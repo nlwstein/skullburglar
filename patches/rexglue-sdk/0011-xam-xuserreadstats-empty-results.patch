@@ -1,0 +1,53 @@
+diff --git a/src/kernel/xam/apps/xgi_app.cpp b/src/kernel/xam/apps/xgi_app.cpp
+index 2b222da..77eb2db 100644
+--- a/src/kernel/xam/apps/xgi_app.cpp
++++ b/src/kernel/xam/apps/xgi_app.cpp
+@@ -9,6 +9,9 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <atomic>
++#include <cstring>
++
+ #include <rex/kernel/xam/apps/xgi_app.h>
+ #include <rex/logging.h>
+ #include <rex/thread.h>
+@@ -324,12 +327,35 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       uint32_t xuids_ptr = memory::load_and_swap<uint32_t>(buffer + 8);
+       uint32_t specs_count = memory::load_and_swap<uint32_t>(buffer + 12);
+       uint32_t specs_ptr = memory::load_and_swap<uint32_t>(buffer + 16);
++      // The XDK wrapper (bots sub_8332DFF8) checks *pcbResults itself (returns 122 with the needed
++      // size when short) and passes the size *value* here, not the pointer.
+       uint32_t results_size = memory::load_and_swap<uint32_t>(buffer + 20);
+       uint32_t results_ptr = memory::load_and_swap<uint32_t>(buffer + 24);
+ 
+-      REXKRNL_DEBUG("XUserReadStats({}, {}, {:08X}, {}, {:08X}, {}, {:08X})", title_id, xuids_count,
+-                    xuids_ptr, specs_count, specs_ptr, results_size, results_ptr);
+-
++      // No Live service: answer with one empty view per requested spec. Returning success without
++      // writing pResults made the game parse its uninitialized buffer as rows/columns (garbage
++      // counts -> 578 MB allocation / runaway writes on the main thread, bots B-059).
++      // XUSER_STATS_READ_RESULTS { dwNumViews, pViews } + XUSER_STATS_VIEW { dwViewId,
++      // dwTotalViewRows, dwNumRows, pRows } per spec; XUSER_STATS_SPEC is 136 bytes, dwViewId first.
++      uint32_t needed = 8 + 16 * specs_count;
++      static std::atomic<uint32_t> logged{0};
++      if (logged.fetch_add(1) < 8) {
++        REXKRNL_INFO("XUserReadStats(title {:08X}, {} xuids, {} specs, cb {}, results {:08X}): "
++                     "empty result, {} bytes",
++                     title_id, xuids_count, specs_count, results_size, results_ptr, needed);
++      }
++      if (!results_ptr || results_size < needed) {
++        return X_ERROR_INSUFFICIENT_BUFFER;
++      }
++      auto* results = memory_->TranslateVirtual(results_ptr);
++      std::memset(results, 0, needed);
++      memory::store_and_swap<uint32_t>(results + 0, specs_count);
++      memory::store_and_swap<uint32_t>(results + 4, specs_count ? results_ptr + 8 : 0);
++      for (uint32_t i = 0; i < specs_count; ++i) {
++        uint32_t view_id =
++            specs_ptr ? memory::load_and_swap<uint32_t>(memory_->TranslateVirtual(specs_ptr + i * 136)) : 0;
++        memory::store_and_swap<uint32_t>(results + 8 + i * 16, view_id);
++      }
+       return X_E_SUCCESS;
+     }
+     case 0x000B0025: {

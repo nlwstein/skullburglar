@@ -1,0 +1,13 @@
+#!/bin/sh
+# Re-scan every commit being pushed, so commits made with --no-verify are still caught.
+remote="$1"
+scan="$(git rev-parse --show-toplevel)/tools/leak_scan.py"
+zero=0000000000000000000000000000000000000000
+while read -r _lref lsha _rref rsha; do
+  [ "$lsha" = "$zero" ] && continue  # deleting a remote branch
+  if [ "$rsha" != "$zero" ] && git cat-file -e "$rsha" 2>/dev/null; then
+    python3 "$scan" range "$rsha..$lsha" || exit 1
+  else
+    python3 "$scan" range "$lsha --not --remotes=$remote" || exit 1
+  fi
+done

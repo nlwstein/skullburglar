@@ -1,0 +1,53 @@
+# Codegen overrides for default.xex. Included from bots_manifest.toml [entrypoint].
+# Top-level tables here ([functions], [[switch_tables]], ...) apply to the entrypoint binary.
+
+# MSVC CRT setjmp/longjmp, found by signature (setjmp: mflr/mfcr + 36 non-volatile stores
+# into the jmp_buf at r3, r13 at +0x98; longjmp: matching loads, val 0 -> 1). Codegen
+# replaces calls to these with host ppc_setjmp/ppc_longjmp. See knowledge/symbols.md.
+setjmp_address = 0x836B84D0
+longjmp_address = 0x836B81B0
+
+# Performance (B-032/B-015): keep these PPC registers in C++ locals instead of PPCContext.
+# non_volatile_as_local also elides the __savegprlr_N/__restgprlr_N helpers, which were ~33%
+# of the UE3 render thread (sample, 2026-10-01). Not enabled: reserved_as_local (r1/r13 —
+# host kernel code reads ctx.r1) and non_argument_as_local (r11/r12 carry values into
+# import thunks / helpers). Caveat: the 2 setjmp callers' localized non-volatiles follow
+# host setjmp semantics (modified-after-setjmp values are indeterminate on longjmp).
+cr_as_local = true
+ctr_as_local = true
+xer_as_local = true
+non_volatile_as_local = true
+
+# Function starts the analyzer missed: reached only by tail-call `b` (never `bl`),
+# typically right after 8-byte `addi r3,r3,N; b X` adjustor thunks. Size left to the analyzer.
+[functions]
+0x8311CE08 = { name = "tail_8311CE08" }  # from thunk sub_83348C78
+0x83204B80 = { name = "tail_83204B80" }  # from 0x83204F9C
+0x83201718 = { name = "tail_83201718" }  # from 0x83202534
+0x830D866C = { name = "tail_830D866C" }  # from 0x830D867C
+0x83126A2C = { name = "tail_83126A2C" }  # from 0x83126A6C
+
+# Functions that overran into the following SEH funclet: they end in a call to a no-return
+# routine (bl 0x83004838 etc.) + 8 bytes padding, and the analyzer kept going, duplicating the
+# funclet without its labels ("use of undeclared label"). Found by tools/check_labels.py.
+0x83084098 = { end = 0x83084134 }
+0x8309AD84 = { end = 0x8309AE20 }
+0x830A3DBC = { end = 0x830A3E58 }
+0x830B153C = { end = 0x830B15D8 }
+0x830B243C = { end = 0x830B24D8 }
+0x830B32B4 = { end = 0x830B3350 }
+0x830B8438 = { end = 0x830B84D4 }
+
+# B-041: null component returned by sub_8244EE48 → skip the virtual call on it (src/game_hooks.cpp).
+[[midasm_hook]]
+address = 0x82E8E270
+name = "BotsGuardMissingAiiuComponent"
+registers = ["r3"]
+jump_address_on_true = 0x82E8E280
+
+# B-059: sub_82FD1D20 reads obj->+96->+36 on an object whose +96 is still null → treat as "no entries".
+[[midasm_hook]]
+address = 0x82FD1D94
+name = "BotsGuardNullEntryList"
+registers = ["r10", "r11"]
+jump_address_on_true = 0x82FD1DE0

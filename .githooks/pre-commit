@@ -1,0 +1,3 @@
+#!/bin/sh
+# Enable once per clone: git config core.hooksPath .githooks
+exec python3 "$(git rev-parse --show-toplevel)/tools/leak_scan.py" staged

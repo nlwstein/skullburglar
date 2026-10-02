@@ -1,0 +1,519 @@
+diff --git a/include/rex/ui/d3d12/d3d12_presenter.h b/include/rex/ui/d3d12/d3d12_presenter.h
+index 83d09f7..bbf1acc 100644
+--- a/include/rex/ui/d3d12/d3d12_presenter.h
++++ b/include/rex/ui/d3d12/d3d12_presenter.h
+@@ -103,6 +103,7 @@ class D3D12Presenter final : public Presenter {
+                               bool& is_8bpc_out) override;
+ 
+   PaintResult PaintAndPresentImpl(bool execute_ui_drawers) override;
++  bool GetDisplayedFrameCounts(uint32_t& displayed, uint32_t& refreshes) override;
+ 
+  private:
+   struct GuestOutputPaintRectangleConstants {
+diff --git a/include/rex/ui/imgui_drawer.h b/include/rex/ui/imgui_drawer.h
+index a570fa0..23356f7 100644
+--- a/include/rex/ui/imgui_drawer.h
++++ b/include/rex/ui/imgui_drawer.h
+@@ -47,6 +47,7 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
+ 
+   void AddDialog(ImGuiDialog* dialog);
+   void RemoveDialog(ImGuiDialog* dialog);
++  Window* window() const { return window_; }
+ 
+   // Whether Draw would render anything, so a caller that has to marshal to the
+   // UI thread can skip the round trip entirely.
+diff --git a/include/rex/ui/overlay/achievement_toast.h b/include/rex/ui/overlay/achievement_toast.h
+index 7642601..dcd6c30 100644
+--- a/include/rex/ui/overlay/achievement_toast.h
++++ b/include/rex/ui/overlay/achievement_toast.h
+@@ -13,6 +13,7 @@
+ 
+ #include <chrono>
+ #include <deque>
++#include <memory>
+ #include <mutex>
+ #include <optional>
+ #include <rex/ui/overlay/achievement_notification.h>
+@@ -49,6 +50,11 @@ class AchievementToastDialog : public AchievementNotificationDialog {
+ 
+   std::mutex mutex_;
+   std::deque<PendingToast> queue_;
++  // The toast is registered with the ImGuiDrawer only while it has something to show: any
++  // registered dialog keeps the presenter in UI-thread painting, which (vblank-paced) dropped
++  // a 60 fps guest to 40-45 presented fps on a 60 Hz display. Cleared by the destructor, checked
++  // by the UI-thread callback Push posts.
++  std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
+   AchievementIconCache icon_cache_;
+ };
+ 
+diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
+index afb4a30..9af389c 100644
+--- a/include/rex/ui/presenter.h
++++ b/include/rex/ui/presenter.h
+@@ -715,6 +715,14 @@ class Presenter {
+   //
+   // Call via PaintAndPresent.
+   virtual PaintResult PaintAndPresentImpl(bool execute_ui_drawers) = 0;
++  // Debug (REX_FPS_LOG): running totals of presents that actually reached the display and of the
++  // display's vertical blanks (DXGI frame statistics). Called from the presenting thread. false if
++  // the backend can't tell.
++  virtual bool GetDisplayedFrameCounts(uint32_t& displayed, uint32_t& refreshes) {
++    (void)displayed;
++    (void)refreshes;
++    return false;
++  }
+ 
+   // For calling from the painting implementations if requested.
+   void ExecuteUIDrawersFromUIThread(UIDrawContext& ui_draw_context);
+diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
+index 76cc877..63de9d3 100644
+--- a/src/system/xmemory.cpp
++++ b/src/system/xmemory.cpp
+@@ -10,6 +10,8 @@
+  */
+ 
+ #include <algorithm>
++#include <atomic>
++#include <cstdlib>
+ #include <cstring>
+ #include <utility>
+ 
+@@ -27,6 +29,7 @@
+ #include <rex/stream.h>
+ #include <rex/system/function_dispatcher.h>
+ #include <rex/system/mmio_handler.h>
++#include <rex/system/thread_state.h>
+ #include <rex/system/xmemory.h>
+ #include <rex/thread.h>
+ 
+@@ -43,6 +46,83 @@ REXCVAR_DEFINE_BOOL(scribble_heap, false, "Memory", "Scribble 0xCD into all allo
+ 
+ namespace rex::memory {
+ 
++namespace {
++// Diagnostics: ring buffer of the last guest virtual-memory operations, dumped when a guest access
++// violation is unhandled (which heap op last touched the faulting range?). REX_VMEM_LOG=1 also
++// logs every operation live. Entries are written without locks; the dump is best effort.
++struct VmOpRecord {
++  uint64_t time_ms;
++  uint32_t thread_id;
++  char op;  // A alloc, F alloc-fixed, R alloc-range, D decommit, X release, P protect
++  uint32_t heap_base;
++  uint32_t address;
++  uint32_t size;
++  uint32_t type;
++  uint32_t protect;
++  uint32_t out_address;
++};
++constexpr uint32_t kVmOpRingSize = 1024;
++VmOpRecord g_vm_ops[kVmOpRingSize];
++std::atomic<uint32_t> g_vm_op_next{0};
++
++uint64_t VmOpNowMs() {
++  static const uint64_t t0 = rex::chrono::Clock::QueryHostUptimeMillis();
++  return rex::chrono::Clock::QueryHostUptimeMillis() - t0;
++}
++
++bool VmOpLogEnabled() {
++  static const bool enabled = std::getenv("REX_VMEM_LOG") != nullptr;
++  return enabled;
++}
++
++void LogVmOp(const char* prefix, const VmOpRecord& r) {
++  REXSYS_INFO("{}t+{}ms thr {:X} {} heap {:08X} addr {:08X} size {:08X} type {:X} prot {:X} -> {:08X}",
++              prefix, r.time_ms, r.thread_id, r.op, r.heap_base, r.address, r.size, r.type,
++              r.protect, r.out_address);
++}
++
++// Records on construction; the destructor fills in the result address (allocs) and logs live.
++class VmOpScope {
++ public:
++  VmOpScope(char op, uint32_t heap_base, uint32_t address, uint32_t size, uint32_t type,
++            uint32_t protect, uint32_t* out_address = nullptr)
++      : out_address_(out_address) {
++    uint32_t i = g_vm_op_next.fetch_add(1, std::memory_order_relaxed) % kVmOpRingSize;
++    rec_ = &g_vm_ops[i];
++    *rec_ = {VmOpNowMs(), rex::thread::current_thread_id(), op, heap_base, address, size, type,
++             protect, 0};
++  }
++  ~VmOpScope() {
++    if (out_address_) rec_->out_address = *out_address_;
++    if (VmOpLogEnabled()) LogVmOp("vmem ", *rec_);
++  }
++
++ private:
++  VmOpRecord* rec_;
++  uint32_t* out_address_;
++};
++
++void DumpVmOpsNear(uint32_t fault_address) {
++  uint32_t next = g_vm_op_next.load(std::memory_order_relaxed);
++  uint32_t count = std::min(next, kVmOpRingSize);
++  REXSYS_ERROR("Recent guest VM ops touching {:08X} +-4 MB (of the last {}):", fault_address, count);
++  uint32_t shown = 0;
++  for (uint32_t k = 0; k < count && shown < 48; ++k) {
++    const VmOpRecord& r = g_vm_ops[(next - 1 - k) % kVmOpRingSize];
++    uint32_t lo = (r.op == 'A' || r.op == 'R') ? r.out_address : r.address;
++    uint64_t hi = uint64_t(lo) + r.size;
++    if (uint64_t(fault_address) + 0x400000 >= lo && uint64_t(fault_address) < hi + 0x400000) {
++      LogVmOp("  ", r);
++      ++shown;
++    }
++  }
++  REXSYS_ERROR("Last 16 guest VM ops overall (newest first):");
++  for (uint32_t k = 0; k < count && k < 16; ++k) {
++    LogVmOp("  ", g_vm_ops[(next - 1 - k) % kVmOpRingSize]);
++  }
++}
++}  // namespace
++
+ uint32_t get_page_count(uint32_t value, uint32_t page_size, uint32_t page_size_shift) {
+   return rex::round_up(value, page_size) >> page_size_shift;
+ }
+@@ -547,6 +627,56 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
+         "Unhandled guest access violation: {} of guest 0x{:08X} (host 0x{:016X}) on thread 0x{:X}",
+         is_write ? "write" : "read", virtual_address, reinterpret_cast<uintptr_t>(host_address),
+         rex::thread::current_thread_id());
++    if (heap) {
++      HeapAllocationInfo info{};
++      uint32_t page = virtual_address & ~(heap->page_size() - 1);
++      if (heap->QueryRegionInfo(page, &info)) {
++        REXSYS_ERROR(
++            "  fault page {:08X} (heap {:08X}, page size {:X}): region {:08X} size {:08X} state {:X} "
++            "protect {:X}; allocation base {:08X} size {:08X} protect {:X}",
++            page, heap->heap_base(), heap->page_size(), info.base_address, info.region_size,
++            info.state, info.protect, info.allocation_base, info.allocation_size,
++            info.allocation_protect);
++      }
++      if (page >= heap->heap_base() + heap->page_size() &&
++          heap->QueryRegionInfo(page - heap->page_size(), &info)) {
++        REXSYS_ERROR("  page before: region {:08X} size {:08X} state {:X} protect {:X}; "
++                     "allocation base {:08X} size {:08X}",
++                     info.base_address, info.region_size, info.state, info.protect,
++                     info.allocation_base, info.allocation_size);
++      }
++    }
++    DumpVmOpsNear(virtual_address);
++    // The faulting guest thread's registers and call chain. Recompiled code sets ctx.lr before
++    // every call, and the guest stack keeps the PowerPC back chain (saved LR at back chain - 8),
++    // so this is a guest call stack that doesn't depend on host symbols or the build.
++    if (auto* ts = runtime::ThreadState::Get()) {
++      const PPCContext* c = ts->context();
++      REXSYS_ERROR("  guest regs: lr {:08X} r1 {:08X} r3 {:08X} r4 {:08X} r5 {:08X} r6 {:08X} "
++                   "r30 {:08X} r31 {:08X}",
++                   uint32_t(c->lr), c->r1.u32, c->r3.u32, c->r4.u32, c->r5.u32, c->r6.u32,
++                   c->r30.u32, c->r31.u32);
++      // Walk only inside this thread's stack (PCR at r13: stack base / end at +0x70 / +0x74), with
++      // no heap queries: this runs in the fault handler, where taking heap locks can deadlock.
++      std::string chain = fmt::format("{:08X}", uint32_t(c->lr));
++      uint32_t pcr = c->r13.u32;
++      if (pcr && LookupHeap(pcr)) {
++        uint32_t top = rex::byte_swap(*TranslateVirtual<uint32_t*>(pcr + 0x70));
++        uint32_t end = rex::byte_swap(*TranslateVirtual<uint32_t*>(pcr + 0x74));
++        uint32_t sp = c->r1.u32;
++        chain = fmt::format("[stack {:08X}-{:08X}] ", end, top) + chain;
++        for (int i = 0; i < 32 && sp >= end && sp + 4 <= top; ++i) {
++          uint32_t next = rex::byte_swap(*TranslateVirtual<uint32_t*>(sp));
++          if (next <= sp || next > top || next - 8 < end) break;
++          // Frames that never spill LR leave 0 there; skip them.
++          if (uint32_t saved = rex::byte_swap(*TranslateVirtual<uint32_t*>(next - 8))) {
++            chain += fmt::format(" {:08X}", saved);
++          }
++          sp = next;
++        }
++      }
++      REXSYS_ERROR("  guest call chain (lr, then saved lr per frame): {}", chain);
++    }
+     return false;
+   }
+ 
+@@ -1286,6 +1416,7 @@ bool BaseHeap::AllocSystemHeap(uint32_t size, uint32_t alignment, uint32_t alloc
+ 
+ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignment,
+                           uint32_t allocation_type, uint32_t protect) {
++  VmOpScope vm_op('F', heap_base_, base_address, size, allocation_type, protect);
+   alignment = rex::round_up(alignment, page_size_);
+   if (base_address % alignment != 0) {
+     if (base_address % page_size_ != 0) {
+@@ -1389,6 +1520,7 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t
+                           uint32_t alignment, uint32_t allocation_type, uint32_t protect,
+                           bool top_down, uint32_t* out_address) {
+   *out_address = 0;
++  VmOpScope vm_op('R', heap_base_, low_address, size, allocation_type, protect, out_address);
+ 
+   alignment = rex::round_up(alignment, page_size_);
+   uint32_t page_count = get_page_count(size, page_size_, page_size_shift_);
+@@ -1547,6 +1679,7 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t
+ }
+ 
+ bool BaseHeap::Decommit(uint32_t address, uint32_t size) {
++  VmOpScope vm_op('D', heap_base_, address, size, 0, 0);
+   uint32_t page_count = get_page_count(size, page_size_, page_size_shift_);
+   uint32_t start_page_number = (address - heap_base_) >> page_size_shift_;
+   uint32_t end_page_number = start_page_number + page_count - 1;
+@@ -1583,6 +1716,7 @@ bool BaseHeap::Decommit(uint32_t address, uint32_t size) {
+ }
+ 
+ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
++  VmOpScope vm_op('X', heap_base_, base_address, 0, 0, 0, out_region_size);
+   // Global critical region before heap_mutex_ - see
+   // AcquireHostPageReconcileLock for why the order matters.
+   auto global_lock = AcquireHostPageReconcileLock();
+@@ -1645,6 +1779,7 @@ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
+ }
+ 
+ bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect, uint32_t* old_protect) {
++  VmOpScope vm_op('P', heap_base_, address, size, 0, protect);
+   if (!size) {
+     REXSYS_ERROR("BaseHeap::Protect failed due to zero size");
+     return false;
+diff --git a/src/ui/d3d12/d3d12_presenter.cpp b/src/ui/d3d12/d3d12_presenter.cpp
+index 306118e..bfc1b99 100644
+--- a/src/ui/d3d12/d3d12_presenter.cpp
++++ b/src/ui/d3d12/d3d12_presenter.cpp
+@@ -32,6 +32,10 @@
+ 
+ REXCVAR_DEFINE_BOOL(d3d12_allow_variable_refresh_rate_and_tearing, true, "UI/D3D12",
+                     "Allow variable refresh rate and tearing");
++REXCVAR_DEFINE_INT32(d3d12_present_sync_interval, 0, "UI/D3D12",
++                     "Present sync interval: 0 = immediately (tearing / VRR allowed), 1 = wait for "
++                     "vertical blank (no tearing; even pacing when the guest rate matches a fixed "
++                     "refresh rate)");
+ 
+ namespace rex::ui::d3d12 {
+ 
+@@ -1155,9 +1159,13 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+   // fullscreen is ever used in, the allow tearing flag must not be passed in
+   // fullscreen, but DXGI fullscreen is largely unneeded with the flip
+   // presentation model used in Direct3D 12).
++  // d3d12_present_sync_interval > 0 waits for vblank instead (ALLOW_TEARING is invalid then).
++  UINT sync_interval = UINT(std::clamp(REXCVAR_GET(d3d12_present_sync_interval), 0, 4));
+   HRESULT present_result = paint_context_.swap_chain->Present(
+-      0, DXGI_PRESENT_RESTART |
+-             (paint_context_.swap_chain_allows_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0));
++      sync_interval,
++      DXGI_PRESENT_RESTART |
++          (paint_context_.swap_chain_allows_tearing && !sync_interval ? DXGI_PRESENT_ALLOW_TEARING
++                                                                      : 0));
+   // Even if presentation has failed, work might have been enqueued anyway
+   // internally before the failure according to Jesse Natalie from the DirectX
+   // Discord server.
+@@ -1512,4 +1520,17 @@ bool D3D12Presenter::InitializeSurfaceIndependent() {
+   return InitializeCommonSurfaceIndependent();
+ }
+ 
++bool D3D12Presenter::GetDisplayedFrameCounts(uint32_t& displayed, uint32_t& refreshes) {
++  if (!paint_context_.swap_chain) {
++    return false;
++  }
++  DXGI_FRAME_STATISTICS stats{};
++  if (FAILED(paint_context_.swap_chain->GetFrameStatistics(&stats))) {
++    return false;
++  }
++  displayed = stats.PresentCount;
++  refreshes = stats.SyncRefreshCount;
++  return true;
++}
++
+ }  // namespace rex::ui::d3d12
+diff --git a/src/ui/overlay/achievement_toast.cpp b/src/ui/overlay/achievement_toast.cpp
+index 53b8c0b..54e37a7 100644
+--- a/src/ui/overlay/achievement_toast.cpp
++++ b/src/ui/overlay/achievement_toast.cpp
+@@ -10,6 +10,8 @@
+  */
+ #include <rex/ui/overlay/achievement_toast.h>
+ #include <imgui.h>
++#include <rex/ui/imgui_drawer.h>
++#include <rex/ui/window.h>
+ 
+ #include <algorithm>
+ 
+@@ -20,13 +22,26 @@ namespace rex::ui {
+ AchievementToastDialog::AchievementToastDialog(ImGuiDrawer* drawer,
+                                                ImmediateDrawer* immediate_drawer,
+                                                rex::Runtime* runtime)
+-    : AchievementNotificationDialog(drawer), icon_cache_(immediate_drawer, runtime) {}
++    : AchievementNotificationDialog(drawer), icon_cache_(immediate_drawer, runtime) {
++  // Idle until the first Push (see alive_).
++  drawer->RemoveDialog(this);
++}
+ 
+-AchievementToastDialog::~AchievementToastDialog() {}
++AchievementToastDialog::~AchievementToastDialog() { *alive_ = false; }
+ 
+ void AchievementToastDialog::Push(const rex::system::AchievementEvent& event) {
+-  std::lock_guard<std::mutex> lock(mutex_);
+-  queue_.push_back({event, std::chrono::steady_clock::now()});
++  {
++    std::lock_guard<std::mutex> lock(mutex_);
++    queue_.push_back({event, std::chrono::steady_clock::now()});
++  }
++  // AddDialog is UI-thread only (and a no-op if already registered).
++  if (Window* window = imgui_drawer()->window()) {
++    window->app_context().CallInUIThread([this, alive = alive_]() {
++      if (*alive) {
++        imgui_drawer()->AddDialog(this);
++      }
++    });
++  }
+ }
+ 
+ void AchievementToastDialog::OnDraw(ImGuiIO& io) {
+@@ -48,6 +63,9 @@ void AchievementToastDialog::OnDraw(ImGuiIO& io) {
+       }
+     }
+     if (queue_.empty()) {
++      // Nothing left to show: unregister so the presenter can go back to presenting guest frames
++      // directly. A Push racing with this re-adds the dialog through its UI-thread callback.
++      imgui_drawer()->RemoveDialog(this);
+       return;
+     }
+     toast = queue_.front();
+diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
+index 7360ed9..3274208 100644
+--- a/src/ui/presenter.cpp
++++ b/src/ui/presenter.cpp
+@@ -12,8 +12,13 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <cctype>
++#include <chrono>
++#include <cstdlib>
++#include <string>
+ #include <utility>
+ 
++#include <fmt/format.h>
++
+ #include <rex/assert.h>
+ #include <rex/cvar.h>
+ #include <rex/logging.h>
+@@ -26,6 +31,40 @@
+ #include <ffx_api/ffx_upscale.h>
+ #endif
+ 
++namespace {
++// Debug (REX_FPS_LOG=1): host-side presentation counters, logged every 5 s next to the guest fps
++// line. "guest fps" counts guest swaps; these count what reaches the host swap chain, which is
++// what external fps counters (NVIDIA/Steam overlays) show.
++struct PresentStats {
++  std::atomic<uint32_t> refreshes{0};          // guest frames handed to the presenter
++  std::atomic<uint32_t> dropped{0};            // replaced in the mailbox before any present took them
++  std::atomic<uint32_t> presents_guest{0};     // presented from the guest output thread (direct)
++  std::atomic<uint32_t> presents_ui{0};        // presented from a UI-thread paint
++  std::atomic<uint32_t> not_presented{0};      // PaintAndPresent calls that didn't present
++  std::atomic<uint64_t> present_ns{0};
++  std::atomic<uint64_t> present_max_ns{0};
++  std::atomic<int64_t> window_start_ns{0};
++};
++PresentStats g_present_stats;
++bool PresentStatsEnabled() {
++  static const bool enabled = std::getenv("REX_FPS_LOG") != nullptr;
++  return enabled;
++}
++int64_t PresentStatsNowNs() {
++  return std::chrono::duration_cast<std::chrono::nanoseconds>(
++             std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
++const char* PaintModeName(int mode) {
++  switch (mode) {
++    case 0: return "none";
++    case 1: return "ui-thread";
++    case 2: return "guest-thread";
++    default: return "?";
++  }
++}
++}  // namespace
++
+ REXCVAR_DEFINE_BOOL(host_present_from_non_ui_thread, true, "UI/Presenter",
+                     "Allow presentation from non-UI thread");
+ 
+@@ -584,6 +623,12 @@ bool Presenter::RefreshGuestOutput(
+   // the host present call on the CPU and all frames reaching a present call).
+   uint32_t last_acquired_and_ready =
+       guest_output_mailbox_acquired_and_ready_.load(std::memory_order_relaxed);
++  if (PresentStatsEnabled()) {
++    g_present_stats.refreshes.fetch_add(1, std::memory_order_relaxed);
++    if ((last_acquired_and_ready >> 2) != (last_acquired_and_ready & 3)) {
++      g_present_stats.dropped.fetch_add(1, std::memory_order_relaxed);
++    }
++  }
+   // Desired acquired = current acquired (changed only by the consumers).
+   // Desired ready = current writable.
+   // memory_order_acq_rel to acquire the new writable image and to release the
+@@ -1300,6 +1363,11 @@ void Presenter::SetPaintModeFromUIThread(PaintMode new_mode) {
+     std::lock_guard<std::mutex> lock(paint_mode_mutex_);
+     paint_mode_ = new_mode;
+   }
++  // Which thread presents decides whether guest frames reach the screen at the guest rate: the
++  // UI-thread path paints on window paint requests paced by vblank ticks and can drop frames.
++  REXLOG_INFO("Presenter paint mode -> {} (ui drawers {}, implicit vsync {})",
++              PaintModeName(int(new_mode)), ui_drawers_.size(),
++              surface_paint_connection_has_implicit_vsync_);
+   UpdateUITicksNeededFromUIThread();
+ }
+ 
+@@ -1497,7 +1565,62 @@ bool Presenter::InSurfaceOnMonitorFromUIThread() const {
+ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
+   assert_false(execute_ui_drawers && !is_in_ui_thread_paint_);
+   assert_true(surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable);
++  int64_t paint_start_ns = PresentStatsEnabled() ? PresentStatsNowNs() : 0;
+   PaintResult result = PaintAndPresentImpl(execute_ui_drawers);
++  if (PresentStatsEnabled()) {
++    PresentStats& st = g_present_stats;
++    int64_t now_ns = PresentStatsNowNs();
++    uint64_t dt = uint64_t(now_ns - paint_start_ns);
++    bool presented =
++        result == PaintResult::kPresented || result == PaintResult::kPresentedSuboptimal;
++    if (presented) {
++      (is_in_ui_thread_paint_ ? st.presents_ui : st.presents_guest)
++          .fetch_add(1, std::memory_order_relaxed);
++      st.present_ns.fetch_add(dt, std::memory_order_relaxed);
++      uint64_t prev_max = st.present_max_ns.load(std::memory_order_relaxed);
++      while (dt > prev_max &&
++             !st.present_max_ns.compare_exchange_weak(prev_max, dt, std::memory_order_relaxed)) {
++      }
++    } else {
++      st.not_presented.fetch_add(1, std::memory_order_relaxed);
++    }
++    int64_t start = st.window_start_ns.load(std::memory_order_relaxed);
++    if (!start) {
++      st.window_start_ns.compare_exchange_strong(start, now_ns, std::memory_order_relaxed);
++    } else if (now_ns - start >= 5'000'000'000 &&
++               st.window_start_ns.compare_exchange_strong(start, now_ns,
++                                                          std::memory_order_relaxed)) {
++      double secs = double(now_ns - start) / 1e9;
++      uint32_t pg = st.presents_guest.exchange(0, std::memory_order_relaxed);
++      uint32_t pu = st.presents_ui.exchange(0, std::memory_order_relaxed);
++      uint32_t np = st.not_presented.exchange(0, std::memory_order_relaxed);
++      uint32_t rf = st.refreshes.exchange(0, std::memory_order_relaxed);
++      uint32_t dr = st.dropped.exchange(0, std::memory_order_relaxed);
++      uint64_t tot = st.present_ns.exchange(0, std::memory_order_relaxed);
++      uint64_t mx = st.present_max_ns.exchange(0, std::memory_order_relaxed);
++      // Frames the display actually showed, from the backend (DXGI frame statistics).
++      static uint32_t last_displayed = 0, last_refreshes = 0;
++      static bool have_last = false;
++      std::string shown = "n/a";
++      uint32_t displayed = 0, refreshes = 0;
++      if (GetDisplayedFrameCounts(displayed, refreshes)) {
++        if (have_last) {
++          shown = fmt::format("{:.1f}/s over {:.1f} refreshes/s",
++                              double(displayed - last_displayed) / secs,
++                              double(refreshes - last_refreshes) / secs);
++        }
++        last_displayed = displayed;
++        last_refreshes = refreshes;
++        have_last = true;
++      }
++      REXLOG_INFO(
++          "host present {:.1f}/s ({} direct, {} ui-thread, {} not presented); guest frames {} in, "
++          "{} dropped unpresented; paint+present avg {:.2f} ms max {:.2f} ms; mode {}; displayed {}",
++          double(pg + pu) / secs, pg, pu, np, rf, dr,
++          (pg + pu) ? double(tot) / 1e6 / double(pg + pu) : 0.0, double(mx) / 1e6,
++          PaintModeName(int(paint_mode_)), shown);
++    }
++  }
+   switch (result) {
+     case PaintResult::kPresented:
+       surface_paint_connection_was_optimal_at_successful_paint_ = true;

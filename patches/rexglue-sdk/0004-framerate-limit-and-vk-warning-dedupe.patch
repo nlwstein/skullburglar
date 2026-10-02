@@ -1,0 +1,91 @@
+diff --git a/src/ui/vulkan/vulkan_instance.cpp b/src/ui/vulkan/vulkan_instance.cpp
+index 914b311..5a325b6 100644
+--- a/src/ui/vulkan/vulkan_instance.cpp
++++ b/src/ui/vulkan/vulkan_instance.cpp
+@@ -9,6 +9,8 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <cstdint>
++#include <mutex>
+ #include <sstream>
+ #include <string>
+ #include <unordered_map>
+@@ -563,7 +565,28 @@ VkBool32 VulkanInstance::DebugUtilsMessengerCallback(
+     VkDebugUtilsMessageSeverityFlagBitsEXT message_severity,
+     VkDebugUtilsMessageTypeFlagsEXT message_types,
+     const VkDebugUtilsMessengerCallbackDataEXT* callback_data, [[maybe_unused]] void* user_data) {
++  // Below error severity, log each distinct message text only at counts 1, 10, 100, ... - MoltenVK
++  // repeats some warnings on every pipeline use (e.g. "Metal does not support disabling primitive
++  // restart", ~40/s in UE3 gameplay), which floods and rotates the log.
++  uint64_t repeat_count = 1;
++  if (message_severity < VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT && callback_data->pMessage) {
++    static std::mutex repeat_mutex;
++    static std::unordered_map<std::string, uint64_t> repeat_counts;
++    std::lock_guard<std::mutex> lock(repeat_mutex);
++    repeat_count = ++repeat_counts[callback_data->pMessage];
++    uint64_t power = 1;
++    while (power < repeat_count) {
++      power *= 10;
++    }
++    if (power != repeat_count) {
++      return VK_FALSE;
++    }
++  }
++
+   std::ostringstream log_str;
++  if (repeat_count > 1) {
++    log_str << "[repeated " << repeat_count << "x] ";
++  }
+ 
+   log_str << "Vulkan " << vk::to_string(vk::DebugUtilsMessageSeverityFlagBitsEXT(message_severity))
+           << " (" << vk::to_string(vk::DebugUtilsMessageTypeFlagsEXT(message_types)) << ", ID "
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index a744375..5fcf826 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -10,6 +10,10 @@
+  */
+ 
+ #include <algorithm>
++#include <vector>
++#include <chrono>
++#include <thread>
++#include <cstdlib>
+ #include <cinttypes>
+ #include <cmath>
+ #include <cstring>
+@@ -37,6 +41,11 @@
+ 
+ REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
+ 
++REXCVAR_DEFINE_UINT32(framerate_limit, 0, "GPU",
++                      "Maximum guest swaps per second, 0 = unlimited. Paces games that don't wait "
++                      "for vblank themselves (e.g. uncapped front-end menus)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
+                     "Refresh page-valid state from GPU-written memory at frame end. "
+                     "Disable for minor CPU overhead reduction, but may break memory coherency.")
+@@ -930,6 +959,21 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+                                                   uint32_t count) {
+   SCOPE_profile_cpu_f("gpu");
+ 
++  // Frame limiter: hold the command processor (and thus, via ring buffer / fence backpressure, the
++  // guest) so swaps are at least 1 / framerate_limit apart.
++  if (uint32_t limit = REXCVAR_GET(framerate_limit)) {
++    using clk = std::chrono::steady_clock;
++    static clk::time_point next_swap;
++    auto interval = std::chrono::nanoseconds(1000000000ull / limit);
++    auto now = clk::now();
++    if (next_swap > now) {
++      std::this_thread::sleep_until(next_swap);
++      next_swap += interval;
++    } else {
++      next_swap = now + interval;
++    }
++  }
++
+ #ifdef REXGLUE_ENABLE_PERF_COUNTERS
+   {
+     static uint64_t last_frame_tick = 0;

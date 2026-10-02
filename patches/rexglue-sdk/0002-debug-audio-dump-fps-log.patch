@@ -1,0 +1,424 @@
+diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
+index 20a2cd8..47fe8e2 100644
+--- a/src/audio/sdl/sdl_audio_driver.cpp
++++ b/src/audio/sdl/sdl_audio_driver.cpp
+@@ -9,6 +9,8 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <cstdio>
++#include <cstdlib>
+ #include <algorithm>
+ #include <array>
+ #include <cstring>
+@@ -124,6 +126,17 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
+ 
+   std::memcpy(output_frame, input_frame, frame_samples_ * sizeof(float));
+ 
++  // Debug: REX_AUDIO_DUMP=<path> appends every guest frame verbatim (6 ch sequential,
++  // 256 samples each, big-endian float32) so output can be checked without a speaker.
++  static FILE* dump = [] {
++    const char* p = std::getenv("REX_AUDIO_DUMP");
++    return p && *p ? std::fopen(p, "wb") : nullptr;
++  }();
++  if (dump) {
++    std::fwrite(input_frame, sizeof(float), frame_samples_, dump);
++    std::fflush(dump);
++  }
++
+   static uint32_t sdl_submit_count = 0;
+   if (sdl_submit_count < 10) {
+     REXAPU_DEBUG("SDLAudioDriver::SubmitFrame: frame_ptr={:08X} queued_count={}", frame_ptr,
+diff --git a/src/graphics/vulkan/deferred_command_buffer.cpp b/src/graphics/vulkan/deferred_command_buffer.cpp
+index b49e033..6612eb6 100644
+--- a/src/graphics/vulkan/deferred_command_buffer.cpp
++++ b/src/graphics/vulkan/deferred_command_buffer.cpp
+@@ -9,17 +9,32 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <algorithm>
++#include <chrono>
+ #include <cstddef>
++#include <cstdlib>
++#include <map>
++#include <mutex>
++#include <string>
++#include <vector>
+ #include <cstdint>
+ #include <cstring>
+ 
++#include <fmt/format.h>
+ #include <rex/assert.h>
++#include <rex/cvar.h>
++#include <rex/logging.h>
+ #include <rex/dbg.h>
+ #include <rex/graphics/flags.h>
+ #include <rex/graphics/vulkan/command_processor.h>
+ #include <rex/graphics/vulkan/deferred_command_buffer.h>
+ #include <rex/math.h>
+ 
++REXCVAR_DEFINE_BOOL(vulkan_shrink_render_area, true, "GPU/Vulkan",
++                    "Shrink each render pass's render area to the bounding box of the scissors of "
++                    "its draws and its clear rectangles (less attachment load/store bandwidth)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ namespace rex::graphics::vulkan {
+ 
+ DeferredCommandBuffer::DeferredCommandBuffer(const VulkanCommandProcessor& command_processor,
+@@ -30,22 +45,110 @@ DeferredCommandBuffer::DeferredCommandBuffer(const VulkanCommandProcessor& comma
+ 
+ void DeferredCommandBuffer::Reset() {
+   command_stream_.clear();
++  pass_begin_offset_ = SIZE_MAX;
++  current_scissor_valid_ = false;
++  splice_stream_.clear();
++  splices_.clear();
++}
++
++namespace {
++// Debug: REX_RP_LOG=1 — per 5 s, counts of replayed commands and a histogram of what runs
++// between one render pass ending and the next beginning ("why do passes split?").
++struct RpStats {
++  bool enabled = std::getenv("REX_RP_LOG") != nullptr;
++  std::mutex m;
++  std::map<int, uint64_t> cmds;
++  std::map<std::string, uint64_t> gaps;
++  std::string gap;
++  bool in_gap = false;
++  std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
++};
++RpStats& Rp() {
++  static RpStats s;
++  return s;
+ }
++}  // namespace
+ 
+ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+ 
++  // Splices are recorded with non-decreasing positions (render passes only move forward), and
++  // ones at the same position run in recording order; stable_sort keeps that if it ever isn't so.
++  if (!std::is_sorted(splices_.begin(), splices_.end(),
++                      [](const Splice& a, const Splice& b) { return a.position < b.position; })) {
++    std::stable_sort(splices_.begin(), splices_.end(),
++                     [](const Splice& a, const Splice& b) { return a.position < b.position; });
++  }
++  size_t position = 0;
++  for (const Splice& splice : splices_) {
++    ExecuteRange(command_buffer, command_stream_.data() + position, splice.position - position);
++    ExecuteRange(command_buffer, splice_stream_.data() + splice.start, splice.length);
++    position = splice.position;
++  }
++  ExecuteRange(command_buffer, command_stream_.data() + position,
++               command_stream_.size() - position);
++}
++
++void DeferredCommandBuffer::ExecuteRange(VkCommandBuffer command_buffer, const uintmax_t* stream,
++                                         size_t stream_remaining) {
+   const ui::vulkan::VulkanDevice::Functions& dfn =
+       command_processor_.GetVulkanDevice()->functions();
+-  const uintmax_t* stream = command_stream_.data();
+-  size_t stream_remaining = command_stream_.size();
+   while (stream_remaining) {
+     const CommandHeader& header = *reinterpret_cast<const CommandHeader*>(stream);
+     stream += kCommandHeaderSizeElements;
+     stream_remaining -= kCommandHeaderSizeElements;
+ 
++    if (Rp().enabled) {
++      auto& rp = Rp();
++      std::lock_guard<std::mutex> lock(rp.m);
++      int c = int(header.command);
++      ++rp.cmds[c];
++      bool begin = header.command == Command::kVkBeginRendering ||
++                   header.command == Command::kVkBeginRenderPass;
++      bool end = header.command == Command::kVkEndRendering ||
++                 header.command == Command::kVkEndRenderPass;
++      if (end) {
++        rp.in_gap = true;
++        rp.gap.clear();
++      } else if (begin) {
++        if (rp.in_gap) ++rp.gaps[rp.gap.empty() ? "(nothing)" : rp.gap];
++        rp.in_gap = false;
++      } else if (rp.in_gap && rp.gap.size() < 120) {
++        std::string tag = fmt::format("{}", c);
++        if (header.command == Command::kVkPipelineBarrier) {
++          auto& a = *reinterpret_cast<const ArgsVkPipelineBarrier*>(stream);
++          tag = fmt::format("B[{:x}>{:x} b{} i{}]", a.src_stage_mask, a.dst_stage_mask,
++                            a.buffer_memory_barrier_count, a.image_memory_barrier_count);
++        } else if (header.command == Command::kVkDispatch) {
++          tag = "Disp";
++        } else if (header.command == Command::kVkCopyBuffer) {
++          tag = "CpyBuf";
++        } else if (header.command == Command::kVkCopyBufferToImage) {
++          tag = "CpyB2I";
++        }
++        if (!(rp.gap.size() >= tag.size() &&
++                rp.gap.compare(rp.gap.size() - tag.size(), tag.size(), tag) == 0))
++          rp.gap += (rp.gap.empty() ? "" : " ") + tag;
++      }
++      auto now = std::chrono::steady_clock::now();
++      double dt = std::chrono::duration<double>(now - rp.t0).count();
++      if (dt >= 5.0) {
++        std::string cs;
++        for (auto& [k, v] : rp.cmds) cs += fmt::format(" {}:{:.0f}", k, v / dt);
++        REXGPU_INFO("rp-log cmds/s:{}", cs);
++        std::vector<std::pair<uint64_t, std::string>> g;
++        for (auto& [k, v] : rp.gaps) g.push_back({v, k});
++        std::sort(g.rbegin(), g.rend());
++        for (size_t i = 0; i < g.size() && i < 8; ++i)
++          REXGPU_INFO("rp-log gap {:.0f}/s: {}", g[i].first / dt, g[i].second);
++        rp.cmds.clear();
++        rp.gaps.clear();
++        rp.t0 = now;
++      }
++    }
++
+     switch (header.command) {
+       case Command::kVkBeginRenderPass: {
+         auto& args = *reinterpret_cast<const ArgsVkBeginRenderPass*>(stream);
+@@ -388,6 +491,9 @@ void DeferredCommandBuffer::CmdVkBeginRendering(const VkRenderingInfo* rendering
+     arguments_size += sizeof(VkRenderingAttachmentInfo);
+   }
+ 
++  pass_begin_offset_ = command_stream_.size();
++  pass_begin_scissor_ = current_scissor_;
++  pass_begin_scissor_valid_ = current_scissor_valid_;
+   uint8_t* args_ptr =
+       reinterpret_cast<uint8_t*>(WriteCommand(Command::kVkBeginRendering, arguments_size));
+   auto& args = *reinterpret_cast<ArgsVkBeginRendering*>(args_ptr);
+@@ -413,6 +519,96 @@ void DeferredCommandBuffer::CmdVkBeginRendering(const VkRenderingInfo* rendering
+   }
+ }
+ 
++void DeferredCommandBuffer::ShrinkRenderArea() {
++  size_t begin = pass_begin_offset_;
++  pass_begin_offset_ = SIZE_MAX;
++  if (begin == SIZE_MAX || begin >= command_stream_.size() ||
++      !REXCVAR_GET(vulkan_shrink_render_area)) {
++    return;
++  }
++  uintmax_t* stream = command_stream_.data();
++  const auto& begin_header = *reinterpret_cast<const CommandHeader*>(stream + begin);
++  uintmax_t* begin_args = stream + begin + kCommandHeaderSizeElements;
++  VkRect2D* render_area;
++  if (begin_header.command == Command::kVkBeginRendering) {
++    auto& args = *reinterpret_cast<ArgsVkBeginRendering*>(begin_args);
++    // An MSAA resolve covers the render area - keep resolving everything.
++    const auto* attachments = reinterpret_cast<const VkRenderingAttachmentInfo*>(
++        reinterpret_cast<const uint8_t*>(begin_args) +
++        rex::align(sizeof(ArgsVkBeginRendering), alignof(VkRenderingAttachmentInfo)));
++    uint32_t attachment_count = args.color_attachment_count + uint32_t(args.has_depth_attachment) +
++                                uint32_t(args.has_stencil_attachment);
++    for (uint32_t i = 0; i < attachment_count; ++i) {
++      // A clear load op and a resolve both cover the render area - keep it whole.
++      if (attachments[i].resolveMode != VK_RESOLVE_MODE_NONE ||
++          attachments[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
++        return;
++      }
++    }
++    render_area = &args.render_area;
++  } else if (begin_header.command == Command::kVkBeginRenderPass) {
++    render_area = &reinterpret_cast<ArgsVkBeginRenderPass*>(begin_args)->render_area;
++  } else {
++    return;
++  }
++  // Bounding box of everything the pass writes.
++  int64_t x0 = INT64_MAX, y0 = INT64_MAX, x1 = INT64_MIN, y1 = INT64_MIN;
++  auto add = [&](const VkRect2D& r) {
++    x0 = std::min<int64_t>(x0, r.offset.x);
++    y0 = std::min<int64_t>(y0, r.offset.y);
++    x1 = std::max<int64_t>(x1, int64_t(r.offset.x) + r.extent.width);
++    y1 = std::max<int64_t>(y1, int64_t(r.offset.y) + r.extent.height);
++  };
++  VkRect2D scissor = pass_begin_scissor_;
++  bool scissor_valid = pass_begin_scissor_valid_;
++  size_t pos = begin;
++  while (pos < command_stream_.size()) {
++    const auto& header = *reinterpret_cast<const CommandHeader*>(stream + pos);
++    const uint8_t* args = reinterpret_cast<const uint8_t*>(stream + pos + kCommandHeaderSizeElements);
++    switch (header.command) {
++      case Command::kVkSetScissor: {
++        const auto& a = *reinterpret_cast<const ArgsVkSetScissor*>(args);
++        if (a.first_scissor == 0 && a.scissor_count) {
++          scissor = *reinterpret_cast<const VkRect2D*>(
++              args + rex::align(sizeof(ArgsVkSetScissor), alignof(VkRect2D)));
++          scissor_valid = true;
++        }
++      } break;
++      case Command::kVkDraw:
++      case Command::kVkDrawIndexed:
++        if (!scissor_valid) return;  // Unbounded draw - keep the full area.
++        add(scissor);
++        break;
++      case Command::kVkClearAttachments: {
++        const auto& a = *reinterpret_cast<const ArgsVkClearAttachments*>(args);
++        size_t rects_offset =
++            rex::align(rex::align(sizeof(ArgsVkClearAttachments), alignof(VkClearAttachment)) +
++                           sizeof(VkClearAttachment) * a.attachment_count,
++                       alignof(VkClearRect));
++        const auto* rects = reinterpret_cast<const VkClearRect*>(args + rects_offset);
++        for (uint32_t i = 0; i < a.rect_count; ++i) add(rects[i].rect);
++      } break;
++      default:
++        break;
++    }
++    pos += kCommandHeaderSizeElements + header.arguments_size_elements;
++  }
++  if (x0 >= x1 || y0 >= y1) {
++    return;  // Nothing written; leave as recorded.
++  }
++  int64_t ax0 = render_area->offset.x, ay0 = render_area->offset.y;
++  int64_t ax1 = ax0 + render_area->extent.width, ay1 = ay0 + render_area->extent.height;
++  x0 = std::max(x0, ax0);
++  y0 = std::max(y0, ay0);
++  x1 = std::min(x1, ax1);
++  y1 = std::min(y1, ay1);
++  if (x0 >= x1 || y0 >= y1) return;
++  render_area->offset.x = int32_t(x0);
++  render_area->offset.y = int32_t(y0);
++  render_area->extent.width = uint32_t(x1 - x0);
++  render_area->extent.height = uint32_t(y1 - y0);
++}
++
+ void* DeferredCommandBuffer::WriteCommand(Command command, size_t arguments_size_bytes) {
+   size_t arguments_size_elements =
+       (arguments_size_bytes + sizeof(uintmax_t) - 1) / sizeof(uintmax_t);
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index a744375..5fcf826 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -960,6 +1004,63 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+ 
+   IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+ 
++  // Debug: REX_FPS_LOG=1 logs the guest swap rate every 5 s.
++  static const bool fps_log = std::getenv("REX_FPS_LOG") != nullptr;
++  if (fps_log) {
++    using clk = std::chrono::steady_clock;
++    static clk::time_point t0 = clk::now();
++    static uint32_t swaps = 0;
++    static clk::time_point last_swap = clk::now();
++    static double worst_ms = 0;
++    static uint32_t hitches = 0;  // swaps more than 100 ms apart
++    static uint32_t slow_frames = 0;  // swaps more than 25 ms apart (a missed 60 Hz vblank)
++    static uint32_t windows = 0;
++    ++swaps;
++    clk::time_point now = clk::now();
++    double frame_ms = std::chrono::duration<double, std::milli>(now - last_swap).count();
++    last_swap = now;
++    worst_ms = std::max(worst_ms, frame_ms);
++    hitches += frame_ms > 100.0;
++    slow_frames += frame_ms > 25.0;
++    double dt = std::chrono::duration<double>(now - t0).count();
++    if (dt >= 5.0) {
++      REXGPU_INFO("guest fps {:.1f} ({} swaps / {:.1f} s), worst frame {:.0f} ms, {} frames >25 ms, "
++                  "{} hitches >100 ms",
++                  swaps / dt, swaps, dt, worst_ms, slow_frames, hitches);
++      worst_ms = 0;
++      hitches = 0;
++      slow_frames = 0;
++      // Every 30 s: guest memory use, to see a heap creeping toward its limit before a crash.
++      if (memory_ && ++windows % 6 == 1) {
++        auto used_mb = [](memory::BaseHeap* heap) {
++          if (!heap) return 0.0;
++          return double(heap->GetTotalPageCount() - heap->GetUnreservedPageCount()) *
++                 heap->page_size() / (1024.0 * 1024.0);
++        };
++        auto total_mb = [](memory::BaseHeap* heap) {
++          return heap ? double(heap->heap_size()) / (1024.0 * 1024.0) : 0.0;
++        };
++        memory::BaseHeap* v4 = memory_->LookupHeap(0x40000000);
++        memory::BaseHeap* v0 = memory_->LookupHeap(0x00010000);
++        memory::BaseHeap* phys = memory_->GetPhysicalHeap();
++        REXGPU_INFO("guest memory reserved: virtual 64K {:.0f}/{:.0f} MB, virtual 4K {:.0f}/{:.0f} MB, "
++                    "physical {:.0f}/{:.0f} MB",
++                    used_mb(v4), total_mb(v4), used_mb(v0), total_mb(v0), used_mb(phys),
++                    total_mb(phys));
++      }
++      if (shader_work_slow_ || async_skipped_draws_) {
++        REXGPU_INFO("shader work: {} slow configures, {:.0f} ms total ({:.0f}% of window), max "
++                    "{:.1f} ms; {} draws skipped (async pending)",
++                    shader_work_slow_, shader_work_ns_ / 1e6, shader_work_ns_ / 1e7 / dt,
++                    shader_work_max_ns_ / 1e6, async_skipped_draws_);
++      }
++      shader_work_ns_ = shader_work_max_ns_ = 0;
++      shader_work_slow_ = async_skipped_draws_ = 0;
++      swaps = 0;
++      t0 = clk::now();
++    }
++  }
++
+   ++counter_;
+   return true;
+ }
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 001f36b..9ab9f99 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -9,6 +9,8 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <cstdlib>
++#include <chrono>
+ #include <algorithm>
+ #include <array>
+ #include <cstdint>
+@@ -2123,8 +2125,46 @@ void VulkanCommandProcessor::ShutdownContext() {
+   CommandProcessor::ShutdownContext();
+ }
+ 
++namespace {
++// Debug: REX_NAN_LOG=1 counts NaN/Inf values written to float constants (per constant slot,
++// 0-255 vertex, 256-511 pixel) and logs the worst slots every 5 s.
++void DebugNanScan(uint32_t first_reg, const uint32_t* values, uint32_t count) {
++  static const bool enabled = std::getenv("REX_NAN_LOG") != nullptr;
++  if (!enabled) return;
++  static std::mutex m;
++  static uint32_t hits[512] = {};
++  static uint64_t total = 0, writes = 0;
++  static auto t0 = std::chrono::steady_clock::now();
++  std::lock_guard<std::mutex> lock(m);
++  for (uint32_t i = 0; i < count; ++i) {
++    ++writes;
++    if ((values[i] & 0x7F800000u) == 0x7F800000u) {
++      uint32_t c = (first_reg + i - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
++      if (c < 512) ++hits[c];
++      ++total;
++    }
++  }
++  auto now = std::chrono::steady_clock::now();
++  if (std::chrono::duration<double>(now - t0).count() < 5.0) return;
++  t0 = now;
++  std::string top;
++  for (int n = 0; n < 8; ++n) {
++    uint32_t best = 0, bi = 0;
++    for (uint32_t c = 0; c < 512; ++c) if (hits[c] > best) { best = hits[c]; bi = c; }
++    if (!best) break;
++    top += fmt::format(" {}{}={}", bi < 256 ? "v" : "p", bi & 255, best);
++    hits[bi] = 0;
++  }
++  REXGPU_INFO("nan-scan: {} non-finite of {} const writes;{}", total, writes, top);
++  std::fill(std::begin(hits), std::end(hits), 0u);
++  total = writes = 0;
++}
++}  // namespace
++
+ void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+   CommandProcessor::WriteRegister(index, value);
++  if (index >= XE_GPU_REG_SHADER_CONSTANT_000_X && index <= XE_GPU_REG_SHADER_CONSTANT_511_W)
++    DebugNanScan(index, &value, 1);
+ 
+   if (index >= XE_GPU_REG_SHADER_CONSTANT_000_X && index <= XE_GPU_REG_SHADER_CONSTANT_511_W) {
+     if (frame_open_) {
+@@ -2196,6 +2236,7 @@ void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_
+   if (start_index >= XE_GPU_REG_SHADER_CONSTANT_000_X &&
+       end_index <= XE_GPU_REG_SHADER_CONSTANT_511_W) {
+     memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
++    DebugNanScan(start_index, register_file_->values + start_index, num_registers);
+     if (frame_open_) {
+       uint32_t first_float_constant = (start_index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
+       uint32_t last_float_constant = (end_index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;

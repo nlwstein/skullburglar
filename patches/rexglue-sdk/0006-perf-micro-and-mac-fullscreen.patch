@@ -1,0 +1,111 @@
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+index 23645ef..81b1400 100644
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -2038,6 +2038,22 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+             case kGuestOutputPaintPipelineLayoutIndexBilinear: {
+               effect_constants_size = sizeof(effect_constants.bilinear);
+               effect_constants.bilinear.Initialize(guest_output_flow, i);
++              static std::atomic<uint64_t> last_bilinear_key{0};
++              uint64_t key = (uint64_t(guest_output_viewport.width) << 32) ^
++                             uint64_t(guest_output_viewport.height) ^
++                             (uint64_t(effect_rect_size.first) << 16);
++              if (last_bilinear_key.exchange(key) != key) {
++                REXLOG_INFO(
++                    "VulkanPresenter: bilinear pass {} final={} viewport {}x{} rect {:.3f},{:.3f} "
++                    "{:.3f}x{:.3f} offset {},{} size_inv {:.6f},{:.6f} swapchain {}x{}",
++                    i, is_final_effect, guest_output_viewport.width, guest_output_viewport.height,
++                    effect_rect_constants.x, effect_rect_constants.y, effect_rect_constants.width,
++                    effect_rect_constants.height, effect_constants.bilinear.output_offset[0],
++                    effect_constants.bilinear.output_offset[1],
++                    effect_constants.bilinear.output_size_inv[0],
++                    effect_constants.bilinear.output_size_inv[1],
++                    paint_context_.swapchain_extent.width, paint_context_.swapchain_extent.height);
++              }
+             } break;
+ #if defined(REX_HAS_FIDELITYFX_SDK)
+             case kGuestOutputPaintPipelineLayoutIndexCasSharpen: {
+diff --git a/src/ui/windowed_app_context_sdl.cpp b/src/ui/windowed_app_context_sdl.cpp
+index dc0b4c2..9ef52f9 100644
+--- a/src/ui/windowed_app_context_sdl.cpp
++++ b/src/ui/windowed_app_context_sdl.cpp
+@@ -46,6 +46,12 @@ bool SDLWindowedAppContext::Initialize() {
+   if (requested_driver.empty()) {
+     requested_driver = "cocoa";
+   }
++  // Fullscreen without a separate Space. The Space transition animates the window from its
++  // windowed size, and the swapchain recreated during it intermittently leaves the CAMetalLayer
++  // stretching a single texel over the screen (solid color, the game itself rendering fine).
++  // Non-Space fullscreen switches instantly. Default priority: SDL_VIDEO_MAC_FULLSCREEN_SPACES=1
++  // in the environment still restores the Space behavior.
++  SDL_SetHintWithPriority(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "0", SDL_HINT_DEFAULT);
+ #endif
+   if (!requested_driver.empty()) {
+     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, requested_driver.c_str());
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index a744375..5fcf826 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -182,8 +197,12 @@ ReadbackResolveMode CommandProcessor::GetReadbackResolveMode(
+ }
+ 
+ bool CommandProcessor::IsReadbackMemexportEnabled(bool legacy_backend_flag) const {
+-  if (legacy_readback_memexport_cvar_name_ &&
+-      rex::cvar::HasNonDefaultValue(legacy_readback_memexport_cvar_name_)) {
++  if (legacy_readback_memexport_overridden_ < 0) {
++    legacy_readback_memexport_overridden_ =
++        legacy_readback_memexport_cvar_name_ &&
++        rex::cvar::HasNonDefaultValue(legacy_readback_memexport_cvar_name_);
++  }
++  if (legacy_readback_memexport_overridden_) {
+     return legacy_backend_flag;
+   }
+   return REXCVAR_GET(readback_memexport);
+@@ -355,7 +374,17 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+ 
+   // Volatile for the WAIT_REG_MEM loop.
+   const_cast<volatile uint32_t&>(regs.values[index]) = value;
+-  if (!regs.GetRegisterInfo(index)) {
++  // Known-register bitmap built once: GetRegisterInfo is a big switch with a guarded static
++  // per case, and running it on every register write (only to log unknown ones) was ~3-4% of
++  // the GPU thread.
++  static const std::vector<bool> known_registers = [] {
++    std::vector<bool> known(RegisterFile::kRegisterCount);
++    for (uint32_t i = 0; i < RegisterFile::kRegisterCount; ++i) {
++      known[i] = RegisterFile::GetRegisterInfo(i) != nullptr;
++    }
++    return known;
++  }();
++  if (!known_registers[index]) [[unlikely]] {
+     REXGPU_DEBUG("GPU: Write to unknown register ({:04X} = {:08X})", index, value);
+   }
+ 
+diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
+index 7360ed9..3274208 100644
+--- a/src/ui/presenter.cpp
++++ b/src/ui/presenter.cpp
+@@ -1014,6 +1059,24 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
+     output_right = int32_t(output_width);
+     output_bottom = int32_t(output_height);
+   }
++  {
++    // Debug: log the paint rectangle whenever any of its inputs changes.
++    static std::atomic<uint64_t> last_key{0};
++    uint64_t key = (uint64_t(host_rt_width) << 48) ^ (uint64_t(host_rt_height) << 32) ^
++                   (uint64_t(surface_width_in_paint_connection_) << 16) ^
++                   surface_height_in_paint_connection_ ^ (uint64_t(output_width) << 40) ^
++                   (uint64_t(properties.frontbuffer_width) << 24);
++    if (last_key.exchange(key) != key) {
++      REXLOG_INFO(
++          "Presenter: paint flow host_rt {}x{} surface {}x{} frontbuffer {}x{} aspect {}:{} -> "
++          "output {}x{} at {},{}",
++          host_rt_width, host_rt_height, surface_width_in_paint_connection_,
++          surface_height_in_paint_connection_, properties.frontbuffer_width,
++          properties.frontbuffer_height, properties.display_aspect_ratio_x,
++          properties.display_aspect_ratio_y, output_width, output_height, flow.output_x,
++          flow.output_y);
++    }
++  }
+   if (!output_width || !output_height || output_right <= 0 || output_bottom <= 0 ||
+       flow.output_x >= int32_t(host_rt_width) || flow.output_y >= int32_t(host_rt_height)) {
+     return flow;

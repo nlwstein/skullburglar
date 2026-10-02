@@ -1,0 +1,42 @@
+diff --git a/src/core/exception_handler_posix.cpp b/src/core/exception_handler_posix.cpp
+index 8b1c76a..e4848f0 100644
+--- a/src/core/exception_handler_posix.cpp
++++ b/src/core/exception_handler_posix.cpp
+@@ -22,6 +22,8 @@
+ #include <signal.h>
+ 
+ #include <cstdint>
++#include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ 
+ #include <rex/assert.h>
+@@ -30,6 +32,7 @@
+ #include <rex/platform.h>
+ 
+ #include <ucontext.h>
++#include <unistd.h>
+ 
+ namespace rex::arch {
+ 
+@@ -417,6 +420,20 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
+       return;
+     }
+   }
++
++  // No handler claimed the fault. Returning would re-execute the faulting instruction forever
++  // (seen as an endless "Unhandled guest access violation" log loop), so report and abort -
++  // a SIGABRT handler can then print a backtrace that includes the faulting frames.
++  char message[192];
++  int message_length = snprintf(
++      message, sizeof(message),
++      "\n=== unhandled host signal %d at pc 0x%llx, fault address 0x%llx ===\n", signal_number,
++      static_cast<unsigned long long>(ex.pc()),
++      static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(signal_info->si_addr)));
++  if (message_length > 0) {
++    write(STDERR_FILENO, message, size_t(message_length));
++  }
++  abort();
+ }
+ 
+ void ExceptionHandler::Install(Handler fn, void* data) {

@@ -1,0 +1,32 @@
+# Game data — never commit
+/game/
+*.iso
+*.xex
+*.xexp
+*.xxx
+*.upk
+*.tfc
+*.bik
+*.bin
+dumps/
+
+# Codegen output and builds
+/generated/*
+!/generated/rexglue.cmake
+/out/
+/build/
+CMakeUserPresets.json
+
+# Misc
+.DS_Store
+*.bak
+/logs/
+/dumps/
+/run/
+
+# Shader captures/master (B-053): .xsh is game shader microcode — never commit
+/shaders/
+__pycache__/
+
+# Private additions to the leak blocklist (tools/leak_scan.py)
+.githooks/blocklist.local

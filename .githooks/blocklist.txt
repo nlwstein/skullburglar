@@ -1,0 +1,6 @@
+# Words that must never appear in this repo's files or commit messages (tools/leak_scan.py).
+# One case-insensitive Python regex per line. Personal entries (host names, user names, domains) go in
+# .githooks/blocklist.local, which is gitignored: publishing them here would leak exactly what they protect.
+/Users/[a-z]
+/home/[a-z]
+C:\\Users\\[a-z]

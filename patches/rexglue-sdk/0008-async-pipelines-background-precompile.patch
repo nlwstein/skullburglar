@@ -1,0 +1,548 @@
+diff --git a/include/rex/system/interfaces/graphics.h b/include/rex/system/interfaces/graphics.h
+index d54df86..0addcc8 100644
+--- a/include/rex/system/interfaces/graphics.h
++++ b/include/rex/system/interfaces/graphics.h
+@@ -79,6 +79,14 @@ class IGraphicsSystem {
+     (void)blocking;
+   }
+ 
++  // Pipelines loaded from the persistent storage that are compiled in the background
++  // (shader_precompile_background): how many are done out of the total. total == 0 when nothing
++  // is being precompiled or the backend doesn't report it.
++  virtual void GetShaderPrecompileProgress(uint32_t& done, uint32_t& total) const {
++    done = 0;
++    total = 0;
++  }
++
+   // One-shot convenience for callers that don't care about the split.
+   X_STATUS Setup(runtime::FunctionDispatcher* function_dispatcher, KernelState* kernel_state,
+                  ui::WindowedAppContext* app_context, bool with_presentation) {
+diff --git a/src/core/filesystem_posix.cpp b/src/core/filesystem_posix.cpp
+index ef5bdf4..0e9cd86 100644
+--- a/src/core/filesystem_posix.cpp
++++ b/src/core/filesystem_posix.cpp
+@@ -124,7 +124,15 @@ std::filesystem::path GetUserFolder() {
+ }
+ 
+ FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode) {
+-  return fopen(path.c_str(), std::string(mode).c_str());
++  FILE* file = fopen(path.c_str(), std::string(mode).c_str());
++  // The initial read position of an "a+" stream is implementation-defined: glibc and the MSVC CRT
++  // start at 0, macOS starts at the end. The shader/pipeline storages read their header first and
++  // reset the file when that read fails, which wiped them on every macOS launch. Appends still go
++  // to the end regardless of the position.
++  if (file && !mode.empty() && mode[0] == 'a') {
++    rewind(file);
++  }
++  return file;
+ }
+ 
+ bool Seek(FILE* file, int64_t offset, int origin) {
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index 19874a5..225f1f1 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -2392,14 +2392,18 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   }
+   void* pipeline_handle;
+   ID3D12RootSignature* root_signature;
+-  if (!pipeline_cache_->ConfigurePipeline(
+-          vertex_shader_translation, pixel_shader_translation, primitive_processing_result,
+-          normalized_depth_control, normalized_color_mask, bound_depth_and_color_render_target_bits,
+-          bound_depth_and_color_render_target_formats, &pipeline_handle, &root_signature)) {
++  auto pipeline_t0 = std::chrono::steady_clock::now();
++  bool pipeline_configured = pipeline_cache_->ConfigurePipeline(
++      vertex_shader_translation, pixel_shader_translation, primitive_processing_result,
++      normalized_depth_control, normalized_color_mask, bound_depth_and_color_render_target_bits,
++      bound_depth_and_color_render_target_formats, &pipeline_handle, &root_signature);
++  NoteShaderWork(pipeline_t0);
++  if (!pipeline_configured) {
+     return false;
+   }
+   if (REXCVAR_GET(async_shader_compilation) &&
+       pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr) {
++    ++async_skipped_draws_;
+     return true;
+   }
+ 
+diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
+index 8e6b854..a79b98e 100644
+--- a/src/graphics/d3d12/pipeline_cache.cpp
++++ b/src/graphics/d3d12/pipeline_cache.cpp
+@@ -634,9 +634,11 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
+               : pipeline_runtime_description.description.depth_write != 0;
+       new_pipeline->priority = pipeline_util::CalculatePipelinePriority(
+           bound_rts, shader_writes_color_targets, shader_writes_depth);
++      new_pipeline->from_storage = true;
+       pipelines_.emplace(pipeline_stored_description.description_hash, new_pipeline);
+       COUNT_profile_set("gpu/pipeline_cache/pipelines", pipelines_.size());
+       if (!creation_threads_.empty()) {
++        command_processor_.shader_precompile_total_.fetch_add(1, std::memory_order_relaxed);
+         // Submit the pipeline for creation to any available thread.
+         {
+           std::lock_guard<std::mutex> lock(creation_request_lock_);
+@@ -650,7 +652,14 @@ void PipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_r
+       ++pipelines_created;
+     }
+ 
+-    if (!creation_threads_.empty()) {
++    bool background = !creation_threads_.empty() && REXCVAR_GET(async_shader_compilation) &&
++                      REXCVAR_GET(shader_precompile_background);
++    if (background) {
++      precompile_start_ticks_ = pipeline_creation_start_;
++      // The creation threads work through the queue while the game runs (lower priority than
++      // pipelines the game asks for); CommandProcessor::GetShaderPrecompileProgress reports how far along it is.
++      REXGPU_INFO("Precompiling {} pipelines from the storage in the background", pipelines_created);
++    } else if (!creation_threads_.empty()) {
+       CreateQueuedPipelinesOnProcessorThread();
+       if (creation_threads_.size() > creation_thread_original_count) {
+         {
+@@ -762,7 +771,12 @@ void PipelineCache::EndSubmission() {
+     shader_storage_file_flush_needed_ = false;
+     pipeline_storage_file_flush_needed_ = false;
+   }
+-  if (!creation_threads_.empty()) {
++  if (!creation_threads_.empty() && REXCVAR_GET(async_shader_compilation)) {
++    // Async mode: draws whose pipeline isn't created yet were skipped, so nothing in this
++    // submission references a pending pipeline. Waiting here (the synchronous path below) stalled
++    // the frame for the full compile of every new pipeline, 200+ ms per new effect on an RTX 3090.
++    creation_request_cond_.notify_one();
++  } else if (!creation_threads_.empty()) {
+     CreateQueuedPipelinesOnProcessorThread();
+     // Await creation of all queued pipelines.
+     bool await_creation_completion_event;
+@@ -789,7 +803,7 @@ bool PipelineCache::IsCreatingPipelines() {
+     return false;
+   }
+   std::lock_guard<std::mutex> lock(creation_request_lock_);
+-  return !creation_queue_.empty() || creation_threads_busy_ != 0;
++  return !CreationQueuesEmptyLocked() || creation_threads_busy_ != 0;
+ }
+ 
+ D3D12Shader* PipelineCache::LoadShader(xenos::ShaderType shader_type, const uint32_t* host_address,
+@@ -1001,6 +1015,16 @@ bool PipelineCache::ConfigurePipeline(
+     Pipeline* found_pipeline = it->second;
+     if (!std::memcmp(&found_pipeline->description.description, &description, sizeof(description))) {
+       PROFILE_PIPELINE_CACHE_HIT();
++      if (found_pipeline->from_storage && !found_pipeline->urgent_requested &&
++          !found_pipeline->creation_claimed.load(std::memory_order_acquire)) {
++        // Needed now, still waiting in the background precompile queue.
++        found_pipeline->urgent_requested = true;
++        {
++          std::lock_guard<std::mutex> lock(creation_request_lock_);
++          creation_urgent_queue_.push_back(found_pipeline);
++        }
++        creation_request_cond_.notify_one();
++      }
+       current_pipeline_ = found_pipeline;
+       *pipeline_handle_out = found_pipeline;
+       *root_signature_out = found_pipeline->root_signature.load(std::memory_order_acquire);
+@@ -1022,8 +1046,10 @@ bool PipelineCache::ConfigurePipeline(
+         pixel_shader ? pixel_shader->shader().writes_color_targets() : 0;
+     bool shader_writes_depth = pixel_shader ? pixel_shader->shader().writes_depth()
+                                             : normalized_depth_control.z_write_enable != 0;
++    // Above every background-precompile (storage) pipeline, which use the plain 0-3 range.
+     new_pipeline->priority = pipeline_util::CalculatePipelinePriority(
+-        bound_rts, shader_writes_color_targets, shader_writes_depth);
++                                 bound_rts, shader_writes_color_targets, shader_writes_depth) +
++                             kRuntimePriorityBoost;
+     new_pipeline->pending_vertex_shader = vertex_shader;
+     new_pipeline->pending_pixel_shader = pixel_shader;
+     // Submit the pipeline for creation to any available thread.
+@@ -3204,7 +3230,10 @@ void PipelineCache::CreationThread(size_t thread_index) {
+     // pipeline if there is any.
+     {
+       std::unique_lock<std::mutex> lock(creation_request_lock_);
+-      if (thread_index >= creation_threads_shutdown_from_ || creation_queue_.empty()) {
++      if (thread_index < creation_threads_shutdown_from_) {
++        pipeline_to_create = PopPipelineToCreateLocked();
++      }
++      if (!pipeline_to_create) {
+         if (creation_completion_set_event_ && creation_threads_busy_ == 0) {
+           // Last pipeline in the queue created - signal the event if requested.
+           creation_completion_set_event_ = false;
+@@ -3216,22 +3245,13 @@ void PipelineCache::CreationThread(size_t thread_index) {
+         creation_request_cond_.wait(lock);
+         continue;
+       }
+-      // Take the pipeline from the queue and increment the busy thread count
+-      // until the pipeline is created - other threads must be able to dequeue
+-      // requests, but can't set the completion event until the pipelines are
++      // Increment the busy thread count until the pipeline is created - other threads must be
++      // able to dequeue requests, but can't set the completion event until the pipelines are
+       // fully created (rather than just started creating).
+-      pipeline_to_create = creation_queue_.top();
+-      creation_queue_.pop();
+       ++creation_threads_busy_;
+     }
+ 
+-    PipelineRuntimeDescription runtime_description;
+-    if (!PrepareRuntimeDescriptionForQueuedCreation(pipeline_to_create, runtime_description)) {
+-      pipeline_to_create->state.store(nullptr, std::memory_order_release);
+-    } else {
+-      pipeline_to_create->state.store(CreateD3D12Pipeline(runtime_description),
+-                                      std::memory_order_release);
+-    }
++    CreateDequeuedPipeline(pipeline_to_create);
+ 
+     // Pipeline created - the thread is not busy anymore, safe to set the
+     // completion event if needed (at the next iteration, or in some other
+@@ -3243,25 +3263,53 @@ void PipelineCache::CreationThread(size_t thread_index) {
+   }
+ }
+ 
++PipelineCache::Pipeline* PipelineCache::PopPipelineToCreateLocked() {
++  while (!CreationQueuesEmptyLocked()) {
++    Pipeline* pipeline;
++    if (!creation_urgent_queue_.empty()) {
++      pipeline = creation_urgent_queue_.front();
++      creation_urgent_queue_.pop_front();
++    } else {
++      pipeline = creation_queue_.top();
++      creation_queue_.pop();
++    }
++    // A storage pipeline can be queued twice (background + urgent); the second dequeue is skipped.
++    if (!pipeline->creation_claimed.exchange(true, std::memory_order_acq_rel)) {
++      return pipeline;
++    }
++  }
++  return nullptr;
++}
++
++void PipelineCache::CreateDequeuedPipeline(Pipeline* pipeline) {
++  PipelineRuntimeDescription runtime_description;
++  if (!PrepareRuntimeDescriptionForQueuedCreation(pipeline, runtime_description)) {
++    pipeline->state.store(nullptr, std::memory_order_release);
++  } else {
++    pipeline->state.store(CreateD3D12Pipeline(runtime_description), std::memory_order_release);
++  }
++  if (pipeline->from_storage &&
++      command_processor_.shader_precompile_done_.fetch_add(1, std::memory_order_relaxed) + 1 ==
++          command_processor_.shader_precompile_total_.load(std::memory_order_relaxed)) {
++    REXGPU_INFO("Background precompile finished: {} pipelines in {} ms",
++                command_processor_.shader_precompile_total_.load(std::memory_order_relaxed),
++                (rex::chrono::Clock::QueryHostTickCount() - precompile_start_ticks_) * 1000 /
++                    rex::chrono::Clock::QueryHostTickFrequency());
++  }
++}
++
+ void PipelineCache::CreateQueuedPipelinesOnProcessorThread() {
+   assert_false(creation_threads_.empty());
+   while (true) {
+     Pipeline* pipeline_to_create;
+     {
+       std::lock_guard<std::mutex> lock(creation_request_lock_);
+-      if (creation_queue_.empty()) {
+-        break;
+-      }
+-      pipeline_to_create = creation_queue_.top();
+-      creation_queue_.pop();
++      pipeline_to_create = PopPipelineToCreateLocked();
+     }
+-    PipelineRuntimeDescription runtime_description;
+-    if (!PrepareRuntimeDescriptionForQueuedCreation(pipeline_to_create, runtime_description)) {
+-      pipeline_to_create->state.store(nullptr, std::memory_order_release);
+-      continue;
++    if (!pipeline_to_create) {
++      break;
+     }
+-    pipeline_to_create->state.store(CreateD3D12Pipeline(runtime_description),
+-                                    std::memory_order_release);
++    CreateDequeuedPipeline(pipeline_to_create);
+   }
+ }
+ 
+diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
+index 8f2fcb0..a492399 100644
+--- a/src/graphics/graphics_system.cpp
++++ b/src/graphics/graphics_system.cpp
+@@ -364,6 +364,14 @@ void GraphicsSystem::InitializeShaderStorage(const std::filesystem::path& cache_
+   }
+ }
+ 
++void GraphicsSystem::GetShaderPrecompileProgress(uint32_t& done, uint32_t& total) const {
++  done = 0;
++  total = 0;
++  if (command_processor_) {
++    command_processor_->GetShaderPrecompileProgress(done, total);
++  }
++}
++
+ void GraphicsSystem::Pause() {
+   paused_ = true;
+   command_processor_->Pause();
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+index 91ac08f..2bde3d8 100644
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -23,6 +23,7 @@
+ 
+ #include <fmt/format.h>
+ 
++#include <rex/chrono/clock.h>
+ #include <rex/assert.h>
+ #include <rex/cvar.h>
+ #include <rex/dbg.h>
+@@ -621,7 +622,29 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+     pipeline_creations.push_back(creation_arguments);
+   }
+ 
+-  if (!pipeline_creations.empty()) {
++  REXGPU_INFO("Vulkan pipeline storage: {} descriptions, {} with translated shaders to create",
++              pipeline_stored_descriptions.size(), pipeline_creations.size());
++  bool background = !pipeline_creations.empty() && !creation_threads_.empty() &&
++                    REXCVAR_GET(async_shader_compilation) &&
++                    REXCVAR_GET(shader_precompile_background);
++  if (background) {
++    // Created by the creation threads while the game runs, below runtime requests in priority.
++    // Until then each one is a null pipeline marked placeholder, so draws using it are skipped
++    // (and ConfigurePipeline moves it to the urgent queue).
++    precompile_start_ticks_ = rex::chrono::Clock::QueryHostTickCount();
++    {
++      std::lock_guard<std::mutex> lock(creation_request_lock_);
++      for (const PipelineCreationArguments& creation_arguments : pipeline_creations) {
++        creation_arguments.pipeline->second.from_storage = true;
++        creation_arguments.pipeline->second.is_placeholder.store(true, std::memory_order_release);
++        creation_queue_.push(creation_arguments);
++      }
++      command_processor_.shader_precompile_total_.fetch_add(uint32_t(pipeline_creations.size()), std::memory_order_relaxed);
++    }
++    creation_request_cond_.notify_all();
++    REXGPU_INFO("Precompiling {} pipelines from the Vulkan storage in the background",
++                pipeline_creations.size());
++  } else if (!pipeline_creations.empty()) {
+     {
+       std::lock_guard<std::mutex> lock(creation_request_lock_);
+       startup_loading_ = true;
+@@ -765,7 +788,9 @@ void VulkanPipelineCache::EndSubmission() {
+       std::lock_guard<std::mutex> lock(creation_request_lock_);
+       startup_loading = startup_loading_;
+     }
+-    if (startup_loading) {
++    if (startup_loading || REXCVAR_GET(async_shader_compilation)) {
++      // Async mode: draws with a placeholder pipeline were skipped, never bound, so this
++      // submission doesn't depend on pending creation. Waiting stalled whole frames on compiles.
+       creation_request_cond_.notify_one();
+     } else {
+       // Help worker threads on the processor thread to reduce warm-up latency.
+@@ -809,6 +834,7 @@ void VulkanPipelineCache::Shutdown() {
+     while (!creation_queue_.empty()) {
+       creation_queue_.pop();
+     }
++    creation_urgent_queue_.clear();
+     creation_threads_busy_ = 0;
+     startup_loading_ = false;
+     creation_completion_set_event_ = false;
+@@ -1122,12 +1148,37 @@ bool VulkanPipelineCache::ConfigurePipeline(
+     bool shader_writes_depth = pixel_shader ? pixel_shader->shader().writes_depth()
+                                             : normalized_depth_control.z_write_enable != 0;
+     async_priority = pipeline_util::CalculatePipelinePriority(
+-        bound_rts, shader_writes_color_targets, shader_writes_depth);
++                         bound_rts, shader_writes_color_targets, shader_writes_depth) +
++                     kRuntimePriorityBoost;
+   }
+ 
+   auto it = pipelines_.find(description);
+   if (it != pipelines_.end()) {
+     VkPipeline found_pipeline = it->second.pipeline.load(std::memory_order_acquire);
++    if (found_pipeline == VK_NULL_HANDLE && it->second.from_storage &&
++        it->second.is_placeholder.load(std::memory_order_acquire) &&
++        REXCVAR_GET(async_shader_compilation)) {
++      // Still in the background precompile queue: ask for it first, skip the draw meanwhile.
++      if (!it->second.urgent_requested &&
++          !it->second.creation_claimed.load(std::memory_order_acquire)) {
++        it->second.urgent_requested = true;
++        PipelineCreationArguments creation_arguments;
++        if (TryGetPipelineCreationArgumentsForDescription(description, &*it, creation_arguments)) {
++          {
++            std::lock_guard<std::mutex> lock(creation_request_lock_);
++            creation_urgent_queue_.push_back(creation_arguments);
++          }
++          creation_request_cond_.notify_one();
++        }
++      }
++      last_pipeline_ = &*it;
++      pipeline_out = VK_NULL_HANDLE;
++      pipeline_layout_out = it->second.pipeline_layout.load(std::memory_order_acquire);
++      if (pipeline_handle_out) {
++        *pipeline_handle_out = &it->second;
++      }
++      return true;
++    }
+     if (found_pipeline == VK_NULL_HANDLE) {
+       PipelineCreationArguments creation_arguments;
+       if (!TryGetPipelineCreationArgumentsForDescription(description, &*it, creation_arguments) ||
+@@ -1210,7 +1261,7 @@ bool VulkanPipelineCache::IsCreatingPipelines() const {
+   if (creation_threads_.empty()) {
+     return startup_loading_;
+   }
+-  return startup_loading_ || !creation_queue_.empty() || creation_threads_busy_ != 0;
++  return startup_loading_ || !CreationQueuesEmptyLocked() || creation_threads_busy_ != 0;
+ }
+ 
+ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
+@@ -3522,7 +3573,7 @@ void VulkanPipelineCache::CreationThread(size_t thread_index) {
+     PipelineCreationArguments creation_arguments;
+     {
+       std::unique_lock<std::mutex> lock(creation_request_lock_);
+-      if (thread_index >= creation_threads_shutdown_from_ || creation_queue_.empty()) {
++      if (thread_index >= creation_threads_shutdown_from_ || !PopCreationLocked(creation_arguments)) {
+         if (creation_completion_set_event_ && creation_threads_busy_ == 0) {
+           creation_completion_set_event_ = false;
+           creation_completion_event_->Set();
+@@ -3533,25 +3584,10 @@ void VulkanPipelineCache::CreationThread(size_t thread_index) {
+         creation_request_cond_.wait(lock);
+         continue;
+       }
+-      creation_arguments = creation_queue_.top();
+-      creation_queue_.pop();
+       ++creation_threads_busy_;
+     }
+ 
+-    bool created = EnsurePipelineCreated(creation_arguments);
+-    if (!created) {
+-      bool has_placeholder =
+-          creation_arguments.pipeline->second.is_placeholder.load(std::memory_order_acquire);
+-      VkPipeline pipeline =
+-          creation_arguments.pipeline->second.pipeline.load(std::memory_order_acquire);
+-      if (has_placeholder && pipeline != VK_NULL_HANDLE) {
+-        // Keep the placeholder resident and stop waiting for a real pipeline.
+-        creation_arguments.pipeline->second.is_placeholder.store(false, std::memory_order_release);
+-      } else {
+-        creation_arguments.pipeline->second.pipeline.store(VK_NULL_HANDLE,
+-                                                           std::memory_order_release);
+-      }
+-    }
++    CreateDequeued(creation_arguments);
+ 
+     {
+       std::lock_guard<std::mutex> lock(creation_request_lock_);
+@@ -3566,26 +3602,54 @@ void VulkanPipelineCache::CreateQueuedPipelinesOnProcessorThread() {
+     PipelineCreationArguments creation_arguments;
+     {
+       std::lock_guard<std::mutex> lock(creation_request_lock_);
+-      if (creation_queue_.empty()) {
++      if (!PopCreationLocked(creation_arguments)) {
+         break;
+       }
+-      creation_arguments = creation_queue_.top();
++    }
++    CreateDequeued(creation_arguments);
++  }
++}
++
++bool VulkanPipelineCache::PopCreationLocked(PipelineCreationArguments& out) {
++  while (!CreationQueuesEmptyLocked()) {
++    if (!creation_urgent_queue_.empty()) {
++      out = creation_urgent_queue_.front();
++      creation_urgent_queue_.pop_front();
++    } else {
++      out = creation_queue_.top();
+       creation_queue_.pop();
+     }
+-    bool created = EnsurePipelineCreated(creation_arguments);
+-    if (!created) {
+-      bool has_placeholder =
+-          creation_arguments.pipeline->second.is_placeholder.load(std::memory_order_acquire);
+-      VkPipeline pipeline =
+-          creation_arguments.pipeline->second.pipeline.load(std::memory_order_acquire);
+-      if (has_placeholder && pipeline != VK_NULL_HANDLE) {
+-        creation_arguments.pipeline->second.is_placeholder.store(false, std::memory_order_release);
+-      } else {
+-        creation_arguments.pipeline->second.pipeline.store(VK_NULL_HANDLE,
+-                                                           std::memory_order_release);
+-      }
++    Pipeline& pipeline = out.pipeline->second;
++    // Storage pipelines can be queued twice (background + urgent); create them once.
++    if (!pipeline.from_storage ||
++        !pipeline.creation_claimed.exchange(true, std::memory_order_acq_rel)) {
++      return true;
+     }
+   }
++  return false;
++}
++
++void VulkanPipelineCache::CreateDequeued(const PipelineCreationArguments& creation_arguments) {
++  Pipeline& pipeline_state = creation_arguments.pipeline->second;
++  bool created = EnsurePipelineCreated(creation_arguments);
++  if (!created) {
++    bool has_placeholder = pipeline_state.is_placeholder.load(std::memory_order_acquire);
++    VkPipeline pipeline = pipeline_state.pipeline.load(std::memory_order_acquire);
++    if (has_placeholder && pipeline != VK_NULL_HANDLE) {
++      // Keep the placeholder resident and stop waiting for a real pipeline.
++      pipeline_state.is_placeholder.store(false, std::memory_order_release);
++    } else {
++      pipeline_state.pipeline.store(VK_NULL_HANDLE, std::memory_order_release);
++    }
++  }
++  if (pipeline_state.from_storage &&
++      command_processor_.shader_precompile_done_.fetch_add(1, std::memory_order_relaxed) + 1 ==
++          command_processor_.shader_precompile_total_.load(std::memory_order_relaxed)) {
++    REXGPU_INFO("Background precompile finished: {} pipelines in {} ms",
++                command_processor_.shader_precompile_total_.load(std::memory_order_relaxed),
++                (rex::chrono::Clock::QueryHostTickCount() - precompile_start_ticks_) * 1000 /
++                    rex::chrono::Clock::QueryHostTickFrequency());
++  }
+ }
+ 
+ void VulkanPipelineCache::ProcessDeferredPipelineDestructions(bool force_all) {
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 001f36b..9ab9f99 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -3753,8 +3805,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+         pixel_shader ? static_cast<VulkanShader::VulkanTranslation*>(
+                            pixel_shader->GetOrCreateTranslation(pixel_shader_modification.value))
+                      : nullptr;
+-    if (!pipeline_cache_->EnsureShadersTranslated(vertex_shader_translation,
+-                                                  pixel_shader_translation)) {
++    auto shader_t0 = std::chrono::steady_clock::now();
++    bool shaders_translated = pipeline_cache_->EnsureShadersTranslated(vertex_shader_translation,
++                                                                       pixel_shader_translation);
++    NoteShaderWork(shader_t0);
++    if (!shaders_translated) {
+       return draw_fail("shader_translation");
+     }
+ 
+@@ -3849,11 +3904,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   // textures.
+   VkPipeline pipeline;
+   void* pipeline_handle = nullptr;
+-  if (!pipeline_cache_->ConfigurePipeline(vertex_shader_translation, pixel_shader_translation,
++  auto pipeline_t0 = std::chrono::steady_clock::now();
++  bool pipeline_configured = pipeline_cache_->ConfigurePipeline(vertex_shader_translation, pixel_shader_translation,
+                                           primitive_processing_result, normalized_depth_control,
+                                           normalized_color_mask,
+                                           render_target_cache_->last_update_render_pass_key(),
+-                                          pipeline, pipeline_layout_provider, &pipeline_handle)) {
++                                          pipeline, pipeline_layout_provider, &pipeline_handle);
++  NoteShaderWork(pipeline_t0);
++  if (!pipeline_configured) {
+     return draw_fail("configure_pipeline");
+   }
+   bool pipeline_is_placeholder = false;
+@@ -3863,6 +3921,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+                                                 &pipeline_is_placeholder);
+   if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder) {
+     frame_used_async_placeholder_pipeline_ = true;
++    ++async_skipped_draws_;
+     return true;
+   }
+   if (pipeline == VK_NULL_HANDLE || pipeline_layout_provider == nullptr) {
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index a744375..5fcf826 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -80,6 +89,12 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
+                     "pipelines are being prepared.")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(shader_precompile_background, true, "GPU",
++                    "Create the pipelines saved by earlier runs in the background at launch instead "
++                    "of before the game starts (needs async_shader_compilation). Draws using one "
++                    "that isn't ready yet are skipped, and it is moved to the front of the queue.")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ namespace rex::graphics {
+ 
+ using namespace rex::graphics::xenos;

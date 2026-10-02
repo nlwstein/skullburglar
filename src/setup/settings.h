@@ -1,0 +1,49 @@
+// Player-facing settings shown by the setup window (B-061) and later the in-game overlay (B-050).
+// Each one is an SDK cvar, so the usual precedence holds: bots.toml < REX_* env < --flag. The
+// window edits values coming from the defaults or bots.toml. Values forced by env or a flag are
+// shown locked. Saving writes the keys to bots.toml (other keys in the file are kept) and applies
+// them as runtime values for this launch.
+#pragma once
+
+#include <filesystem>
+#include <string>
+#include <vector>
+
+namespace bots::setup {
+
+struct Choice {
+  std::string value;  // cvar value as text
+  std::string label;
+};
+
+struct Setting {
+  std::string cvar;               // also the bots.toml key
+  std::string also_cvar;          // second cvar kept equal (resolution scale y)
+  std::string label;
+  std::string help;
+  std::vector<Choice> choices;    // empty = checkbox (bool cvar)
+  // Live state for the window.
+  std::string value;              // current value as text
+  bool locked = false;            // set by env or command line: shown, not editable
+};
+
+// The curated list, with current values read from the cvar registry.
+std::vector<Setting> LoadSettings();
+
+// Applies every unlocked setting as a runtime cvar value and writes them to `config_path`.
+// Returns an error message, empty on success.
+std::string SaveSettings(const std::vector<Setting>& settings,
+                         const std::filesystem::path& config_path);
+
+// Marks a cvar whose REX_* env value is the app's own built-in default (BotsApp::SetCvarDefault),
+// not a launch option, so the window still lets the player change it.
+void MarkAppDefault(const std::string& cvar);
+
+// True when bots.toml sets `key` (then the app's built-in env defaults must not override it).
+bool ConfigHasKey(const std::filesystem::path& config_path, const std::string& key);
+
+// A string value from bots.toml, empty if missing (game_data_root is read before the SDK loads
+// the file).
+std::string ConfigString(const std::filesystem::path& config_path, const std::string& key);
+
+}  // namespace bots::setup
