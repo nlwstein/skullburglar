@@ -95,6 +95,14 @@ SERIES.append(
     # KeWaitForMultipleObjects.
     ("0014-posix-wait-multiple-no-spin.patch",
      ["src/core/threading_posix.cpp"], {}))
+SERIES.append(
+    # SpirvShaderTranslator::Features::fragment_contraction / vertex_contraction: no NoContraction decorations in pixel
+    # / vertex shaders. SPIRV-Cross's Metal backend turns every decorated add/sub/mul into a [[clang::optnone]] helper
+    # call - the GPU time of a frame on an M2 Pro fell 41 ms -> 11 ms without them. Default off (exact, as before). The
+    # Features/SpirvBuilder members are in 0003's header diff (include/rex/graphics is claimed whole there).
+    ("0015-spirv-contraction-features.patch",
+     ["src/graphics/pipeline/shader/spirv_builder.cpp", "src/graphics/pipeline/shader/spirv_translator.cpp"],
+     {}))
 
 
 def git(sdk, *args, **kw):

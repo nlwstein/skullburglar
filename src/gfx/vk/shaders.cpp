@@ -1,6 +1,7 @@
 #include "shaders.h"
 
 #include <cstdio>
+#include <cstdlib>
 
 #include <xxhash.h>
 
@@ -10,8 +11,28 @@ namespace rg = rex::graphics;
 
 namespace {
 
+bool EnvFlag(const char* name, bool fallback) {
+  const char* env = std::getenv(name);
+  return env && *env ? *env != '0' : fallback;
+}
+
+// Let the driver fuse float ops: the translator otherwise marks every op NoContraction, which the Metal path turns
+// into an unoptimizable helper call per op (several times the GPU time). Pixel shaders don't need exactness.
+// Vertex shaders rely on the Invariant position output for the depth prepass / EQUAL-test passes to line up; Metal
+// honours it natively, so contraction is on there only. BOTS_GFX_PS_CONTRACTION / BOTS_GFX_VS_CONTRACTION=0|1.
+rg::SpirvShaderTranslator::Features TranslatorFeatures(const rex::ui::vulkan::VulkanDevice* device) {
+  rg::SpirvShaderTranslator::Features features(device);
+  features.fragment_contraction = EnvFlag("BOTS_GFX_PS_CONTRACTION", true);
+#ifdef __APPLE__
+  features.vertex_contraction = EnvFlag("BOTS_GFX_VS_CONTRACTION", true);
+#else
+  features.vertex_contraction = EnvFlag("BOTS_GFX_VS_CONTRACTION", false);
+#endif
+  return features;
+}
+
 // Host render targets: no fragment shader interlock, no 2x MSAA tricks (the game renders without MSAA).
-#define BOTS_TRANSLATOR_ARGS(device) rg::SpirvShaderTranslator::Features(device), false, false, false
+#define BOTS_TRANSLATOR_ARGS(device) TranslatorFeatures(device), false, false, false
 
 }  // namespace
 
@@ -95,6 +116,17 @@ bool ShaderCache::Translate(rg::SpirvShaderTranslator& translator, Translation& 
   if (!translation.is_translated() && !translator.TranslateAnalyzedShader(translation)) {
     std::fprintf(stderr, "native renderer: shader %016llX translation failed\n",
                  (unsigned long long)translation.shader().ucode_data_hash());
+  } else if (static const char* dir = std::getenv("BOTS_DUMP_SPIRV"); dir && *dir) {
+    // BOTS_DUMP_SPIRV=<dir>: every translation as <dir>/<ucode hash>-<modification>.spv (inspect with spirv-dis /
+    // spirv-cross; debugging).
+    char path[512];
+    std::snprintf(path, sizeof(path), "%s/%016llX-%016llX.spv", dir,
+                  (unsigned long long)translation.shader().ucode_data_hash(),
+                  (unsigned long long)translation.modification());
+    if (std::FILE* f = std::fopen(path, "wb")) {
+      std::fwrite(translation.translated_binary().data(), 1, translation.translated_binary().size(), f);
+      std::fclose(f);
+    }
   }
   return translation.is_valid() && translation.GetOrCreateShaderModule();
 }

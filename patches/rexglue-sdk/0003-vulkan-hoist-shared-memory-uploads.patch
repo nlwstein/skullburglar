@@ -143,6 +143,38 @@ index ac6b056..ea3b7c1 100644
  
    bool is_paused() const { return paused_; }
    void Pause();
+diff --git a/include/rex/graphics/pipeline/shader/spirv_builder.h b/include/rex/graphics/pipeline/shader/spirv_builder.h
+index dbd6b01..8c54bc6 100644
+--- a/include/rex/graphics/pipeline/shader/spirv_builder.h
++++ b/include/rex/graphics/pipeline/shader/spirv_builder.h
+@@ -34,6 +34,8 @@ class SpirvBuilder : public spv::Builder {
+   spv::Id createQuadOp(spv::Op op_code, spv::Id type_id, spv::Id operand1, spv::Id operand2,
+                        spv::Id operand3, spv::Id operand4);
+ 
++  // False: the createNoContraction* ops are created without the decoration (contraction allowed).
++  bool no_contraction = true;
+   spv::Id createNoContractionUnaryOp(spv::Op op_code, spv::Id type_id, spv::Id operand);
+   spv::Id createNoContractionBinOp(spv::Op op_code, spv::Id type_id, spv::Id operand1,
+                                    spv::Id operand2);
+diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
+index dce3dbf..1e83207 100644
+--- a/include/rex/graphics/pipeline/shader/spirv_translator.h
++++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
+@@ -399,6 +399,14 @@ class SpirvShaderTranslator : public ShaderTranslator {
+ 
+     bool demote_to_helper_invocation;
+     bool sample_rate_shading;
++
++    // Let the host compiler contract (fuse into FMA) float ops in pixel shaders: no NoContraction decorations
++    // there. Vertex shaders keep them (positions must match exactly between passes). SPIRV-Cross's Metal backend
++    // turns every NoContraction op into a call to an unoptimizable helper function, several times slower.
++    bool fragment_contraction = false;
++    // The same for vertex shaders, leaving cross-shader position equality to the Invariant decoration on the outputs
++    // (Metal: [[invariant]] with preserveInvariance).
++    bool vertex_contraction = false;
+   };
+ 
+   SpirvShaderTranslator(const Features& features, bool native_2x_msaa_with_attachments,
 diff --git a/include/rex/graphics/shared_memory.h b/include/rex/graphics/shared_memory.h
 index 4d85a2b..277d6f2 100644
 --- a/include/rex/graphics/shared_memory.h
