@@ -319,7 +319,7 @@ VkPipeline Renderer::GetPipeline(std::string_view key, const VkGraphicsPipelineC
   auto it = pipelines_.find(last_pipeline_key_);
   if (it == pipelines_.end()) {
     VkPipeline pipeline = VK_NULL_HANDLE;
-    if (vk_.vkCreateGraphicsPipelines(device_->device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
+    if (vk_.vkCreateGraphicsPipelines(device_->device(), pipeline_cache_, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
       std::fprintf(stderr, "native renderer: pipeline creation failed\n");
       pipeline = VK_NULL_HANDLE;
     } else {
@@ -963,13 +963,34 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   }
 
   GpuMark(kGpuDraw);  // after any transfers Surface() recorded
+  du::Scissor scissor;
+  du::GetScissor(regs, scissor);
+  scissor.offset[0] *= samples_x, scissor.extent[0] *= samples_x;
+  scissor.offset[1] *= samples_y, scissor.extent[1] *= samples_y;
+  const uint32_t sx = std::min(scissor.offset[0], width), sy = std::min(scissor.offset[1], height);
+  const VkRect2D scissor_rect{{int32_t(sx), int32_t(sy)},
+                              {std::min(scissor.extent[0], width - sx), std::min(scissor.extent[1], height - sy)}};
+  // How far this draw can write: fragments land inside scissor and viewport (Vulkan always clips x/y to the
+  // viewport), with some slack for wide points. Games leave the scissor wide open, so the viewport is the real bound.
+  uint32_t scissor_x1 = sx + scissor_rect.extent.width, scissor_y1 = sy + scissor_rect.extent.height;
+  if (viewport.xy_extent[0] && viewport.xy_extent[1]) {
+    scissor_x1 = std::min(scissor_x1, viewport.xy_offset[0] + viewport.xy_extent[0] + 16);
+    scissor_y1 = std::min(scissor_y1, viewport.xy_offset[1] + viewport.xy_extent[1] + 16);
+  }
+  // Screen-space draws (VTE off) get a viewport bigger than the surface: they don't shape the render area hint.
+  const bool bounded = viewport.xy_extent[0] && viewport.xy_extent[1] &&
+                       viewport.xy_offset[0] + viewport.xy_extent[0] <= width &&
+                       viewport.xy_offset[1] + viewport.xy_extent[1] <= height;
   // Render pass: kept open across draws to the same targets, and reopened when a draw samples something written
   // since the last barrier (reopening the same attachments then always barriers: they count as written). An
   // attachment sampled by its own pass is left as the guest had it.
   Image* const pass_writes[5] = {attachments.color[0], attachments.color[1], attachments.color[2],
                                  attachments.color[3], attachments.depth};
   std::erase_if(draw_reads_, [&](Image* image) { return std::ranges::find(pass_writes, image) != std::end(pass_writes); });
-  if (rendering_ && open_pass_ == attachments && !Conflicts(draw_reads_, {})) {
+  // The render area: this draw's bound and the surfaces' area hints (later draws mostly stay inside it; one that
+  // doesn't reopens the pass larger).
+  if (rendering_ && open_pass_ == attachments && scissor_x1 <= open_area_.width && scissor_y1 <= open_area_.height &&
+      !Conflicts(draw_reads_, {})) {
     Track(draw_reads_, {});
   } else {
     EndRendering();
@@ -985,7 +1006,12 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     VkRenderingAttachmentInfo depth = colors[0];
     depth.imageView = attachments.depth ? attachments.depth->view : VK_NULL_HANDLE;
     VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    rendering.renderArea = {{0, 0}, {width, height}};
+    uint32_t area_width = std::max(scissor_x1, 1u), area_height = std::max(scissor_y1, 1u);
+    for (const Image* image : pass_writes) {
+      if (image) area_width = std::max(area_width, image->area_width), area_height = std::max(area_height, image->area_height);
+    }
+    open_area_ = {std::min(area_width, width), std::min(area_height, height)};
+    rendering.renderArea = {{0, 0}, open_area_};
     rendering.layerCount = 1;
     rendering.colorAttachmentCount = 4;
     rendering.pColorAttachments = colors;
@@ -994,7 +1020,8 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     rendering_ = true;
     open_pass_ = attachments;
     if (gpu_timing_) {
-      std::string label = "pass " + std::to_string(width) + "x" + std::to_string(height) + " c";
+      std::string label = "pass " + std::to_string(width) + "x" + std::to_string(height) + " area " +
+                          std::to_string(open_area_.width) + "x" + std::to_string(open_area_.height) + " c";
       for (const Image* image : attachments.color) label += image ? " " + std::to_string(image->format) : " -";
       label += attachments.depth ? " +depth" : "";
       label += samples_x * samples_y > 1 ? " ss" + std::to_string(samples_x * samples_y) : "";
@@ -1021,13 +1048,6 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     vp.width = float(viewport.xy_extent[0]), vp.height = float(viewport.xy_extent[1]);
   }
   vk_.vkCmdSetViewport(cmd_, 0, 1, &vp);
-  du::Scissor scissor;
-  du::GetScissor(regs, scissor);
-  scissor.offset[0] *= samples_x, scissor.extent[0] *= samples_x;
-  scissor.offset[1] *= samples_y, scissor.extent[1] *= samples_y;
-  const uint32_t sx = std::min(scissor.offset[0], width), sy = std::min(scissor.offset[1], height);
-  const VkRect2D scissor_rect{{int32_t(sx), int32_t(sy)},
-                              {std::min(scissor.extent[0], width - sx), std::min(scissor.extent[1], height - sy)}};
   vk_.vkCmdSetScissor(cmd_, 0, 1, &scissor_rect);
   float bias_slope, bias_constant;
   du::GetPreferredFacePolygonOffset(regs, polygonal, bias_slope, bias_constant);
@@ -1057,6 +1077,9 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     vk_.vkCmdDraw(cmd_, host_count, 1, 0, 0);
   }
   ++stats_.draws;
+  for (Image* image : pass_writes) {
+    if (image) image->Use(scissor_x1, scissor_y1, bounded);
+  }
   for (uint32_t i = 0; i < 4; ++i) {
     if (attachments.color[i] && key.write_mask[i]) attachments.color[i]->written = ++write_clock_;
   }

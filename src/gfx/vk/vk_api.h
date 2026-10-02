@@ -45,6 +45,7 @@ namespace bots::gfx::vk {
   X(vkCreateFence)                   \
   X(vkCreateGraphicsPipelines)       \
   X(vkCreateImageView)               \
+  X(vkCreatePipelineCache)           \
   X(vkCreatePipelineLayout)          \
   X(vkCreateQueryPool)               \
   X(vkCreateSampler)                 \
@@ -55,6 +56,7 @@ namespace bots::gfx::vk {
   X(vkDestroyFence)                  \
   X(vkDestroyImageView)              \
   X(vkDestroyPipeline)               \
+  X(vkDestroyPipelineCache)          \
   X(vkDestroyPipelineLayout)         \
   X(vkDestroyQueryPool)              \
   X(vkDestroySampler)                \
@@ -63,7 +65,9 @@ namespace bots::gfx::vk {
   X(vkResetDescriptorPool)           \
   X(vkUpdateDescriptorSets)          \
   X(vkEndCommandBuffer)              \
+  X(vkGetPipelineCacheData)          \
   X(vkGetQueryPoolResults)           \
+  X(vkMergePipelineCaches)           \
   X(vkQueueSubmit)                   \
   X(vkResetCommandPool)              \
   X(vkResetFences)                   \

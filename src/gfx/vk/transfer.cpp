@@ -251,7 +251,7 @@ VkPipeline Renderer::FullscreenPipeline(VkShaderModule fs, VkFormat format, VkPi
   info.pDynamicState = &dynamic;
   info.layout = layout;
   VkPipeline pipeline = VK_NULL_HANDLE;
-  if (vk_.vkCreateGraphicsPipelines(device_->device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
+  if (vk_.vkCreateGraphicsPipelines(device_->device(), pipeline_cache_, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
     return VK_NULL_HANDLE;
   }
   return pipeline;
@@ -287,7 +287,12 @@ void Renderer::Transfer(Image& source, uint32_t source_format, Image& dest, uint
   color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
   VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
   // With a rectangle (resolves) texels map 1:1 and only that area is written.
-  rendering.renderArea = rect ? *rect : VkRect2D{{0, 0}, {width, height}};
+  // Without one, only what the source has had drawn into it (all of it if nothing is recorded).
+  const VkExtent2D used = source.used_width ? VkExtent2D{std::min(source.used_width, width),
+                                                          std::min(source.used_height, height)}
+                                            : VkExtent2D{width, height};
+  rendering.renderArea = rect ? *rect : VkRect2D{{0, 0}, used};
+  if (!rect) dest.Use(used.width, used.height);
   rendering.layerCount = 1;
   rendering.colorAttachmentCount = 1;
   rendering.pColorAttachments = &color;

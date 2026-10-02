@@ -10,9 +10,11 @@
 // guest memory bound as one storage buffer ("shared memory"), so there is no vertex input state.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <span>
@@ -65,6 +67,11 @@ class Renderer : public Pm4Sink {
   void ResetFrame();
   // Live: guest memory changes under the renderer. Set before the first draw.
   void SetMemoryTracker(GuestMemoryTracker* tracker) { tracker_ = tracker; }
+  // Pipelines persist in a VkPipelineCache file (the driver checks it was made by the same GPU and driver, and
+  // ignores it otherwise). Load merges the file into the cache in use; Save writes it when pipelines were created
+  // since the last save.
+  void LoadPipelineCache(const std::filesystem::path& path);
+  void SavePipelineCache();
   // For the tracker: records a copy of guest physical [start, start + length) into the shared-memory buffer.
   bool UploadGuestMemory(uint32_t start, uint32_t length);
   // Live: after each guest frame's Flush. Evicts guest textures no draw used for a while.
@@ -117,6 +124,16 @@ class Renderer : public Pm4Sink {
     VkImageView depth_view = VK_NULL_HANDLE, stencil_view = VK_NULL_HANDLE;  // depth surfaces, for sampling
     std::map<uint32_t, VkImageView> swizzled_views;  // sampled images: by host swizzle | other signedness << 12
     bool swapped = false;  // resolve destinations: red and blue swapped (RB_COPY_DEST_INFO copy_dest_swap)
+    // Surfaces reach to the end of EDRAM (often 1328+ rows for a 720-row target), and on tiling GPUs every render
+    // pass loads and stores its whole render area. used_*: the extent from the origin that anything has written
+    // (format transfers copy only that). area_*: the same over viewport-bounded draws only, the render area a pass
+    // starts with; the few screen-space draws (VTE off: viewport as big as the surface) reopen their pass larger.
+    uint32_t used_width = 0, used_height = 0, area_width = 0, area_height = 0;
+    void Use(uint32_t x1, uint32_t y1, bool hint = true) {
+      x1 = std::min(x1, width), y1 = std::min(y1, height);
+      used_width = std::max(used_width, x1), used_height = std::max(used_height, y1);
+      if (hint) area_width = std::max(area_width, x1), area_height = std::max(area_height, y1);
+    }
   };
   struct Buffer {
     VkBuffer buffer = VK_NULL_HANDLE;
@@ -304,6 +321,9 @@ class Renderer : public Pm4Sink {
   std::map<std::tuple<bool, uint32_t, uint32_t>, VkDescriptorSetLayout> texture_set_layouts_;
   std::map<LayoutKey, PipelineLayout> pipeline_layouts_;
   std::unordered_map<std::string, VkPipeline> pipelines_;
+  VkPipelineCache pipeline_cache_ = VK_NULL_HANDLE;
+  std::filesystem::path pipeline_cache_path_;
+  uint64_t pipelines_saved_ = 0;
   std::string last_pipeline_key_;
   VkPipeline last_pipeline_ = VK_NULL_HANDLE;
   // What the current command buffer has bound, so unchanged pipelines aren't rebound (VK_NULL_HANDLE: unknown).
@@ -313,6 +333,7 @@ class Renderer : public Pm4Sink {
   VkSampler sampler_ = VK_NULL_HANDLE;
   Image null_2d_array_, null_3d_, null_cube_;
   Attachments open_pass_;
+  VkExtent2D open_area_{};  // the open pass's render area (from the origin)
   bool rendering_ = false;
   std::map<TextureCacheKey, std::unique_ptr<GuestTexture>> guest_textures_;
   std::map<SamplerKey, VkSampler> samplers_;

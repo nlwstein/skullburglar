@@ -160,6 +160,8 @@ Renderer::Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory m
                                                submission.pool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
     if (vk_.vkAllocateCommandBuffers(device_->device(), &cmd_info, &submission.cmd) != VK_SUCCESS) return;
   }
+  const VkPipelineCacheCreateInfo cache_info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+  vk_.vkCreatePipelineCache(device_->device(), &cache_info, nullptr, &pipeline_cache_);
   if (const char* v = std::getenv("BOTS_GPU_TIMING"); v && *v == '1') {
     VkPhysicalDeviceProperties props;
     device_->vulkan_instance()->functions().vkGetPhysicalDeviceProperties(device_->physical_device(), &props);
@@ -174,6 +176,46 @@ Renderer::Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory m
   }
   UseSubmission(0);
   ok_ = InitDrawing();
+}
+
+void Renderer::LoadPipelineCache(const std::filesystem::path& path) {
+  pipeline_cache_path_ = path;
+  std::vector<char> data;
+  if (FILE* f = std::fopen(path.string().c_str(), "rb")) {
+    std::fseek(f, 0, SEEK_END);
+    const long size = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (size > 0) {
+      data.resize(size_t(size));
+      if (std::fread(data.data(), 1, data.size(), f) != data.size()) data.clear();
+    }
+    std::fclose(f);
+  }
+  if (data.empty() || !pipeline_cache_) return;
+  const VkPipelineCacheCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, nullptr, 0, data.size(),
+                                       data.data()};
+  VkPipelineCache loaded = VK_NULL_HANDLE;
+  if (vk_.vkCreatePipelineCache(device_->device(), &info, nullptr, &loaded) != VK_SUCCESS) return;
+  vk_.vkMergePipelineCaches(device_->device(), pipeline_cache_, 1, &loaded);
+  vk_.vkDestroyPipelineCache(device_->device(), loaded, nullptr);
+  std::fprintf(stderr, "native renderer: pipeline cache %s (%zu KB)\n", path.string().c_str(), data.size() / 1024);
+}
+
+void Renderer::SavePipelineCache() {
+  if (!pipeline_cache_ || pipeline_cache_path_.empty() || stats_.pipelines == pipelines_saved_) return;
+  size_t size = 0;
+  if (vk_.vkGetPipelineCacheData(device_->device(), pipeline_cache_, &size, nullptr) != VK_SUCCESS || !size) return;
+  std::vector<char> data(size);
+  if (vk_.vkGetPipelineCacheData(device_->device(), pipeline_cache_, &size, data.data()) != VK_SUCCESS) return;
+  std::error_code ec;
+  std::filesystem::create_directories(pipeline_cache_path_.parent_path(), ec);
+  const std::filesystem::path temp = pipeline_cache_path_.string() + ".tmp";
+  FILE* f = std::fopen(temp.string().c_str(), "wb");
+  if (!f) return;
+  const bool written = std::fwrite(data.data(), 1, size, f) == size;
+  std::fclose(f);
+  if (written) std::filesystem::rename(temp, pipeline_cache_path_, ec);
+  pipelines_saved_ = stats_.pipelines;
 }
 
 void Renderer::UseSubmission(uint32_t index) {
@@ -319,6 +361,8 @@ Renderer::~Renderer() {
   if (!device_) return;
   const VkDevice dev = device_->device();
   if (vk_.vkDeviceWaitIdle) vk_.vkDeviceWaitIdle(dev);
+  SavePipelineCache();
+  if (pipeline_cache_) vk_.vkDestroyPipelineCache(dev, pipeline_cache_, nullptr);
   DestroyFrameState();
   for (Image& image : retired_) DestroyImage(image);
   for (Submission& submission : submissions_) {
@@ -766,7 +810,8 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
     attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    rendering.renderArea = {{0, 0}, {image.width, image.height}};
+    rendering.renderArea = {{x0, y0}, {uint32_t(w), uint32_t(h)}};
+    image.Use(uint32_t(x0 + w), uint32_t(y0 + h));
     rendering.layerCount = 1;
     if (depth) {
       rendering.pDepthAttachment = rendering.pStencilAttachment = &attachment;

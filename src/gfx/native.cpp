@@ -95,6 +95,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
       }
       last_ = {frames_, now, st.draw_us, st.texture_us, st.wait_us, st.flushes, st.draws, st.resolves};
       last_.render_passes = st.render_passes, last_.transfers = st.transfers, last_.barriers = st.barriers;
+      renderer_->SavePipelineCache();  // runs are often killed rather than shut down
       std::copy(std::begin(st.gpu_ns), std::end(st.gpu_ns), last_.gpu_ns);
       REXLOG_INFO(
           "gfx native: frame {}: {} draws, {} resolves, {} presents, {} failed shaders, {} unsupported prims, "
@@ -120,8 +121,15 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     }
     sync_ = std::make_unique<vk::MemorySync>(*memory_, *renderer_);
     renderer_->SetMemoryTracker(sync_.get());
+    if (!pipeline_cache_path_.empty()) renderer_->LoadPipelineCache(pipeline_cache_path_);
     REXLOG_INFO("gfx native: renderer up");
     return true;
+  }
+
+  // Runs on the command processor thread, or before the context is set up while the processor is paused.
+  void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id, bool blocking) override {
+    pipeline_cache_path_ = cache_root / "native" / fmt::format("{:08X}.pipelines.bin", title_id);
+    if (renderer_) renderer_->LoadPipelineCache(pipeline_cache_path_);
   }
 
   void ShutdownContext() override {
@@ -181,6 +189,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
  private:
   std::unique_ptr<vk::Renderer> renderer_;
   std::unique_ptr<vk::MemorySync> sync_;
+  std::filesystem::path pipeline_cache_path_;
   ShaderLoad vs_, ps_;
   std::vector<uint32_t> vs_inline_, ps_inline_;
   uint64_t frames_ = 0, indirect_draws_ = 0;
