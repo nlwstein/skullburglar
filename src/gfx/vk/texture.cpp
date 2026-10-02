@@ -243,6 +243,7 @@ VkImageView Renderer::SwizzledView(Image& image, uint32_t host_swizzle, bool is_
 }
 
 void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, GuestTexture& texture) {
+  ScopedMicros time(stats_.texture_us);
   uint32_t width_m1, height_m1, depth_m1, base_page, mip_page, mip_min, mip_max;
   rg::texture_util::GetSubresourcesFromFetchConstant(fetch, &width_m1, &height_m1, &depth_m1, &base_page, &mip_page,
                                                      &mip_min, &mip_max);

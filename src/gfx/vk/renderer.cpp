@@ -309,7 +309,11 @@ void Renderer::Flush() {
     auto queue = device_->AcquireQueue(device_->queue_family_graphics_compute(), 0);
     vk_.vkQueueSubmit(queue.queue(), 1, &submit, fence_);
   }
-  vk_.vkWaitForFences(device_->device(), 1, &fence_, VK_TRUE, UINT64_MAX);
+  ++stats_.flushes;
+  {
+    ScopedMicros wait(stats_.wait_us);
+    vk_.vkWaitForFences(device_->device(), 1, &fence_, VK_TRUE, UINT64_MAX);
+  }
   vk_.vkResetFences(device_->device(), 1, &fence_);
   for (Image& image : retired_) DestroyImage(image);
   retired_.clear();
@@ -473,6 +477,7 @@ Renderer::Image* Renderer::ResolveTexture(uint32_t address, uint32_t format, uin
 
 void Renderer::OnDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps, const Draw& draw) {
   if (!ok_) return;
+  ScopedMicros time(stats_.draw_us);
   if (regs.Get<rg::reg::RB_MODECONTROL>().edram_mode == xe::EdramMode::kCopy) {
     Resolve(regs);
     return;

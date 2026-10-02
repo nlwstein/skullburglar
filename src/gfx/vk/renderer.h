@@ -11,6 +11,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -79,10 +80,24 @@ class Renderer : public Pm4Sink {
     uint64_t textures = 0, unsupported_textures = 0, transfers = 0;
     uint64_t uploaded_bytes = 0, invalidations = 0, texture_reloads = 0, texture_evictions = 0;  // live
     uint64_t presents = 0;  // native
+    // Profiling (P5): submits, and microseconds blocked on the GPU fence, inside OnDraw (recording, including
+    // texture loads and any flush it triggers) and inside LoadTexture (untile + upload).
+    uint64_t flushes = 0, wait_us = 0, draw_us = 0, texture_us = 0;
   };
   const Stats& stats() const { return stats_; }
 
  private:
+  // Adds the scope's duration in microseconds to `total`.
+  struct ScopedMicros {
+    explicit ScopedMicros(uint64_t& total) : total(total), start(std::chrono::steady_clock::now()) {}
+    ~ScopedMicros() {
+      total += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start)
+                            .count());
+    }
+    uint64_t& total;
+    std::chrono::steady_clock::time_point start;
+  };
+
   struct Image {
     VkImage image = VK_NULL_HANDLE;
     VmaAllocation allocation = nullptr;

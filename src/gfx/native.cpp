@@ -5,6 +5,7 @@
 // native renderer instead of the emulated EDRAM backend. A plugin rather than part of the game so its SDK sources
 // and their cvars live in their own module, as the xenos plugin's do.
 #include <algorithm>
+#include <chrono>
 #include <string_view>
 #include <vector>
 
@@ -58,6 +59,21 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     }
     if (frames_ % 600 == 1) {
       const auto& st = renderer_->stats();
+      // Per-frame averages over the last interval (P5 profiling): wall time on this thread, and how much of it
+      // was spent recording draws (incl. textures and flushes), loading textures, and blocked on the GPU.
+      const auto now = std::chrono::steady_clock::now();
+      const double n = double(frames_ - last_.frames);
+      if (last_.frames && n > 0) {
+        auto ms = [&](uint64_t now_us, uint64_t then_us) { return double(now_us - then_us) / 1000.0 / n; };
+        REXLOG_INFO(
+            "gfx native: per frame over {} frames: {:.2f} ms wall, {:.2f} ms in draws, {:.2f} ms textures, {:.2f} ms "
+            "GPU wait, {:.1f} flushes, {:.0f} draws, {:.1f} resolves",
+            frames_ - last_.frames,
+            std::chrono::duration<double, std::milli>(now - last_.time).count() / n, ms(st.draw_us, last_.draw_us),
+            ms(st.texture_us, last_.texture_us), ms(st.wait_us, last_.wait_us), double(st.flushes - last_.flushes) / n,
+            double(st.draws - last_.draws) / n, double(st.resolves - last_.resolves) / n);
+      }
+      last_ = {frames_, now, st.draw_us, st.texture_us, st.wait_us, st.flushes, st.draws, st.resolves};
       REXLOG_INFO(
           "gfx native: frame {}: {} draws, {} resolves, {} presents, {} failed shaders, {} unsupported prims, "
           "{} unsupported textures, {:.1f} MB uploaded, {} invalidations, {} texture reloads, {} evictions, {} indirect draws skipped (totals)",
@@ -146,6 +162,11 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   ShaderLoad vs_, ps_;
   std::vector<uint32_t> vs_inline_, ps_inline_;
   uint64_t frames_ = 0, indirect_draws_ = 0;
+  struct {
+    uint64_t frames = 0;
+    std::chrono::steady_clock::time_point time;
+    uint64_t draw_us = 0, texture_us = 0, wait_us = 0, flushes = 0, draws = 0, resolves = 0;
+  } last_;
   uint32_t indirect_depth_ = 0;
 };
 
