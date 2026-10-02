@@ -27,14 +27,16 @@ void main() {
 }
 )";
 
-// SRC and DST are ColorRenderTargetFormat values (storage formats); SRC 100 is a D24S8 depth/stencil surface.
+// SRC and DST are ColorRenderTargetFormat values (storage formats); SRC 100 and 101 are depth/stencil surfaces
+// encoded as D24S8 and D24FS8, DST 200 writes the depth value itself (resolves to 24_8 textures), and DST 300 is a
+// colour resolve: the value scaled by the exponent bias.
 // The source is scaled to the destination: a 4x MSAA surface covers the tiles of a 1x one twice its size.
 constexpr const char* kFragmentShader = R"(
 layout(set = 0, binding = 0) uniform sampler2D source;
-#if SRC == 100
+#if SRC >= 100
 layout(set = 0, binding = 1) uniform usampler2D stencil;
 #endif
-layout(push_constant) uniform Constants { ivec2 dest_size; };
+layout(push_constant) uniform Constants { ivec2 dest_size; float scale; };
 layout(location = 0) out vec4 result;
 
 uint To7e3(float f) {
@@ -46,14 +48,29 @@ float From7e3(uint v) {
   uint m = v & 0x7Fu, e = (v >> 7) & 7u;
   return e == 0u ? float(m) * exp2(-9.0) : (1.0 + float(m) / 128.0) * exp2(float(e) - 3.0);
 }
+uint To20e4(float f) {
+  uint u = floatBitsToUint(max(f, 0.0));
+  if (u >= 0x3FFFFFF8u) return 0xFFFFFFu;
+  u = u < 0x38800000u ? ((u & 0x7FFFFFu) | 0x800000u) >> min(113u - (u >> 23), 24u) : u + 0xC8000000u;
+  return ((u + 3u + ((u >> 3) & 1u)) >> 3) & 0xFFFFFFu;
+}
 uint ToUnorm(float f, float scale) { return uint(round(clamp(f, 0.0, 1.0) * scale)); }
 
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy) * textureSize(source, 0) / dest_size;
   vec4 v = texelFetch(source, p, 0);
+#if DST == 200
+  result = vec4(v.r, 0.0, 0.0, 0.0);
+  return;
+#elif DST == 300
+  result = v * scale;
+  return;
+#endif
   uint bits;
 #if SRC == 100
   bits = (uint(round(clamp(v.r, 0.0, 1.0) * 16777215.0)) << 8) | (texelFetch(stencil, p, 0).r & 0xFFu);
+#elif SRC == 101
+  bits = (To20e4(v.r) << 8) | (texelFetch(stencil, p, 0).r & 0xFFu);
 #elif SRC == 0
   bits = packUnorm4x8(v);
 #elif SRC == 2
@@ -159,7 +176,7 @@ bool Renderer::InitTransfers() {
     return false;
   }
   VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-  const VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 8};
+  const VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 12};
   layout_info.setLayoutCount = 1;
   layout_info.pSetLayouts = &transfer_set_layout_;
   layout_info.pushConstantRangeCount = 1;
@@ -180,7 +197,7 @@ void Renderer::DestroyTransfers() {
 }
 
 VkPipeline Renderer::TransferPipeline(uint32_t source_format, uint32_t dest_format, VkFormat host_format) {
-  VkPipeline& pipeline = transfer_pipelines_[{source_format, dest_format}];
+  VkPipeline& pipeline = transfer_pipelines_[{source_format, dest_format, host_format}];
   if (pipeline) return pipeline;
   const std::string source = "#version 450\n#define SRC " + std::to_string(source_format) + "\n#define DST " +
                              std::to_string(dest_format) + "\n" + kFragmentShader;
@@ -232,7 +249,8 @@ VkPipeline Renderer::TransferPipeline(uint32_t source_format, uint32_t dest_form
   return pipeline;
 }
 
-void Renderer::Transfer(Image& source, uint32_t source_format, Image& dest, uint32_t dest_format) {
+void Renderer::Transfer(Image& source, uint32_t source_format, Image& dest, uint32_t dest_format,
+                        const VkRect2D* rect, float scale) {
   const VkPipeline pipeline = TransferPipeline(source_format, dest_format, dest.format);
   if (!pipeline) return;
   BeginCommands();
@@ -242,7 +260,7 @@ void Renderer::Transfer(Image& source, uint32_t source_format, Image& dest, uint
   }
   const VkDescriptorSet set = AllocateSet(transfer_set_layout_);
   if (!set) return;
-  const bool depth = source_format == kTransferDepth;
+  const bool depth = source_format >= kTransferDepth;
   const VkDescriptorImageInfo images[2] = {{sampler_, depth ? source.depth_view : source.view, VK_IMAGE_LAYOUT_GENERAL},
                                            {sampler_, source.stencil_view, VK_IMAGE_LAYOUT_GENERAL}};
   const VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 0, 0, depth ? 2u : 1u,
@@ -258,7 +276,8 @@ void Renderer::Transfer(Image& source, uint32_t source_format, Image& dest, uint
   color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
   color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
   VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
-  rendering.renderArea = {{0, 0}, {width, height}};
+  // With a rectangle (resolves) texels map 1:1 and only that area is written.
+  rendering.renderArea = rect ? *rect : VkRect2D{{0, 0}, {width, height}};
   rendering.layerCount = 1;
   rendering.colorAttachmentCount = 1;
   rendering.pColorAttachments = &color;
@@ -268,8 +287,11 @@ void Renderer::Transfer(Image& source, uint32_t source_format, Image& dest, uint
   const VkViewport vp{0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f};
   vk_.vkCmdSetViewport(cmd_, 0, 1, &vp);
   vk_.vkCmdSetScissor(cmd_, 0, 1, &rendering.renderArea);
-  const int32_t dest_size[2] = {int32_t(width), int32_t(height)};
-  vk_.vkCmdPushConstants(cmd_, transfer_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(dest_size), dest_size);
+  struct {
+    int32_t dest_size[2];
+    float scale;
+  } constants{{int32_t(rect ? source.width : width), int32_t(rect ? source.height : height)}, scale};
+  vk_.vkCmdPushConstants(cmd_, transfer_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(constants), &constants);
   vk_.vkCmdDraw(cmd_, 3, 1, 0, 0);
   vk_.vkCmdEndRendering(cmd_);
   Barrier();

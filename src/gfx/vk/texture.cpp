@@ -1,6 +1,7 @@
 // Renderer: guest textures (loaded on the CPU: untile + byte swap + a few bit shuffles) and samplers.
 //
 // Only the base level of 2D textures is loaded so far; mips, stacked, 3D and cube textures bind the null image.
+// Resolve destinations (render-to-texture) are sampled from their host images instead.
 // Textures are cached by the fetch constant fields that describe their memory, and never invalidated: fine for
 // replays (static memory), not for the game (P3 needs write tracking).
 #include <algorithm>
@@ -129,13 +130,44 @@ VkImageView Renderer::TextureView(const rg::xenos::xe_gpu_texture_fetch_t& fetch
   GuestTexture& texture = *slot;
   if (!texture.image.image) return VK_NULL_HANDLE;
   host_swizzle = HostSwizzle(fetch.swizzle, texture.host_format_swizzle);
-  if (!device_->properties().imageViewFormatSwizzle) return texture.image.view;  // swizzled in the shader
-  VkImageView& view = texture.views[host_swizzle];
+  return SwizzledView(texture.image, host_swizzle);
+}
+
+Renderer::Image* Renderer::ResolvedTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch) {
+  const uint32_t address = fetch.base_address << 12;
+  if (fetch.format == xe::TextureFormat::k_24_8 || fetch.format == xe::TextureFormat::k_24_8_FLOAT) {
+    if (const auto it = depth_texture_at_.find(address); it != depth_texture_at_.end()) return it->second;
+  }
+  const auto it = texture_at_.find(address);
+  return it != texture_at_.end() ? it->second : nullptr;
+}
+
+VkImageView Renderer::ResolvedTextureView(Image& image, const rg::xenos::xe_gpu_texture_fetch_t& fetch,
+                                          uint32_t& host_swizzle) {
+  // Channels the host format lacks read like the guest's (1- and 2-component formats repeat their last one).
+  uint32_t host_format = xe::XE_GPU_TEXTURE_SWIZZLE_RGBA;
+  switch (image.format) {
+    case VK_FORMAT_R8_UNORM:
+    case VK_FORMAT_R32_SFLOAT: host_format = xe::XE_GPU_TEXTURE_SWIZZLE_RRRR; break;
+    case VK_FORMAT_R16G16_SNORM:
+    case VK_FORMAT_R16G16_SFLOAT:
+    case VK_FORMAT_R32G32_SFLOAT: host_format = xe::XE_GPU_TEXTURE_SWIZZLE_RGGG; break;
+    default: break;
+  }
+  // After a swapping resolve the guest's first component is blue; the host image keeps red first.
+  if (image.swapped) host_format = 2u | (1u << 3) | (0u << 6) | (3u << 9);
+  host_swizzle = HostSwizzle(fetch.swizzle, host_format);
+  return SwizzledView(image, host_swizzle);
+}
+
+VkImageView Renderer::SwizzledView(Image& image, uint32_t host_swizzle) {
+  if (!device_->properties().imageViewFormatSwizzle) return image.view;  // swizzled in the shader
+  VkImageView& view = image.swizzled_views[host_swizzle];
   if (!view) {
     VkImageViewCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    info.image = texture.image.image;
+    info.image = image.image;
     info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-    info.format = texture.image.format;
+    info.format = image.format;
     info.components = {ComponentSwizzle(host_swizzle & 7), ComponentSwizzle((host_swizzle >> 3) & 7),
                        ComponentSwizzle((host_swizzle >> 6) & 7), ComponentSwizzle((host_swizzle >> 9) & 7)};
     info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};

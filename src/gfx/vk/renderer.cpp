@@ -166,15 +166,13 @@ Renderer::~Renderer() {
     for (VkImageView view : {image.view, image.depth_view, image.stencil_view}) {
       if (view) vk_.vkDestroyImageView(dev, view, nullptr);
     }
+    for (auto& [s, view] : image.swizzled_views) vk_.vkDestroyImageView(dev, view, nullptr);
     if (image.image) vmaDestroyImage(allocator_, image.image, image.allocation);
   };
   for (auto& [k, image] : surfaces_) destroy(*image);
   for (auto& [k, image] : textures_) destroy(*image);
   for (Image* image : {&null_2d_array_, &null_3d_, &null_cube_}) destroy(*image);
-  for (auto& [k, texture] : guest_textures_) {
-    for (auto& [s, view] : texture->views) vk_.vkDestroyImageView(dev, view, nullptr);
-    destroy(texture->image);
-  }
+  for (auto& [k, texture] : guest_textures_) destroy(texture->image);
   for (auto& [k, sampler] : samplers_) vk_.vkDestroySampler(dev, sampler, nullptr);
   DestroyTransfers();
   DestroyDrawing();
@@ -335,22 +333,33 @@ Renderer::Image* Renderer::Own(const SurfaceKey& key, Image* image) {
     }
   }
   if (newest) {
+    if (trace_textures_) {
+      std::fprintf(stderr, "transfer: base %X pitch %u fmt %u -> fmt %u (%ux%u -> %ux%u)\n", base, pitch,
+                   newest_format, format, newest->width, newest->height, image->width, image->height);
+    }
     Transfer(*newest, newest_format, *image, format);
     image->written = newest->written;
   }
   return image;
 }
 
-Renderer::Image* Renderer::ResolveTexture(uint32_t address, uint32_t format, uint32_t width, uint32_t height) {
-  const TextureKey key{address, format, width, height};
+Renderer::Image* Renderer::ResolveTexture(uint32_t address, uint32_t format, uint32_t width, uint32_t height,
+                                          bool depth_value) {
+  const TextureKey key{address, depth_value ? 0x100 | format : format, width, height};
   auto& slot = textures_[key];
   if (!slot) {
     auto image = std::make_unique<Image>();
     // Shaders sample 2D textures as arrays.
-    if (!CreateImage(*image, TextureFormat(format), width, height, false, VK_IMAGE_VIEW_TYPE_2D_ARRAY)) return nullptr;
+    const VkFormat host_format = depth_value ? VK_FORMAT_R32_SFLOAT : TextureFormat(format);
+    if (!CreateImage(*image, host_format, width, height, false, VK_IMAGE_VIEW_TYPE_2D_ARRAY)) return nullptr;
     slot = std::move(image);
   }
-  texture_at_[address] = slot.get();
+  if (depth_value) {
+    depth_texture_at_[address] = slot.get();
+  } else {
+    texture_at_[address] = slot.get();
+    depth_texture_at_.erase(address);
+  }
   return slot.get();
 }
 
@@ -434,26 +443,42 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
         rg::reg::RB_COLOR_INFO::rt_register_indices[depth_source ? 0 : copy.copy_src_select]);
     std::fprintf(stderr,
                  "resolve %llu: %s src %u (surface %ux%u fmt %u) rect %d,%d-%d,%d -> %08X fmt %u %ux%u cmd %u "
-                 "clear %s%s\n",
+                 "bias %d num %u swap %u clear %s%s\n",
                  (unsigned long long)stats_.resolves, depth_source ? "depth" : "color", copy.copy_src_select,
                  source->width, source->height, depth_source ? 0u : uint32_t(color_info.color_format), x0, y0, x1, y1,
                  dest_address, uint32_t(dest_info.copy_dest_format), uint32_t(dest_pitch.copy_dest_pitch),
-                 uint32_t(dest_pitch.copy_dest_height), uint32_t(copy.copy_command),
-                 copy.color_clear_enable ? "color " : "", copy.depth_clear_enable ? "depth" : "");
+                 uint32_t(dest_pitch.copy_dest_height), uint32_t(copy.copy_command), int(dest_info.copy_dest_exp_bias),
+                 uint32_t(dest_info.copy_dest_number), uint32_t(dest_info.copy_dest_swap), copy.color_clear_enable ? "color " : "", copy.depth_clear_enable ? "depth" : "");
   }
-  if (copying && !depth_source) {  // depth resolves (to 24_8 textures) need a shader: M6
+  if (copying && depth_source) {
+    // D3D resolves depth to an 8888 texture holding the raw 24_8 bits; games sample it as 24_8 / 24_8_FLOAT
+    // (the depth value) or as 8888 (to restore depth). Keep both.
+    const bool float_depth =
+        regs.Get<rg::reg::RB_DEPTH_INFO>().depth_format == xe::DepthRenderTargetFormat::kD24FS8;
+    Image* raw = ResolveTexture(dest_address, uint32_t(xe::TextureFormat::k_8_8_8_8), dest_pitch.copy_dest_pitch,
+                                dest_pitch.copy_dest_height);
+    Image* value = ResolveTexture(dest_address, uint32_t(float_depth ? xe::TextureFormat::k_24_8_FLOAT
+                                                                     : xe::TextureFormat::k_24_8),
+                                  dest_pitch.copy_dest_pitch, dest_pitch.copy_dest_height, true);
+    int32_t w, h, dw, dh;
+    if (raw && value && clamp_rect(*source, w, h) && clamp_rect(*raw, dw, dh)) {
+      const VkRect2D rect{{x0, y0}, {uint32_t(std::min(w, dw)), uint32_t(std::min(h, dh))}};
+      Transfer(*source, float_depth ? kTransferFloatDepth : kTransferDepth, *raw,
+               uint32_t(xe::ColorRenderTargetFormat::k_8_8_8_8), &rect);
+      Transfer(*source, kTransferDepth, *value, kTransferDepthValue, &rect);
+    } else {
+      ++stats_.dropped_resolves;
+    }
+  } else if (copying) {
     const uint32_t format = uint32_t(dest_info.copy_dest_format);
     Image* dest = ResolveTexture(dest_address, format, dest_pitch.copy_dest_pitch, dest_pitch.copy_dest_height);
     int32_t w, h, dw, dh;
     if (dest && clamp_rect(*source, w, h) && clamp_rect(*dest, dw, dh)) {
-      w = std::min(w, dw), h = std::min(h, dh);
-      Barrier();
-      VkImageBlit blit{};
-      blit.srcSubresource = blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-      blit.srcOffsets[0] = blit.dstOffsets[0] = {x0, y0, 0};
-      blit.srcOffsets[1] = blit.dstOffsets[1] = {x0 + w, y0 + h, 1};
-      vk_.vkCmdBlitImage(cmd_, source->image, VK_IMAGE_LAYOUT_GENERAL, dest->image, VK_IMAGE_LAYOUT_GENERAL, 1,
-                         &blit, VK_FILTER_NEAREST);
+      // The resolve converts through the shader: exponent bias (UE3 copies its HDR scene out at 1/8) and the
+      // red/blue swap. The host image keeps red first and remembers the swap for sampling.
+      const VkRect2D rect{{x0, y0}, {uint32_t(std::min(w, dw)), uint32_t(std::min(h, dh))}};
+      Transfer(*source, 0, *dest, kTransferResolve, &rect, std::ldexp(1.0f, int(dest_info.copy_dest_exp_bias)));
+      dest->swapped = dest_info.copy_dest_swap;
       last_resolve_address_ = dest_address;
       // BOTS_DUMP_RESOLVES=<dir> writes every colour resolve as <dir>/resolve-<n>-<address>.ppm (debugging).
       static const char* dump_dir = std::getenv("BOTS_DUMP_RESOLVES");
@@ -475,8 +500,6 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
     } else {
       ++stats_.dropped_resolves;
     }
-  } else if (copying) {
-    ++stats_.dropped_resolves;
   }
 
   // Clears, after the copy.
@@ -567,6 +590,13 @@ bool Renderer::ReadTexture(uint32_t address, std::vector<uint8_t>& rgb, uint32_t
   Flush();
   vmaInvalidateAllocation(allocator_, allocation, 0, VK_WHOLE_SIZE);
 
+  // BOTS_DUMP_SCALE=<f> scales the values first, to look at HDR targets (debugging).
+  static const float scale = [] {
+    const char* v = std::getenv("BOTS_DUMP_SCALE");
+    return v ? float(std::atof(v)) : 1.0f;
+  }();
+  // BOTS_DUMP_7E3=1 shows 2_10_10_10 textures as 7e3 (UE3 copies HDR scene colour out through them).
+  static const bool as_7e3 = std::getenv("BOTS_DUMP_7E3") != nullptr;
   width = image.width, height = image.height;
   rgb.resize(size_t(width) * height * 3);
   const auto* src = static_cast<const uint8_t*>(mapped.pMappedData);
@@ -587,11 +617,13 @@ bool Renderer::ReadTexture(uint32_t address, std::vector<uint8_t>& rgb, uint32_t
       std::memcpy(&p, src + i * 4, 4);
       if (image.format == VK_FORMAT_R8G8B8A8_UNORM) {
         for (int k = 0; k < 3; ++k) c[k] = Unorm(p >> (8 * k), 8);
+      } else if (as_7e3) {
+        for (int k = 0; k < 3; ++k) c[k] = rex::graphics::xenos::Float7e3To32((p >> (10 * k)) & 0x3FF);
       } else {
         for (int k = 0; k < 3; ++k) c[k] = Unorm(p >> (10 * k), 10);
       }
     }
-    for (int k = 0; k < 3; ++k) rgb[i * 3 + k] = ToByte(c[k]);
+    for (int k = 0; k < 3; ++k) rgb[i * 3 + k] = ToByte(c[k] * scale);
   }
   vmaDestroyBuffer(allocator_, buffer, allocation);
   return true;

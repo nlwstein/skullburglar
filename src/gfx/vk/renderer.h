@@ -62,6 +62,8 @@ class Renderer : public Pm4Sink {
     uint32_t width = 0, height = 0;
     uint64_t written = 0;  // surfaces: write_clock_ at the last write
     VkImageView depth_view = VK_NULL_HANDLE, stencil_view = VK_NULL_HANDLE;  // depth surfaces, for sampling
+    std::map<uint32_t, VkImageView> swizzled_views;  // sampled images: by host swizzle
+    bool swapped = false;  // resolve destinations: red and blue swapped (RB_COPY_DEST_INFO copy_dest_swap)
   };
   struct Buffer {
     VkBuffer buffer = VK_NULL_HANDLE;
@@ -83,7 +85,6 @@ class Renderer : public Pm4Sink {
   struct GuestTexture {
     Image image;
     uint32_t host_format_swizzle = 0;
-    std::map<uint32_t, VkImageView> views;
   };
   using TextureCacheKey = std::array<uint32_t, 4>;
   // Filters (mag, min, mip), clamp modes (x, y, z), border colour.
@@ -97,7 +98,7 @@ class Renderer : public Pm4Sink {
 
   Image* Surface(const rex::graphics::RegisterFile& regs, bool depth, uint32_t color_index);
   Image* Own(const SurfaceKey& key, Image* image);
-  Image* ResolveTexture(uint32_t address, uint32_t format, uint32_t width, uint32_t height);
+  Image* ResolveTexture(uint32_t address, uint32_t format, uint32_t width, uint32_t height, bool depth_value = false);
   bool CreateImage(Image& image, VkFormat format, uint32_t width, uint32_t height, bool depth,
                    VkImageViewType view_type = VK_IMAGE_VIEW_TYPE_2D, bool attachment = true);
   bool CreateBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage);
@@ -120,16 +121,26 @@ class Renderer : public Pm4Sink {
   VkPipeline GetPipeline(const std::string& key, const VkGraphicsPipelineCreateInfo& info);
 
   // EDRAM ownership transfers (transfer.cpp).
-  static constexpr uint32_t kTransferDepth = 100;  // Transfer source format for depth/stencil surfaces
+  static constexpr uint32_t kTransferDepth = 100;       // Transfer source format for D24S8 depth/stencil
+  static constexpr uint32_t kTransferFloatDepth = 101;  // ... and for D24FS8 (20e4 depth)
+  static constexpr uint32_t kTransferDepthValue = 200;  // Transfer destination: the depth value as R32_SFLOAT
+  static constexpr uint32_t kTransferResolve = 300;     // Transfer destination: a colour resolve (exponent bias)
   static bool IsTransferable(uint32_t format);
   bool InitTransfers();
   void DestroyTransfers();
   VkShaderModule CreateShaderModule(int stage, const std::string& source);
   VkPipeline TransferPipeline(uint32_t source_format, uint32_t dest_format, VkFormat host_format);
-  void Transfer(Image& source, uint32_t source_format, Image& dest, uint32_t dest_format);
+  void Transfer(Image& source, uint32_t source_format, Image& dest, uint32_t dest_format,
+                const VkRect2D* rect = nullptr, float scale = 1.0f);
 
   // Textures (texture.cpp). TextureView may record an upload, so call it before a draw's ring reservation.
   VkImageView TextureView(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch, uint32_t& host_swizzle);
+  // The resolve destination a fetch reads, if any (a depth resolve read as 24_8 gives the depth value).
+  Image* ResolvedTexture(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch);
+  // A view of a resolve destination as the fetch constant sees it (swizzle; red/blue swap).
+  VkImageView ResolvedTextureView(Image& image, const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch,
+                                  uint32_t& host_swizzle);
+  VkImageView SwizzledView(Image& image, uint32_t host_swizzle);
   void LoadTexture(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch, GuestTexture& texture);
   VkSampler GetSampler(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch,
                        const rex::graphics::SpirvShader::SamplerBinding& binding);
@@ -147,6 +158,8 @@ class Renderer : public Pm4Sink {
   std::map<SurfaceKey, std::unique_ptr<Image>> surfaces_;
   std::map<TextureKey, std::unique_ptr<Image>> textures_;
   std::map<uint32_t, Image*> texture_at_;  // guest address -> latest resolve destination there
+  // Depth resolves also keep the depth value, for 24_8 fetches (the 8888 destination holds the raw bits).
+  std::map<uint32_t, Image*> depth_texture_at_;
   uint32_t last_resolve_address_ = 0;
   Stats stats_;
 
@@ -176,7 +189,7 @@ class Renderer : public Pm4Sink {
   VkPipelineLayout transfer_layout_ = VK_NULL_HANDLE;
   VkShaderModule transfer_vs_ = VK_NULL_HANDLE;
   std::vector<VkShaderModule> transfer_modules_;
-  std::map<std::pair<uint32_t, uint32_t>, VkPipeline> transfer_pipelines_;
+  std::map<std::tuple<uint32_t, uint32_t, VkFormat>, VkPipeline> transfer_pipelines_;
 };
 
 }  // namespace bots::gfx::vk

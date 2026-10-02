@@ -307,6 +307,28 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     pshader = shaders_->Get(xe::ShaderType::kPixel, ucode(ps), ps.dwords);
     if (!du::IsPixelShaderNeededWithRasterization(*pshader, regs)) pshader = nullptr;
   }
+  // BOTS_SKIP_DRAWS=<a>-<b> leaves draws a..b out (bisecting rendering bugs).
+  static const std::pair<long long, long long> skip = [] {
+    long long a = -1, b = -1;
+    if (const char* v = std::getenv("BOTS_SKIP_DRAWS")) std::sscanf(v, "%lld-%lld", &a, &b);
+    return std::pair{a, b};
+  }();
+  if ((long long)stats_.draws + 1 >= skip.first && (long long)stats_.draws + 1 <= skip.second) {
+    ++stats_.draws;
+    return;
+  }
+  // BOTS_DUMP_DRAW=<n> prints the microcode of draw n (numbered as in the draw trace) - debugging.
+  static const long long dump_draw = [] {
+    const char* v = std::getenv("BOTS_DUMP_DRAW");
+    return v ? std::atoll(v) : -1;
+  }();
+  if (dump_draw == (long long)stats_.draws + 1) {
+    std::fprintf(stderr, "--- draw %lld vertex shader %08X\n%s", dump_draw, vs.address,
+                 vshader->ucode_disassembly().c_str());
+    if (pshader) {
+      std::fprintf(stderr, "--- pixel shader %08X\n%s", ps.address, pshader->ucode_disassembly().c_str());
+    }
+  }
   const reg::RB_DEPTHCONTROL depth_control = du::GetNormalizedDepthControl(regs);
   const auto program_cntl = regs.Get<reg::SQ_PROGRAM_CNTL>();
   uint32_t param_gen_pos = UINT32_MAX;
@@ -411,10 +433,13 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
         view = null_3d_.view;
       } else if (binding.dimension == xe::FetchOpDimension::kCube) {
         view = null_cube_.view;
-      } else if (const auto it = texture_at_.find(fetch.base_address << 12); it != texture_at_.end()) {
+      } else if (Image* resolved = ResolvedTexture(fetch)) {
         // Render-to-texture: a resolve destination is sampled straight from its host image.
-        view = it->second->view;
-        source = "rt";
+        uint32_t swizzle = xe::XE_GPU_TEXTURE_SWIZZLE_RGBA;
+        view = ResolvedTextureView(*resolved, fetch, swizzle);
+        texture_swizzles[binding.fetch_constant] = swizzle;
+        texture_signs[binding.fetch_constant] = rg::texture_util::SwizzleSigns(fetch);
+        source = resolved->format == VK_FORMAT_R32_SFLOAT ? "depth" : "rt";
       } else {
         uint32_t swizzle = xe::XE_GPU_TEXTURE_SWIZZLE_RGBA;
         view = TextureView(fetch, swizzle);
@@ -543,9 +568,11 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   if (!host_count) return;
 
   // System constants (VulkanCommandProcessor::UpdateSystemConstantValues, host render targets).
+  // Host depth holds the guest value for both depth formats (not float24 halved into [0, 1)): clears, resolves
+  // and transfers read and write it as such.
   du::ViewportInfo viewport;
   du::GetHostViewportInfo(regs, 1, 1, false, props.maxViewportDimensions[0], props.maxViewportDimensions[1], true,
-                          depth_control, false, true, pshader && pshader->writes_depth(), viewport);
+                          depth_control, false, false, pshader && pshader->writes_depth(), viewport);
   Translator::SystemConstants sc;
   std::memset(&sc, 0, sizeof(sc));
   uint32_t flags = 0;
