@@ -3,7 +3,7 @@
     python3 tools/gfxcap.py summary CAPDIR        # calls per entry point, draws, memory
     python3 tools/gfxcap.py calls CAPDIR [N]      # first N calls (default all), with arguments
     python3 tools/gfxcap.py pm4 CAPDIR [FIRST [N]] # calls with the PM4 packets each emitted
-    python3 tools/gfxcap.py mem CAPDIR ADDR [LEN] # guest bytes at a virtual address (snapshot, then blobs)
+    python3 tools/gfxcap.py mem CAPDIR ADDR [LEN] # guest bytes at a virtual address, or pADDR for physical
 
 Names come from docs/knowledge/d3d-runtime.md (outside this repo); NAMES below keeps the ones the
 replayer depends on.
@@ -54,13 +54,17 @@ NAMES = {
 }
 
 
+# Type-3 opcodes (the SDK's xenos.h).
 PM4_OPS = {
-    0x10: "NOP", 0x13: "REG_RMW", 0x21: "CONTEXT_UPDATE", 0x22: "DRAW_INDX", 0x27: "IM_LOAD",
-    0x2B: "IM_LOAD_IMMEDIATE", 0x2D: "SET_CONSTANT", 0x2F: "LOAD_ALU_CONSTANT", 0x36: "DRAW_INDX_2",
-    0x37: "INDIRECT_BUFFER_PFD", 0x3C: "WAIT_REG_MEM", 0x3F: "INDIRECT_BUFFER", 0x46: "EVENT_WRITE",
-    0x48: "ME_INIT", 0x50: "SET_BIN_MASK_LO", 0x51: "SET_BIN_MASK_HI", 0x52: "SET_BIN_SELECT_LO",
-    0x53: "SET_BIN_SELECT_HI", 0x55: "SET_CONSTANT2", 0x58: "EVENT_WRITE_SHD", 0x59: "EVENT_WRITE_CFL",
-    0x5B: "EVENT_WRITE_ZPD", 0x5D: "INVALIDATE_STATE",
+    0x10: "NOP", 0x21: "REG_RMW", 0x22: "DRAW_INDX", 0x23: "VIZ_QUERY", 0x26: "WAIT_FOR_IDLE", 0x27: "IM_LOAD",
+    0x2B: "IM_LOAD_IMMEDIATE", 0x2D: "SET_CONSTANT", 0x2E: "LOAD_CONSTANT_CONTEXT", 0x2F: "LOAD_ALU_CONSTANT",
+    0x36: "DRAW_INDX_2", 0x37: "INDIRECT_BUFFER_PFD", 0x3B: "INVALIDATE_STATE", 0x3C: "WAIT_REG_MEM",
+    0x3D: "MEM_WRITE", 0x3E: "REG_TO_MEM", 0x3F: "INDIRECT_BUFFER", 0x44: "COND_EXEC", 0x45: "COND_WRITE",
+    0x46: "EVENT_WRITE", 0x48: "ME_INIT", 0x4A: "SET_SHADER_BASES", 0x50: "SET_BIN_MASK", 0x51: "SET_BIN_SELECT",
+    0x52: "WAIT_REG_EQ", 0x53: "WAIT_REG_GTE", 0x54: "INTERRUPT", 0x55: "SET_CONSTANT2",
+    0x56: "SET_SHADER_CONSTANTS", 0x58: "EVENT_WRITE_SHD", 0x59: "EVENT_WRITE_CFL", 0x5A: "EVENT_WRITE_EXT",
+    0x5B: "EVENT_WRITE_ZPD", 0x5E: "CONTEXT_UPDATE", 0x60: "SET_BIN_MASK_LO", 0x61: "SET_BIN_MASK_HI",
+    0x62: "SET_BIN_SELECT_LO", 0x63: "SET_BIN_SELECT_HI",
 }
 # SET_CONSTANT type -> register file base (Xenos): ALU, fetch, bool, loop, registers.
 CONST_BASE = {0: 0x4000, 1: 0x4800, 2: 0x4900, 3: 0x4908, 4: 0x2000}
@@ -172,11 +176,16 @@ def pm4_cmd(capdir, first, count):
 
 
 def mem(capdir, addr, length):
+    """addr: guest virtual address, or a physical one as pADDR (the 0xA0000000+ views are read as physical)."""
+    physical = addr.startswith("p")
+    addr = int(addr.lstrip("p"), 16)
+    if not physical and addr >= 0xA0000000:
+        physical, addr = True, (addr & 0x1FFFFFFF) + (0x1000 if addr >= 0xE0000000 else 0)
     idx = open(os.path.join(capdir, "mem.idx"), "rb").read()
     with open(os.path.join(capdir, "mem.bin"), "rb") as f:
         for i in range(0, len(idx), REGION.size):
             phys, a, size, _, off = REGION.unpack_from(idx, i)
-            if not phys and a <= addr < a + size:
+            if bool(phys) == physical and a <= addr < a + size:
                 f.seek(off + addr - a)
                 print(f.read(min(length, a + size - addr)).hex(" ", 4))
                 return
@@ -192,7 +201,7 @@ def main():
     elif cmd == "pm4":
         pm4_cmd(capdir, int(sys.argv[3]) if len(sys.argv) > 3 else 0, int(sys.argv[4]) if len(sys.argv) > 4 else 50)
     elif cmd == "mem":
-        mem(capdir, int(sys.argv[3], 16), int(sys.argv[4], 0) if len(sys.argv) > 4 else 64)
+        mem(capdir, sys.argv[3], int(sys.argv[4], 0) if len(sys.argv) > 4 else 64)
 
 
 if __name__ == "__main__":

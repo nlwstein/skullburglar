@@ -51,6 +51,20 @@ if(TARGET imgui)
     target_include_directories(bots PRIVATE $<TARGET_PROPERTY:imgui,INTERFACE_INCLUDE_DIRECTORIES>)
 endif()
 
+# bots-replay: offline renderer for D3D frame captures (native renderer, P2). Needs the SDK source tree: the
+# Xenos register and shader-translation code it reuses lives in the rexgpu-xenos plugin, which exports nothing.
+if(REXSDK_DIR AND NOT WIN32)
+    set(REX_GRAPHICS_SRC ${REXSDK_DIR}/src/graphics)
+    add_executable(bots-replay
+        src/gfx/pm4.cpp
+        src/gfx/replay/capture_file.cpp
+        src/gfx/replay/main.cpp
+        ${REX_GRAPHICS_SRC}/register_file.cpp
+        ${REX_GRAPHICS_SRC}/registers.cpp
+    )
+    target_link_libraries(bots-replay PRIVATE rexruntime)
+endif()
+
 # bots_register.cpp is one function with ~143k SetFunction() calls (runs once at startup).
 # Clang goes superlinear on it: >25 min at -O2 -g, and >16 min at -O0 too, where arm64 uses
 # GlobalISel and its Localizer pass is quadratic here. -O0 with SelectionDAG avoids both.
