@@ -46,7 +46,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     // whole frame's rendering, which hides the renderer's own throughput.
     static const bool no_present = std::getenv("BOTS_GFX_NO_PRESENT") != nullptr;
     rex::ui::Presenter* presenter = no_present ? nullptr : graphics_system_->presenter();
-    if (no_present) renderer_->Flush();  // Present normally submits the frame
+    const uint64_t presents = renderer_->stats().presents;
     if (presenter) {
       rex::system::X_VIDEO_MODE video_mode;
       rex::kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
@@ -64,6 +64,10 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
                                       vulkan_context.image_view(), width, height, ramp);
           });
     }
+    // Present submits the frame. When it didn't run - no presenter, or the presenter skipped the refresh (window
+    // hidden or minimised, display asleep) - submit here, or the next frames pile into one command buffer and the
+    // GPU work arrives in bursts.
+    if (renderer_->stats().presents == presents) renderer_->Flush();
     if (frames_ % 600 == 1) {
       const auto& st = renderer_->stats();
       // Per-frame averages over the last interval (P5 profiling): wall time on this thread, and how much of it

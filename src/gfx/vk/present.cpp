@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include <glslang/Public/ShaderLang.h>
+#include <rex/logging.h>
 
 #include "renderer.h"
 
@@ -60,7 +61,23 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
                        const uint32_t* gamma_ramp) {
   auto it = texture_at_.find(address);
   if (it == texture_at_.end()) it = texture_at_.find(last_resolve_address_);
-  if (it == texture_at_.end() || !InitPresent()) return false;
+  if (it == texture_at_.end()) {
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      REXLOG_WARN("gfx native: nothing to present at {:08X} (last resolve {:08X})", address, last_resolve_address_);
+    }
+    return false;
+  }
+  if (!InitPresent()) {
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      REXLOG_ERROR("gfx native: couldn't create the present pipeline (layout {}, pipeline layout {})",
+                   present_set_layout_ != VK_NULL_HANDLE, present_layout_ != VK_NULL_HANDLE);
+    }
+    return false;
+  }
   const Image& source = *it->second;
 
   BeginCommands(kGpuPresent);
@@ -76,7 +93,14 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
   }
   std::memcpy(ramp, gamma_ramp, kRampBytes);
   const VkDescriptorSet set = AllocateSet(present_set_layout_);
-  if (!set) return false;
+  if (!set) {
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      REXLOG_ERROR("gfx native: couldn't allocate the present descriptor set");
+    }
+    return false;
+  }
   const VkDescriptorImageInfo image_info{sampler_, source.view, VK_IMAGE_LAYOUT_GENERAL};
   const VkDescriptorBufferInfo buffer_info{ring_.buffer, offset, kRampBytes};
   const VkWriteDescriptorSet writes[2] = {

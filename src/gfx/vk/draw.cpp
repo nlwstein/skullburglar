@@ -5,6 +5,7 @@
 // its own thing for render targets (renderer.h) and indices (built on the CPU, already byte-swapped).
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -190,6 +191,9 @@ bool Renderer::InitDrawing() {
       {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kTransientSetCount * 8},
       {VK_DESCRIPTOR_TYPE_SAMPLER, kTransientSetCount * 8},
       {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kTransientSetCount},
+      // The present set's gamma ramp: one per frame. Pools may enforce these counts (Intel's Windows driver
+      // does), so every type a transient set uses has to be here.
+      {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4},
   };
   pool_info.maxSets = kTransientSetCount;
   pool_info.poolSizeCount = uint32_t(std::size(transient_sizes));
@@ -469,6 +473,41 @@ VkPipeline Renderer::GetPipeline(const PipelineKey& key, bool sync, bool& pendin
   last_pipeline_key_.assign(bytes);  // reuses its capacity
   last_pipeline_ = slot.pipeline;
   return last_pipeline_;
+}
+
+// The bounding box (exclusive, guest pixels, plus a pixel of slack) of a screen-space rectangle list whose vertex
+// shader reads one float2/3/4 position at the start of a single vertex stream, from that data. False if the draw
+// isn't like that.
+bool Renderer::RectListBound(const rg::RegisterFile& regs, const ShaderCache::Shader& vshader, xe::SourceSelect source,
+                             uint32_t count, uint32_t& x1, uint32_t& y1) const {
+  const auto& bindings = vshader.vertex_bindings();
+  if (bindings.size() != 1 || bindings[0].attributes.empty() || source != xe::SourceSelect::kAutoIndex || !count ||
+      count > 96 || regs.values[rg::XE_GPU_REG_VGT_INDX_OFFSET]) {
+    return false;
+  }
+  const auto& binding = bindings[0];
+  const auto& position = binding.attributes[0].fetch_instr.attributes;
+  if (position.offset != 0 || (position.data_format != xe::VertexFormat::k_32_32_FLOAT &&
+                               position.data_format != xe::VertexFormat::k_32_32_32_FLOAT &&
+                               position.data_format != xe::VertexFormat::k_32_32_32_32_FLOAT)) {
+    return false;
+  }
+  const auto fetch = regs.GetVertexFetch(binding.fetch_constant);
+  const uint32_t stride = binding.stride_words;
+  if (fetch.type != xe::FetchConstantType::kVertex || !stride || (count - 1) * stride + 2 > fetch.size) return false;
+  const uint8_t* data = memory_(fetch.address << 2);
+  if (!data) return false;
+  float max_x = 0.0f, max_y = 0.0f;
+  for (uint32_t i = 0; i < count; ++i) {
+    float xy[2];
+    std::memcpy(xy, data + 4 * size_t(i * stride), sizeof(xy));
+    for (float& v : xy) v = xe::GpuSwap(v, fetch.endian);
+    if (!std::isfinite(xy[0]) || !std::isfinite(xy[1])) return false;
+    max_x = std::max(max_x, xy[0]), max_y = std::max(max_y, xy[1]);
+  }
+  if (max_x > 16384.0f || max_y > 16384.0f) return false;
+  x1 = uint32_t(std::ceil(max_x + 0.5f)) + 1, y1 = uint32_t(std::ceil(max_y + 0.5f)) + 1;
+  return true;
 }
 
 void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
@@ -1064,8 +1103,8 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   scissor.offset[0] *= samples_x, scissor.extent[0] *= samples_x;
   scissor.offset[1] *= samples_y, scissor.extent[1] *= samples_y;
   const uint32_t sx = std::min(scissor.offset[0], width), sy = std::min(scissor.offset[1], height);
-  const VkRect2D scissor_rect{{int32_t(sx), int32_t(sy)},
-                              {std::min(scissor.extent[0], width - sx), std::min(scissor.extent[1], height - sy)}};
+  VkRect2D scissor_rect{{int32_t(sx), int32_t(sy)},
+                        {std::min(scissor.extent[0], width - sx), std::min(scissor.extent[1], height - sy)}};
   // How far this draw can write: fragments land inside scissor and viewport (Vulkan always clips x/y to the
   // viewport), with some slack for wide points. Games leave the scissor wide open, so the viewport is the real bound.
   uint32_t scissor_x1 = sx + scissor_rect.extent.width, scissor_y1 = sy + scissor_rect.extent.height;
@@ -1074,9 +1113,23 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     scissor_y1 = std::min(scissor_y1, viewport.xy_offset[1] + viewport.xy_extent[1] + 16);
   }
   // Screen-space draws (VTE off) get a viewport bigger than the surface: they don't shape the render area hint.
-  const bool bounded = viewport.xy_extent[0] && viewport.xy_extent[1] &&
-                       viewport.xy_offset[0] + viewport.xy_extent[0] <= width &&
-                       viewport.xy_offset[1] + viewport.xy_extent[1] <= height;
+  bool bounded = viewport.xy_extent[0] && viewport.xy_extent[1] &&
+                 viewport.xy_offset[0] + viewport.xy_extent[0] <= width &&
+                 viewport.xy_offset[1] + viewport.xy_extent[1] <= height;
+  // Except screen-space rectangle lists - XDK Clear() and the like, with the scissor wide open too - whose vertex
+  // shader passes positions (guest pixels) through: their rectangle is in the vertex data. Bounded by it (scissor
+  // included, so the draw stays defined if a shader didn't pass them through), they stop counting as covering the
+  // whole surface, which surfaces reach to the end of EDRAM.
+  if (!bounded && rect) {
+    uint32_t x1, y1;
+    if (RectListBound(regs, *vshader, source, count, x1, y1)) {
+      x1 = std::min(x1 * samples_x, width), y1 = std::min(y1 * samples_y, height);
+      scissor_x1 = std::min(scissor_x1, x1), scissor_y1 = std::min(scissor_y1, y1);
+      scissor_rect.extent.width = scissor_x1 > sx ? std::min(scissor_rect.extent.width, scissor_x1 - sx) : 0;
+      scissor_rect.extent.height = scissor_y1 > sy ? std::min(scissor_rect.extent.height, scissor_y1 - sy) : 0;
+      bounded = true;
+    }
+  }
   profile.Mark(kPhasePass);
   // Render pass: kept open across draws to the same targets, and reopened when a draw samples something written
   // since the last barrier (reopening the same attachments then always barriers: they count as written). An

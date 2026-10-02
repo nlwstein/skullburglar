@@ -257,6 +257,8 @@ class Renderer : public Pm4Sink {
   bool UploadSharedMemory();
   void IssueDraw(const rex::graphics::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
                  const Draw& draw);
+  bool RectListBound(const rex::graphics::RegisterFile& regs, const ShaderCache::Shader& vshader,
+                     rex::graphics::xenos::SourceSelect source, uint32_t count, uint32_t& x1, uint32_t& y1) const;
   // Space in this submission's upload ring (uniforms and indices); flushes when full.
   uint8_t* Upload(VkDeviceSize size, VkDeviceSize alignment, VkDeviceSize& offset);
   VkDescriptorSet AllocateSet(VkDescriptorSetLayout layout);
