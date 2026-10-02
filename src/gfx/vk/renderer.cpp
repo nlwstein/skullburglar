@@ -171,6 +171,7 @@ Renderer::~Renderer() {
   };
   for (auto& [k, image] : surfaces_) destroy(*image);
   for (auto& [k, image] : textures_) destroy(*image);
+  for (auto& [k, image] : crops_) destroy(*image);
   for (Image* image : {&null_2d_array_, &null_3d_, &null_cube_}) destroy(*image);
   for (auto& [k, texture] : guest_textures_) destroy(texture->image);
   for (auto& [k, sampler] : samplers_) vk_.vkDestroySampler(dev, sampler, nullptr);
@@ -467,6 +468,7 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
       Transfer(*source, float_depth ? kTransferFloatDepth : kTransferDepth, *raw,
                uint32_t(xe::ColorRenderTargetFormat::k_8_8_8_8), &rect);
       Transfer(*source, kTransferDepth, *value, kTransferDepthValue, &rect);
+      raw->written = value->written = ++write_clock_;
       DumpResolve(*value, dest_address);
     } else {
       ++stats_.dropped_resolves;
@@ -492,6 +494,7 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
       Transfer(*source, 0, *dest, kTransferResolve, &rect,
                std::ldexp(1.0f, int(dest_info.copy_dest_exp_bias) + (fixed ? 5 : 0)));
       dest->swapped = dest_info.copy_dest_swap;
+      dest->written = ++write_clock_;
       last_resolve_address_ = dest_address;
       DumpResolve(*dest, dest_address);
     } else {

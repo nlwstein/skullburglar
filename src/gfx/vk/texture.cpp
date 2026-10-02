@@ -156,11 +156,42 @@ VkImageView Renderer::TextureView(const rg::xenos::xe_gpu_texture_fetch_t& fetch
 
 Renderer::Image* Renderer::ResolvedTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch) {
   const uint32_t address = fetch.base_address << 12;
+  Image* image = nullptr;
   if (fetch.format == xe::TextureFormat::k_24_8 || fetch.format == xe::TextureFormat::k_24_8_FLOAT) {
-    if (const auto it = depth_texture_at_.find(address); it != depth_texture_at_.end()) return it->second;
+    if (const auto it = depth_texture_at_.find(address); it != depth_texture_at_.end()) image = it->second;
   }
-  const auto it = texture_at_.find(address);
-  return it != texture_at_.end() ? it->second : nullptr;
+  if (!image) {
+    const auto it = texture_at_.find(address);
+    if (it == texture_at_.end()) return nullptr;
+    image = it->second;
+  }
+  // The fetch's size, not the resolve's pitch, is what normalized coordinates span.
+  const uint32_t width = std::min(uint32_t(fetch.size_2d.width) + 1, image->width);
+  const uint32_t height = std::min(uint32_t(fetch.size_2d.height) + 1, image->height);
+  if (width == image->width && height == image->height) return image;
+  return Crop(*image, width, height);
+}
+
+Renderer::Image* Renderer::Crop(Image& image, uint32_t width, uint32_t height) {
+  auto& slot = crops_[{&image, width, height}];
+  if (!slot) {
+    auto crop = std::make_unique<Image>();
+    if (!CreateImage(*crop, image.format, width, height, false, VK_IMAGE_VIEW_TYPE_2D_ARRAY)) return nullptr;
+    slot = std::move(crop);
+  }
+  Image& crop = *slot;
+  if (crop.written != image.written) {
+    BeginCommands();
+    EndRendering();
+    Barrier();
+    const VkImageCopy region{{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                             {0, 0, 0}, {width, height, 1}};
+    vk_.vkCmdCopyImage(cmd_, image.image, VK_IMAGE_LAYOUT_GENERAL, crop.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+    Barrier();
+    crop.written = image.written;
+  }
+  crop.swapped = image.swapped;
+  return &crop;
 }
 
 VkImageView Renderer::ResolvedTextureView(Image& image, const rg::xenos::xe_gpu_texture_fetch_t& fetch,

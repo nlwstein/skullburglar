@@ -60,7 +60,7 @@ class Renderer : public Pm4Sink {
     VkImageAspectFlags aspect = 0;
     VkImageView view = VK_NULL_HANDLE;
     uint32_t width = 0, height = 0;
-    uint64_t written = 0;  // surfaces: write_clock_ at the last write
+    uint64_t written = 0;  // surfaces and resolve destinations: write_clock_ at the last write
     VkImageView depth_view = VK_NULL_HANDLE, stencil_view = VK_NULL_HANDLE;  // depth surfaces, for sampling
     std::map<uint32_t, VkImageView> swizzled_views;  // sampled images: by host swizzle | other signedness << 12
     bool swapped = false;  // resolve destinations: red and blue swapped (RB_COPY_DEST_INFO copy_dest_swap)
@@ -145,6 +145,7 @@ class Renderer : public Pm4Sink {
   // The resolve destination a fetch reads, if any (a depth resolve read as 24_8 gives the depth value).
   Image* ResolvedTexture(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch);
   // A view of a resolve destination as the fetch constant sees it (swizzle; red/blue swap).
+  Image* Crop(Image& image, uint32_t width, uint32_t height);
   VkImageView ResolvedTextureView(Image& image, const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch,
                                   bool is_signed, uint32_t& host_swizzle);
   VkImageView SwizzledView(Image& image, uint32_t host_swizzle, bool is_signed);
@@ -167,6 +168,8 @@ class Renderer : public Pm4Sink {
   std::map<uint32_t, Image*> texture_at_;  // guest address -> latest resolve destination there
   // Depth resolves also keep the depth value, for 24_8 fetches (the 8888 destination holds the raw bits).
   std::map<uint32_t, Image*> depth_texture_at_;
+  // Resolve destinations are pitch wide; a fetch of a narrower (or shorter) texture samples a copy of its corner.
+  std::map<std::tuple<const Image*, uint32_t, uint32_t>, std::unique_ptr<Image>> crops_;
   uint32_t last_resolve_address_ = 0;
   Stats stats_;
 
