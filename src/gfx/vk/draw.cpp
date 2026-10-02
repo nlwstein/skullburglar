@@ -163,6 +163,7 @@ bool Renderer::InitDrawing() {
   draw_profile_ = std::getenv("BOTS_DRAW_PROFILE") && *std::getenv("BOTS_DRAW_PROFILE") == '1';
   if (const char* v = std::getenv("BOTS_GFX_PASS_MERGE"); v && *v) pass_merge_ = *v == '1';
   if (const char* v = std::getenv("BOTS_GFX_LAZY_RAW_DEPTH"); v && *v) lazy_raw_depth_ = *v == '1';
+  if (const char* v = std::getenv("BOTS_GFX_MAX_ANISO"); v && *v) max_anisotropy_ = uint32_t(std::atoi(v));
   shaders_ = std::make_unique<ShaderCache>(device_, workers);
   shared_memory_bindings_ = 1u << Translator::GetSharedMemoryStorageBufferCountLog2(props.maxStorageBufferRange);
 

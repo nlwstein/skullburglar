@@ -365,11 +365,12 @@ VkSampler Renderer::GetSampler(const rg::xenos::xe_gpu_texture_fetch_t& fetch,
   const xe::TextureFilter mip = pick(binding.mip_filter, fetch.mip_filter);
   xe::AnisoFilter aniso =
       binding.aniso_filter == xe::AnisoFilter::kUseFetchConst ? fetch.aniso_filter : binding.aniso_filter;
-  // Host max anisotropy as an AnisoFilter (kMax_1_1 = 1x ... kMax_16_1 = 16x).
+  // Host max anisotropy (capped by BOTS_GFX_MAX_ANISO) as an AnisoFilter (kMax_1_1 = 1x ... kMax_16_1 = 16x).
   const auto& props = device_->properties();
   uint32_t host_max = uint32_t(xe::AnisoFilter::kDisabled);
   if (props.samplerAnisotropy) {
-    for (uint32_t n = 1; n <= std::min(16.0f, props.maxSamplerAnisotropy); n <<= 1) ++host_max;
+    const float limit = std::min({16.0f, props.maxSamplerAnisotropy, float(max_anisotropy_)});
+    for (uint32_t n = 1; n <= limit; n <<= 1) ++host_max;
   }
   if (aniso == xe::AnisoFilter::kUseFetchConst) aniso = xe::AnisoFilter::kDisabled;
   aniso = xe::AnisoFilter(std::min(uint32_t(aniso), host_max));

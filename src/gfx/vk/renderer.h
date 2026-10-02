@@ -265,6 +265,7 @@ class Renderer : public Pm4Sink {
   bool trace_rendering_ = false;
   bool pass_merge_ = true;
   bool lazy_raw_depth_ = true;  // BOTS_GFX_LAZY_RAW_DEPTH=0: write a depth resolve's raw 8888 image at once (A/B)
+  uint32_t max_anisotropy_ = 16;  // BOTS_GFX_MAX_ANISO=0|1|2|4|8|16: cap on the game's anisotropic filtering (0 = off)
   bool gpu_draw_labels_ = false;  // BOTS_GPU_TIMING=2: a span per draw, by shader pair
   bool InitDrawing();
   void DestroyDrawing();
