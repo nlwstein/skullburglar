@@ -88,6 +88,10 @@ if(REXSDK_DIR AND NOT WIN32)
         ${REX_GRAPHICS_SRC}/pipeline/shader/spirv_translator_rb.cpp
         ${REX_GRAPHICS_SRC}/vulkan/shader.cpp
     )
+    # These two define GPU cvars, which belong to whichever GPU plugin is loaded: in our binaries they keep their
+    # storage and defaults but are not registered (src/gfx/sdk_cvars.h).
+    set_source_files_properties(${REX_GRAPHICS_SRC}/flags.cpp ${REX_GRAPHICS_SRC}/util/draw.cpp
+        PROPERTIES COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/src/gfx/sdk_cvars.h")
     set(BOTS_NATIVE_GFX_LIBS Vulkan::Headers GPUOpen::VulkanMemoryAllocator
         xxHash::xxhash glslang::SPIRV glslang MachineIndependent GenericCodeGen OSDependent OGLCompiler)
 

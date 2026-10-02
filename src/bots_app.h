@@ -21,6 +21,10 @@
 #include <execinfo.h>
 #include <mach-o/dyld.h>
 #include <unistd.h>
+#elif defined(__linux__)
+#include <dlfcn.h>
+#include <execinfo.h>
+#include <unistd.h>
 #endif
 
 #include <rex/logging.h>
@@ -141,18 +145,25 @@ class BotsApp : public rex::ReXApp {
                 PPCImageConfig.image_size, path);
   }
 
-  // On SIGABRT (REX_FATAL), write the raw host backtrace + image slide to stderr
-  // (lands in logs/run-N.out). Resolve offline:
-  //   atos -o out/build/mac-arm64-relwithdebinfo/bots -l <load addr> <addrs...>
+  // On SIGABRT (REX_FATAL, or an unhandled host fault: the SDK's handler aborts), write the raw
+  // host backtrace + image slide to stderr (lands in logs/run-N.out). Resolve offline:
+  //   macOS: atos -o out/build/mac-arm64-relwithdebinfo/bots -l <load addr> <addrs...>
+  //   Linux: frames print as module(+offset); addr2line -f -C -e <module> <offset>
   // Recompiled frames resolve to sub_XXXXXXXX, i.e. this doubles as a guest call stack.
-  // macOS only for now (Windows: the SDK's own unhandled-exception path).
-#if defined(__APPLE__)
+  // Windows: the SDK's own unhandled-exception path.
+#if defined(__APPLE__) || defined(__linux__)
   static void CrashHandler(int sig) {
     void* frames[96];
     int n = backtrace(frames, 96);
     char buf[64];
-    int len = snprintf(buf, sizeof(buf), "\n=== bots crash: signal %d, load addr 0x%lx ===\n", sig,
-                       (unsigned long)_dyld_get_image_header(0));
+#if defined(__APPLE__)
+    const unsigned long load = (unsigned long)_dyld_get_image_header(0);
+#else
+    Dl_info info{};
+    dladdr(reinterpret_cast<void*>(&CrashHandler), &info);
+    const unsigned long load = (unsigned long)info.dli_fbase;
+#endif
+    int len = snprintf(buf, sizeof(buf), "\n=== bots crash: signal %d, load addr 0x%lx ===\n", sig, load);
     write(2, buf, len);
     backtrace_symbols_fd(frames, n, 2);
     signal(sig, SIG_DFL);
