@@ -555,7 +555,7 @@ bool Renderer::CreateImage(Image& image, VkFormat format, uint32_t width, uint32
   barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
   barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
   barrier.image = image.image;
-  barrier.subresourceRange = view.subresourceRange;
+  barrier.subresourceRange = {image.aspect, 0, levels, 0, info.arrayLayers};  // both aspects of a depth image
   vk_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
                            nullptr, 0, nullptr, 1, &barrier);
   return true;
