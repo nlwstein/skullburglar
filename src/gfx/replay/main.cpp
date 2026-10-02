@@ -141,7 +141,7 @@ int Render(Capture& capture, const std::filesystem::path& out) {
   bots::gfx::Pm4Executor executor([&](uint32_t pa) -> const uint8_t* { return capture.memory.Physical(pa); },
                                   &renderer);
   executor.Execute(capture.pm4.data(), capture.pm4.size());
-  renderer.Flush();
+  renderer.Finish();
   const auto& s = renderer.stats();
   std::printf("native: %llu resolves (%llu dropped, %llu multisampled not copied), %llu clears, %llu draws, "
               "%llu draws not rendered yet\n",

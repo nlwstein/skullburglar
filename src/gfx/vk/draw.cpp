@@ -134,19 +134,26 @@ bool Renderer::InitDrawing() {
   pool_info.maxSets = kTransientSetCount;
   pool_info.poolSizeCount = 4;
   pool_info.pPoolSizes = transient_sizes;
-  if (vk_.vkCreateDescriptorPool(dev, &pool_info, nullptr, &transient_pool_) != VK_SUCCESS) return false;
+  for (Submission& submission : submissions_) {
+    if (vk_.vkCreateDescriptorPool(dev, &pool_info, nullptr, &submission.transient_pool) != VK_SUCCESS) return false;
+  }
   const VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, persistent_pool_, 1,
                                           &set_layout_shared_};
   if (vk_.vkAllocateDescriptorSets(dev, &alloc, &shared_set_) != VK_SUCCESS) return false;
 
   // Guest physical memory, as the translated shaders address it (vertex fetch, index loads).
-  if (!CreateBuffer(shared_memory_, kSharedMemorySize,
-                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT) ||
-      !CreateBuffer(ring_, kRingSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-                                                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+  bool buffers = CreateBuffer(shared_memory_, kSharedMemorySize,
+                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+  for (Buffer& ring : rings_) {
+    buffers = buffers && CreateBuffer(ring, kRingSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+                                                           VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                                                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+  }
+  if (!buffers) {
     std::fprintf(stderr, "native renderer: buffer allocation failed\n");
     return false;
   }
+  UseSubmission(current_);  // picks up the ring and transient pool just created
   std::vector<VkDescriptorBufferInfo> ranges(shared_memory_bindings_);
   const VkDeviceSize chunk = kSharedMemorySize / shared_memory_bindings_;
   for (uint32_t i = 0; i < shared_memory_bindings_; ++i) ranges[i] = {shared_memory_.buffer, i * chunk, chunk};
@@ -189,12 +196,14 @@ void Renderer::DestroyDrawing() {
   for (VkDescriptorSetLayout layout : {set_layout_shared_, set_layout_constants_, set_layout_empty_}) {
     if (layout) vk_.vkDestroyDescriptorSetLayout(dev, layout, nullptr);
   }
-  for (VkDescriptorPool pool : {persistent_pool_, transient_pool_}) {
-    if (pool) vk_.vkDestroyDescriptorPool(dev, pool, nullptr);
+  if (persistent_pool_) vk_.vkDestroyDescriptorPool(dev, persistent_pool_, nullptr);
+  for (Submission& submission : submissions_) {
+    if (submission.transient_pool) vk_.vkDestroyDescriptorPool(dev, submission.transient_pool, nullptr);
   }
   if (sampler_) vk_.vkDestroySampler(dev, sampler_, nullptr);
-  for (Buffer* buffer : {&shared_memory_, &ring_}) {
-    if (buffer->buffer) vmaDestroyBuffer(allocator_, buffer->buffer, buffer->allocation);
+  if (shared_memory_.buffer) vmaDestroyBuffer(allocator_, shared_memory_.buffer, shared_memory_.allocation);
+  for (Buffer& ring : rings_) {
+    if (ring.buffer) vmaDestroyBuffer(allocator_, ring.buffer, ring.allocation);
   }
   shaders_.reset();
 }

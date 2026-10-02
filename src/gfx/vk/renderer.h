@@ -53,7 +53,10 @@ class Renderer : public Pm4Sink {
               const Draw& draw) override;
 
   // Submits everything recorded so far and waits for it.
+  // Submits what's recorded without waiting (up to kSubmissions in flight). Finish also waits for the GPU:
+  // needed before the CPU reads anything the GPU wrote.
   void Flush();
+  void Finish();
   // Forgets everything taken from guest memory or rendered (surfaces, textures, the shared-memory copy, stats);
   // keeps shaders, pipelines and samplers. In-process shadow mode renders each sampled frame from scratch.
   void ResetFrame();
@@ -219,12 +222,28 @@ class Renderer : public Pm4Sink {
   const rex::ui::vulkan::VulkanDevice* device_;
   PhysicalMemory memory_;
   GuestMemoryTracker* tracker_ = nullptr;
-  std::vector<Image> retired_;
+  std::vector<Image> retired_;  // the current submission's
   uint64_t frame_ = 0;
   std::vector<std::pair<uint32_t, uint32_t>> invalidated_;
   Api vk_;
   bool ok_ = false;
   VmaAllocator allocator_ = nullptr;
+  // Submissions in flight. The members below (pool_, cmd_, fence_, ring_, transient_pool_, retired_) are the
+  // current one's; Flush submits it and moves on to the next slot, waiting only if that slot is still pending.
+  struct Submission {
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    VkDescriptorPool transient_pool = VK_NULL_HANDLE;
+    std::vector<Image> retired;
+    bool pending = false;
+  };
+  static constexpr uint32_t kSubmissions = 3;
+  std::array<Submission, kSubmissions> submissions_;
+  std::array<Buffer, kSubmissions> rings_;
+  uint32_t current_ = 0;
+  void UseSubmission(uint32_t index);
+  void WaitSubmission(Submission& submission);
   VkCommandPool pool_ = VK_NULL_HANDLE;
   VkCommandBuffer cmd_ = VK_NULL_HANDLE;
   VkFence fence_ = VK_NULL_HANDLE;

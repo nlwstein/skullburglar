@@ -160,7 +160,7 @@ void ShadowRender(uint64_t frame, const std::vector<uint8_t>& pm4, bool sample) 
     Pm4Executor executor(Physical, s.renderer.get());
     executor.Execute(pm4.data(), pm4.size());
   }
-  s.renderer->Flush();
+  s.renderer->Finish();
   if (live) s.renderer->EndFrame();
   const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
   ++s.frames;

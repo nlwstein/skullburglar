@@ -36,7 +36,6 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
 
   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width, uint32_t frontbuffer_height) override {
     if (!renderer_) return;
-    renderer_->Flush();
     renderer_->EndFrame();
     ++frames_;
     rex::ui::Presenter* presenter = graphics_system_->presenter();

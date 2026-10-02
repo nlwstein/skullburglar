@@ -147,16 +147,44 @@ Renderer::Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory m
     return;
   }
   allocator_ = rex::ui::vulkan::CreateVmaAllocator(device_, false);
+  if (!allocator_) return;
   const VkCommandPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, nullptr, 0,
                                           device_->queue_family_graphics_compute()};
-  VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-  if (!allocator_ || vk_.vkCreateCommandPool(device_->device(), &pool_info, nullptr, &pool_) != VK_SUCCESS ||
-      vk_.vkCreateFence(device_->device(), &fence_info, nullptr, &fence_) != VK_SUCCESS) {
-    return;
+  const VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  for (Submission& submission : submissions_) {
+    if (vk_.vkCreateCommandPool(device_->device(), &pool_info, nullptr, &submission.pool) != VK_SUCCESS ||
+        vk_.vkCreateFence(device_->device(), &fence_info, nullptr, &submission.fence) != VK_SUCCESS) {
+      return;
+    }
+    const VkCommandBufferAllocateInfo cmd_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, nullptr,
+                                               submission.pool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
+    if (vk_.vkAllocateCommandBuffers(device_->device(), &cmd_info, &submission.cmd) != VK_SUCCESS) return;
   }
-  const VkCommandBufferAllocateInfo cmd_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, nullptr, pool_,
-                                             VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
-  ok_ = vk_.vkAllocateCommandBuffers(device_->device(), &cmd_info, &cmd_) == VK_SUCCESS && InitDrawing();
+  UseSubmission(0);
+  ok_ = InitDrawing();
+}
+
+void Renderer::UseSubmission(uint32_t index) {
+  current_ = index;
+  const Submission& s = submissions_[index];
+  pool_ = s.pool, cmd_ = s.cmd, fence_ = s.fence, transient_pool_ = s.transient_pool;
+  ring_ = rings_[index];
+  ring_used_ = 0;
+  transient_sets_ = 0;
+}
+
+void Renderer::WaitSubmission(Submission& submission) {
+  if (!submission.pending) return;
+  {
+    ScopedMicros wait(stats_.wait_us);
+    vk_.vkWaitForFences(device_->device(), 1, &submission.fence, VK_TRUE, UINT64_MAX);
+  }
+  vk_.vkResetFences(device_->device(), 1, &submission.fence);
+  for (Image& image : submission.retired) DestroyImage(image);
+  submission.retired.clear();
+  vk_.vkResetCommandPool(device_->device(), submission.pool, 0);
+  vk_.vkResetDescriptorPool(device_->device(), submission.transient_pool, 0);
+  submission.pending = false;
 }
 
 void Renderer::DestroyImage(Image& image) {
@@ -248,7 +276,7 @@ void Renderer::DestroyFrameState() {
 }
 
 void Renderer::ResetFrame() {
-  Flush();
+  Finish();
   if (vk_.vkDeviceWaitIdle) vk_.vkDeviceWaitIdle(device_->device());
   DestroyFrameState();
   open_pass_ = {};
@@ -263,12 +291,17 @@ Renderer::~Renderer() {
   if (vk_.vkDeviceWaitIdle) vk_.vkDeviceWaitIdle(dev);
   DestroyFrameState();
   for (Image& image : retired_) DestroyImage(image);
+  for (Submission& submission : submissions_) {
+    for (Image& image : submission.retired) DestroyImage(image);
+  }
   for (Image* image : {&null_2d_array_, &null_3d_, &null_cube_}) DestroyImage(*image);
   for (auto& [k, sampler] : samplers_) vk_.vkDestroySampler(dev, sampler, nullptr);
   DestroyTransfers();
   DestroyDrawing();
-  if (fence_) vk_.vkDestroyFence(dev, fence_, nullptr);
-  if (pool_) vk_.vkDestroyCommandPool(dev, pool_, nullptr);
+  for (Submission& submission : submissions_) {
+    if (submission.fence) vk_.vkDestroyFence(dev, submission.fence, nullptr);
+    if (submission.pool) vk_.vkDestroyCommandPool(dev, submission.pool, nullptr);
+  }
   if (allocator_) vmaDestroyAllocator(allocator_);
 }
 
@@ -310,17 +343,18 @@ void Renderer::Flush() {
     vk_.vkQueueSubmit(queue.queue(), 1, &submit, fence_);
   }
   ++stats_.flushes;
-  {
-    ScopedMicros wait(stats_.wait_us);
-    vk_.vkWaitForFences(device_->device(), 1, &fence_, VK_TRUE, UINT64_MAX);
-  }
-  vk_.vkResetFences(device_->device(), 1, &fence_);
-  for (Image& image : retired_) DestroyImage(image);
+  Submission& submitted = submissions_[current_];
+  submitted.pending = true;
+  submitted.retired.insert(submitted.retired.end(), retired_.begin(), retired_.end());
   retired_.clear();
-  vk_.vkResetCommandPool(device_->device(), pool_, 0);
-  vk_.vkResetDescriptorPool(device_->device(), transient_pool_, 0);
-  ring_used_ = 0;
-  transient_sets_ = 0;
+  const uint32_t next = (current_ + 1) % kSubmissions;
+  WaitSubmission(submissions_[next]);
+  UseSubmission(next);
+}
+
+void Renderer::Finish() {
+  Flush();
+  for (uint32_t i = 1; i <= kSubmissions; ++i) WaitSubmission(submissions_[(current_ + i) % kSubmissions]);
 }
 
 bool Renderer::CreateImage(Image& image, VkFormat format, uint32_t width, uint32_t height, bool depth,
@@ -729,7 +763,7 @@ bool Renderer::ReadImage(const Image& image, std::vector<uint8_t>& rgb, uint32_t
   region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
   region.imageExtent = {image.width, image.height, 1};
   vk_.vkCmdCopyImageToBuffer(cmd_, image.image, VK_IMAGE_LAYOUT_GENERAL, buffer, 1, &region);
-  Flush();
+  Finish();
   vmaInvalidateAllocation(allocator_, allocation, 0, VK_WHOLE_SIZE);
 
   // BOTS_DUMP_SCALE=<f> scales the values first, to look at HDR targets (debugging).
