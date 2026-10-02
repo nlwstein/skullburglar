@@ -59,10 +59,12 @@ if(REXSDK_DIR AND NOT WIN32)
         src/gfx/pm4.cpp
         src/gfx/replay/capture_file.cpp
         src/gfx/replay/main.cpp
+        src/gfx/vk/renderer.cpp
         ${REX_GRAPHICS_SRC}/register_file.cpp
         ${REX_GRAPHICS_SRC}/registers.cpp
     )
-    target_link_libraries(bots-replay PRIVATE rexruntime)
+    target_link_libraries(bots-replay PRIVATE rexruntime Vulkan::Headers GPUOpen::VulkanMemoryAllocator)
+    target_include_directories(bots-replay PRIVATE ${REXSDK_DIR}/thirdparty/renderdoc)  # rex/ui/vulkan headers
 endif()
 
 # bots_register.cpp is one function with ~143k SetFunction() calls (runs once at startup).

@@ -1,16 +1,23 @@
 // bots-replay: renders a D3D frame capture offline (native renderer, P2).
 //
-//   bots-replay CAPDIR [--draws]
+//   bots-replay CAPDIR [--draws]         per-draw state report
+//   bots-replay CAPDIR --render OUT.ppm  render with the native renderer, compare with the capture's reference
 //
-// Runs the capture's PM4 through the same executor the game uses in-process and reports the state of every draw.
+// Runs the capture's PM4 through the same executor the game uses in-process.
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <set>
 #include <stdexcept>
 #include <tuple>
 
+#include <rex/ui/vulkan/provider.h>
+
 #include "../pm4.h"
+#include "../vk/renderer.h"
 #include "capture_file.h"
 
 namespace {
@@ -109,19 +116,95 @@ class Logger : public bots::gfx::Pm4Sink {
   std::map<uint32_t, uint32_t> prims_, events_;
 };
 
+bool ReadPpm(const std::filesystem::path& path, std::vector<uint8_t>& rgb, uint32_t& width, uint32_t& height) {
+  std::FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f) return false;
+  unsigned w, h, max;
+  const bool ok = std::fscanf(f, "P6 %u %u %u", &w, &h, &max) == 3 && max == 255 && std::fgetc(f) != EOF;
+  if (ok) {
+    rgb.resize(size_t(w) * h * 3);
+    width = w, height = h;
+  }
+  const bool read = ok && std::fread(rgb.data(), 1, rgb.size(), f) == rgb.size();
+  std::fclose(f);
+  return read;
+}
+
+void WritePpm(const std::filesystem::path& path, const std::vector<uint8_t>& rgb, uint32_t width, uint32_t height) {
+  std::FILE* f = std::fopen(path.c_str(), "wb");
+  if (!f) throw std::runtime_error("cannot write " + path.string());
+  std::fprintf(f, "P6\n%u %u\n255\n", width, height);
+  std::fwrite(rgb.data(), 1, rgb.size(), f);
+  std::fclose(f);
+}
+
+// Renders the capture with the native renderer, writes `out`, compares with the capture's reference.ppm.
+int Render(Capture& capture, const std::filesystem::path& out) {
+  auto provider = rex::ui::vulkan::VulkanProvider::Create(true, false);
+  if (!provider) throw std::runtime_error("no Vulkan device");
+  bots::gfx::vk::Renderer renderer(provider->vulkan_device(),
+                                   [&](uint32_t pa) -> const uint8_t* { return capture.memory.Physical(pa); });
+  if (!renderer.ok()) throw std::runtime_error("renderer setup failed");
+  bots::gfx::Pm4Executor executor([&](uint32_t pa) -> const uint8_t* { return capture.memory.Physical(pa); },
+                                  &renderer);
+  executor.Execute(capture.pm4.data(), capture.pm4.size());
+  renderer.Flush();
+  const auto& s = renderer.stats();
+  std::printf("native: %llu resolves (%llu dropped), %llu clears, %llu draws, %llu draws not rendered yet\n",
+              (unsigned long long)s.resolves, (unsigned long long)s.dropped_resolves, (unsigned long long)s.clears,
+              (unsigned long long)s.draws, (unsigned long long)s.skipped_draws);
+
+  std::vector<uint8_t> image, reference;
+  uint32_t w, h, rw, rh;
+  if (!renderer.ReadTexture(renderer.last_resolve_address(), image, w, h)) {
+    throw std::runtime_error("nothing resolved");
+  }
+  WritePpm(out, image, w, h);
+  std::printf("frame: %ux%u from resolve to %08X -> %s\n", w, h, renderer.last_resolve_address(), out.c_str());
+  if (!ReadPpm(capture.dir / "reference.ppm", reference, rw, rh)) {
+    std::printf("no reference.ppm\n");
+    return 0;
+  }
+  // Compare the overlapping area (the reference is the presenter's output and may be a different size).
+  const uint32_t cw = std::min(w, rw), ch = std::min(h, rh);
+  double sum = 0, sq = 0;
+  uint64_t bad = 0;
+  for (uint32_t y = 0; y < ch; ++y) {
+    for (uint32_t x = 0; x < cw; ++x) {
+      int worst = 0;
+      for (int k = 0; k < 3; ++k) {
+        const int d = std::abs(int(image[(size_t(y) * w + x) * 3 + k]) - int(reference[(size_t(y) * rw + x) * 3 + k]));
+        sum += d, sq += double(d) * d, worst = std::max(worst, d);
+      }
+      bad += worst > 16;
+    }
+  }
+  const double n = double(cw) * ch * 3;
+  const double mse = sq / n;
+  std::printf("vs reference %ux%u: mean abs diff %.2f, PSNR %.1f dB, %.2f%% pixels off by >16\n", rw, rh, sum / n,
+              mse > 0 ? 10 * std::log10(255.0 * 255.0 / mse) : 99.0, 100.0 * double(bad) / (double(cw) * ch));
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::fprintf(stderr, "usage: bots-replay CAPDIR [--draws]\n");
+    std::fprintf(stderr, "usage: bots-replay CAPDIR [--draws] [--render OUT.ppm]\n");
     return 2;
   }
-  const bool verbose = argc > 2 && std::strcmp(argv[2], "--draws") == 0;
+  bool verbose = false;
+  const char* render_out = nullptr;
+  for (int i = 2; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--draws") == 0) verbose = true;
+    if (std::strcmp(argv[i], "--render") == 0 && i + 1 < argc) render_out = argv[++i];
+  }
   try {
     Capture capture;
     capture.Load(argv[1]);
     std::printf("frame %u: %zu calls, %zu KB PM4, device %08X, front buffer %08X\n", capture.frame,
                 capture.calls.size(), capture.pm4.size() >> 10, capture.device, capture.front_buffer);
+    if (render_out) return Render(capture, render_out);
 
     Logger logger(capture, verbose);
     bots::gfx::Pm4Executor executor([&](uint32_t pa) -> const uint8_t* { return capture.memory.Physical(pa); },
