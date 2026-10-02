@@ -69,6 +69,51 @@ xe::Endian IndexEndian(xe::Endian endian, bool index32) {
   return endian == xe::Endian::k8in32 ? xe::Endian::k8in16 : xe::Endian::kNone;
 }
 
+// Guest DMA indices -> host index buffer, byte-swapped, the guest reset index mapped to all ones (Vulkan's restart
+// value). One pass that only writes dst: the ring is write-combined host memory, where reading back is very slow.
+// This was a third of the draw-recording time as a per-index loop through a std::vector.
+template <typename T, xe::Endian kEndian, bool kReset>
+bool ConvertIndicesAs(const uint8_t* src, T* dst, uint32_t count, uint32_t reset_index) {
+  bool any = false;
+  for (uint32_t i = 0; i < count; ++i) {
+    T v;
+    std::memcpy(&v, src + size_t(i) * sizeof(T), sizeof(T));
+    if constexpr (sizeof(T) == 2) {
+      if constexpr (kEndian == xe::Endian::k8in16) v = __builtin_bswap16(v);
+    } else if constexpr (kEndian == xe::Endian::k8in16) {
+      v = ((v & 0x00FF00FFu) << 8) | ((v >> 8) & 0x00FF00FFu);
+    } else if constexpr (kEndian == xe::Endian::k8in32) {
+      v = __builtin_bswap32(v);
+    } else if constexpr (kEndian == xe::Endian::k16in32) {
+      v = (v << 16) | (v >> 16);
+    }
+    if constexpr (kReset) {
+      const bool match = (sizeof(T) == 4 ? v & 0xFFFFFF : v) == reset_index;
+      any |= match;
+      v = match ? T(~T(0)) : v;
+    }
+    dst[i] = v;
+  }
+  return any;
+}
+
+template <typename T, bool kReset>
+bool ConvertIndicesReset(const uint8_t* src, T* dst, uint32_t count, xe::Endian endian, uint32_t reset_index) {
+  switch (endian) {
+    case xe::Endian::k8in16: return ConvertIndicesAs<T, xe::Endian::k8in16, kReset>(src, dst, count, reset_index);
+    case xe::Endian::k8in32: return ConvertIndicesAs<T, xe::Endian::k8in32, kReset>(src, dst, count, reset_index);
+    case xe::Endian::k16in32: return ConvertIndicesAs<T, xe::Endian::k16in32, kReset>(src, dst, count, reset_index);
+    default: return ConvertIndicesAs<T, xe::Endian::kNone, kReset>(src, dst, count, reset_index);
+  }
+}
+
+// Returns whether any index was the reset index (always false when !reset).
+template <typename T>
+bool ConvertIndices(const uint8_t* src, T* dst, uint32_t count, xe::Endian endian, bool reset, uint32_t reset_index) {
+  return reset ? ConvertIndicesReset<T, true>(src, dst, count, endian, reset_index)
+               : ConvertIndicesReset<T, false>(src, dst, count, endian, reset_index);
+}
+
 // Everything that selects a pipeline. Zero-initialised (padding included) and compared as bytes.
 struct PipelineKey {
   const void* vs;
@@ -545,6 +590,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   bool indexed = false, restart = false;
   uint32_t host_count = count;
   VkDeviceSize index_offset = 0;
+  VkIndexType index_type = VK_INDEX_TYPE_UINT32;
   std::vector<uint32_t> guest, host;
   const xe::Endian index_endian = IndexEndian(draw.index_endian, index32);
   auto load_guest = [&] {
@@ -586,6 +632,33 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
       for (uint32_t k = 0; k < 4; ++k) host.push_back(r * 4 + k);
     }
     restart = true;
+  } else if (dma && prim != xe::PrimitiveType::kQuadList && prim != xe::PrimitiveType::kTriangleFan) {
+    // Straight from guest memory into the ring. 16-bit indices stay 16-bit unless a reset index in a list (no
+    // restart) has to become 0xFFFFFFFF, as the 32-bit path makes it.
+    const uint8_t* src = memory_(draw.index_base);
+    if (!src) {
+      ++stats_.skipped_draws;
+      return;
+    }
+    const bool reset_enabled = regs.Get<reg::PA_SU_SC_MODE_CNTL>().multi_prim_ib_ena;
+    const uint32_t reset_index = regs.Get<reg::VGT_MULTI_PRIM_IB_RESET_INDX>().reset_indx;
+    const bool strip = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP || topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+    if (!index32 && (!reset_enabled || strip)) {
+      auto* dst = reinterpret_cast<uint16_t*>(Upload(VkDeviceSize(count) * 2, 4, index_offset));
+      restart = ConvertIndices(src, dst, count, index_endian, reset_enabled, reset_index);
+      index_type = VK_INDEX_TYPE_UINT16;
+    } else if (index32) {
+      auto* dst = reinterpret_cast<uint32_t*>(Upload(VkDeviceSize(count) * 4, 4, index_offset));
+      restart = ConvertIndices(src, dst, count, index_endian, reset_enabled, reset_index);
+    } else {
+      // A 16-bit list with a reset index: it becomes 0xFFFFFFFF, as on the general path below.
+      std::vector<uint16_t> narrow(count);
+      ConvertIndices(src, narrow.data(), count, index_endian, false, 0);
+      auto* dst = reinterpret_cast<uint32_t*>(Upload(VkDeviceSize(count) * 4, 4, index_offset));
+      for (uint32_t i = 0; i < count; ++i) dst[i] = narrow[i] == reset_index ? UINT32_MAX : narrow[i];
+    }
+    restart = restart && strip;  // Vulkan only restarts strips
+    indexed = true;
   } else if (prim == xe::PrimitiveType::kQuadList || prim == xe::PrimitiveType::kTriangleFan || dma) {
     if (!load_guest()) {
       ++stats_.skipped_draws;
@@ -953,7 +1026,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   vk_.vkCmdSetStencilWriteMask(cmd_, VK_STENCIL_FACE_BACK_BIT, ref_back.stencilwritemask);
 
   if (indexed) {
-    vk_.vkCmdBindIndexBuffer(cmd_, ring_.buffer, index_offset, VK_INDEX_TYPE_UINT32);
+    vk_.vkCmdBindIndexBuffer(cmd_, ring_.buffer, index_offset, index_type);
     vk_.vkCmdDrawIndexed(cmd_, host_count, 1, 0, 0, 0);
   } else {
     vk_.vkCmdDraw(cmd_, host_count, 1, 0, 0);
