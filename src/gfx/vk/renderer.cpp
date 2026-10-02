@@ -273,6 +273,8 @@ void Renderer::UseSubmission(uint32_t index) {
   ring_ = rings_[index];
   ring_used_ = 0;
   transient_sets_ = 0;
+  constant_set_ = constant_sets_[index];
+  texture_sets_.clear();
 }
 
 void Renderer::WaitSubmission(Submission& submission) {

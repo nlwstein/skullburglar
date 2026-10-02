@@ -27,6 +27,14 @@ using Translator = rg::SpirvShaderTranslator;
 
 constexpr VkDeviceSize kSharedMemorySize = VkDeviceSize(512) << 20;
 constexpr VkDeviceSize kRingSize = VkDeviceSize(128) << 20;
+// Constant buffers are dynamic uniform buffers over the ring with a fixed range each (one set per ring, only the
+// offsets change per draw). Float constants are packed to what the shader uses, at most 256 registers; the ring
+// has this much slack past kRingSize so a range starting near its end stays inside the buffer.
+constexpr VkDeviceSize kFloatConstantsRange = 256 * 16;
+constexpr VkDeviceSize kRingSlack = kFloatConstantsRange;
+// By Translator::ConstantBuffer: system, float vertex, float pixel, bool/loop, fetch (as IssueDraw uploads them).
+constexpr VkDeviceSize kConstantRanges[Translator::kConstantBufferCount] = {
+    sizeof(Translator::SystemConstants), kFloatConstantsRange, kFloatConstantsRange, 4 * (8 + 32), 4 * 6 * 32};
 constexpr VkShaderStageFlags kStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
 VkBlendFactor BlendFactor(xe::BlendFactor f) {
@@ -151,6 +159,7 @@ bool Renderer::InitDrawing() {
   uint32_t workers = std::clamp(std::thread::hardware_concurrency() / 3, 1u, 4u);
   if (const char* v = std::getenv("BOTS_GFX_PIPELINE_THREADS"); v && *v) workers = uint32_t(std::atoi(v));
   async_pipelines_ = workers != 0;
+  draw_profile_ = std::getenv("BOTS_DRAW_PROFILE") && *std::getenv("BOTS_DRAW_PROFILE") == '1';
   shaders_ = std::make_unique<ShaderCache>(device_, workers);
   shared_memory_bindings_ = 1u << Translator::GetSharedMemoryStorageBufferCountLog2(props.maxStorageBufferRange);
 
@@ -163,7 +172,7 @@ bool Renderer::InitDrawing() {
   if (vk_.vkCreateDescriptorSetLayout(dev, &layout_info, nullptr, &set_layout_shared_) != VK_SUCCESS) return false;
   VkDescriptorSetLayoutBinding constants[Translator::kConstantBufferCount];
   for (uint32_t i = 0; i < Translator::kConstantBufferCount; ++i) {
-    constants[i] = {i, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, kStages, nullptr};
+    constants[i] = {i, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, kStages, nullptr};
   }
   layout_info.bindingCount = Translator::kConstantBufferCount;
   layout_info.pBindings = constants;
@@ -171,18 +180,19 @@ bool Renderer::InitDrawing() {
     return false;
   }
 
-  const VkDescriptorPoolSize persistent_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, shared_memory_bindings_};
-  VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, 1, 1,
-                                       &persistent_size};
+  const VkDescriptorPoolSize persistent_sizes[] = {
+      {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, shared_memory_bindings_},
+      {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kSubmissions * Translator::kConstantBufferCount}};
+  VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, 1 + kSubmissions, 2,
+                                       persistent_sizes};
   if (vk_.vkCreateDescriptorPool(dev, &pool_info, nullptr, &persistent_pool_) != VK_SUCCESS) return false;
   const VkDescriptorPoolSize transient_sizes[] = {
-      {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kTransientSetCount * Translator::kConstantBufferCount},
       {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kTransientSetCount * 8},
       {VK_DESCRIPTOR_TYPE_SAMPLER, kTransientSetCount * 8},
       {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kTransientSetCount},
   };
   pool_info.maxSets = kTransientSetCount;
-  pool_info.poolSizeCount = 4;
+  pool_info.poolSizeCount = uint32_t(std::size(transient_sizes));
   pool_info.pPoolSizes = transient_sizes;
   for (Submission& submission : submissions_) {
     if (vk_.vkCreateDescriptorPool(dev, &pool_info, nullptr, &submission.transient_pool) != VK_SUCCESS) return false;
@@ -195,13 +205,26 @@ bool Renderer::InitDrawing() {
   bool buffers = CreateBuffer(shared_memory_, kSharedMemorySize,
                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
   for (Buffer& ring : rings_) {
-    buffers = buffers && CreateBuffer(ring, kRingSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
-                                                           VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-                                                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    buffers = buffers && CreateBuffer(ring, kRingSize + kRingSlack, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+                                                                        VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                                                                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    ring.size = kRingSize;  // what Upload hands out; the slack is only ever read past
   }
   if (!buffers) {
     std::fprintf(stderr, "native renderer: buffer allocation failed\n");
     return false;
+  }
+  // One constants set per ring.
+  for (uint32_t i = 0; i < kSubmissions; ++i) {
+    const VkDescriptorSetAllocateInfo constants_alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr,
+                                                      persistent_pool_, 1, &set_layout_constants_};
+    if (vk_.vkAllocateDescriptorSets(dev, &constants_alloc, &constant_sets_[i]) != VK_SUCCESS) return false;
+    VkDescriptorBufferInfo ranges[Translator::kConstantBufferCount];
+    for (uint32_t b = 0; b < Translator::kConstantBufferCount; ++b) ranges[b] = {rings_[i].buffer, 0, kConstantRanges[b]};
+    const VkWriteDescriptorSet constants_write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, constant_sets_[i], 0, 0,
+                                               Translator::kConstantBufferCount,
+                                               VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, nullptr, ranges, nullptr};
+    vk_.vkUpdateDescriptorSets(dev, 1, &constants_write, 0, nullptr);
   }
   UseSubmission(current_);  // picks up the ring and transient pool just created
   std::vector<VkDescriptorBufferInfo> ranges(shared_memory_bindings_);
@@ -457,6 +480,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     ++stats_.skipped_draws;
     return;
   }
+  DrawProfile profile(draw_profile_ ? stats_.draw_phase_ns : nullptr);
   ProcessInvalidations();
   if (!shared_memory_uploaded_ && !tracker_) {
     if (!UploadSharedMemory()) {
@@ -586,6 +610,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
             ? DepthStencilMode::kEarlyHint
             : DepthStencilMode::kNoModifiers;
   }
+  profile.Mark(kPhaseShaders);
   // Shaders are translated and pipelines created on worker threads; a draw whose aren't ready yet is skipped (a new
   // effect shows up a few frames late instead of stalling the frame). Rectangle lists - XDK clears and screen-space
   // passes, few and cheap - wait instead, as does everything when not live (replay, shadow: exact frames).
@@ -602,6 +627,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     return;
   }
 
+  profile.Mark(kPhaseTracker);
   // Tracked memory: what the shaders read from shared memory - vertex buffers, and the DMA indices rectangle-list
   // vertex shaders load themselves. (Other indices are read on the CPU below.)
   if (tracker_) {
@@ -617,6 +643,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     }
   }
 
+  profile.Mark(kPhaseTextures);
   // Textures. Loading one may record an upload (and flush), so this comes before the ring reservation.
   static const std::vector<rg::SpirvShader::TextureBinding> kNoTextures;
   static const std::vector<rg::SpirvShader::SamplerBinding> kNoSamplers;
@@ -688,6 +715,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   };
   const std::vector<VkImageView> vviews = texture_views(vtextures), pviews = texture_views(ptextures);
 
+  profile.Mark(kPhaseRing);
   // Room for this draw's uploads and descriptor sets: flush first rather than mid-draw.
   BeginCommands(kGpuDraw);
   const VkDeviceSize upload_need = 64 * 1024 + VkDeviceSize(count) * 12;
@@ -700,6 +728,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     BeginCommands(kGpuDraw);
   }
 
+  profile.Mark(kPhaseTargets);
   // Render targets.
   const uint32_t color_mask = du::GetNormalizedColorMask(regs, pshader ? pshader->writes_color_targets() : 0);
   Attachments attachments;
@@ -719,6 +748,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     return;
   }
 
+  profile.Mark(kPhaseIndices);
   // Indices: the host index buffer holds guest vertex indices, already byte-swapped.
   bool indexed = false, restart = false;
   uint32_t host_count = count;
@@ -820,6 +850,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   }
   if (!host_count) return;
 
+  profile.Mark(kPhaseConstants);
   // System constants (VulkanCommandProcessor::UpdateSystemConstantValues, host render targets).
   // Host depth holds the guest value for both depth formats (not float24 halved into [0, 1)): clears, resolves
   // and transfers read and write it as such.
@@ -891,11 +922,11 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
 
   // Constant buffers (VulkanCommandProcessor::UpdateBindings): float constants packed in use order.
   const VkDeviceSize ubo_align = props.minUniformBufferOffsetAlignment;
-  VkDescriptorBufferInfo buffers[Translator::kConstantBufferCount];
+  uint32_t constant_offsets[Translator::kConstantBufferCount];
   auto put = [&](uint32_t index, const void* data, VkDeviceSize size) {
     VkDeviceSize offset;
     std::memcpy(Upload(size, ubo_align, offset), data, size);
-    buffers[index] = {ring_.buffer, offset, size};
+    constant_offsets[index] = uint32_t(offset);
   };
   auto put_floats = [&](uint32_t index, const ShaderCache::Shader* shader, uint32_t first_register) {
     const uint32_t n = shader ? shader->constant_register_map().float_count : 0;
@@ -909,7 +940,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
         p += 16;
       }
     }
-    buffers[index] = {ring_.buffer, offset, size};
+    constant_offsets[index] = uint32_t(offset);
   };
   put(Translator::kConstantBufferSystem, &sc, sizeof(sc));
   put_floats(Translator::kConstantBufferFloatVertex, vshader, rg::XE_GPU_REG_SHADER_CONSTANT_000_X);
@@ -917,6 +948,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   put(Translator::kConstantBufferBoolLoop, &regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031], 4 * (8 + 32));
   put(Translator::kConstantBufferFetch, &regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0], 4 * 6 * 32);
 
+  profile.Mark(kPhaseDescriptors);
   // Descriptor sets.
   const PipelineLayout* layout = GetPipelineLayout({uint32_t(vtextures.size()), uint32_t(vsamplers.size()),
                                                     uint32_t(ptextures.size()), uint32_t(psamplers.size())});
@@ -924,21 +956,36 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     ++stats_.skipped_draws;
     return;
   }
-  VkDescriptorSet sets[4] = {shared_set_, AllocateSet(set_layout_constants_), VK_NULL_HANDLE, VK_NULL_HANDLE};
+  VkDescriptorSet sets[4] = {shared_set_, constant_set_, VK_NULL_HANDLE, VK_NULL_HANDLE};
   std::vector<VkWriteDescriptorSet> writes;
   std::vector<VkDescriptorImageInfo> images;
   images.reserve(vtextures.size() + vsamplers.size() + ptextures.size() + psamplers.size());
-  writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, sets[1], 0, 0, Translator::kConstantBufferCount,
-                    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, buffers, nullptr});
+  // Texture sets are reused within a submission when a draw binds exactly what an earlier one did (consecutive draws
+  // of a material mostly do). Views and samplers outlive the submission (Retire), so a handle can't be reused in it.
   auto texture_set = [&](VkDescriptorSet& set, VkDescriptorSetLayout set_layout, const std::vector<VkImageView>& views,
                          const std::vector<rg::SpirvShader::SamplerBinding>& samplers) {
     if (views.empty() && samplers.empty()) return;
-    set = AllocateSet(set_layout);
     const size_t first = images.size();
     for (VkImageView view : views) images.push_back({VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL});
     for (const auto& binding : samplers) {
       images.push_back(
           {GetSampler(regs.GetTextureFetch(binding.fetch_constant), binding), VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL});
+    }
+    set_key_.assign(reinterpret_cast<const char*>(&set_layout), sizeof(set_layout));
+    for (size_t i = first; i < images.size(); ++i) {
+      const uint64_t handle = images[i].imageView ? uint64_t(images[i].imageView) : uint64_t(images[i].sampler);
+      set_key_.append(reinterpret_cast<const char*>(&handle), sizeof(handle));
+    }
+    auto [cached, added] = texture_sets_.try_emplace(set_key_, VK_NULL_HANDLE);
+    if (!added) {
+      set = cached->second;
+      images.resize(first);
+      return;
+    }
+    set = cached->second = AllocateSet(set_layout);
+    if (!set) {
+      texture_sets_.erase(cached);
+      return;
     }
     if (!views.empty()) {
       writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 0, 0, uint32_t(views.size()),
@@ -952,13 +999,14 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   };
   texture_set(sets[2], layout->textures_vertex, vviews, vsamplers);
   texture_set(sets[3], layout->textures_pixel, pviews, psamplers);
-  if (!sets[1] || (sets[2] == VK_NULL_HANDLE && !(vtextures.empty() && vsamplers.empty())) ||
+  if ((sets[2] == VK_NULL_HANDLE && !(vtextures.empty() && vsamplers.empty())) ||
       (sets[3] == VK_NULL_HANDLE && !(ptextures.empty() && psamplers.empty()))) {
     ++stats_.skipped_draws;
     return;
   }
-  vk_.vkUpdateDescriptorSets(device_->device(), uint32_t(writes.size()), writes.data(), 0, nullptr);
+  if (!writes.empty()) vk_.vkUpdateDescriptorSets(device_->device(), uint32_t(writes.size()), writes.data(), 0, nullptr);
 
+  profile.Mark(kPhasePipeline);
   // Pipeline (VulkanPipelineCache::GetCurrentStateDescription + EnsurePipelineCreated, simplified).
   PipelineKey key;
   std::memset(&key, 0, sizeof(key));
@@ -1029,6 +1077,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   const bool bounded = viewport.xy_extent[0] && viewport.xy_extent[1] &&
                        viewport.xy_offset[0] + viewport.xy_extent[0] <= width &&
                        viewport.xy_offset[1] + viewport.xy_extent[1] <= height;
+  profile.Mark(kPhasePass);
   // Render pass: kept open across draws to the same targets, and reopened when a draw samples something written
   // since the last barrier (reopening the same attachments then always barriers: they count as written). An
   // attachment sampled by its own pass is left as the guest had it.
@@ -1082,13 +1131,15 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     vk_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     bound_pipeline_ = pipeline;
   }
-  vk_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout->layout, 0, 2, sets, 0, nullptr);
+  vk_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout->layout, 0, 2, sets,
+                              Translator::kConstantBufferCount, constant_offsets);
   for (uint32_t i = 2; i < 4; ++i) {
     if (sets[i]) {
       vk_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout->layout, i, 1, &sets[i], 0, nullptr);
     }
   }
 
+  profile.Mark(kPhaseRecord);
   // Dynamic state (VulkanCommandProcessor::UpdateDynamicState).
   VkViewport vp{-1.0f, -1.0f, 1.0f, 1.0f, viewport.z_min, viewport.z_max};
   if (viewport.xy_extent[0] && viewport.xy_extent[1]) {

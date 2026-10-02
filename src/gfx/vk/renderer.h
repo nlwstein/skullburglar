@@ -94,6 +94,7 @@ class Renderer : public Pm4Sink {
     uint64_t uploaded_bytes = 0, invalidations = 0, texture_reloads = 0, texture_evictions = 0;  // live
     uint64_t presents = 0, barriers = 0;  // native
     uint64_t pending_draws = 0;  // live: skipped while their shaders or pipeline were still being made
+    uint64_t draw_phase_ns[12] = {};  // BOTS_DRAW_PROFILE=1: IssueDraw's time by phase (kDrawPhaseNames)
     // Profiling (P5): submits, and microseconds blocked on the GPU fence, inside OnDraw (recording, including
     // texture loads and any flush it triggers) and inside LoadTexture (untile + upload).
     uint64_t flushes = 0, wait_us = 0, draw_us = 0, texture_us = 0;
@@ -202,6 +203,14 @@ class Renderer : public Pm4Sink {
   // GPU timing (BOTS_GPU_TIMING=1): a timestamp whenever the kind of work being recorded changes; each span is
   // added to stats_.gpu_ns[kind] once its submission completes. BeginCommands marks its caller's kind.
  public:
+  enum DrawPhase : uint8_t {
+    kPhaseSetup, kPhaseShaders, kPhaseTracker, kPhaseTextures, kPhaseRing, kPhaseTargets, kPhaseIndices,
+    kPhaseConstants, kPhaseDescriptors, kPhasePipeline, kPhasePass, kPhaseRecord
+  };
+  static constexpr const char* kDrawPhaseNames[] = {"setup", "shaders", "tracker", "textures", "ring", "targets",
+                                                    "indices", "constants", "descriptors", "pipeline", "pass",
+                                                    "record"};
+  bool draw_profile() const { return draw_profile_; }
   enum GpuCat : uint8_t { kGpuDraw, kGpuResolve, kGpuUpload, kGpuTexture, kGpuTransfer, kGpuPresent, kGpuOther };
   static constexpr const char* kGpuCatNames[] = {"draw", "resolve", "upload", "texture", "transfer", "present",
                                                  "other"};
@@ -226,6 +235,23 @@ class Renderer : public Pm4Sink {
   VkFormat PassDepthFormat(VkFormat depth) const { return depth || !dummy_depth_ ? depth : VK_FORMAT_D32_SFLOAT_S8_UINT; }
 
   // Draws (draw.cpp).
+  // Adds the time since the last Mark to the current phase's total, then moves on to `next` (no-op without totals).
+  struct DrawProfile {
+    uint64_t* totals;
+    uint8_t phase = kPhaseSetup;
+    std::chrono::steady_clock::time_point last;
+    explicit DrawProfile(uint64_t* totals) : totals(totals) {
+      if (totals) last = std::chrono::steady_clock::now();
+    }
+    void Mark(uint8_t next) {
+      if (!totals) return;
+      const auto now = std::chrono::steady_clock::now();
+      totals[phase] += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - last).count());
+      last = now, phase = next;
+    }
+    ~DrawProfile() { Mark(phase); }
+  };
+  bool draw_profile_ = false;
   bool InitDrawing();
   void DestroyDrawing();
   bool UploadSharedMemory();
@@ -347,6 +373,11 @@ class Renderer : public Pm4Sink {
   VkPipeline bound_pipeline_ = VK_NULL_HANDLE;
   VkDescriptorPool persistent_pool_ = VK_NULL_HANDLE, transient_pool_ = VK_NULL_HANDLE;
   VkDescriptorSet shared_set_ = VK_NULL_HANDLE;
+  std::array<VkDescriptorSet, kSubmissions> constant_sets_{};  // per ring (draw.cpp)
+  VkDescriptorSet constant_set_ = VK_NULL_HANDLE;              // the current ring's
+  // This submission's texture sets by layout + bound handles (draw.cpp); cleared with its transient pool.
+  std::unordered_map<std::string, VkDescriptorSet> texture_sets_;
+  std::string set_key_;
   VkSampler sampler_ = VK_NULL_HANDLE;
   Image null_2d_array_, null_3d_, null_cube_;
   Attachments open_pass_;

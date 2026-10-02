@@ -82,6 +82,14 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
             double(st.draws - last_.draws) / n, double(st.resolves - last_.resolves) / n,
             double(st.render_passes - last_.render_passes) / n, double(st.transfers - last_.transfers) / n,
             double(st.barriers - last_.barriers) / n, double(st.pending_draws - last_.pending_draws) / n);
+        if (renderer_->draw_profile()) {
+          std::string phases;
+          for (size_t i = 0; i < std::size(st.draw_phase_ns); ++i) {
+            phases += fmt::format(" {} {:.2f},", vk::Renderer::kDrawPhaseNames[i],
+                                  double(st.draw_phase_ns[i] - last_.draw_phase_ns[i]) / 1e6 / n);
+          }
+          REXLOG_INFO("gfx native: draw CPU ms per frame:{}", phases);
+        }
         if (renderer_->gpu_timing()) {
           std::string gpu;
           double total = 0;
@@ -99,6 +107,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
       last_.pending_draws = st.pending_draws;
       renderer_->SavePipelineCache();  // runs are often killed rather than shut down
       std::copy(std::begin(st.gpu_ns), std::end(st.gpu_ns), last_.gpu_ns);
+      std::copy(std::begin(st.draw_phase_ns), std::end(st.draw_phase_ns), last_.draw_phase_ns);
       REXLOG_INFO(
           "gfx native: frame {}: {} draws, {} resolves, {} presents, {} failed shaders, {} unsupported prims, "
           "{} unsupported textures, {:.1f} MB uploaded, {} invalidations, {} texture reloads, {} evictions, {} indirect draws skipped (totals)",
@@ -199,7 +208,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     uint64_t frames = 0;
     std::chrono::steady_clock::time_point time;
     uint64_t draw_us = 0, texture_us = 0, wait_us = 0, flushes = 0, draws = 0, resolves = 0;
-    uint64_t render_passes = 0, transfers = 0, barriers = 0, pending_draws = 0, gpu_ns[7] = {};
+    uint64_t render_passes = 0, transfers = 0, barriers = 0, pending_draws = 0, gpu_ns[7] = {}, draw_phase_ns[12] = {};
   } last_;
   uint32_t indirect_depth_ = 0;
 };
