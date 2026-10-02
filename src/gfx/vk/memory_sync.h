@@ -4,9 +4,15 @@
 // write-protected through the guest memory's physical access callbacks; a CPU write drops the protection, marks
 // the pages invalid (re-uploaded on their next request) and fires the watches. This subclass records the
 // uploads into the renderer's command stream and queues the invalidated ranges for its texture caches.
+//
+// RequestRange takes the global critical region, which the game's threads take constantly; with ~1500 draws a frame
+// the command processor spent a quarter of its time waiting for it. So Request first checks a lock-free copy of the
+// valid-page bits and only goes to the SDK when a page in the range may be invalid.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -22,7 +28,7 @@ class MemorySync final : public rex::graphics::SharedMemory, public GuestMemoryT
   MemorySync(rex::memory::Memory& memory, Renderer& renderer);
   ~MemorySync() override;
 
-  bool Request(uint32_t start, uint32_t length) override { return RequestRange(start, length); }
+  bool Request(uint32_t start, uint32_t length) override;
   void TakeInvalidated(std::vector<std::pair<uint32_t, uint32_t>>& ranges) override;
 
  protected:
@@ -37,6 +43,10 @@ class MemorySync final : public rex::graphics::SharedMemory, public GuestMemoryT
   GlobalWatchHandle watch_ = nullptr;
   std::mutex mutex_;
   std::vector<std::pair<uint32_t, uint32_t>> invalidated_;
+  // A page's bit is set before the SDK makes it valid and cleared whenever it is invalidated (OnInvalidated sees
+  // every invalidation), so a set bit can be stale-cleared but never stale-set.
+  std::unique_ptr<std::atomic<uint64_t>[]> valid_;
+  void SetValidBits(uint32_t page_first, uint32_t page_last, bool valid);
 };
 
 }  // namespace bots::gfx::vk
