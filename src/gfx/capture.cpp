@@ -81,7 +81,8 @@ struct Capture {
   std::string dir;
   std::chrono::steady_clock::time_point first_swap{};
   bool seen_swap = false;
-  bool write_files = false;  // this recording is a capture (else only a shadow sample)
+  bool write_files = false;  // this recording is a capture
+  bool shadow_sample = false;  // ... a frame to compare natively (else, in live shadow mode, just rendered)
   double next_shadow = 0;    // seconds
   uint64_t frame = 0;
   std::vector<CallRecord> calls;
@@ -309,7 +310,7 @@ void StartRecording(Capture& c) {
 bool CaptureConfigured() {
   static const bool on = [] {
     const char* v = std::getenv("BOTS_GFX_CAPTURE");
-    return (v && *v) || ShadowInterval() > 0;
+    return (v && *v) || ShadowInterval() > 0 || ShadowLive();
   }();
   return on;
 }
@@ -354,9 +355,10 @@ int64_t CapturePre(uint32_t entry, PPCContext& ctx) {
         c.frame, c.device_ptr, kDeviceBytes, LoadBE32(kFrontBufferGlobal), c.calls.size(), sizeof(CallRecord),
         mem_bytes, c.pm4.size(), c.pm4_lost);
   }
-  if (ShadowInterval() > 0) ShadowRender(c.frame, c.pm4);
+  if (ShadowInterval() > 0 || ShadowLive()) ShadowRender(c.frame, c.pm4, c.shadow_sample);
   c.state = State::kIdle;
-  return -2;  // CapturePost takes the reference image once the original Swap has run
+  // CapturePost takes the reference image once the original Swap has run.
+  return c.write_files || c.shadow_sample ? -2 : -1;
 }
 
 void CapturePost(uint32_t entry, int64_t token, PPCContext& ctx) {
@@ -388,8 +390,9 @@ void CapturePost(uint32_t entry, int64_t token, PPCContext& ctx) {
       const bool shadow = interval > 0 && t >= c.next_shadow;
       if (capture) c.times.erase(c.times.begin());
       if (shadow) c.next_shadow = t + interval;
-      if (capture || shadow) {
+      if (capture || shadow || ShadowLive()) {
         c.write_files = capture;
+        c.shadow_sample = shadow;
         StartRecording(c);
       }
     }

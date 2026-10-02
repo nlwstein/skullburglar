@@ -16,6 +16,7 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include <rex/ui/vulkan/mem_alloc.h>
@@ -25,6 +26,19 @@
 #include "vk_api.h"
 
 namespace bots::gfx::vk {
+
+// Keeps the renderer's GPU copy of guest physical memory current while the game runs (memory_sync.h). Without
+// one the first draw uploads all of physical memory once, which is right for a frame from a fixed snapshot
+// (bots-replay, shadow samples) and nothing else.
+class GuestMemoryTracker {
+ public:
+  virtual ~GuestMemoryTracker() = default;
+  // Makes [start, start + length) current in the shared-memory buffer: re-uploads (UploadGuestMemory) the pages
+  // the CPU wrote since they were last requested, and watches them for the next write.
+  virtual bool Request(uint32_t start, uint32_t length) = 0;
+  // Physical ranges [first, last] the CPU wrote since the last call (for the renderer's caches).
+  virtual void TakeInvalidated(std::vector<std::pair<uint32_t, uint32_t>>& ranges) = 0;
+};
 
 class Renderer : public Pm4Sink {
  public:
@@ -42,6 +56,17 @@ class Renderer : public Pm4Sink {
   // Forgets everything taken from guest memory or rendered (surfaces, textures, the shared-memory copy, stats);
   // keeps shaders, pipelines and samplers. In-process shadow mode renders each sampled frame from scratch.
   void ResetFrame();
+  // Live: guest memory changes under the renderer. Set before the first draw.
+  void SetMemoryTracker(GuestMemoryTracker* tracker) { tracker_ = tracker; }
+  // For the tracker: records a copy of guest physical [start, start + length) into the shared-memory buffer.
+  bool UploadGuestMemory(uint32_t start, uint32_t length);
+  // Live: after each guest frame's Flush. Evicts guest textures no draw used for a while.
+  void EndFrame();
+  // Native present: the front buffer resolved to `address` (else the latest resolve), through the 256-entry
+  // gamma ramp (10:10:10 per entry, red highest), into `target`: the presenter's guest output image
+  // (A2B10G10R10), left in SHADER_READ_ONLY_OPTIMAL as the presenter expects. Submits and waits.
+  bool Present(uint32_t address, VkImage target, VkImageView target_view, uint32_t width, uint32_t height,
+               const uint32_t* gamma_ramp);
 
   // Guest address of the last resolve destination (the frame ends with a resolve into the front buffer).
   uint32_t last_resolve_address() const { return last_resolve_address_; }
@@ -52,6 +77,8 @@ class Renderer : public Pm4Sink {
     uint64_t draws = 0, resolves = 0, clears = 0, skipped_draws = 0, dropped_resolves = 0, msaa_resolves = 0;
     uint64_t render_passes = 0, pipelines = 0, failed_shaders = 0, unsupported_primitives = 0;
     uint64_t textures = 0, unsupported_textures = 0, transfers = 0;
+    uint64_t uploaded_bytes = 0, invalidations = 0, texture_reloads = 0, texture_evictions = 0;  // live
+    uint64_t presents = 0;  // native
   };
   const Stats& stats() const { return stats_; }
 
@@ -89,6 +116,10 @@ class Renderer : public Pm4Sink {
   struct GuestTexture {
     Image image;
     uint32_t host_format_swizzle = 0;
+    // Guest physical memory it was loaded from: [start, end) of the base level and of the mips.
+    std::array<std::pair<uint32_t, uint32_t>, 2> ranges{};
+    bool dirty = false;  // the CPU wrote that memory since (tracked memory)
+    uint64_t last_used = 0;  // frame_
   };
   using TextureCacheKey = std::array<uint32_t, 5>;
   // Filters (mag, min, mip), clamp modes (x, y, z), border colour, mip range, anisotropy.
@@ -101,6 +132,10 @@ class Renderer : public Pm4Sink {
   };
 
   void DestroyImage(Image& image);
+  // Images still referenced by recorded commands: destroyed after the next Flush.
+  void Retire(Image& image);
+  // Applies the tracker's invalidated ranges to the texture caches.
+  void ProcessInvalidations();
   void DestroyFrameState();
   Image* Surface(const rex::graphics::RegisterFile& regs, bool depth, uint32_t color_index);
   // Host pixels per guest pixel of the current surface (its MSAA sample grid).
@@ -143,6 +178,9 @@ class Renderer : public Pm4Sink {
   void DestroyTransfers();
   VkShaderModule CreateShaderModule(int stage, const std::string& source);
   VkPipeline TransferPipeline(uint32_t source_format, uint32_t dest_format, VkFormat host_format);
+  // A full-screen triangle (transfer_vs_) into one colour attachment, dynamic viewport and scissor.
+  VkPipeline FullscreenPipeline(VkShaderModule fs, VkFormat format, VkPipelineLayout layout);
+  bool InitPresent();
   void Transfer(Image& source, uint32_t source_format, Image& dest, uint32_t dest_format,
                 const VkRect2D* rect = nullptr, float scale = 1.0f);
 
@@ -165,6 +203,10 @@ class Renderer : public Pm4Sink {
 
   const rex::ui::vulkan::VulkanDevice* device_;
   PhysicalMemory memory_;
+  GuestMemoryTracker* tracker_ = nullptr;
+  std::vector<Image> retired_;
+  uint64_t frame_ = 0;
+  std::vector<std::pair<uint32_t, uint32_t>> invalidated_;
   Api vk_;
   bool ok_ = false;
   VmaAllocator allocator_ = nullptr;
@@ -210,6 +252,9 @@ class Renderer : public Pm4Sink {
   VkShaderModule transfer_vs_ = VK_NULL_HANDLE;
   std::vector<VkShaderModule> transfer_modules_;
   std::map<std::tuple<uint32_t, uint32_t, VkFormat>, VkPipeline> transfer_pipelines_;
+  VkDescriptorSetLayout present_set_layout_ = VK_NULL_HANDLE;
+  VkPipelineLayout present_layout_ = VK_NULL_HANDLE;
+  VkPipeline present_pipeline_ = VK_NULL_HANDLE;
 };
 
 }  // namespace bots::gfx::vk

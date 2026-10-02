@@ -2,8 +2,8 @@
 //
 // 1D, 2D, stacked, cube and 3D textures with all their mip levels; formats without a host equivalent bind the
 // null image. Resolve destinations (render-to-texture) are sampled from their host images instead.
-// Textures are cached by the fetch constant fields that describe their memory, and never invalidated: fine for
-// replays (static memory), not for the game (P3 needs write tracking).
+// Textures are cached by the fetch constant fields that describe their memory. With a memory tracker (live) the
+// memory they came from is watched, and a texture the CPU wrote over is reloaded on its next use.
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -141,7 +141,6 @@ VkFormat Renderer::SignTwin(VkFormat format, bool* is_signed) {
 
 VkImageView Renderer::TextureView(const rg::xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed,
                                   uint32_t& host_swizzle) {
-  // The fields that describe the memory: pitch/tiled, format/endian/stacked/address, size, dimension/packing.
   // The fields that describe the memory: pitch/tiled, format/endian/stacked/address, size, mip range,
   // dimension/packing/mip address.
   const TextureCacheKey key{fetch.dword_0 & 0xFFC00000u, fetch.dword_1, fetch.dword_2, (fetch.dword_4 >> 2) & 0xFFu,
@@ -150,8 +149,14 @@ VkImageView Renderer::TextureView(const rg::xenos::xe_gpu_texture_fetch_t& fetch
   if (!slot) {
     slot = std::make_unique<GuestTexture>();
     LoadTexture(fetch, *slot);
+  } else if (slot->dirty) {
+    Retire(slot->image);  // earlier draws of this submission still sample the old contents
+    *slot = GuestTexture{};
+    LoadTexture(fetch, *slot);
+    ++stats_.texture_reloads;
   }
   GuestTexture& texture = *slot;
+  texture.last_used = frame_;
   if (!texture.image.image) return VK_NULL_HANDLE;
   host_swizzle = HostSwizzle(fetch.swizzle, texture.host_format_swizzle);
   return SwizzledView(texture.image, host_swizzle, is_signed);
@@ -269,6 +274,15 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
     return;
   }
   texture.host_format_swizzle = host.swizzle;
+  if (base_page) texture.ranges[0] = {base_page << 12, (base_page << 12) + layout.base.level_data_extent_bytes};
+  if (mip_page && mip_max) texture.ranges[1] = {mip_page << 12, (mip_page << 12) + layout.mips_total_extent_bytes};
+  if (tracker_) {
+    // Requesting the pages is what puts a write watch on them (and keeps the shared-memory copy right where a
+    // page is shared with a buffer).
+    for (const auto& [start, end] : texture.ranges) {
+      if (end > start) tracker_->Request(start, end - start);
+    }
+  }
 
   // Levels below mip_min stay undefined: the sampler's LOD range never reaches them.
   for (uint32_t level = mip_min; level <= mip_max; ++level) {

@@ -193,6 +193,9 @@ void Renderer::DestroyTransfers() {
   for (auto& [k, pipeline] : transfer_pipelines_) vk_.vkDestroyPipeline(dev, pipeline, nullptr);
   for (VkShaderModule module : transfer_modules_) vk_.vkDestroyShaderModule(dev, module, nullptr);
   if (transfer_layout_) vk_.vkDestroyPipelineLayout(dev, transfer_layout_, nullptr);
+  if (present_pipeline_) vk_.vkDestroyPipeline(dev, present_pipeline_, nullptr);
+  if (present_layout_) vk_.vkDestroyPipelineLayout(dev, present_layout_, nullptr);
+  if (present_set_layout_) vk_.vkDestroyDescriptorSetLayout(dev, present_set_layout_, nullptr);
   if (transfer_set_layout_) vk_.vkDestroyDescriptorSetLayout(dev, transfer_set_layout_, nullptr);
 }
 
@@ -202,7 +205,11 @@ VkPipeline Renderer::TransferPipeline(uint32_t source_format, uint32_t dest_form
   const std::string source = "#version 450\n#define SRC " + std::to_string(source_format) + "\n#define DST " +
                              std::to_string(dest_format) + "\n" + kFragmentShader;
   const VkShaderModule fs = CreateShaderModule(EShLangFragment, source);
-  if (!fs) return VK_NULL_HANDLE;
+  if (fs) pipeline = FullscreenPipeline(fs, host_format, transfer_layout_);
+  return pipeline;
+}
+
+VkPipeline Renderer::FullscreenPipeline(VkShaderModule fs, VkFormat format, VkPipelineLayout layout) {
   const VkPipelineShaderStageCreateInfo stages[2] = {
       {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, transfer_vs_,
        "main", nullptr},
@@ -230,7 +237,7 @@ VkPipeline Renderer::TransferPipeline(uint32_t source_format, uint32_t dest_form
   dynamic.pDynamicStates = dynamic_states;
   VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
   rendering.colorAttachmentCount = 1;
-  rendering.pColorAttachmentFormats = &host_format;
+  rendering.pColorAttachmentFormats = &format;
   VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &rendering};
   info.stageCount = 2;
   info.pStages = stages;
@@ -242,9 +249,10 @@ VkPipeline Renderer::TransferPipeline(uint32_t source_format, uint32_t dest_form
   info.pDepthStencilState = &depth;
   info.pColorBlendState = &blend;
   info.pDynamicState = &dynamic;
-  info.layout = transfer_layout_;
+  info.layout = layout;
+  VkPipeline pipeline = VK_NULL_HANDLE;
   if (vk_.vkCreateGraphicsPipelines(device_->device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
-    pipeline = VK_NULL_HANDLE;
+    return VK_NULL_HANDLE;
   }
   return pipeline;
 }

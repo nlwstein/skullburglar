@@ -21,6 +21,7 @@ namespace bots::gfx::vk {
   X(vkCmdBlitImage)                  \
   X(vkCmdClearAttachments)           \
   X(vkCmdClearColorImage)            \
+  X(vkCmdCopyBuffer)                 \
   X(vkCmdCopyBufferToImage)          \
   X(vkCmdCopyImage)                  \
   X(vkCmdCopyImageToBuffer)          \

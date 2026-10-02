@@ -140,7 +140,8 @@ bool Renderer::InitDrawing() {
   if (vk_.vkAllocateDescriptorSets(dev, &alloc, &shared_set_) != VK_SUCCESS) return false;
 
   // Guest physical memory, as the translated shaders address it (vertex fetch, index loads).
-  if (!CreateBuffer(shared_memory_, kSharedMemorySize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) ||
+  if (!CreateBuffer(shared_memory_, kSharedMemorySize,
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT) ||
       !CreateBuffer(ring_, kRingSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
     std::fprintf(stderr, "native renderer: buffer allocation failed\n");
@@ -198,7 +199,7 @@ void Renderer::DestroyDrawing() {
   shaders_.reset();
 }
 
-// Replay: the capture's memory snapshot, once. (In-process, P3/P4 track guest writes instead.)
+// Snapshot (no tracker): all of physical memory, once. With a tracker, draws request what they read instead.
 bool Renderer::UploadSharedMemory() {
   const uint8_t* source = memory_(0);
   if (!source) return false;
@@ -280,7 +281,8 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     ++stats_.skipped_draws;
     return;
   }
-  if (!shared_memory_uploaded_) {
+  ProcessInvalidations();
+  if (!shared_memory_uploaded_ && !tracker_) {
     if (!UploadSharedMemory()) {
       ok_ = false;
       return;
@@ -413,6 +415,21 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   if (!vt || (pshader && !pt)) {
     ++stats_.failed_shaders;
     return;
+  }
+
+  // Tracked memory: what the shaders read from shared memory - vertex buffers, and the DMA indices rectangle-list
+  // vertex shaders load themselves. (Other indices are read on the CPU below.)
+  if (tracker_) {
+    const auto& vfetch_bitmap = vshader->constant_register_map().vertex_fetch_bitmap;
+    for (uint32_t i = 0; i < std::size(vfetch_bitmap); ++i) {
+      for (uint32_t bits = vfetch_bitmap[i]; bits; bits &= bits - 1) {
+        const auto fetch = regs.GetVertexFetch(i * 32 + std::countr_zero(bits));
+        if (fetch.type == xe::FetchConstantType::kVertex) tracker_->Request(fetch.address << 2, fetch.size << 2);
+      }
+    }
+    if (rect && source == xe::SourceSelect::kDMA) {
+      tracker_->Request(draw.index_base, draw.index_words * (index32 ? 4 : 2));
+    }
   }
 
   // Textures. Loading one may record an upload (and flush), so this comes before the ring reservation.

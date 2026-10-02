@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 
 #include <rex/graphics/registers.h>
 #include <rex/graphics/xenos.h>
@@ -168,6 +169,71 @@ void Renderer::DestroyImage(Image& image) {
   image = Image{};
 }
 
+void Renderer::Retire(Image& image) {
+  retired_.push_back(image);
+  image = Image{};
+}
+
+void Renderer::ProcessInvalidations() {
+  if (!tracker_) return;
+  invalidated_.clear();
+  tracker_->TakeInvalidated(invalidated_);
+  for (const auto& [first, last] : invalidated_) {
+    ++stats_.invalidations;
+    auto overlaps = [&](uint32_t start, uint32_t end) { return start < end && start <= last && end > first; };
+    for (auto& [key, texture] : guest_textures_) {
+      for (const auto& [start, end] : texture->ranges) texture->dirty |= overlaps(start, end);
+    }
+    // A resolve destination the CPU wrote over is no longer what a fetch of that address reads.
+    for (auto* map : {&texture_at_, &depth_texture_at_}) {
+      for (auto it = map->begin(); it != map->end();) {
+        const auto& image = *it->second;
+        const uint64_t bytes = uint64_t(image.width) * image.height * 4;  // close enough: pages, not texels
+        it = overlaps(it->first, uint32_t(std::min<uint64_t>(it->first + bytes, UINT32_MAX))) ? map->erase(it)
+                                                                                                : std::next(it);
+      }
+    }
+  }
+}
+
+void Renderer::EndFrame() {
+  constexpr uint64_t kUnusedFrames = 600;  // ~10 s at 60 fps
+  if (++frame_ % 64) return;
+  for (auto it = guest_textures_.begin(); it != guest_textures_.end();) {
+    if (frame_ - it->second->last_used > kUnusedFrames) {
+      Retire(it->second->image);
+      it = guest_textures_.erase(it);
+      ++stats_.texture_evictions;
+    } else {
+      ++it;
+    }
+  }
+}
+
+bool Renderer::UploadGuestMemory(uint32_t start, uint32_t length) {
+  BeginCommands();
+  EndRendering();
+  Barrier();
+  while (length) {
+    const uint32_t chunk = uint32_t(std::min<VkDeviceSize>(length, ring_.size / 4));
+    VkDeviceSize offset;
+    uint8_t* staging = Upload(chunk, 16, offset);
+    if (!staging) {
+      Flush();
+      BeginCommands();
+      staging = Upload(chunk, 16, offset);
+      if (!staging) return false;
+    }
+    std::memcpy(staging, memory_(start), chunk);
+    const VkBufferCopy region{offset, start, chunk};
+    vk_.vkCmdCopyBuffer(cmd_, ring_.buffer, shared_memory_.buffer, 1, &region);
+    stats_.uploaded_bytes += chunk;
+    start += chunk, length -= chunk;
+  }
+  Barrier();
+  return true;
+}
+
 void Renderer::DestroyFrameState() {
   for (auto& [k, image] : surfaces_) DestroyImage(*image);
   for (auto& [k, image] : textures_) DestroyImage(*image);
@@ -196,6 +262,7 @@ Renderer::~Renderer() {
   const VkDevice dev = device_->device();
   if (vk_.vkDeviceWaitIdle) vk_.vkDeviceWaitIdle(dev);
   DestroyFrameState();
+  for (Image& image : retired_) DestroyImage(image);
   for (Image* image : {&null_2d_array_, &null_3d_, &null_cube_}) DestroyImage(*image);
   for (auto& [k, sampler] : samplers_) vk_.vkDestroySampler(dev, sampler, nullptr);
   DestroyTransfers();
@@ -244,6 +311,8 @@ void Renderer::Flush() {
   }
   vk_.vkWaitForFences(device_->device(), 1, &fence_, VK_TRUE, UINT64_MAX);
   vk_.vkResetFences(device_->device(), 1, &fence_);
+  for (Image& image : retired_) DestroyImage(image);
+  retired_.clear();
   vk_.vkResetCommandPool(device_->device(), pool_, 0);
   vk_.vkResetDescriptorPool(device_->device(), transient_pool_, 0);
   ring_used_ = 0;

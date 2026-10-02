@@ -60,6 +60,7 @@ if(REXSDK_DIR AND NOT WIN32)
     set(BOTS_NATIVE_GFX_SOURCES
         src/gfx/pm4.cpp
         src/gfx/vk/draw.cpp
+        src/gfx/vk/present.cpp
         src/gfx/vk/renderer.cpp
         src/gfx/vk/shaders.cpp
         src/gfx/vk/texture.cpp
@@ -102,13 +103,36 @@ if(REXSDK_DIR AND NOT WIN32)
     # In the game: Linux first (the shadow-mode test host); macOS and Windows once it is proven there.
     option(BOTS_NATIVE_GFX "Build the native renderer into the game (shadow mode)" ${LINUX})
     if(BOTS_NATIVE_GFX)
-        target_sources(bots PRIVATE ${BOTS_NATIVE_GFX_SOURCES})
+        # Live guest memory (shadow live mode, then the cutover): the SDK's page tracking.
+        set(BOTS_NATIVE_GFX_GAME_SOURCES ${BOTS_NATIVE_GFX_SOURCES}
+            src/gfx/vk/memory_sync.cpp
+            ${REX_GRAPHICS_SRC}/shared_memory.cpp)
+        target_sources(bots PRIVATE ${BOTS_NATIVE_GFX_GAME_SOURCES})
         target_link_libraries(bots PRIVATE ${BOTS_NATIVE_GFX_LIBS})
         target_include_directories(bots PRIVATE ${REXSDK_DIR}/thirdparty/renderdoc)
         target_compile_definitions(bots PRIVATE BOTS_NATIVE_GFX=1)
         # The SDK sources are not written against the game's precompiled header.
-        set_source_files_properties(${BOTS_NATIVE_GFX_SOURCES} TARGET_DIRECTORY bots
+        set_source_files_properties(${BOTS_NATIVE_GFX_GAME_SOURCES} TARGET_DIRECTORY bots
             PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+
+        # Native mode (B-075): the renderer as a GPU plugin on the SDK's command processor, staged next to the game
+        # under the name the plugin loader expects (librexgpu-native[d|rd].so). REX_GPU_PLUGIN=native selects it.
+        add_library(rexgpu-native SHARED
+            src/gfx/native.cpp
+            src/gfx/vk/memory_sync.cpp
+            ${BOTS_NATIVE_GFX_SOURCES}
+            ${REX_GRAPHICS_SRC}/shared_memory.cpp
+            ${REX_GRAPHICS_SRC}/graphics_system.cpp
+            ${REX_GRAPHICS_SRC}/command_processor.cpp)
+        set_target_properties(rexgpu-native PROPERTIES
+            CXX_VISIBILITY_PRESET hidden
+            VISIBILITY_INLINES_HIDDEN ON
+            DEBUG_POSTFIX d
+            RELWITHDEBINFO_POSTFIX rd
+            LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+        target_include_directories(rexgpu-native PRIVATE src ${REXSDK_DIR}/thirdparty/renderdoc)
+        target_link_libraries(rexgpu-native PRIVATE rex::runtime ${BOTS_NATIVE_GFX_LIBS})
+        add_dependencies(bots rexgpu-native)
     endif()
 endif()
 
