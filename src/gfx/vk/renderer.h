@@ -218,6 +218,11 @@ class Renderer : public Pm4Sink {
   double timestamp_ns_ = 1.0;
   void BeginCommands(GpuCat cat = kGpuOther);
   void EndRendering();
+  // vkCmdBeginRendering; BOTS_TRACE_RENDERING=1 prints each one first (flushed: for driver crashes).
+  void BeginRendering(const VkRenderingInfo& info, const char* what);
+  VkImageView DummyDepth(uint32_t width, uint32_t height);  // at least this size
+  // Pipelines declare a depth format even without depth (see dummy_depth_).
+  VkFormat PassDepthFormat(VkFormat depth) const { return depth || !dummy_depth_ ? depth : VK_FORMAT_D32_SFLOAT_S8_UINT; }
 
   // Draws (draw.cpp).
   bool InitDrawing();
@@ -322,6 +327,8 @@ class Renderer : public Pm4Sink {
   std::map<LayoutKey, PipelineLayout> pipeline_layouts_;
   std::unordered_map<std::string, VkPipeline> pipelines_;
   VkPipelineCache pipeline_cache_ = VK_NULL_HANDLE;
+  bool dummy_depth_ = false;  // every pass gets a depth attachment (driver workaround, renderer.cpp)
+  std::vector<std::unique_ptr<Image>> dummy_depths_;
   std::filesystem::path pipeline_cache_path_;
   uint64_t pipelines_saved_ = 0;
   std::string last_pipeline_key_;

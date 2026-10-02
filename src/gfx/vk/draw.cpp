@@ -943,7 +943,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   VkPipelineRenderingCreateInfo rendering_info{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
   rendering_info.colorAttachmentCount = 4;
   rendering_info.pColorAttachmentFormats = key.color;
-  rendering_info.depthAttachmentFormat = rendering_info.stencilAttachmentFormat = key.depth;
+  rendering_info.depthAttachmentFormat = rendering_info.stencilAttachmentFormat = PassDepthFormat(key.depth);
   VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &rendering_info};
   info.stageCount = pt ? 2 : 1;
   info.pStages = stages;
@@ -1016,7 +1016,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     rendering.colorAttachmentCount = 4;
     rendering.pColorAttachments = colors;
     if (attachments.depth) rendering.pDepthAttachment = rendering.pStencilAttachment = &depth;
-    vk_.vkCmdBeginRendering(cmd_, &rendering);
+    BeginRendering(rendering, "pass");
     rendering_ = true;
     open_pass_ = attachments;
     if (gpu_timing_) {

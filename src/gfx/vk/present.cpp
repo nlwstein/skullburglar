@@ -110,7 +110,7 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
   rendering.layerCount = 1;
   rendering.colorAttachmentCount = 1;
   rendering.pColorAttachments = &color;
-  vk_.vkCmdBeginRendering(cmd_, &rendering);
+  BeginRendering(rendering, "present");
   vk_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, present_pipeline_);
   bound_pipeline_ = present_pipeline_;
   vk_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout_, 0, 1, &set, 0, nullptr);

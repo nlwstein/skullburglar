@@ -238,6 +238,7 @@ VkPipeline Renderer::FullscreenPipeline(VkShaderModule fs, VkFormat format, VkPi
   VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
   rendering.colorAttachmentCount = 1;
   rendering.pColorAttachmentFormats = &format;
+  rendering.depthAttachmentFormat = rendering.stencilAttachmentFormat = PassDepthFormat(VK_FORMAT_UNDEFINED);
   VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &rendering};
   info.stageCount = 2;
   info.pStages = stages;
@@ -296,7 +297,11 @@ void Renderer::Transfer(Image& source, uint32_t source_format, Image& dest, uint
   rendering.layerCount = 1;
   rendering.colorAttachmentCount = 1;
   rendering.pColorAttachments = &color;
-  vk_.vkCmdBeginRendering(cmd_, &rendering);
+  char what[96];
+  std::snprintf(what, sizeof(what), "%s %u->%u vkfmt %d->%d %ux%u->%ux%u", rect ? "resolve" : "transfer",
+                source_format, dest_format, int(source.format), int(dest.format), source.width, source.height,
+                dest.width, dest.height);
+  BeginRendering(rendering, what);
   if (gpu_timing_) {
     GpuLabel(rect ? kGpuResolve : kGpuTransfer,
              (rect ? "resolve " : "transfer ") + std::to_string(source_format) + "->" + std::to_string(dest_format) +

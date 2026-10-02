@@ -160,6 +160,11 @@ Renderer::Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory m
                                                submission.pool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
     if (vk_.vkAllocateCommandBuffers(device_->device(), &cmd_info, &submission.cmd) != VK_SUCCESS) return;
   }
+  // Intel's Windows driver (seen on Gen9, UHD 620, 31.0.101.2135) crashes in vkCmdBeginRendering when a pass
+  // without a depth attachment follows one with depth in the same command buffer. There every pass gets one: a
+  // scratch depth image that is never loaded or stored. BOTS_GFX_DUMMY_DEPTH=0/1 overrides.
+  dummy_depth_ = device_->properties().driverID == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS;
+  if (const char* v = std::getenv("BOTS_GFX_DUMMY_DEPTH"); v && *v) dummy_depth_ = *v == '1';
   const VkPipelineCacheCreateInfo cache_info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
   vk_.vkCreatePipelineCache(device_->device(), &cache_info, nullptr, &pipeline_cache_);
   if (const char* v = std::getenv("BOTS_GPU_TIMING"); v && *v == '1') {
@@ -176,6 +181,49 @@ Renderer::Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory m
   }
   UseSubmission(0);
   ok_ = InitDrawing();
+}
+
+void Renderer::BeginRendering(const VkRenderingInfo& info, const char* what) {
+  static const bool trace = [] {
+    const char* v = std::getenv("BOTS_TRACE_RENDERING");
+    return v && *v == '1';
+  }();
+  if (trace) {
+    std::fprintf(stderr, "BeginRendering %s: area %d,%d %ux%u layers %u colors", what, info.renderArea.offset.x,
+                 info.renderArea.offset.y, info.renderArea.extent.width, info.renderArea.extent.height,
+                 info.layerCount);
+    for (uint32_t i = 0; i < info.colorAttachmentCount; ++i) {
+      std::fprintf(stderr, " %p", (void*)info.pColorAttachments[i].imageView);
+    }
+    std::fprintf(stderr, " depth %p stencil %p\n", info.pDepthAttachment ? (void*)info.pDepthAttachment->imageView : nullptr,
+                 info.pStencilAttachment ? (void*)info.pStencilAttachment->imageView : nullptr);
+    std::fflush(stderr);
+  }
+  if (dummy_depth_ && !(info.pDepthAttachment && info.pDepthAttachment->imageView)) {
+    VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    depth.imageView = DummyDepth(uint32_t(info.renderArea.offset.x) + info.renderArea.extent.width,
+                                 uint32_t(info.renderArea.offset.y) + info.renderArea.extent.height);
+    depth.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    depth.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    VkRenderingInfo with_depth = info;
+    with_depth.pDepthAttachment = with_depth.pStencilAttachment = &depth;
+    vk_.vkCmdBeginRendering(cmd_, &with_depth);
+    return;
+  }
+  vk_.vkCmdBeginRendering(cmd_, &info);
+}
+
+VkImageView Renderer::DummyDepth(uint32_t width, uint32_t height) {
+  if (dummy_depths_.empty() || dummy_depths_.back()->width < width || dummy_depths_.back()->height < height) {
+    // Grows rarely (to the largest surface); older ones are kept, as passes still in flight may use them.
+    auto image = std::make_unique<Image>();
+    const uint32_t w = std::max(width, dummy_depths_.empty() ? 0u : dummy_depths_.back()->width);
+    const uint32_t h = std::max(height, dummy_depths_.empty() ? 0u : dummy_depths_.back()->height);
+    if (!CreateImage(*image, kDepthFormat, w, h, true)) return VK_NULL_HANDLE;
+    dummy_depths_.push_back(std::move(image));
+  }
+  return dummy_depths_.back()->view;
 }
 
 void Renderer::LoadPipelineCache(const std::filesystem::path& path) {
@@ -339,6 +387,8 @@ void Renderer::DestroyFrameState() {
   for (auto& [k, image] : textures_) DestroyImage(*image);
   for (auto& [k, image] : crops_) DestroyImage(*image);
   for (auto& [k, texture] : guest_textures_) DestroyImage(texture->image);
+  for (auto& image : dummy_depths_) DestroyImage(*image);
+  dummy_depths_.clear();
   surfaces_.clear();
   textures_.clear();
   crops_.clear();
@@ -819,7 +869,7 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
       rendering.colorAttachmentCount = 1;
       rendering.pColorAttachments = &attachment;
     }
-    vk_.vkCmdBeginRendering(cmd_, &rendering);
+    BeginRendering(rendering, "clear");
     const VkClearAttachment what{depth ? VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
                                        : VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT),
                                  0, value};
