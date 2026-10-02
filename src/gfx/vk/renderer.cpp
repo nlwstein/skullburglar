@@ -188,6 +188,7 @@ void Renderer::BeginRendering(const VkRenderingInfo& info, const char* what) {
     const char* v = std::getenv("BOTS_TRACE_RENDERING");
     return v && *v == '1';
   }();
+  trace_rendering_ = trace;
   if (trace) {
     std::fprintf(stderr, "BeginRendering %s: area %d,%d %ux%u layers %u colors", what, info.renderArea.offset.x,
                  info.renderArea.offset.y, info.renderArea.extent.width, info.renderArea.extent.height,
@@ -251,10 +252,18 @@ void Renderer::LoadPipelineCache(const std::filesystem::path& path) {
 
 void Renderer::SavePipelineCache() {
   if (!pipeline_cache_ || pipeline_cache_path_.empty() || stats_.pipelines == pipelines_saved_) return;
+  // Pipeline workers keep adding to the cache, so it can outgrow the size just queried (VK_INCOMPLETE, and MoltenVK
+  // then writes nothing): query with some headroom and retry.
+  std::vector<char> data;
   size_t size = 0;
-  if (vk_.vkGetPipelineCacheData(device_->device(), pipeline_cache_, &size, nullptr) != VK_SUCCESS || !size) return;
-  std::vector<char> data(size);
-  if (vk_.vkGetPipelineCacheData(device_->device(), pipeline_cache_, &size, data.data()) != VK_SUCCESS) return;
+  VkResult result = VK_INCOMPLETE;
+  for (int attempt = 0; attempt < 4 && result == VK_INCOMPLETE; ++attempt) {
+    if (vk_.vkGetPipelineCacheData(device_->device(), pipeline_cache_, &size, nullptr) != VK_SUCCESS || !size) return;
+    size += size / 8;
+    data.resize(size);
+    result = vk_.vkGetPipelineCacheData(device_->device(), pipeline_cache_, &size, data.data());
+  }
+  if (result != VK_SUCCESS) return;
   std::error_code ec;
   std::filesystem::create_directories(pipeline_cache_path_.parent_path(), ec);
   const std::filesystem::path temp = pipeline_cache_path_.string() + ".tmp";
@@ -362,7 +371,7 @@ void Renderer::EndFrame() {
 
 bool Renderer::UploadGuestMemory(uint32_t start, uint32_t length) {
   BeginCommands(kGpuUpload);
-  EndRendering();
+  EndRendering("upload");
   Barrier();
   while (length) {
     const uint32_t chunk = uint32_t(std::min<VkDeviceSize>(length, ring_.size / 4));
@@ -520,15 +529,16 @@ void Renderer::Barrier() {
                            &barrier, 0, nullptr, 0, nullptr);
 }
 
-void Renderer::EndRendering() {
+void Renderer::EndRendering(const char* why) {
   if (!rendering_) return;
+  if (trace_rendering_) std::fprintf(stderr, "EndRendering %s\n", why);
   vk_.vkCmdEndRendering(cmd_);
   rendering_ = false;
 }
 
 void Renderer::Flush() {
   if (!recording_) return;
-  EndRendering();
+  EndRendering("flush");
   GpuMark(kGpuOther, true);  // closes the last span
   if (ring_used_) vmaFlushAllocation(allocator_, ring_.allocation, 0, ring_used_);
   vk_.vkEndCommandBuffer(cmd_);
@@ -601,7 +611,7 @@ bool Renderer::CreateImage(Image& image, VkFormat format, uint32_t width, uint32
   }
 
   BeginCommands(kGpuOther);
-  EndRendering();
+  EndRendering("create image");
   VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
   barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
   barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -765,7 +775,7 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
   }
 
   BeginCommands(kGpuResolve);
-  EndRendering();
+  EndRendering("resolve");
   uint32_t samples_x, samples_y;
   SampleGrid(regs, samples_x, samples_y);
   const bool multisampled = samples_x * samples_y > 1;

@@ -277,7 +277,7 @@ void Renderer::Transfer(Image& source, uint32_t source_format, Image& dest, uint
   vk_.vkUpdateDescriptorSets(device_->device(), 1, &write, 0, nullptr);
 
   const uint32_t width = dest.width, height = dest.height;
-  EndRendering();
+  EndRendering("transfer");
   Image* const read_image = &source;
   Image* const write_image = &dest;
   Access({&read_image, 1}, {&write_image, 1});

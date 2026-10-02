@@ -190,7 +190,7 @@ Renderer::Image* Renderer::Crop(Image& image, uint32_t width, uint32_t height) {
   Image& crop = *slot;
   if (crop.written != image.written) {
     BeginCommands(kGpuTexture);
-    EndRendering();
+    EndRendering("texture load");
     Image* const read = &image;
     Image* const write = &crop;
     Access({&read, 1}, {&write, 1});

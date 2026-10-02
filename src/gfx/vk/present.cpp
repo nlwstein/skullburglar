@@ -81,7 +81,7 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
   const Image& source = *it->second;
 
   BeginCommands(kGpuPresent);
-  EndRendering();
+  EndRendering("present");
   const VkDeviceSize ubo_align = device_->properties().minUniformBufferOffsetAlignment;
   VkDeviceSize offset;
   uint8_t* ramp = Upload(kRampBytes, ubo_align, offset);

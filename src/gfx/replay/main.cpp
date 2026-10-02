@@ -132,7 +132,7 @@ bool ReadPpm(const std::filesystem::path& path, std::vector<uint8_t>& rgb, uint3
 }
 
 // Renders the capture with the native renderer, writes `out`, compares with the capture's reference.ppm.
-int Render(Capture& capture, const std::filesystem::path& out) {
+int Render(Capture& capture, const std::filesystem::path& out, int repeat) {
   auto provider = rex::ui::vulkan::VulkanProvider::Create(true, false);
   if (!provider) throw std::runtime_error("no Vulkan device");
   bots::gfx::vk::Renderer renderer(provider->vulkan_device(),
@@ -140,7 +140,14 @@ int Render(Capture& capture, const std::filesystem::path& out) {
   if (!renderer.ok()) throw std::runtime_error("renderer setup failed");
   bots::gfx::Pm4Executor executor([&](uint32_t pa) -> const uint8_t* { return capture.memory.Physical(pa); },
                                   &renderer);
-  executor.Execute(capture.pm4.data(), capture.pm4.size());
+  // Repeats replay the frame again over the warm caches, as the next frames of a running game would.
+  for (int i = 0; i < repeat; ++i) {
+    if (i) {
+      renderer.EndFrame();
+      if (std::getenv("BOTS_TRACE_RENDERING")) std::fprintf(stderr, "Frame %d\n", i);
+    }
+    executor.Execute(capture.pm4.data(), capture.pm4.size());
+  }
   renderer.Finish();
   const auto& s = renderer.stats();
   std::printf("native: %llu resolves (%llu dropped, %llu multisampled not copied), %llu clears, %llu draws, "
@@ -187,21 +194,23 @@ int Render(Capture& capture, const std::filesystem::path& out) {
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::fprintf(stderr, "usage: bots-replay CAPDIR [--draws] [--render OUT.ppm]\n");
+    std::fprintf(stderr, "usage: bots-replay CAPDIR [--draws] [--render OUT.ppm [--repeat N]]\n");
     return 2;
   }
   bool verbose = false;
   const char* render_out = nullptr;
+  int repeat = 1;
   for (int i = 2; i < argc; ++i) {
     if (std::strcmp(argv[i], "--draws") == 0) verbose = true;
     if (std::strcmp(argv[i], "--render") == 0 && i + 1 < argc) render_out = argv[++i];
+    if (std::strcmp(argv[i], "--repeat") == 0 && i + 1 < argc) repeat = std::max(1, std::atoi(argv[++i]));
   }
   try {
     Capture capture;
     capture.Load(argv[1]);
     std::printf("frame %u: %zu calls, %zu KB PM4, device %08X, front buffer %08X\n", capture.frame,
                 capture.calls.size(), capture.pm4.size() >> 10, capture.device, capture.front_buffer);
-    if (render_out) return Render(capture, render_out);
+    if (render_out) return Render(capture, render_out, repeat);
 
     Logger logger(capture, verbose);
     bots::gfx::Pm4Executor executor([&](uint32_t pa) -> const uint8_t* { return capture.memory.Physical(pa); },

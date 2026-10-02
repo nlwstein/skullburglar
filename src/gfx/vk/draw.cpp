@@ -161,6 +161,7 @@ bool Renderer::InitDrawing() {
   if (const char* v = std::getenv("BOTS_GFX_PIPELINE_THREADS"); v && *v) workers = uint32_t(std::atoi(v));
   async_pipelines_ = workers != 0;
   draw_profile_ = std::getenv("BOTS_DRAW_PROFILE") && *std::getenv("BOTS_DRAW_PROFILE") == '1';
+  if (const char* v = std::getenv("BOTS_GFX_PASS_MERGE"); v && *v) pass_merge_ = *v == '1';
   shaders_ = std::make_unique<ShaderCache>(device_, workers);
   shared_memory_bindings_ = 1u << Translator::GetSharedMemoryStorageBufferCountLog2(props.maxStorageBufferRange);
 
@@ -1083,20 +1084,6 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
       }
     }
   }
-  for (uint32_t i = 0; i < 4; ++i) {
-    if (!attachments.color[i]) continue;
-    key.color[i] = attachments.color[i]->format;
-    key.write_mask[i] = (color_mask >> (4 * i)) & 0xF;
-    key.blend[i] = regs.values[reg::RB_BLENDCONTROL::rt_register_indices[i]] & 0x1FFF1FFF;
-  }
-
-  bool pending = false;
-  const VkPipeline pipeline = GetPipeline(key, sync, pending);
-  if (!pipeline) {
-    ++(pending ? stats_.pending_draws : stats_.skipped_draws);
-    return;
-  }
-
   GpuMark(kGpuDraw);  // after any transfers Surface() recorded
   du::Scissor scissor;
   du::GetScissor(regs, scissor);
@@ -1130,50 +1117,104 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
       bounded = true;
     }
   }
+  // Pass merging. UE3 marks stencil around each light's colour pass with depth-only draws (depth-only, colour,
+  // depth-only: three passes per light, ~45 lights a frame). So a draw whose targets are a subset of the open
+  // pass's runs in that pass with the extra attachments write-masked, and a depth-only pass also attaches the
+  // colour targets its depth surface was last drawn with. Draws only sample resolve destinations, never
+  // surfaces, so an extra attachment can't be a feedback loop. The merged attachments must cover what this draw
+  // can write; BOTS_GFX_PASS_MERGE=0 turns it off.
+  Attachments pass = attachments;
+  if (pass_merge_) {
+    auto covers = [&](const Image* image) {
+      return !image || (image->width >= scissor_x1 && image->height >= scissor_y1);
+    };
+    bool subset = rendering_ && (!attachments.depth || attachments.depth == open_pass_.depth) &&
+                  std::ranges::all_of(open_pass_.color, covers) && covers(open_pass_.depth);
+    for (uint32_t i = 0; i < 4 && subset; ++i) {
+      subset = !attachments.color[i] || attachments.color[i] == open_pass_.color[i];
+    }
+    if (subset) {
+      pass = open_pass_;
+    } else if (attachments.depth && std::ranges::none_of(attachments.color, std::identity{}) &&
+               std::ranges::all_of(attachments.depth->companions, covers)) {
+      pass.color = attachments.depth->companions;
+    }
+  }
+  uint32_t pass_width = width, pass_height = height;
+  for (const Image* image : pass.color) {
+    if (image) pass_width = std::min(pass_width, image->width), pass_height = std::min(pass_height, image->height);
+  }
+  if (pass.depth) {
+    pass_width = std::min(pass_width, pass.depth->width), pass_height = std::min(pass_height, pass.depth->height);
+  }
+
+  if (pass.depth && !attachments.depth) key.depth = pass.depth->format;  // merged: no test, no writes
+  for (uint32_t i = 0; i < 4; ++i) {
+    if (pass.color[i]) key.color[i] = pass.color[i]->format;  // merged extras stay write-masked
+    if (!attachments.color[i]) continue;
+    key.write_mask[i] = (color_mask >> (4 * i)) & 0xF;
+    key.blend[i] = regs.values[reg::RB_BLENDCONTROL::rt_register_indices[i]] & 0x1FFF1FFF;
+  }
+
+  bool pending = false;
+  const VkPipeline pipeline = GetPipeline(key, sync, pending);
+  if (!pipeline) {
+    ++(pending ? stats_.pending_draws : stats_.skipped_draws);
+    return;
+  }
+
   profile.Mark(kPhasePass);
   // Render pass: kept open across draws to the same targets, and reopened when a draw samples something written
   // since the last barrier (reopening the same attachments then always barriers: they count as written). An
   // attachment sampled by its own pass is left as the guest had it.
-  Image* const pass_writes[5] = {attachments.color[0], attachments.color[1], attachments.color[2],
-                                 attachments.color[3], attachments.depth};
+  Image* const pass_writes[5] = {pass.color[0], pass.color[1], pass.color[2], pass.color[3], pass.depth};
   std::erase_if(draw_reads_, [&](Image* image) { return std::ranges::find(pass_writes, image) != std::end(pass_writes); });
   // The render area: this draw's bound and the surfaces' area hints (later draws mostly stay inside it; one that
   // doesn't reopens the pass larger).
-  if (rendering_ && open_pass_ == attachments && scissor_x1 <= open_area_.width && scissor_y1 <= open_area_.height &&
+  if (rendering_ && open_pass_ == pass && scissor_x1 <= open_area_.width && scissor_y1 <= open_area_.height &&
       !Conflicts(draw_reads_, {})) {
     Track(draw_reads_, {});
   } else {
-    EndRendering();
+    EndRendering(!(open_pass_ == pass)                                                     ? "targets"
+                 : scissor_x1 > open_area_.width || scissor_y1 > open_area_.height ? "area"
+                                                                                    : "sampled");
+    // A merged pass opens before the draws that sample what was resolved just ahead of it (a light's shadow map):
+    // barrier for anything written outside the pass now rather than reopening the pass for it later.
+    const bool outside_writes = pass_merge_ && std::ranges::any_of(written_since_barrier_, [&](const Image* image) {
+                                  return std::ranges::find(pass_writes, image) == std::end(pass_writes);
+                                });
+    if (outside_writes) Barrier();
     Access(draw_reads_, pass_writes);
     VkRenderingAttachmentInfo colors[4];
     for (uint32_t i = 0; i < 4; ++i) {
       colors[i] = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-      colors[i].imageView = attachments.color[i] ? attachments.color[i]->view : VK_NULL_HANDLE;
+      colors[i].imageView = pass.color[i] ? pass.color[i]->view : VK_NULL_HANDLE;
       colors[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
       colors[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
       colors[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     }
     VkRenderingAttachmentInfo depth = colors[0];
-    depth.imageView = attachments.depth ? attachments.depth->view : VK_NULL_HANDLE;
+    depth.imageView = pass.depth ? pass.depth->view : VK_NULL_HANDLE;
     VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
     uint32_t area_width = std::max(scissor_x1, 1u), area_height = std::max(scissor_y1, 1u);
     for (const Image* image : pass_writes) {
       if (image) area_width = std::max(area_width, image->area_width), area_height = std::max(area_height, image->area_height);
     }
-    open_area_ = {std::min(area_width, width), std::min(area_height, height)};
+    open_area_ = {std::min(area_width, pass_width), std::min(area_height, pass_height)};
     rendering.renderArea = {{0, 0}, open_area_};
     rendering.layerCount = 1;
     rendering.colorAttachmentCount = 4;
     rendering.pColorAttachments = colors;
-    if (attachments.depth) rendering.pDepthAttachment = rendering.pStencilAttachment = &depth;
+    if (pass.depth) rendering.pDepthAttachment = rendering.pStencilAttachment = &depth;
     BeginRendering(rendering, "pass");
     rendering_ = true;
-    open_pass_ = attachments;
+    open_pass_ = pass;
+    if (pass.depth && std::ranges::any_of(pass.color, std::identity{})) pass.depth->companions = pass.color;
     if (gpu_timing_) {
       std::string label = "pass " + std::to_string(width) + "x" + std::to_string(height) + " area " +
                           std::to_string(open_area_.width) + "x" + std::to_string(open_area_.height) + " c";
-      for (const Image* image : attachments.color) label += image ? " " + std::to_string(image->format) : " -";
-      label += attachments.depth ? " +depth" : "";
+      for (const Image* image : pass.color) label += image ? " " + std::to_string(image->format) : " -";
+      label += pass.depth ? " +depth" : "";
       label += samples_x * samples_y > 1 ? " ss" + std::to_string(samples_x * samples_y) : "";
       GpuLabel(kGpuDraw, std::move(label));
     }
@@ -1229,9 +1270,10 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     vk_.vkCmdDraw(cmd_, host_count, 1, 0, 0);
   }
   ++stats_.draws;
-  for (Image* image : pass_writes) {
+  for (Image* image : attachments.color) {
     if (image) image->Use(scissor_x1, scissor_y1, bounded);
   }
+  if (attachments.depth) attachments.depth->Use(scissor_x1, scissor_y1, bounded);
   for (uint32_t i = 0; i < 4; ++i) {
     if (attachments.color[i] && key.write_mask[i]) attachments.color[i]->written = ++write_clock_;
   }

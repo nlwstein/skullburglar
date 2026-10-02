@@ -136,6 +136,9 @@ class Renderer : public Pm4Sink {
       used_width = std::max(used_width, x1), used_height = std::max(used_height, y1);
       if (hint) area_width = std::max(area_width, x1), area_height = std::max(area_height, y1);
     }
+    // Depth surfaces: the colour targets of the last pass with colour that used this depth (pass merging,
+    // draw.cpp). Surfaces are only destroyed all together.
+    std::array<Image*, 4> companions{};
   };
   struct Buffer {
     VkBuffer buffer = VK_NULL_HANDLE;
@@ -227,7 +230,8 @@ class Renderer : public Pm4Sink {
   uint8_t gpu_cat_ = 0xFF;
   double timestamp_ns_ = 1.0;
   void BeginCommands(GpuCat cat = kGpuOther);
-  void EndRendering();
+  // why: what ended the pass (BOTS_TRACE_RENDERING=1 prints it).
+  void EndRendering(const char* why = "other");
   // vkCmdBeginRendering; BOTS_TRACE_RENDERING=1 prints each one first (flushed: for driver crashes).
   void BeginRendering(const VkRenderingInfo& info, const char* what);
   VkImageView DummyDepth(uint32_t width, uint32_t height);  // at least this size
@@ -252,6 +256,8 @@ class Renderer : public Pm4Sink {
     ~DrawProfile() { Mark(phase); }
   };
   bool draw_profile_ = false;
+  bool trace_rendering_ = false;
+  bool pass_merge_ = true;
   bool InitDrawing();
   void DestroyDrawing();
   bool UploadSharedMemory();
