@@ -14,7 +14,8 @@ include(generated/rexglue.cmake)
 set(BOTS_SOURCES
     src/main.cpp
     src/game_hooks.cpp
-    src/gfx/d3d_census.cpp
+    src/gfx/d3d_hooks.cpp
+    src/gfx/capture.cpp
     src/setup/iso_extract.cpp
     src/setup/settings.cpp
 )

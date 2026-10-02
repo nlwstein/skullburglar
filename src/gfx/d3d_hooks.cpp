@@ -1,9 +1,11 @@
-// BOTS_D3D_CENSUS=1: count calls into the game's statically linked Xbox D3D runtime (native renderer, P0).
+// Hooks on the game's statically linked Xbox D3D runtime (native renderer).
 //
 // Every runtime function that code outside the runtime calls (src/gfx/d3d_entries.inc, from
-// tools/d3d_scan.py) is overridden here: count the call and its return address, then run the original.
-// Every 5 s the log gets the calls per second of each entry point and its busiest call sites, which is how
-// the API surface gets named and ranked. Off by default; the cost when off is one predictable branch.
+// tools/d3d_scan.py) is overridden here and runs the original, with two optional observers:
+// - BOTS_D3D_CENSUS=1 (P0): count the call and its return address. Every 5 s the log gets the calls per
+//   second of each entry point and its busiest call sites, which is how the API surface gets named and ranked.
+// - BOTS_GFX_CAPTURE (P1): record whole frames of calls for offline replay (capture.cpp).
+// Off by default; the cost when off is one predictable branch.
 #include <cstdint>
 #include <cstdlib>
 
@@ -18,6 +20,8 @@
 
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
+
+#include "capture.h"
 
 namespace {
 
@@ -99,11 +103,34 @@ void StartReporter() {
 
 }  // namespace
 
+namespace {
+
+bool HooksOn() {
+  static const bool on = CensusOn() || bots::gfx::CaptureConfigured();
+  return on;
+}
+
+void Observe(Entry& entry, PPCContext& ctx, uint8_t* base, void (*original)(PPCContext&, uint8_t*)) {
+  if (CensusOn()) entry.Hit(uint32_t(ctx.lr));
+  if (!bots::gfx::CaptureConfigured()) {
+    original(ctx, base);
+    return;
+  }
+  const int64_t token = bots::gfx::CapturePre(entry.address, ctx);
+  original(ctx, base);
+  bots::gfx::CapturePost(entry.address, token, ctx);
+}
+
+}  // namespace
+
 #define D3D_ENTRY(a)                                                                \
   extern "C" void __imp__sub_##a(PPCContext& __restrict ctx, uint8_t* base);        \
   static Entry census_##a(0x##a);                                                   \
   extern "C" void sub_##a(PPCContext& __restrict ctx, uint8_t* base) {              \
-    if (CensusOn()) census_##a.Hit(uint32_t(ctx.lr));                               \
+    if (HooksOn()) {                                                                \
+      Observe(census_##a, ctx, base, __imp__sub_##a);                               \
+      return;                                                                       \
+    }                                                                               \
     __imp__sub_##a(ctx, base);                                                      \
   }
 #include "d3d_entries.inc"
