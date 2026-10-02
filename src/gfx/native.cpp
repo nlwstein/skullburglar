@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <iterator>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -72,13 +74,28 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
         auto ms = [&](uint64_t now_us, uint64_t then_us) { return double(now_us - then_us) / 1000.0 / n; };
         REXLOG_INFO(
             "gfx native: per frame over {} frames: {:.2f} ms wall, {:.2f} ms in draws, {:.2f} ms textures, {:.2f} ms "
-            "GPU wait, {:.1f} flushes, {:.0f} draws, {:.1f} resolves",
+            "GPU wait, {:.1f} flushes, {:.0f} draws, {:.1f} resolves, {:.1f} render passes, {:.1f} transfers, {:.1f} barriers",
             frames_ - last_.frames,
             std::chrono::duration<double, std::milli>(now - last_.time).count() / n, ms(st.draw_us, last_.draw_us),
             ms(st.texture_us, last_.texture_us), ms(st.wait_us, last_.wait_us), double(st.flushes - last_.flushes) / n,
-            double(st.draws - last_.draws) / n, double(st.resolves - last_.resolves) / n);
+            double(st.draws - last_.draws) / n, double(st.resolves - last_.resolves) / n,
+            double(st.render_passes - last_.render_passes) / n, double(st.transfers - last_.transfers) / n,
+            double(st.barriers - last_.barriers) / n);
+        if (renderer_->gpu_timing()) {
+          std::string gpu;
+          double total = 0;
+          for (size_t i = 0; i < std::size(st.gpu_ns); ++i) {
+            const double t = double(st.gpu_ns[i] - last_.gpu_ns[i]) / 1e6 / n;
+            total += t;
+            gpu += fmt::format(" {} {:.2f},", vk::Renderer::kGpuCatNames[i], t);
+          }
+          REXLOG_INFO("gfx native: GPU ms per frame: {:.2f} total:{}", total, gpu);
+          REXLOG_INFO("gfx native: top GPU spans per frame:{}", renderer_->TakeGpuLabelReport(n, 25));
+        }
       }
       last_ = {frames_, now, st.draw_us, st.texture_us, st.wait_us, st.flushes, st.draws, st.resolves};
+      last_.render_passes = st.render_passes, last_.transfers = st.transfers, last_.barriers = st.barriers;
+      std::copy(std::begin(st.gpu_ns), std::end(st.gpu_ns), last_.gpu_ns);
       REXLOG_INFO(
           "gfx native: frame {}: {} draws, {} resolves, {} presents, {} failed shaders, {} unsupported prims, "
           "{} unsupported textures, {:.1f} MB uploaded, {} invalidations, {} texture reloads, {} evictions, {} indirect draws skipped (totals)",
@@ -171,6 +188,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     uint64_t frames = 0;
     std::chrono::steady_clock::time_point time;
     uint64_t draw_us = 0, texture_us = 0, wait_us = 0, flushes = 0, draws = 0, resolves = 0;
+    uint64_t render_passes = 0, transfers = 0, barriers = 0, gpu_ns[7] = {};
   } last_;
   uint32_t indirect_depth_ = 0;
 };

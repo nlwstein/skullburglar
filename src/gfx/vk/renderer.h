@@ -15,7 +15,10 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <span>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -82,10 +85,11 @@ class Renderer : public Pm4Sink {
     uint64_t render_passes = 0, pipelines = 0, failed_shaders = 0, unsupported_primitives = 0;
     uint64_t textures = 0, unsupported_textures = 0, transfers = 0;
     uint64_t uploaded_bytes = 0, invalidations = 0, texture_reloads = 0, texture_evictions = 0;  // live
-    uint64_t presents = 0;  // native
+    uint64_t presents = 0, barriers = 0;  // native
     // Profiling (P5): submits, and microseconds blocked on the GPU fence, inside OnDraw (recording, including
     // texture loads and any flush it triggers) and inside LoadTexture (untile + upload).
     uint64_t flushes = 0, wait_us = 0, draw_us = 0, texture_us = 0;
+    uint64_t gpu_ns[7] = {};  // BOTS_GPU_TIMING=1: GPU time per GpuCat
   };
   const Stats& stats() const { return stats_; }
 
@@ -170,7 +174,32 @@ class Renderer : public Pm4Sink {
   bool CreateBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage);
   void Resolve(const rex::graphics::RegisterFile& regs);
   void Barrier();
-  void BeginCommands();
+  // Barriers only on a hazard: images written / read by GPU work recorded since the last Barrier(). Access()
+  // barriers if this work's reads or writes conflict with those, then records them; rendering must be ended.
+  bool Conflicts(std::span<Image* const> reads, std::span<Image* const> writes) const;
+  void Track(std::span<Image* const> reads, std::span<Image* const> writes);
+  void Access(std::span<Image* const> reads, std::span<Image* const> writes);
+  std::vector<const Image*> written_since_barrier_, read_since_barrier_;
+  std::vector<Image*> draw_reads_;  // resolve destinations the current draw samples
+  // GPU timing (BOTS_GPU_TIMING=1): a timestamp whenever the kind of work being recorded changes; each span is
+  // added to stats_.gpu_ns[kind] once its submission completes. BeginCommands marks its caller's kind.
+ public:
+  enum GpuCat : uint8_t { kGpuDraw, kGpuResolve, kGpuUpload, kGpuTexture, kGpuTransfer, kGpuPresent, kGpuOther };
+  static constexpr const char* kGpuCatNames[] = {"draw", "resolve", "upload", "texture", "transfer", "present",
+                                                 "other"};
+  bool gpu_timing() const { return gpu_timing_; }
+  // The labelled spans with the most GPU time since the last call ("label ms/frame xcount", one per line).
+  std::string TakeGpuLabelReport(double frames, size_t top);
+
+ private:
+  void GpuMark(GpuCat cat, bool force = false);
+  void GpuLabel(GpuCat cat, std::string label);  // a forced mark whose span is reported under its label
+  std::unordered_map<std::string, std::pair<uint64_t, uint64_t>> gpu_labels_;  // ns, spans
+  static constexpr uint32_t kMaxGpuMarks = 4096;
+  bool gpu_timing_ = false;
+  uint8_t gpu_cat_ = 0xFF;
+  double timestamp_ns_ = 1.0;
+  void BeginCommands(GpuCat cat = kGpuOther);
   void EndRendering();
 
   // Draws (draw.cpp).
@@ -184,7 +213,8 @@ class Renderer : public Pm4Sink {
   VkDescriptorSet AllocateSet(VkDescriptorSetLayout layout);
   VkDescriptorSetLayout TextureSetLayout(bool vertex, uint32_t textures, uint32_t samplers);
   const PipelineLayout* GetPipelineLayout(const LayoutKey& key);
-  VkPipeline GetPipeline(const std::string& key, const VkGraphicsPipelineCreateInfo& info);
+  // Allocation-free on a hit; the previous draw's pipeline is checked first (consecutive draws mostly share it).
+  VkPipeline GetPipeline(std::string_view key, const VkGraphicsPipelineCreateInfo& info);
 
   // EDRAM ownership transfers (transfer.cpp).
   static constexpr uint32_t kTransferDepth = 100;       // Transfer source format for D24S8 depth/stencil
@@ -237,6 +267,9 @@ class Renderer : public Pm4Sink {
     VkDescriptorPool transient_pool = VK_NULL_HANDLE;
     std::vector<Image> retired;
     bool pending = false;
+    VkQueryPool timing_pool = VK_NULL_HANDLE;
+    std::vector<uint8_t> marks;  // GpuCat per timestamp written
+    std::vector<std::string> labels;  // parallel to marks
   };
   static constexpr uint32_t kSubmissions = 3;
   std::array<Submission, kSubmissions> submissions_;
@@ -270,7 +303,11 @@ class Renderer : public Pm4Sink {
                         set_layout_empty_ = VK_NULL_HANDLE;
   std::map<std::tuple<bool, uint32_t, uint32_t>, VkDescriptorSetLayout> texture_set_layouts_;
   std::map<LayoutKey, PipelineLayout> pipeline_layouts_;
-  std::map<std::string, VkPipeline> pipelines_;
+  std::unordered_map<std::string, VkPipeline> pipelines_;
+  std::string last_pipeline_key_;
+  VkPipeline last_pipeline_ = VK_NULL_HANDLE;
+  // What the current command buffer has bound, so unchanged pipelines aren't rebound (VK_NULL_HANDLE: unknown).
+  VkPipeline bound_pipeline_ = VK_NULL_HANDLE;
   VkDescriptorPool persistent_pool_ = VK_NULL_HANDLE, transient_pool_ = VK_NULL_HANDLE;
   VkDescriptorSet shared_set_ = VK_NULL_HANDLE;
   VkSampler sampler_ = VK_NULL_HANDLE;

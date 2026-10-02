@@ -160,6 +160,18 @@ Renderer::Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory m
                                                submission.pool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
     if (vk_.vkAllocateCommandBuffers(device_->device(), &cmd_info, &submission.cmd) != VK_SUCCESS) return;
   }
+  if (const char* v = std::getenv("BOTS_GPU_TIMING"); v && *v == '1') {
+    VkPhysicalDeviceProperties props;
+    device_->vulkan_instance()->functions().vkGetPhysicalDeviceProperties(device_->physical_device(), &props);
+    timestamp_ns_ = props.limits.timestampPeriod;
+    const VkQueryPoolCreateInfo query_info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, nullptr, 0,
+                                           VK_QUERY_TYPE_TIMESTAMP, kMaxGpuMarks};
+    gpu_timing_ = props.limits.timestampComputeAndGraphics;
+    for (Submission& submission : submissions_) {
+      gpu_timing_ = gpu_timing_ && vk_.vkCreateQueryPool(device_->device(), &query_info, nullptr,
+                                                         &submission.timing_pool) == VK_SUCCESS;
+    }
+  }
   UseSubmission(0);
   ok_ = InitDrawing();
 }
@@ -180,6 +192,24 @@ void Renderer::WaitSubmission(Submission& submission) {
     vk_.vkWaitForFences(device_->device(), 1, &submission.fence, VK_TRUE, UINT64_MAX);
   }
   vk_.vkResetFences(device_->device(), 1, &submission.fence);
+  if (gpu_timing_ && submission.marks.size() >= 2) {
+    const uint32_t n = uint32_t(submission.marks.size());
+    std::vector<uint64_t> t(n);
+    if (vk_.vkGetQueryPoolResults(device_->device(), submission.timing_pool, 0, n, n * 8, t.data(), 8,
+                                  VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+      for (uint32_t i = 0; i + 1 < n; ++i) {
+        if (submission.marks[i] < std::size(stats_.gpu_ns) && t[i + 1] >= t[i]) {
+          const uint64_t ns = uint64_t(double(t[i + 1] - t[i]) * timestamp_ns_);
+          stats_.gpu_ns[submission.marks[i]] += ns;
+          auto& label = gpu_labels_[submission.labels[i].empty() ? kGpuCatNames[submission.marks[i]]
+                                                                 : submission.labels[i]];
+          label.first += ns, ++label.second;
+        }
+      }
+    }
+  }
+  submission.marks.clear();
+  submission.labels.clear();
   for (Image& image : submission.retired) DestroyImage(image);
   submission.retired.clear();
   vk_.vkResetCommandPool(device_->device(), submission.pool, 0);
@@ -239,7 +269,7 @@ void Renderer::EndFrame() {
 }
 
 bool Renderer::UploadGuestMemory(uint32_t start, uint32_t length) {
-  BeginCommands();
+  BeginCommands(kGpuUpload);
   EndRendering();
   Barrier();
   while (length) {
@@ -248,7 +278,7 @@ bool Renderer::UploadGuestMemory(uint32_t start, uint32_t length) {
     uint8_t* staging = Upload(chunk, 16, offset);
     if (!staging) {
       Flush();
-      BeginCommands();
+      BeginCommands(kGpuUpload);
       staging = Upload(chunk, 16, offset);
       if (!staging) return false;
     }
@@ -301,21 +331,91 @@ Renderer::~Renderer() {
   for (Submission& submission : submissions_) {
     if (submission.fence) vk_.vkDestroyFence(dev, submission.fence, nullptr);
     if (submission.pool) vk_.vkDestroyCommandPool(dev, submission.pool, nullptr);
+    if (submission.timing_pool) vk_.vkDestroyQueryPool(dev, submission.timing_pool, nullptr);
   }
   if (allocator_) vmaDestroyAllocator(allocator_);
 }
 
-void Renderer::BeginCommands() {
-  if (recording_) return;
-  const VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr,
-                                       VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
-  vk_.vkBeginCommandBuffer(cmd_, &begin);
-  recording_ = true;
+void Renderer::BeginCommands(GpuCat cat) {
+  if (!recording_) {
+    const VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr,
+                                         VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    vk_.vkBeginCommandBuffer(cmd_, &begin);
+    recording_ = true;
+    bound_pipeline_ = VK_NULL_HANDLE;
+    if (gpu_timing_) {
+      vk_.vkCmdResetQueryPool(cmd_, submissions_[current_].timing_pool, 0, kMaxGpuMarks);
+      submissions_[current_].marks.clear();
+      submissions_[current_].labels.clear();
+      gpu_cat_ = 0xFF;
+    }
+  }
+  GpuMark(cat);
+}
+
+void Renderer::GpuMark(GpuCat cat, bool force) {
+  if (!gpu_timing_ || !recording_ || (cat == gpu_cat_ && !force)) return;
+  Submission& s = submissions_[current_];
+  if (s.marks.size() >= kMaxGpuMarks) return;
+  vk_.vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s.timing_pool, uint32_t(s.marks.size()));
+  s.marks.push_back(cat);
+  s.labels.emplace_back();
+  gpu_cat_ = cat;
+}
+
+void Renderer::GpuLabel(GpuCat cat, std::string label) {
+  if (!gpu_timing_ || !recording_) return;
+  GpuMark(cat, true);
+  Submission& s = submissions_[current_];
+  if (!s.labels.empty() && s.labels.size() == s.marks.size()) s.labels.back() = std::move(label);
+}
+
+std::string Renderer::TakeGpuLabelReport(double frames, size_t top) {
+  std::vector<std::pair<std::string, std::pair<uint64_t, uint64_t>>> rows(gpu_labels_.begin(), gpu_labels_.end());
+  gpu_labels_.clear();
+  std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
+  std::string out;
+  for (size_t i = 0; i < rows.size() && i < top; ++i) {
+    char line[256];
+    std::snprintf(line, sizeof(line), "\n  %7.3f ms  x%-6.1f %s", double(rows[i].second.first) / 1e6 / frames,
+                  double(rows[i].second.second) / frames, rows[i].first.c_str());
+    out += line;
+  }
+  return out;
 }
 
 // Everything stays in GENERAL layout and every operation is separated by a full barrier. Simple and correct;
 // finer barriers are P5 work.
+bool Renderer::Conflicts(std::span<Image* const> reads, std::span<Image* const> writes) const {
+  auto in = [](const std::vector<const Image*>& set, const Image* image) {
+    return std::find(set.begin(), set.end(), image) != set.end();
+  };
+  for (const Image* image : reads) {
+    if (image && in(written_since_barrier_, image)) return true;
+  }
+  for (const Image* image : writes) {
+    if (image && (in(written_since_barrier_, image) || in(read_since_barrier_, image))) return true;
+  }
+  return false;
+}
+
+void Renderer::Track(std::span<Image* const> reads, std::span<Image* const> writes) {
+  auto add = [](std::vector<const Image*>& set, const Image* image) {
+    if (image && std::find(set.begin(), set.end(), image) == set.end()) set.push_back(image);
+  };
+  for (const Image* image : reads) add(read_since_barrier_, image);
+  for (const Image* image : writes) add(written_since_barrier_, image);
+}
+
+void Renderer::Access(std::span<Image* const> reads, std::span<Image* const> writes) {
+  if (Conflicts(reads, writes)) Barrier();
+  Track(reads, writes);
+}
+
 void Renderer::Barrier() {
+  written_since_barrier_.clear();
+  read_since_barrier_.clear();
+  ++stats_.barriers;
   const VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr,
                                 VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
                                 VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
@@ -332,6 +432,7 @@ void Renderer::EndRendering() {
 void Renderer::Flush() {
   if (!recording_) return;
   EndRendering();
+  GpuMark(kGpuOther, true);  // closes the last span
   if (ring_used_) vmaFlushAllocation(allocator_, ring_.allocation, 0, ring_used_);
   vk_.vkEndCommandBuffer(cmd_);
   recording_ = false;
@@ -402,7 +503,7 @@ bool Renderer::CreateImage(Image& image, VkFormat format, uint32_t width, uint32
     if (vk_.vkCreateImageView(device_->device(), &view, nullptr, &image.stencil_view) != VK_SUCCESS) return false;
   }
 
-  BeginCommands();
+  BeginCommands(kGpuOther);
   EndRendering();
   VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
   barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -566,7 +667,7 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
     return;
   }
 
-  BeginCommands();
+  BeginCommands(kGpuResolve);
   EndRendering();
   uint32_t samples_x, samples_y;
   SampleGrid(regs, samples_x, samples_y);
@@ -657,7 +758,8 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
   auto clear = [&](Image& image, bool depth, const VkClearValue& value) {
     int32_t w, h;
     if (!clamp_rect(image, w, h)) return;
-    Barrier();
+    Image* const target = &image;
+    Access({}, {&target, 1});
     VkRenderingAttachmentInfo attachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     attachment.imageView = image.view;
     attachment.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -719,7 +821,7 @@ void Renderer::DumpResolve(const Image& image, uint32_t address) {
       std::fclose(f);
     }
   }
-  BeginCommands();
+  BeginCommands(kGpuOther);
 }
 
 bool Renderer::ReadTexture(uint32_t address, std::vector<uint8_t>& rgb, uint32_t& width, uint32_t& height) {
@@ -757,7 +859,7 @@ bool Renderer::ReadImage(const Image& image, std::vector<uint8_t>& rgb, uint32_t
   VmaAllocationInfo mapped;
   if (vmaCreateBuffer(allocator_, &info, &alloc, &buffer, &allocation, &mapped) != VK_SUCCESS) return false;
 
-  BeginCommands();
+  BeginCommands(kGpuOther);
   Barrier();
   VkBufferImageCopy region{};
   region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};

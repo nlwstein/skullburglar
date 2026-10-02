@@ -261,10 +261,10 @@ void Renderer::Transfer(Image& source, uint32_t source_format, Image& dest, uint
                         const VkRect2D* rect, float scale) {
   const VkPipeline pipeline = TransferPipeline(source_format, dest_format, dest.format);
   if (!pipeline) return;
-  BeginCommands();
+  BeginCommands(kGpuTransfer);
   if (transient_sets_ + 1 > kTransientSetCount) {
     Flush();
-    BeginCommands();
+    BeginCommands(kGpuTransfer);
   }
   const VkDescriptorSet set = AllocateSet(transfer_set_layout_);
   if (!set) return;
@@ -277,7 +277,9 @@ void Renderer::Transfer(Image& source, uint32_t source_format, Image& dest, uint
 
   const uint32_t width = dest.width, height = dest.height;
   EndRendering();
-  Barrier();
+  Image* const read_image = &source;
+  Image* const write_image = &dest;
+  Access({&read_image, 1}, {&write_image, 1});
   VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
   color.imageView = dest.view;
   color.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -290,7 +292,14 @@ void Renderer::Transfer(Image& source, uint32_t source_format, Image& dest, uint
   rendering.colorAttachmentCount = 1;
   rendering.pColorAttachments = &color;
   vk_.vkCmdBeginRendering(cmd_, &rendering);
+  if (gpu_timing_) {
+    GpuLabel(rect ? kGpuResolve : kGpuTransfer,
+             (rect ? "resolve " : "transfer ") + std::to_string(source_format) + "->" + std::to_string(dest_format) +
+                 " " + std::to_string(rendering.renderArea.extent.width) + "x" +
+                 std::to_string(rendering.renderArea.extent.height));
+  }
   vk_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+  bound_pipeline_ = pipeline;
   vk_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, transfer_layout_, 0, 1, &set, 0, nullptr);
   const VkViewport vp{0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f};
   vk_.vkCmdSetViewport(cmd_, 0, 1, &vp);
@@ -302,7 +311,6 @@ void Renderer::Transfer(Image& source, uint32_t source_format, Image& dest, uint
   vk_.vkCmdPushConstants(cmd_, transfer_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(constants), &constants);
   vk_.vkCmdDraw(cmd_, 3, 1, 0, 0);
   vk_.vkCmdEndRendering(cmd_);
-  Barrier();
   ++stats_.transfers;
 }
 

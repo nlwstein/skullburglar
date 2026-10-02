@@ -313,17 +313,22 @@ const Renderer::PipelineLayout* Renderer::GetPipelineLayout(const LayoutKey& key
   return &slot;
 }
 
-VkPipeline Renderer::GetPipeline(const std::string& key, const VkGraphicsPipelineCreateInfo& info) {
-  auto& slot = pipelines_[key];
-  if (!slot) {
-    if (vk_.vkCreateGraphicsPipelines(device_->device(), VK_NULL_HANDLE, 1, &info, nullptr, &slot) != VK_SUCCESS) {
+VkPipeline Renderer::GetPipeline(std::string_view key, const VkGraphicsPipelineCreateInfo& info) {
+  if (last_pipeline_ && key == last_pipeline_key_) return last_pipeline_;
+  last_pipeline_key_.assign(key);  // reuses its capacity
+  auto it = pipelines_.find(last_pipeline_key_);
+  if (it == pipelines_.end()) {
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    if (vk_.vkCreateGraphicsPipelines(device_->device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
       std::fprintf(stderr, "native renderer: pipeline creation failed\n");
-      slot = VK_NULL_HANDLE;
+      pipeline = VK_NULL_HANDLE;
     } else {
       ++stats_.pipelines;
     }
+    it = pipelines_.emplace(last_pipeline_key_, pipeline).first;
   }
-  return slot;
+  last_pipeline_ = it->second;
+  return last_pipeline_;
 }
 
 void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
@@ -502,6 +507,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   std::string trace_textures;
   uint32_t texture_swizzles[32], texture_signs[32];
   for (uint32_t i = 0; i < 32; ++i) texture_swizzles[i] = xe::XE_GPU_TEXTURE_SWIZZLE_RGBA, texture_signs[i] = 0;
+  draw_reads_.clear();
   auto texture_views = [&](const std::vector<rg::SpirvShader::TextureBinding>& bindings) {
     std::vector<VkImageView> views;
     for (const auto& binding : bindings) {
@@ -525,6 +531,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
         // Render-to-texture: a resolve destination is sampled straight from its host image.
         uint32_t swizzle = xe::XE_GPU_TEXTURE_SWIZZLE_RGBA;
         view = ResolvedTextureView(*resolved, fetch, binding.is_signed, swizzle);
+        draw_reads_.push_back(resolved);
         texture_swizzles[binding.fetch_constant] = swizzle;
         texture_signs[binding.fetch_constant] = rg::texture_util::SwizzleSigns(fetch);
         source = resolved->format == VK_FORMAT_R32_SFLOAT ? "depth" : "rt";
@@ -556,7 +563,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   const std::vector<VkImageView> vviews = texture_views(vtextures), pviews = texture_views(ptextures);
 
   // Room for this draw's uploads and descriptor sets: flush first rather than mid-draw.
-  BeginCommands();
+  BeginCommands(kGpuDraw);
   const VkDeviceSize upload_need = 64 * 1024 + VkDeviceSize(count) * 12;
   if (upload_need > ring_.size) {
     ++stats_.skipped_draws;
@@ -564,7 +571,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   }
   if (ring_used_ + upload_need > ring_.size || transient_sets_ + 12 > kTransientSetCount) {
     Flush();
-    BeginCommands();
+    BeginCommands(kGpuDraw);
   }
 
   // Render targets.
@@ -949,16 +956,24 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   info.pColorBlendState = &blend;
   info.pDynamicState = &dynamic;
   info.layout = layout->layout;
-  const VkPipeline pipeline = GetPipeline(std::string(reinterpret_cast<const char*>(&key), sizeof(key)), info);
+  const VkPipeline pipeline = GetPipeline(std::string_view(reinterpret_cast<const char*>(&key), sizeof(key)), info);
   if (!pipeline) {
     ++stats_.skipped_draws;
     return;
   }
 
-  // Render pass: kept open across draws to the same targets.
-  if (!rendering_ || !(open_pass_ == attachments)) {
+  GpuMark(kGpuDraw);  // after any transfers Surface() recorded
+  // Render pass: kept open across draws to the same targets, and reopened when a draw samples something written
+  // since the last barrier (reopening the same attachments then always barriers: they count as written). An
+  // attachment sampled by its own pass is left as the guest had it.
+  Image* const pass_writes[5] = {attachments.color[0], attachments.color[1], attachments.color[2],
+                                 attachments.color[3], attachments.depth};
+  std::erase_if(draw_reads_, [&](Image* image) { return std::ranges::find(pass_writes, image) != std::end(pass_writes); });
+  if (rendering_ && open_pass_ == attachments && !Conflicts(draw_reads_, {})) {
+    Track(draw_reads_, {});
+  } else {
     EndRendering();
-    Barrier();
+    Access(draw_reads_, pass_writes);
     VkRenderingAttachmentInfo colors[4];
     for (uint32_t i = 0; i < 4; ++i) {
       colors[i] = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
@@ -978,10 +993,20 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     vk_.vkCmdBeginRendering(cmd_, &rendering);
     rendering_ = true;
     open_pass_ = attachments;
+    if (gpu_timing_) {
+      std::string label = "pass " + std::to_string(width) + "x" + std::to_string(height) + " c";
+      for (const Image* image : attachments.color) label += image ? " " + std::to_string(image->format) : " -";
+      label += attachments.depth ? " +depth" : "";
+      label += samples_x * samples_y > 1 ? " ss" + std::to_string(samples_x * samples_y) : "";
+      GpuLabel(kGpuDraw, std::move(label));
+    }
     ++stats_.render_passes;
   }
 
-  vk_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+  if (pipeline != bound_pipeline_) {
+    vk_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    bound_pipeline_ = pipeline;
+  }
   vk_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout->layout, 0, 2, sets, 0, nullptr);
   for (uint32_t i = 2; i < 4; ++i) {
     if (sets[i]) {

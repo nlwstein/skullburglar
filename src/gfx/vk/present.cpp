@@ -63,14 +63,14 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
   if (it == texture_at_.end() || !InitPresent()) return false;
   const Image& source = *it->second;
 
-  BeginCommands();
+  BeginCommands(kGpuPresent);
   EndRendering();
   const VkDeviceSize ubo_align = device_->properties().minUniformBufferOffsetAlignment;
   VkDeviceSize offset;
   uint8_t* ramp = Upload(kRampBytes, ubo_align, offset);
   if (!ramp || transient_sets_ + 1 > kTransientSetCount) {
     Flush();
-    BeginCommands();
+    BeginCommands(kGpuPresent);
     ramp = Upload(kRampBytes, ubo_align, offset);
     if (!ramp) return false;
   }
@@ -112,6 +112,7 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
   rendering.pColorAttachments = &color;
   vk_.vkCmdBeginRendering(cmd_, &rendering);
   vk_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, present_pipeline_);
+  bound_pipeline_ = present_pipeline_;
   vk_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout_, 0, 1, &set, 0, nullptr);
   const VkViewport vp{0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f};
   vk_.vkCmdSetViewport(cmd_, 0, 1, &vp);

@@ -189,13 +189,14 @@ Renderer::Image* Renderer::Crop(Image& image, uint32_t width, uint32_t height) {
   }
   Image& crop = *slot;
   if (crop.written != image.written) {
-    BeginCommands();
+    BeginCommands(kGpuTexture);
     EndRendering();
-    Barrier();
+    Image* const read = &image;
+    Image* const write = &crop;
+    Access({&read, 1}, {&write, 1});
     const VkImageCopy region{{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                              {0, 0, 0}, {width, height, 1}};
     vk_.vkCmdCopyImage(cmd_, image.image, VK_IMAGE_LAYOUT_GENERAL, crop.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
-    Barrier();
     crop.written = image.written;
   }
   crop.swapped = image.swapped;
@@ -306,7 +307,7 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
     uint8_t* staging = Upload(bytes, 16, offset);
     if (!staging) {
       Flush();
-      BeginCommands();
+      BeginCommands(kGpuTexture);
       staging = Upload(bytes, 16, offset);
       if (!staging) {
         ++stats_.unsupported_textures;

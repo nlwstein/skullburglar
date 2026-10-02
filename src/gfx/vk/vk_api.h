@@ -30,6 +30,7 @@ namespace bots::gfx::vk {
   X(vkCmdEndRendering)               \
   X(vkCmdPipelineBarrier)            \
   X(vkCmdPushConstants)              \
+  X(vkCmdResetQueryPool)             \
   X(vkCmdSetBlendConstants)          \
   X(vkCmdSetDepthBias)               \
   X(vkCmdSetScissor)                 \
@@ -37,6 +38,7 @@ namespace bots::gfx::vk {
   X(vkCmdSetStencilReference)        \
   X(vkCmdSetStencilWriteMask)        \
   X(vkCmdSetViewport)                \
+  X(vkCmdWriteTimestamp)             \
   X(vkCreateCommandPool)             \
   X(vkCreateDescriptorPool)          \
   X(vkCreateDescriptorSetLayout)     \
@@ -44,6 +46,7 @@ namespace bots::gfx::vk {
   X(vkCreateGraphicsPipelines)       \
   X(vkCreateImageView)               \
   X(vkCreatePipelineLayout)          \
+  X(vkCreateQueryPool)               \
   X(vkCreateSampler)                 \
   X(vkCreateShaderModule)            \
   X(vkDestroyCommandPool)            \
@@ -53,12 +56,14 @@ namespace bots::gfx::vk {
   X(vkDestroyImageView)              \
   X(vkDestroyPipeline)               \
   X(vkDestroyPipelineLayout)         \
+  X(vkDestroyQueryPool)              \
   X(vkDestroySampler)                \
   X(vkDestroyShaderModule)           \
   X(vkDeviceWaitIdle)                \
   X(vkResetDescriptorPool)           \
   X(vkUpdateDescriptorSets)          \
   X(vkEndCommandBuffer)              \
+  X(vkGetQueryPoolResults)           \
   X(vkQueueSubmit)                   \
   X(vkResetCommandPool)              \
   X(vkResetFences)                   \
