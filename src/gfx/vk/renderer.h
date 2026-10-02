@@ -93,6 +93,7 @@ class Renderer : public Pm4Sink {
     uint64_t textures = 0, unsupported_textures = 0, transfers = 0;
     uint64_t uploaded_bytes = 0, invalidations = 0, texture_reloads = 0, texture_evictions = 0;  // live
     uint64_t presents = 0, barriers = 0;  // native
+    uint64_t pending_draws = 0;  // live: skipped while their shaders or pipeline were still being made
     // Profiling (P5): submits, and microseconds blocked on the GPU fence, inside OnDraw (recording, including
     // texture loads and any flush it triggers) and inside LoadTexture (untile + upload).
     uint64_t flushes = 0, wait_us = 0, draw_us = 0, texture_us = 0;
@@ -235,8 +236,11 @@ class Renderer : public Pm4Sink {
   VkDescriptorSet AllocateSet(VkDescriptorSetLayout layout);
   VkDescriptorSetLayout TextureSetLayout(bool vertex, uint32_t textures, uint32_t samplers);
   const PipelineLayout* GetPipelineLayout(const LayoutKey& key);
-  // Allocation-free on a hit; the previous draw's pipeline is checked first (consecutive draws mostly share it).
-  VkPipeline GetPipeline(std::string_view key, const VkGraphicsPipelineCreateInfo& info);
+  struct PipelineKey;  // draw.cpp
+  VkPipeline CreateDrawPipeline(const PipelineKey& key) const;
+  // The previous draw's pipeline is checked first (consecutive draws mostly share it). Not yet created: created now
+  // (sync), or queued on a worker and null with `pending` set.
+  VkPipeline GetPipeline(const PipelineKey& key, bool sync, bool& pending);
 
   // EDRAM ownership transfers (transfer.cpp).
   static constexpr uint32_t kTransferDepth = 100;       // Transfer source format for D24S8 depth/stencil
@@ -325,7 +329,13 @@ class Renderer : public Pm4Sink {
                         set_layout_empty_ = VK_NULL_HANDLE;
   std::map<std::tuple<bool, uint32_t, uint32_t>, VkDescriptorSetLayout> texture_set_layouts_;
   std::map<LayoutKey, PipelineLayout> pipeline_layouts_;
-  std::unordered_map<std::string, VkPipeline> pipelines_;
+  struct PipelineSlot {
+    std::atomic<Async> state{Async::kNone};
+    VkPipeline pipeline = VK_NULL_HANDLE;  // set by whoever creates it, before state becomes kReady
+    bool counted = false;                  // in stats_.pipelines
+  };
+  std::unordered_map<std::string, std::unique_ptr<PipelineSlot>> pipelines_;
+  bool async_pipelines_ = false;
   VkPipelineCache pipeline_cache_ = VK_NULL_HANDLE;
   bool dummy_depth_ = false;  // every pass gets a depth attachment (driver workaround, renderer.cpp)
   std::vector<std::unique_ptr<Image>> dummy_depths_;

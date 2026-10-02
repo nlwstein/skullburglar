@@ -114,8 +114,10 @@ bool ConvertIndices(const uint8_t* src, T* dst, uint32_t count, xe::Endian endia
                : ConvertIndicesReset<T, false>(src, dst, count, endian, reset_index);
 }
 
+}  // namespace
+
 // Everything that selects a pipeline. Zero-initialised (padding included) and compared as bytes.
-struct PipelineKey {
+struct Renderer::PipelineKey {
   const void* vs;
   const void* ps;
   VkPipelineLayout layout;
@@ -124,8 +126,6 @@ struct PipelineKey {
   VkFormat color[4], depth;
   uint32_t blend[4], write_mask[4];
 };
-
-}  // namespace
 
 bool Renderer::CreateBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage) {
   VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -146,7 +146,12 @@ bool Renderer::CreateBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlag
 bool Renderer::InitDrawing() {
   const VkDevice dev = device_->device();
   const auto& props = device_->properties();
-  shaders_ = std::make_unique<ShaderCache>(device_);
+  // Pipeline workers: BOTS_GFX_PIPELINE_THREADS (0: create on the GPU thread), else a third of the hardware
+  // threads, 1-4 (the guest's CPU threads come first).
+  uint32_t workers = std::clamp(std::thread::hardware_concurrency() / 3, 1u, 4u);
+  if (const char* v = std::getenv("BOTS_GFX_PIPELINE_THREADS"); v && *v) workers = uint32_t(std::atoi(v));
+  async_pipelines_ = workers != 0;
+  shaders_ = std::make_unique<ShaderCache>(device_, workers);
   shared_memory_bindings_ = 1u << Translator::GetSharedMemoryStorageBufferCountLog2(props.maxStorageBufferRange);
 
   VkDescriptorSetLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
@@ -235,7 +240,10 @@ bool Renderer::InitDrawing() {
 
 void Renderer::DestroyDrawing() {
   const VkDevice dev = device_->device();
-  for (auto& [k, pipeline] : pipelines_) vk_.vkDestroyPipeline(dev, pipeline, nullptr);
+  if (shaders_) shaders_->StopWorkers();
+  for (auto& [k, slot] : pipelines_) {
+    if (slot->pipeline) vk_.vkDestroyPipeline(dev, slot->pipeline, nullptr);
+  }
   for (auto& [k, layout] : pipeline_layouts_) vk_.vkDestroyPipelineLayout(dev, layout.layout, nullptr);
   for (auto& [k, layout] : texture_set_layouts_) vk_.vkDestroyDescriptorSetLayout(dev, layout, nullptr);
   for (VkDescriptorSetLayout layout : {set_layout_shared_, set_layout_constants_, set_layout_empty_}) {
@@ -313,21 +321,130 @@ const Renderer::PipelineLayout* Renderer::GetPipelineLayout(const LayoutKey& key
   return &slot;
 }
 
-VkPipeline Renderer::GetPipeline(std::string_view key, const VkGraphicsPipelineCreateInfo& info) {
-  if (last_pipeline_ && key == last_pipeline_key_) return last_pipeline_;
-  last_pipeline_key_.assign(key);  // reuses its capacity
-  auto it = pipelines_.find(last_pipeline_key_);
-  if (it == pipelines_.end()) {
-    VkPipeline pipeline = VK_NULL_HANDLE;
-    if (vk_.vkCreateGraphicsPipelines(device_->device(), pipeline_cache_, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
-      std::fprintf(stderr, "native renderer: pipeline creation failed\n");
-      pipeline = VK_NULL_HANDLE;
-    } else {
-      ++stats_.pipelines;
-    }
-    it = pipelines_.emplace(last_pipeline_key_, pipeline).first;
+// Thread-safe (worker threads): everything comes from the key and state fixed at construction.
+VkPipeline Renderer::CreateDrawPipeline(const PipelineKey& key) const {
+  VkPipelineShaderStageCreateInfo stages[2] = {
+      {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT,
+       static_cast<const ShaderCache::Translation*>(key.vs)->shader_module(), "main", nullptr},
+      {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT,
+       key.ps ? static_cast<const ShaderCache::Translation*>(key.ps)->shader_module() : VK_NULL_HANDLE, "main", nullptr},
+  };
+  VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+  VkPipelineInputAssemblyStateCreateInfo input_assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+  input_assembly.topology = VkPrimitiveTopology(key.topology);
+  input_assembly.primitiveRestartEnable = key.restart;
+  VkPipelineViewportStateCreateInfo viewport_state{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+  viewport_state.viewportCount = viewport_state.scissorCount = 1;
+  VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+  raster.depthClampEnable = key.depth_clamp;
+  raster.polygonMode = key.polygon_line ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
+  raster.cullMode = VkCullModeFlags(key.cull);
+  raster.frontFace = key.front_clockwise ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  raster.depthBiasEnable = VK_TRUE;
+  raster.lineWidth = 1.0f;
+  VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+  multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineDepthStencilStateCreateInfo depth_stencil{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+  depth_stencil.depthTestEnable = key.depth_test;
+  depth_stencil.depthWriteEnable = key.depth_write;
+  depth_stencil.depthCompareOp = CompareOp(xe::CompareFunction(key.depth_op));
+  depth_stencil.stencilTestEnable = key.stencil;
+  auto stencil_state = [](const uint32_t ops[4]) {
+    VkStencilOpState s{};
+    s.failOp = StencilOp(xe::StencilOp(ops[0]));
+    s.passOp = StencilOp(xe::StencilOp(ops[1]));
+    s.depthFailOp = StencilOp(xe::StencilOp(ops[2]));
+    s.compareOp = CompareOp(xe::CompareFunction(ops[3]));
+    return s;
+  };
+  depth_stencil.front = stencil_state(key.front);
+  depth_stencil.back = stencil_state(key.back);
+  VkPipelineColorBlendAttachmentState blends[4]{};
+  for (uint32_t i = 0; i < 4; ++i) {
+    blends[i].colorWriteMask = key.write_mask[i];
+    reg::RB_BLENDCONTROL bc;
+    bc.value = key.blend[i];
+    blends[i].srcColorBlendFactor = BlendFactor(bc.color_srcblend);
+    blends[i].dstColorBlendFactor = BlendFactor(bc.color_destblend);
+    blends[i].colorBlendOp = BlendOp(bc.color_comb_fcn);
+    blends[i].srcAlphaBlendFactor = BlendFactor(bc.alpha_srcblend);
+    blends[i].dstAlphaBlendFactor = BlendFactor(bc.alpha_destblend);
+    blends[i].alphaBlendOp = BlendOp(bc.alpha_comb_fcn);
+    // 1 * src + 0 * dst is no blending.
+    blends[i].blendEnable = key.write_mask[i] && (key.blend[i] & 0x1FFF1FFF) != 0x00010001;
   }
-  last_pipeline_ = it->second;
+  VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+  blend.attachmentCount = 4;
+  blend.pAttachments = blends;
+  const VkDynamicState dynamic_states[] = {VK_DYNAMIC_STATE_VIEWPORT,
+                                           VK_DYNAMIC_STATE_SCISSOR,
+                                           VK_DYNAMIC_STATE_DEPTH_BIAS,
+                                           VK_DYNAMIC_STATE_BLEND_CONSTANTS,
+                                           VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
+                                           VK_DYNAMIC_STATE_STENCIL_WRITE_MASK,
+                                           VK_DYNAMIC_STATE_STENCIL_REFERENCE};
+  VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+  dynamic.dynamicStateCount = uint32_t(std::size(dynamic_states));
+  dynamic.pDynamicStates = dynamic_states;
+  VkPipelineRenderingCreateInfo rendering_info{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+  rendering_info.colorAttachmentCount = 4;
+  rendering_info.pColorAttachmentFormats = key.color;
+  rendering_info.depthAttachmentFormat = rendering_info.stencilAttachmentFormat = PassDepthFormat(key.depth);
+  VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &rendering_info};
+  info.stageCount = key.ps ? 2 : 1;
+  info.pStages = stages;
+  info.pVertexInputState = &vertex_input;
+  info.pInputAssemblyState = &input_assembly;
+  info.pViewportState = &viewport_state;
+  info.pRasterizationState = &raster;
+  info.pMultisampleState = &multisample;
+  info.pDepthStencilState = &depth_stencil;
+  info.pColorBlendState = &blend;
+  info.pDynamicState = &dynamic;
+  info.layout = key.layout;
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  if (vk_.vkCreateGraphicsPipelines(device_->device(), pipeline_cache_, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
+    std::fprintf(stderr, "native renderer: pipeline creation failed\n");
+    return VK_NULL_HANDLE;
+  }
+  return pipeline;
+}
+
+VkPipeline Renderer::GetPipeline(const PipelineKey& key, bool sync, bool& pending) {
+  const std::string_view bytes(reinterpret_cast<const char*>(&key), sizeof(key));
+  pending = false;
+  if (last_pipeline_ && bytes == last_pipeline_key_) return last_pipeline_;
+  auto it = pipelines_.find(std::string(bytes));
+  if (it == pipelines_.end()) it = pipelines_.emplace(std::string(bytes), std::make_unique<PipelineSlot>()).first;
+  PipelineSlot& slot = *it->second;
+  Async state = slot.state.load(std::memory_order_acquire);
+  if (state == Async::kNone) {
+    Workers* workers = shaders_->workers();
+    if (sync || !workers) {
+      slot.pipeline = CreateDrawPipeline(key);
+      state = slot.pipeline ? Async::kReady : Async::kFailed;
+      slot.state.store(state, std::memory_order_release);
+    } else {
+      slot.state.store(Async::kPending, std::memory_order_relaxed);
+      workers->Submit([this, key, s = &slot](rex::graphics::SpirvShaderTranslator&) {
+        s->pipeline = CreateDrawPipeline(key);
+        s->state.store(s->pipeline ? Async::kReady : Async::kFailed, std::memory_order_release);
+      });
+      state = Async::kPending;
+    }
+  }
+  if (state == Async::kPending && sync) {
+    shaders_->Wait(slot.state);
+    state = slot.state.load(std::memory_order_acquire);
+  }
+  if (state == Async::kPending) {
+    pending = true;
+    return VK_NULL_HANDLE;
+  }
+  if (state == Async::kFailed) return VK_NULL_HANDLE;
+  if (!slot.counted) slot.counted = true, ++stats_.pipelines;
+  last_pipeline_key_.assign(bytes);  // reuses its capacity
+  last_pipeline_ = slot.pipeline;
   return last_pipeline_;
 }
 
@@ -469,10 +586,19 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
             ? DepthStencilMode::kEarlyHint
             : DepthStencilMode::kNoModifiers;
   }
-  ShaderCache::Translation* vt = shaders_->Translate(*vshader, vmod.value);
-  ShaderCache::Translation* pt = pshader ? shaders_->Translate(*pshader, pmod.value) : nullptr;
-  if (!vt || (pshader && !pt)) {
+  // Shaders are translated and pipelines created on worker threads; a draw whose aren't ready yet is skipped (a new
+  // effect shows up a few frames late instead of stalling the frame). Rectangle lists - XDK clears and screen-space
+  // passes, few and cheap - wait instead, as does everything when not live (replay, shadow: exact frames).
+  const bool sync = !async_pipelines_ || !tracker_ || rect;
+  ShaderCache::Translation *vt = nullptr, *pt = nullptr;
+  const Async vs_state = shaders_->Request(*vshader, vmod.value, vt, sync);
+  const Async ps_state = pshader ? shaders_->Request(*pshader, pmod.value, pt, sync) : Async::kReady;
+  if (vs_state == Async::kFailed || ps_state == Async::kFailed) {
     ++stats_.failed_shaders;
+    return;
+  }
+  if (vs_state != Async::kReady || ps_state != Async::kReady) {
+    ++stats_.pending_draws;
     return;
   }
 
@@ -877,88 +1003,10 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     key.blend[i] = regs.values[reg::RB_BLENDCONTROL::rt_register_indices[i]] & 0x1FFF1FFF;
   }
 
-  VkPipelineShaderStageCreateInfo stages[2] = {
-      {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT,
-       vt->shader_module(), "main", nullptr},
-      {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT,
-       pt ? pt->shader_module() : VK_NULL_HANDLE, "main", nullptr},
-  };
-  VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-  VkPipelineInputAssemblyStateCreateInfo input_assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-  input_assembly.topology = topology;
-  input_assembly.primitiveRestartEnable = restart;
-  VkPipelineViewportStateCreateInfo viewport_state{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-  viewport_state.viewportCount = viewport_state.scissorCount = 1;
-  VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-  raster.depthClampEnable = key.depth_clamp;
-  raster.polygonMode = key.polygon_line ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
-  raster.cullMode = key.cull;
-  raster.frontFace = key.front_clockwise ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
-  raster.depthBiasEnable = VK_TRUE;
-  raster.lineWidth = 1.0f;
-  VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-  multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-  VkPipelineDepthStencilStateCreateInfo depth_stencil{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-  depth_stencil.depthTestEnable = key.depth_test;
-  depth_stencil.depthWriteEnable = key.depth_write;
-  depth_stencil.depthCompareOp = CompareOp(xe::CompareFunction(key.depth_op));
-  depth_stencil.stencilTestEnable = key.stencil;
-  auto stencil_state = [](const uint32_t ops[4]) {
-    VkStencilOpState s{};
-    s.failOp = StencilOp(xe::StencilOp(ops[0]));
-    s.passOp = StencilOp(xe::StencilOp(ops[1]));
-    s.depthFailOp = StencilOp(xe::StencilOp(ops[2]));
-    s.compareOp = CompareOp(xe::CompareFunction(ops[3]));
-    return s;
-  };
-  depth_stencil.front = stencil_state(key.front);
-  depth_stencil.back = stencil_state(key.back);
-  VkPipelineColorBlendAttachmentState blends[4]{};
-  for (uint32_t i = 0; i < 4; ++i) {
-    blends[i].colorWriteMask = key.write_mask[i];
-    reg::RB_BLENDCONTROL bc;
-    bc.value = key.blend[i];
-    blends[i].srcColorBlendFactor = BlendFactor(bc.color_srcblend);
-    blends[i].dstColorBlendFactor = BlendFactor(bc.color_destblend);
-    blends[i].colorBlendOp = BlendOp(bc.color_comb_fcn);
-    blends[i].srcAlphaBlendFactor = BlendFactor(bc.alpha_srcblend);
-    blends[i].dstAlphaBlendFactor = BlendFactor(bc.alpha_destblend);
-    blends[i].alphaBlendOp = BlendOp(bc.alpha_comb_fcn);
-    // 1 * src + 0 * dst is no blending.
-    blends[i].blendEnable = key.write_mask[i] && (key.blend[i] & 0x1FFF1FFF) != 0x00010001;
-  }
-  VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-  blend.attachmentCount = 4;
-  blend.pAttachments = blends;
-  const VkDynamicState dynamic_states[] = {VK_DYNAMIC_STATE_VIEWPORT,
-                                           VK_DYNAMIC_STATE_SCISSOR,
-                                           VK_DYNAMIC_STATE_DEPTH_BIAS,
-                                           VK_DYNAMIC_STATE_BLEND_CONSTANTS,
-                                           VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
-                                           VK_DYNAMIC_STATE_STENCIL_WRITE_MASK,
-                                           VK_DYNAMIC_STATE_STENCIL_REFERENCE};
-  VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-  dynamic.dynamicStateCount = uint32_t(std::size(dynamic_states));
-  dynamic.pDynamicStates = dynamic_states;
-  VkPipelineRenderingCreateInfo rendering_info{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-  rendering_info.colorAttachmentCount = 4;
-  rendering_info.pColorAttachmentFormats = key.color;
-  rendering_info.depthAttachmentFormat = rendering_info.stencilAttachmentFormat = PassDepthFormat(key.depth);
-  VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &rendering_info};
-  info.stageCount = pt ? 2 : 1;
-  info.pStages = stages;
-  info.pVertexInputState = &vertex_input;
-  info.pInputAssemblyState = &input_assembly;
-  info.pViewportState = &viewport_state;
-  info.pRasterizationState = &raster;
-  info.pMultisampleState = &multisample;
-  info.pDepthStencilState = &depth_stencil;
-  info.pColorBlendState = &blend;
-  info.pDynamicState = &dynamic;
-  info.layout = layout->layout;
-  const VkPipeline pipeline = GetPipeline(std::string_view(reinterpret_cast<const char*>(&key), sizeof(key)), info);
+  bool pending = false;
+  const VkPipeline pipeline = GetPipeline(key, sync, pending);
   if (!pipeline) {
-    ++stats_.skipped_draws;
+    ++(pending ? stats_.pending_draws : stats_.skipped_draws);
     return;
   }
 

@@ -409,6 +409,7 @@ void Renderer::ResetFrame() {
 
 Renderer::~Renderer() {
   if (!device_) return;
+  if (shaders_) shaders_->StopWorkers();  // their jobs use the pipeline cache and shader modules
   const VkDevice dev = device_->device();
   if (vk_.vkDeviceWaitIdle) vk_.vkDeviceWaitIdle(dev);
   SavePipelineCache();
