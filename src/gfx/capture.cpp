@@ -12,6 +12,8 @@
 //   device.bin  the D3DDevice at frame start (0x4000 bytes)
 //   mem.bin     committed guest memory at frame end (non-zero 4 KB pages; physical memory once, by physical
 //               address), index in mem.idx
+//   gamma.bin      the display gamma ramp (set by MMIO, so not in the PM4): 256 DC_LUT_30_COLOR entries, then
+//                  128 x 3 DC_LUT_PWL_DATA entries (used for 2_10_10_10 front buffers)
 //   reference.ppm  the emulated output of this frame (the render thread waits for the GPU before taking it)
 //   meta.json
 // Layouts: tools/gfxcap.py reads them. Guest data stays big-endian. Debug tool: it stalls the frame it records.
@@ -32,6 +34,8 @@
 #include <thread>
 #include <vector>
 
+#include <rex/graphics/command_processor.h>
+#include <rex/graphics/graphics_system.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
 #include <rex/system/interfaces/graphics.h>
@@ -230,6 +234,23 @@ void WriteMemory(const std::filesystem::path& dir, uint64_t* total) {
   *total = offset;
 }
 
+// The command processor's gamma ramp getters are protected; a member pointer taken through a derived class reads
+// them without patching the SDK.
+struct GammaRamp : rex::graphics::CommandProcessor {
+  static const void* Table(const CommandProcessor& cp) { return (cp.*&GammaRamp::gamma_ramp_256_entry_table)(); }
+  static const void* Pwl(const CommandProcessor& cp) { return (cp.*&GammaRamp::gamma_ramp_pwl_rgb)(); }
+};
+
+void WriteGamma(const std::filesystem::path& path) {
+  auto* gfx = static_cast<rex::graphics::GraphicsSystem*>(rex::system::kernel_state()->emulator()->graphics_system());
+  auto* cp = gfx ? gfx->command_processor() : nullptr;
+  if (!cp) return;
+  std::vector<uint32_t> ramp(256 + 128 * 3);
+  std::memcpy(ramp.data(), GammaRamp::Table(*cp), 256 * 4);
+  std::memcpy(ramp.data() + 256, GammaRamp::Pwl(*cp), 128 * 3 * 4);
+  WriteFile(path, ramp.data(), ramp.size() * 4);
+}
+
 void WriteReference(const std::filesystem::path& path) {
   auto* gfx = rex::system::kernel_state()->emulator()->graphics_system();
   auto* presenter = gfx ? gfx->presenter() : nullptr;
@@ -253,6 +274,7 @@ void Finish(Capture& c, const std::filesystem::path& dir, uint64_t* mem_bytes) {
   WriteFile(dir / "blobs.bin", c.blobs.data(), c.blobs.size());
   WriteFile(dir / "device.bin", c.device.data(), c.device.size());
   WriteFile(dir / "pm4.bin", c.pm4.data(), c.pm4.size());
+  WriteGamma(dir / "gamma.bin");
   WriteMemory(dir, mem_bytes);
 }
 

@@ -150,8 +150,10 @@ int Render(Capture& capture, const std::filesystem::path& out) {
   executor.Execute(capture.pm4.data(), capture.pm4.size());
   renderer.Flush();
   const auto& s = renderer.stats();
-  std::printf("native: %llu resolves (%llu dropped), %llu clears, %llu draws, %llu draws not rendered yet\n",
-              (unsigned long long)s.resolves, (unsigned long long)s.dropped_resolves, (unsigned long long)s.clears,
+  std::printf("native: %llu resolves (%llu dropped, %llu multisampled not copied), %llu clears, %llu draws, "
+              "%llu draws not rendered yet\n",
+              (unsigned long long)s.resolves, (unsigned long long)s.dropped_resolves,
+              (unsigned long long)s.msaa_resolves, (unsigned long long)s.clears,
               (unsigned long long)s.draws, (unsigned long long)s.skipped_draws);
   std::printf("native: %llu textures loaded, %llu unsupported, %llu EDRAM transfers\n",
               (unsigned long long)s.textures, (unsigned long long)s.unsupported_textures,
@@ -164,6 +166,18 @@ int Render(Capture& capture, const std::filesystem::path& out) {
   uint32_t w, h, rw, rh;
   if (!renderer.ReadTexture(renderer.last_resolve_address(), image, w, h)) {
     throw std::runtime_error("nothing resolved");
+  }
+  // The presenter applies the guest's gamma ramp (256-entry table for 8-bit front buffers); so does the reference.
+  if (std::FILE* f = std::fopen((capture.dir / "gamma.bin").c_str(), "rb")) {
+    uint32_t table[256];
+    if (std::fread(table, 4, 256, f) == 256) {
+      for (size_t i = 0; i < image.size(); ++i) {
+        const uint32_t shift = (2 - i % 3) * 10;  // red in bits 20-29, blue in 0-9
+        image[i] = uint8_t(((table[image[i]] >> shift) & 0x3FF) * 255 / 1023.0f + 0.5f);
+      }
+      std::printf("gamma ramp applied\n");
+    }
+    std::fclose(f);
   }
   WritePpm(out, image, w, h);
   std::printf("frame: %ux%u from resolve to %08X -> %s\n", w, h, renderer.last_resolve_address(), out.c_str());

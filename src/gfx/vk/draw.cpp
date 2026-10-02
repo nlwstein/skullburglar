@@ -437,11 +437,20 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
       const auto fetch = regs.GetTextureFetch(binding.fetch_constant);
       VkImageView view = VK_NULL_HANDLE;
       const char* source = "null";
-      if (binding.dimension == xe::FetchOpDimension::k3DOrStacked) {
-        view = null_3d_.view;
-      } else if (binding.dimension == xe::FetchOpDimension::kCube) {
-        view = null_cube_.view;
-      } else if (Image* resolved = ResolvedTexture(fetch)) {
+      // As the SDK's AreDimensionsCompatible: 3D-or-stacked fetches have a 2D array binding (stacked data) and a 3D
+      // one, and the shader picks by the fetch's dimension; the binding that does not match gets the null image.
+      Image* null_image = binding.dimension == xe::FetchOpDimension::k3DOrStacked ? &null_3d_
+                          : binding.dimension == xe::FetchOpDimension::kCube      ? &null_cube_
+                                                                                  : &null_2d_array_;
+      const bool compatible =
+          binding.dimension == xe::FetchOpDimension::k3DOrStacked ? fetch.dimension == xe::DataDimension::k3D
+          : binding.dimension == xe::FetchOpDimension::kCube      ? fetch.dimension == xe::DataDimension::kCube
+                                                                  : fetch.dimension == xe::DataDimension::k1D ||
+                                                                        fetch.dimension == xe::DataDimension::k2DOrStacked;
+      const bool flat = fetch.dimension != xe::DataDimension::k3D && fetch.dimension != xe::DataDimension::kCube;
+      if (!compatible) {
+        view = null_image->view;
+      } else if (Image* resolved = flat ? ResolvedTexture(fetch) : nullptr) {
         // Render-to-texture: a resolve destination is sampled straight from its host image.
         uint32_t swizzle = xe::XE_GPU_TEXTURE_SWIZZLE_RGBA;
         view = ResolvedTextureView(*resolved, fetch, binding.is_signed, swizzle);
@@ -456,7 +465,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
           texture_signs[binding.fetch_constant] = rg::texture_util::SwizzleSigns(fetch);
           source = "tex";
         } else {
-          view = null_2d_array_.view;
+          view = null_image->view;
         }
       }
       views.push_back(view);
@@ -582,8 +591,11 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   // System constants (VulkanCommandProcessor::UpdateSystemConstantValues, host render targets).
   // Host depth holds the guest value for both depth formats (not float24 halved into [0, 1)): clears, resolves
   // and transfers read and write it as such.
+  // Multisampled surfaces are drawn supersampled (Surface()): scale like the SDK's draw resolution scale.
+  uint32_t samples_x, samples_y;
+  SampleGrid(regs, samples_x, samples_y);
   du::ViewportInfo viewport;
-  du::GetHostViewportInfo(regs, 1, 1, false, props.maxViewportDimensions[0], props.maxViewportDimensions[1], true,
+  du::GetHostViewportInfo(regs, samples_x, samples_y, false, props.maxViewportDimensions[0], props.maxViewportDimensions[1], true,
                           depth_control, false, false, pshader && pshader->writes_depth(), viewport);
   Translator::SystemConstants sc;
   std::memset(&sc, 0, sizeof(sc));
@@ -887,6 +899,8 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   vk_.vkCmdSetViewport(cmd_, 0, 1, &vp);
   du::Scissor scissor;
   du::GetScissor(regs, scissor);
+  scissor.offset[0] *= samples_x, scissor.extent[0] *= samples_x;
+  scissor.offset[1] *= samples_y, scissor.extent[1] *= samples_y;
   const uint32_t sx = std::min(scissor.offset[0], width), sy = std::min(scissor.offset[1], height);
   const VkRect2D scissor_rect{{int32_t(sx), int32_t(sy)},
                               {std::min(scissor.extent[0], width - sx), std::min(scissor.extent[1], height - sy)}};

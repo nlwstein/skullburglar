@@ -46,7 +46,7 @@ class Renderer : public Pm4Sink {
   bool ReadTexture(uint32_t address, std::vector<uint8_t>& rgb, uint32_t& width, uint32_t& height);
 
   struct Stats {
-    uint64_t draws = 0, resolves = 0, clears = 0, skipped_draws = 0, dropped_resolves = 0;
+    uint64_t draws = 0, resolves = 0, clears = 0, skipped_draws = 0, dropped_resolves = 0, msaa_resolves = 0;
     uint64_t render_passes = 0, pipelines = 0, failed_shaders = 0, unsupported_primitives = 0;
     uint64_t textures = 0, unsupported_textures = 0, transfers = 0;
   };
@@ -59,7 +59,8 @@ class Renderer : public Pm4Sink {
     VkFormat format = VK_FORMAT_UNDEFINED;
     VkImageAspectFlags aspect = 0;
     VkImageView view = VK_NULL_HANDLE;
-    uint32_t width = 0, height = 0;
+    uint32_t width = 0, height = 0, depth = 1, layers = 1, levels = 1;
+    VkImageViewType view_type = VK_IMAGE_VIEW_TYPE_2D;
     uint64_t written = 0;  // surfaces and resolve destinations: write_clock_ at the last write
     VkImageView depth_view = VK_NULL_HANDLE, stencil_view = VK_NULL_HANDLE;  // depth surfaces, for sampling
     std::map<uint32_t, VkImageView> swizzled_views;  // sampled images: by host swizzle | other signedness << 12
@@ -86,9 +87,9 @@ class Renderer : public Pm4Sink {
     Image image;
     uint32_t host_format_swizzle = 0;
   };
-  using TextureCacheKey = std::array<uint32_t, 4>;
-  // Filters (mag, min, mip), clamp modes (x, y, z), border colour.
-  using SamplerKey = std::array<uint32_t, 7>;
+  using TextureCacheKey = std::array<uint32_t, 5>;
+  // Filters (mag, min, mip), clamp modes (x, y, z), border colour, mip range.
+  using SamplerKey = std::array<uint32_t, 9>;
   // The attachments of the open render pass.
   struct Attachments {
     std::array<Image*, 4> color{};
@@ -97,13 +98,17 @@ class Renderer : public Pm4Sink {
   };
 
   Image* Surface(const rex::graphics::RegisterFile& regs, bool depth, uint32_t color_index);
+  // Host pixels per guest pixel of the current surface (its MSAA sample grid).
+  static void SampleGrid(const rex::graphics::RegisterFile& regs, uint32_t& x, uint32_t& y);
   bool ReadImage(const Image& image, std::vector<uint8_t>& rgb, uint32_t& width, uint32_t& height);
   void DumpResolve(const Image& image, uint32_t address);
   Image* Own(const SurfaceKey& key, Image* image);
   Image* ResolveTexture(uint32_t address, uint32_t format, uint32_t width, uint32_t height, bool depth_value = false,
                         bool is_signed = false);
+  // depth_or_layers: Z size of 3D images, array layers otherwise (6 for cubes).
   bool CreateImage(Image& image, VkFormat format, uint32_t width, uint32_t height, bool depth,
-                   VkImageViewType view_type = VK_IMAGE_VIEW_TYPE_2D, bool attachment = true);
+                   VkImageViewType view_type = VK_IMAGE_VIEW_TYPE_2D, bool attachment = true,
+                   uint32_t depth_or_layers = 1, uint32_t levels = 1);
   bool CreateBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage);
   void Resolve(const rex::graphics::RegisterFile& regs);
   void Barrier();

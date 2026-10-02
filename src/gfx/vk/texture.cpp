@@ -1,7 +1,7 @@
 // Renderer: guest textures (loaded on the CPU: untile + byte swap + a few bit shuffles) and samplers.
 //
-// Only the base level of 2D textures is loaded so far; mips, stacked, 3D and cube textures bind the null image.
-// Resolve destinations (render-to-texture) are sampled from their host images instead.
+// 1D, 2D, stacked, cube and 3D textures with all their mip levels; formats without a host equivalent bind the
+// null image. Resolve destinations (render-to-texture) are sampled from their host images instead.
 // Textures are cached by the fetch constant fields that describe their memory, and never invalidated: fine for
 // replays (static memory), not for the game (P3 needs write tracking).
 #include <algorithm>
@@ -142,7 +142,10 @@ VkFormat Renderer::SignTwin(VkFormat format, bool* is_signed) {
 VkImageView Renderer::TextureView(const rg::xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed,
                                   uint32_t& host_swizzle) {
   // The fields that describe the memory: pitch/tiled, format/endian/stacked/address, size, dimension/packing.
-  const TextureCacheKey key{fetch.dword_0 & 0xFFC00000u, fetch.dword_1, fetch.dword_2, fetch.dword_5 & 0x00000E00u};
+  // The fields that describe the memory: pitch/tiled, format/endian/stacked/address, size, mip range,
+  // dimension/packing/mip address.
+  const TextureCacheKey key{fetch.dword_0 & 0xFFC00000u, fetch.dword_1, fetch.dword_2, (fetch.dword_4 >> 2) & 0xFFu,
+                            fetch.dword_5 & 0xFFFFFE00u};
   auto& slot = guest_textures_[key];
   if (!slot) {
     slot = std::make_unique<GuestTexture>();
@@ -224,96 +227,114 @@ VkImageView Renderer::SwizzledView(Image& image, uint32_t host_swizzle, bool is_
   if (!view) {
     VkImageViewCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     info.image = image.image;
-    info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    info.viewType = image.view_type;
     info.format = other ? twin : image.format;
     info.components = {ComponentSwizzle(swizzle & 7), ComponentSwizzle((swizzle >> 3) & 7),
                        ComponentSwizzle((swizzle >> 6) & 7), ComponentSwizzle((swizzle >> 9) & 7)};
-    info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, image.levels, 0, image.layers};
     if (vk_.vkCreateImageView(device_->device(), &info, nullptr, &view) != VK_SUCCESS) view = VK_NULL_HANDLE;
   }
   return view;
 }
 
 void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, GuestTexture& texture) {
-  rg::TextureInfo info;
-  if (fetch.dimension != xe::DataDimension::k2DOrStacked || fetch.stacked ||
-      !rg::TextureInfo::Prepare(fetch, &info)) {
+  uint32_t width_m1, height_m1, depth_m1, base_page, mip_page, mip_min, mip_max;
+  rg::texture_util::GetSubresourcesFromFetchConstant(fetch, &width_m1, &height_m1, &depth_m1, &base_page, &mip_page,
+                                                     &mip_min, &mip_max);
+  const HostFormat host = GetHostFormat(fetch.format);
+  if (host.format == VK_FORMAT_UNDEFINED || (!base_page && !mip_page)) {
     ++stats_.unsupported_textures;
+    if (trace_textures_) std::fprintf(stderr, "texture: unsupported format %u\n", uint32_t(fetch.format));
     return;
   }
-  const HostFormat host = GetHostFormat(info.format);
-  if (host.format == VK_FORMAT_UNDEFINED) {
-    ++stats_.unsupported_textures;
-    if (trace_textures_) std::fprintf(stderr, "texture: unsupported format %u\n", uint32_t(info.format));
-    return;
-  }
-  const rg::FormatInfo* format_info = info.format_info();
-  const uint32_t block_bytes = format_info->bytes_per_block();
-  uint32_t offset_x, offset_y;
-  const uint32_t address = info.GetMipLocation(0, &offset_x, &offset_y, true);
-  const uint8_t* source = memory_(address);
-  if (!source) {
-    ++stats_.unsupported_textures;
-    return;
-  }
-  const rg::TextureExtent guest = info.GetMipExtent(0, true);
-  const rg::TextureExtent host_extent = info.GetMipExtent(0, false);
-  const uint32_t blocks_x = host_extent.block_width, blocks_y = host_extent.block_height;
-  const VkDeviceSize bytes = VkDeviceSize(blocks_x) * blocks_y * block_bytes;
-  VkDeviceSize offset;
-  uint8_t* staging = Upload(bytes, 16, offset);
-  if (!staging) {
-    Flush();
-    BeginCommands();
-    staging = Upload(bytes, 16, offset);
-    if (!staging) {
-      ++stats_.unsupported_textures;
-      return;
-    }
-  }
-  const xe::Endian endian = info.endianness;
-  if (info.is_tiled) {
-    rg::texture_conversion::UntileInfo untile{};
-    untile.offset_x = offset_x;
-    untile.offset_y = offset_y;
-    untile.width = blocks_x;
-    untile.height = blocks_y;
-    untile.input_pitch = guest.block_pitch_h;
-    untile.output_pitch = blocks_x;
-    untile.input_format_info = untile.output_format_info = format_info;
-    untile.copy_callback = [endian](void* out, const void* in, size_t length) {
-      rg::texture_conversion::CopySwapBlock(endian, out, in, length);
-    };
-    rg::texture_conversion::Untile(staging, source, &untile);
-  } else {
-    for (uint32_t y = 0; y < blocks_y; ++y) {
-      rg::texture_conversion::CopySwapBlock(
-          endian, staging + size_t(y) * blocks_x * block_bytes,
-          source + (size_t(offset_y + y) * guest.block_pitch_h + offset_x) * block_bytes, size_t(blocks_x) * block_bytes);
-    }
-  }
-  ApplyShuffle(host.shuffle, staging, bytes);
-
-  const uint32_t width = info.width + 1, height = info.height + 1;
-  if (!CreateImage(texture.image, host.format, width, height, false, VK_IMAGE_VIEW_TYPE_2D_ARRAY, false)) {
-    std::fprintf(stderr, "native renderer: texture image %ux%u format %d failed\n", width, height, int(host.format));
+  const xe::DataDimension dimension = fetch.dimension;
+  const bool is_3d = dimension == xe::DataDimension::k3D;
+  const bool cube = dimension == xe::DataDimension::kCube;
+  const uint32_t width = width_m1 + 1, height = height_m1 + 1, depth = depth_m1 + 1;
+  const uint32_t layers = is_3d ? 1 : depth;
+  const rg::FormatInfo* format_info = rg::FormatInfo::Get(uint32_t(fetch.format));
+  const uint32_t bpb = format_info->bytes_per_block();
+  uint32_t bpb_log2 = 0;
+  while ((2u << bpb_log2) <= bpb) ++bpb_log2;
+  const auto layout = rg::texture_util::GetGuestTextureLayout(dimension, fetch.pitch, width, height, depth, fetch.tiled,
+                                                             fetch.format, fetch.packed_mips, base_page != 0, mip_max);
+  const VkImageViewType view_type = is_3d ? VK_IMAGE_VIEW_TYPE_3D
+                                    : cube ? VK_IMAGE_VIEW_TYPE_CUBE
+                                           : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+  if (!CreateImage(texture.image, host.format, width, height, false, view_type, false, depth, mip_max + 1)) {
+    std::fprintf(stderr, "native renderer: texture image %ux%ux%u format %d failed\n", width, height, depth,
+                 int(host.format));
     texture.image = {};
     ++stats_.unsupported_textures;
     return;
   }
   texture.host_format_swizzle = host.swizzle;
-  VkBufferImageCopy region{};
-  region.bufferOffset = offset;
-  region.bufferRowLength = blocks_x * format_info->block_width;
-  region.bufferImageHeight = blocks_y * format_info->block_height;
-  region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-  region.imageExtent = {width, height, 1};
-  vk_.vkCmdCopyBufferToImage(cmd_, ring_.buffer, texture.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+
+  // Levels below mip_min stay undefined: the sampler's LOD range never reaches them.
+  for (uint32_t level = mip_min; level <= mip_max; ++level) {
+    const bool base = level == 0;
+    const uint32_t stored = std::min(level, layout.packed_level);
+    const auto& guest = base ? layout.base : layout.mips[stored];
+    const uint32_t level_address = base ? base_page << 12 : (mip_page << 12) + layout.mip_offsets_bytes[stored];
+    uint32_t offset_x = 0, offset_y = 0, offset_z = 0;
+    if (level >= layout.packed_level) {
+      rg::texture_util::GetPackedMipOffset(width, height, is_3d ? depth : 1, fetch.format, level, offset_x, offset_y,
+                                           offset_z);
+    }
+    const uint32_t level_width = std::max(width >> level, 1u), level_height = std::max(height >> level, 1u);
+    const uint32_t level_depth = is_3d ? std::max(depth >> level, 1u) : 1;
+    const uint32_t blocks_x = (level_width + format_info->block_width - 1) / format_info->block_width;
+    const uint32_t blocks_y = (level_height + format_info->block_height - 1) / format_info->block_height;
+    const uint32_t pitch_blocks = guest.row_pitch_bytes / bpb;
+    const VkDeviceSize bytes = VkDeviceSize(blocks_x) * blocks_y * level_depth * layers * bpb;
+    VkDeviceSize offset;
+    uint8_t* staging = Upload(bytes, 16, offset);
+    if (!staging) {
+      Flush();
+      BeginCommands();
+      staging = Upload(bytes, 16, offset);
+      if (!staging) {
+        ++stats_.unsupported_textures;
+        return;
+      }
+    }
+    // Block by block through the SDK's tiled-address functions: slow but exact for every layout (P5: GPU untile).
+    uint8_t* out = staging;
+    for (uint32_t layer = 0; layer < layers; ++layer) {
+      const uint8_t* source = memory_(level_address + layer * guest.array_slice_stride_bytes);
+      for (uint32_t z = 0; z < level_depth; ++z) {
+        for (uint32_t y = 0; y < blocks_y; ++y) {
+          for (uint32_t x = 0; x < blocks_x; ++x, out += bpb) {
+            const int32_t bx = int32_t(x + offset_x), by = int32_t(y + offset_y), bz = int32_t(z + offset_z);
+            int32_t at;
+            if (!fetch.tiled) {
+              at = (bz * int32_t(guest.z_slice_stride_block_rows) + by) * int32_t(guest.row_pitch_bytes) + bx * int32_t(bpb);
+            } else if (is_3d) {
+              at = rg::texture_util::GetTiledOffset3D(bx, by, bz, pitch_blocks, guest.z_slice_stride_block_rows,
+                                                      bpb_log2);
+            } else {
+              at = rg::texture_util::GetTiledOffset2D(bx, by, pitch_blocks, bpb_log2);
+            }
+            rg::texture_conversion::CopySwapBlock(fetch.endianness, out, source + at, bpb);
+          }
+        }
+      }
+    }
+    ApplyShuffle(host.shuffle, staging, bytes);
+    VkBufferImageCopy region{};
+    region.bufferOffset = offset;
+    region.bufferRowLength = blocks_x * format_info->block_width;
+    region.bufferImageHeight = blocks_y * format_info->block_height;
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, texture.image.layers};
+    region.imageExtent = {level_width, level_height, level_depth};
+    vk_.vkCmdCopyBufferToImage(cmd_, ring_.buffer, texture.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+  }
   Barrier();
   ++stats_.textures;
   if (trace_textures_) {
-    std::fprintf(stderr, "texture %08X: %ux%u format %u%s endian %u -> vk %d\n", address, width, height,
-                 uint32_t(info.format), info.is_tiled ? " tiled" : "", uint32_t(endian), int(host.format));
+    std::fprintf(stderr, "texture %08X: %ux%ux%u dim %u levels %u-%u format %u%s endian %u -> vk %d\n", base_page << 12,
+                 width, height, depth, uint32_t(dimension), mip_min, mip_max, uint32_t(fetch.format),
+                 fetch.tiled ? " tiled" : "", uint32_t(fetch.endianness), int(host.format));
   }
 }
 
@@ -325,8 +346,9 @@ VkSampler Renderer::GetSampler(const rg::xenos::xe_gpu_texture_fetch_t& fetch,
   const xe::TextureFilter mag = pick(binding.mag_filter, fetch.mag_filter);
   const xe::TextureFilter min = pick(binding.min_filter, fetch.min_filter);
   const xe::TextureFilter mip = pick(binding.mip_filter, fetch.mip_filter);
-  const SamplerKey key{uint32_t(mag), uint32_t(min), uint32_t(mip), uint32_t(fetch.clamp_x), uint32_t(fetch.clamp_y),
-                       uint32_t(fetch.clamp_z), uint32_t(fetch.border_color)};
+  const SamplerKey key{uint32_t(mag),           uint32_t(min),          uint32_t(mip),
+                       uint32_t(fetch.clamp_x),  uint32_t(fetch.clamp_y), uint32_t(fetch.clamp_z),
+                       uint32_t(fetch.border_color), fetch.mip_min_level, fetch.mip_max_level};
   VkSampler& sampler = samplers_[key];
   if (sampler) return sampler;
   VkSamplerCreateInfo info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -336,7 +358,9 @@ VkSampler Renderer::GetSampler(const rg::xenos::xe_gpu_texture_fetch_t& fetch,
   info.addressModeU = AddressMode(fetch.clamp_x);
   info.addressModeV = AddressMode(fetch.clamp_y);
   info.addressModeW = AddressMode(fetch.clamp_z);
-  info.maxLod = mip == xe::TextureFilter::kBaseMap ? 0.25f : VK_LOD_CLAMP_NONE;
+  // Host level n is guest level n, so the fetch's mip range is the LOD range.
+  info.minLod = mip == xe::TextureFilter::kBaseMap ? 0.0f : float(fetch.mip_min_level);
+  info.maxLod = mip == xe::TextureFilter::kBaseMap ? 0.25f : float(std::max(fetch.mip_min_level, fetch.mip_max_level));
   switch (fetch.border_color) {
     case xe::BorderColor::k_ABGR_White: info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE; break;
     case xe::BorderColor::k_ABGR_Black: info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK; break;

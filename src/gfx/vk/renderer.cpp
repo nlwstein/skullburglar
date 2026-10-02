@@ -228,16 +228,17 @@ void Renderer::Flush() {
 }
 
 bool Renderer::CreateImage(Image& image, VkFormat format, uint32_t width, uint32_t height, bool depth,
-                           VkImageViewType view_type, bool attachment) {
+                           VkImageViewType view_type, bool attachment, uint32_t depth_or_layers, uint32_t levels) {
   const bool cube = view_type == VK_IMAGE_VIEW_TYPE_CUBE;
+  const bool is_3d = view_type == VK_IMAGE_VIEW_TYPE_3D;
   VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   info.flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
   if (!depth && SignTwin(format) != VK_FORMAT_UNDEFINED) info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
   info.imageType = view_type == VK_IMAGE_VIEW_TYPE_3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
   info.format = format;
-  info.extent = {width, height, 1};
-  info.mipLevels = 1;
-  info.arrayLayers = cube ? 6 : 1;
+  info.extent = {width, height, is_3d ? depth_or_layers : 1};
+  info.mipLevels = levels;
+  info.arrayLayers = is_3d ? 1 : cube ? std::max(depth_or_layers, 6u) : depth_or_layers;
   info.samples = VK_SAMPLE_COUNT_1_BIT;
   info.tiling = VK_IMAGE_TILING_OPTIMAL;
   info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -254,11 +255,15 @@ bool Renderer::CreateImage(Image& image, VkFormat format, uint32_t width, uint32
   image.aspect = depth ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
   image.width = width;
   image.height = height;
+  image.depth = info.extent.depth;
+  image.layers = info.arrayLayers;
+  image.levels = levels;
+  image.view_type = view_type;
   VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   view.image = image.image;
   view.viewType = view_type;
   view.format = format;
-  view.subresourceRange = {image.aspect, 0, 1, 0, info.arrayLayers};
+  view.subresourceRange = {image.aspect, 0, levels, 0, info.arrayLayers};
   if (vk_.vkCreateImageView(device_->device(), &view, nullptr, &image.view) != VK_SUCCESS) return false;
   if (depth) {
     view.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
@@ -298,22 +303,31 @@ Renderer::Image* Renderer::Surface(const rg::RegisterFile& regs, bool depth, uin
     base = info.color_base, format = uint32_t(storage);
     is_64bpp = xe::IsColorRenderTargetFormat64bpp(info.color_format);
   }
-  const uint32_t pitch = surface.surface_pitch;
+  // Multisampled surfaces are rendered supersampled: one host pixel per guest sample. A 4x surface then is the
+  // same image as a 1x surface of twice the pitch over the same tiles, which the XDK relies on (it clears an
+  // 880-wide depth buffer by drawing a 440-wide 4x one).
+  uint32_t samples_x, samples_y;
+  SampleGrid(regs, samples_x, samples_y);
+  const uint32_t pitch = surface.surface_pitch * samples_x;
   if (!pitch) return nullptr;
   const SurfaceKey key{base, depth, format, pitch};
   auto& slot = surfaces_[key];
   if (slot) return Own(key, slot.get());
 
   // No height on Xenos: the surface can extend to the end of EDRAM.
-  const uint32_t samples_x = surface.msaa_samples >= xe::MsaaSamples::k4X ? 2 : 1;
-  const uint32_t samples_y = surface.msaa_samples >= xe::MsaaSamples::k2X ? 2 : 1;
-  const uint32_t pitch_tiles = ((pitch * samples_x + kTileWidthSamples - 1) / kTileWidthSamples) << is_64bpp;
+  const uint32_t pitch_tiles = ((pitch + kTileWidthSamples - 1) / kTileWidthSamples) << is_64bpp;
   const uint32_t rows = std::max(1u, (kEdramTiles - base % kEdramTiles) / pitch_tiles);
-  const uint32_t height = std::min(rows * kTileHeightSamples / samples_y, kMaxSurfaceHeight);
+  const uint32_t height = std::min(rows * kTileHeightSamples, kMaxSurfaceHeight);
   auto image = std::make_unique<Image>();
   if (!CreateImage(*image, depth ? kDepthFormat : ColorTargetFormat(format), pitch, height, depth)) return nullptr;
   slot = std::move(image);
   return Own(key, slot.get());
+}
+
+void Renderer::SampleGrid(const rg::RegisterFile& regs, uint32_t& x, uint32_t& y) {
+  const auto samples = regs.Get<rg::reg::RB_SURFACE_INFO>().msaa_samples;
+  x = samples >= xe::MsaaSamples::k4X ? 2 : 1;
+  y = samples >= xe::MsaaSamples::k2X ? 2 : 1;
 }
 
 // If another format's surface at the same base and pitch was written more recently, takes over its contents.
@@ -423,6 +437,9 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
 
   BeginCommands();
   EndRendering();
+  uint32_t samples_x, samples_y;
+  SampleGrid(regs, samples_x, samples_y);
+  const bool multisampled = samples_x * samples_y > 1;
   Image* source = Surface(regs, depth_source, depth_source ? 0 : copy.copy_src_select);
   if (!source) {
     ++stats_.dropped_resolves;
@@ -445,14 +462,16 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
         rg::reg::RB_COLOR_INFO::rt_register_indices[depth_source ? 0 : copy.copy_src_select]);
     std::fprintf(stderr,
                  "resolve %llu: %s src %u (surface %ux%u fmt %u) rect %d,%d-%d,%d -> %08X fmt %u %ux%u cmd %u "
-                 "bias %d num %u swap %u clear %s%s\n",
+                 "bias %d num %u swap %u%s clear %s%s\n",
                  (unsigned long long)stats_.resolves, depth_source ? "depth" : "color", copy.copy_src_select,
                  source->width, source->height, depth_source ? 0u : uint32_t(color_info.color_format), x0, y0, x1, y1,
                  dest_address, uint32_t(dest_info.copy_dest_format), uint32_t(dest_pitch.copy_dest_pitch),
                  uint32_t(dest_pitch.copy_dest_height), uint32_t(copy.copy_command), int(dest_info.copy_dest_exp_bias),
-                 uint32_t(dest_info.copy_dest_number), uint32_t(dest_info.copy_dest_swap), copy.color_clear_enable ? "color " : "", copy.depth_clear_enable ? "depth" : "");
+                 uint32_t(dest_info.copy_dest_number), uint32_t(dest_info.copy_dest_swap), multisampled ? " msaa" : "", copy.color_clear_enable ? "color " : "", copy.depth_clear_enable ? "depth" : "");
   }
-  if (copying && depth_source) {
+  if (copying && multisampled) {
+    ++stats_.msaa_resolves;  // would need a downsample; none seen in this game yet
+  } else if (copying && depth_source) {
     // D3D resolves depth to an 8888 texture holding the raw 24_8 bits; games sample it as 24_8 / 24_8_FLOAT
     // (the depth value) or as 8888 (to restore depth). Keep both.
     const bool float_depth =
@@ -502,7 +521,8 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
     }
   }
 
-  // Clears, after the copy.
+  // Clears, after the copy, of every sample in the rect.
+  x0 *= samples_x, x1 *= samples_x, y0 *= samples_y, y1 *= samples_y;
   auto clear = [&](Image& image, bool depth, const VkClearValue& value) {
     int32_t w, h;
     if (!clamp_rect(image, w, h)) return;
