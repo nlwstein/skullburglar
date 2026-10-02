@@ -12,21 +12,47 @@ namespace bots::gfx::vk {
 
 #define BOTS_VK_DEVICE_FUNCTIONS(X)  \
   X(vkAllocateCommandBuffers)        \
+  X(vkAllocateDescriptorSets)        \
   X(vkBeginCommandBuffer)            \
   X(vkCmdBeginRendering)             \
+  X(vkCmdBindDescriptorSets)         \
+  X(vkCmdBindIndexBuffer)            \
+  X(vkCmdBindPipeline)               \
   X(vkCmdBlitImage)                  \
   X(vkCmdClearAttachments)           \
+  X(vkCmdClearColorImage)            \
   X(vkCmdCopyImage)                  \
   X(vkCmdCopyImageToBuffer)          \
+  X(vkCmdDraw)                       \
+  X(vkCmdDrawIndexed)                \
   X(vkCmdEndRendering)               \
   X(vkCmdPipelineBarrier)            \
+  X(vkCmdSetBlendConstants)          \
+  X(vkCmdSetDepthBias)               \
+  X(vkCmdSetScissor)                 \
+  X(vkCmdSetStencilCompareMask)      \
+  X(vkCmdSetStencilReference)        \
+  X(vkCmdSetStencilWriteMask)        \
+  X(vkCmdSetViewport)                \
   X(vkCreateCommandPool)             \
+  X(vkCreateDescriptorPool)          \
+  X(vkCreateDescriptorSetLayout)     \
   X(vkCreateFence)                   \
+  X(vkCreateGraphicsPipelines)       \
   X(vkCreateImageView)               \
+  X(vkCreatePipelineLayout)          \
+  X(vkCreateSampler)                 \
   X(vkDestroyCommandPool)            \
+  X(vkDestroyDescriptorPool)         \
+  X(vkDestroyDescriptorSetLayout)    \
   X(vkDestroyFence)                  \
   X(vkDestroyImageView)              \
+  X(vkDestroyPipeline)               \
+  X(vkDestroyPipelineLayout)         \
+  X(vkDestroySampler)                \
   X(vkDeviceWaitIdle)                \
+  X(vkResetDescriptorPool)           \
+  X(vkUpdateDescriptorSets)          \
   X(vkEndCommandBuffer)              \
   X(vkQueueSubmit)                   \
   X(vkResetCommandPool)              \

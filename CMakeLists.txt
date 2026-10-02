@@ -59,11 +59,30 @@ if(REXSDK_DIR AND NOT WIN32)
         src/gfx/pm4.cpp
         src/gfx/replay/capture_file.cpp
         src/gfx/replay/main.cpp
+        src/gfx/vk/draw.cpp
         src/gfx/vk/renderer.cpp
+        src/gfx/vk/shaders.cpp
         ${REX_GRAPHICS_SRC}/register_file.cpp
         ${REX_GRAPHICS_SRC}/registers.cpp
+        # Xenos microcode -> SPIR-V
+        ${REX_GRAPHICS_SRC}/flags.cpp
+        ${REX_GRAPHICS_SRC}/format/ucode.cpp
+        ${REX_GRAPHICS_SRC}/sampler_info.cpp
+        ${REX_GRAPHICS_SRC}/util/draw.cpp
+        ${REX_GRAPHICS_SRC}/pipeline/shader/shader.cpp
+        ${REX_GRAPHICS_SRC}/pipeline/shader/translator.cpp
+        ${REX_GRAPHICS_SRC}/pipeline/shader/translator_disasm.cpp
+        ${REX_GRAPHICS_SRC}/pipeline/shader/spirv.cpp
+        ${REX_GRAPHICS_SRC}/pipeline/shader/spirv_builder.cpp
+        ${REX_GRAPHICS_SRC}/pipeline/shader/spirv_translator.cpp
+        ${REX_GRAPHICS_SRC}/pipeline/shader/spirv_translator_alu.cpp
+        ${REX_GRAPHICS_SRC}/pipeline/shader/spirv_translator_fetch.cpp
+        ${REX_GRAPHICS_SRC}/pipeline/shader/spirv_translator_memexport.cpp
+        ${REX_GRAPHICS_SRC}/pipeline/shader/spirv_translator_rb.cpp
+        ${REX_GRAPHICS_SRC}/vulkan/shader.cpp
     )
-    target_link_libraries(bots-replay PRIVATE rexruntime Vulkan::Headers GPUOpen::VulkanMemoryAllocator)
+    target_link_libraries(bots-replay PRIVATE rexruntime Vulkan::Headers GPUOpen::VulkanMemoryAllocator
+        xxHash::xxhash glslang::SPIRV glslang MachineIndependent GenericCodeGen OSDependent OGLCompiler)
     target_include_directories(bots-replay PRIVATE ${REXSDK_DIR}/thirdparty/renderdoc)  # rex/ui/vulkan headers
 endif()
 

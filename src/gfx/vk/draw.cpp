@@ -1,0 +1,861 @@
+// Renderer: guest draws (shader translation, pipelines, constants, indices).
+//
+// Follows the SDK's VulkanCommandProcessor::IssueDraw (host render target path) for everything the translated
+// shaders depend on - modifications, system constants, constant buffer packing, descriptor layout - and does
+// its own thing for render targets (renderer.h) and indices (built on the CPU, already byte-swapped).
+#include <algorithm>
+#include <bit>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#include <rex/graphics/registers.h>
+#include <rex/graphics/util/draw.h>
+#include <rex/graphics/xenos.h>
+
+#include "renderer.h"
+
+namespace bots::gfx::vk {
+namespace {
+
+namespace rg = rex::graphics;
+namespace xe = rex::graphics::xenos;
+namespace reg = rex::graphics::reg;
+namespace du = rex::graphics::draw_util;
+using Translator = rg::SpirvShaderTranslator;
+
+constexpr VkDeviceSize kSharedMemorySize = VkDeviceSize(512) << 20;
+constexpr VkDeviceSize kRingSize = VkDeviceSize(128) << 20;
+constexpr uint32_t kTransientSets = 16384;
+constexpr VkShaderStageFlags kStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+VkBlendFactor BlendFactor(xe::BlendFactor f) {
+  switch (uint32_t(f)) {
+    case 1: return VK_BLEND_FACTOR_ONE;
+    case 4: return VK_BLEND_FACTOR_SRC_COLOR;
+    case 5: return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+    case 6: return VK_BLEND_FACTOR_SRC_ALPHA;
+    case 7: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    case 8: return VK_BLEND_FACTOR_DST_COLOR;
+    case 9: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+    case 10: return VK_BLEND_FACTOR_DST_ALPHA;
+    case 11: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+    case 12: return VK_BLEND_FACTOR_CONSTANT_COLOR;
+    case 13: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+    case 14: return VK_BLEND_FACTOR_CONSTANT_ALPHA;
+    case 15: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
+    case 16: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+    default: return VK_BLEND_FACTOR_ZERO;
+  }
+}
+
+VkBlendOp BlendOp(xe::BlendOp op) {
+  switch (op) {
+    case xe::BlendOp::kSubtract: return VK_BLEND_OP_SUBTRACT;
+    case xe::BlendOp::kMin: return VK_BLEND_OP_MIN;
+    case xe::BlendOp::kMax: return VK_BLEND_OP_MAX;
+    case xe::BlendOp::kRevSubtract: return VK_BLEND_OP_REVERSE_SUBTRACT;
+    default: return VK_BLEND_OP_ADD;
+  }
+}
+
+// Xenos compare functions and stencil ops are in Vulkan's order.
+VkCompareOp CompareOp(xe::CompareFunction f) { return VkCompareOp(uint32_t(f)); }
+VkStencilOp StencilOp(xe::StencilOp op) { return VkStencilOp(uint32_t(op)); }
+
+// 16-bit indices only swap within 16 bits (as the SDK normalizes it).
+xe::Endian IndexEndian(xe::Endian endian, bool index32) {
+  if (index32 || endian == xe::Endian::kNone || endian == xe::Endian::k8in16) return endian;
+  return endian == xe::Endian::k8in32 ? xe::Endian::k8in16 : xe::Endian::kNone;
+}
+
+// Everything that selects a pipeline. Zero-initialised (padding included) and compared as bytes.
+struct PipelineKey {
+  const void* vs;
+  const void* ps;
+  VkPipelineLayout layout;
+  uint32_t topology, restart, cull, front_clockwise, polygon_line, depth_clamp;
+  uint32_t depth_test, depth_write, depth_op, stencil, front[4], back[4];
+  VkFormat color[4], depth;
+  uint32_t blend[4], write_mask[4];
+};
+
+}  // namespace
+
+bool Renderer::CreateBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage) {
+  VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  info.size = size;
+  info.usage = usage;
+  VmaAllocationCreateInfo alloc{};
+  alloc.usage = VMA_MEMORY_USAGE_AUTO;
+  alloc.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+  VmaAllocationInfo mapped;
+  if (vmaCreateBuffer(allocator_, &info, &alloc, &buffer.buffer, &buffer.allocation, &mapped) != VK_SUCCESS) {
+    return false;
+  }
+  buffer.mapping = static_cast<uint8_t*>(mapped.pMappedData);
+  buffer.size = size;
+  return buffer.mapping != nullptr;
+}
+
+bool Renderer::InitDrawing() {
+  const VkDevice dev = device_->device();
+  const auto& props = device_->properties();
+  shaders_ = std::make_unique<ShaderCache>(device_);
+  shared_memory_bindings_ = 1u << Translator::GetSharedMemoryStorageBufferCountLog2(props.maxStorageBufferRange);
+
+  VkDescriptorSetLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+  if (vk_.vkCreateDescriptorSetLayout(dev, &layout_info, nullptr, &set_layout_empty_) != VK_SUCCESS) return false;
+  const VkDescriptorSetLayoutBinding shared{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, shared_memory_bindings_, kStages,
+                                            nullptr};
+  layout_info.bindingCount = 1;
+  layout_info.pBindings = &shared;
+  if (vk_.vkCreateDescriptorSetLayout(dev, &layout_info, nullptr, &set_layout_shared_) != VK_SUCCESS) return false;
+  VkDescriptorSetLayoutBinding constants[Translator::kConstantBufferCount];
+  for (uint32_t i = 0; i < Translator::kConstantBufferCount; ++i) {
+    constants[i] = {i, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, kStages, nullptr};
+  }
+  layout_info.bindingCount = Translator::kConstantBufferCount;
+  layout_info.pBindings = constants;
+  if (vk_.vkCreateDescriptorSetLayout(dev, &layout_info, nullptr, &set_layout_constants_) != VK_SUCCESS) {
+    return false;
+  }
+
+  const VkDescriptorPoolSize persistent_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, shared_memory_bindings_};
+  VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, 1, 1,
+                                       &persistent_size};
+  if (vk_.vkCreateDescriptorPool(dev, &pool_info, nullptr, &persistent_pool_) != VK_SUCCESS) return false;
+  const VkDescriptorPoolSize transient_sizes[] = {
+      {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kTransientSets * Translator::kConstantBufferCount},
+      {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kTransientSets * 8},
+      {VK_DESCRIPTOR_TYPE_SAMPLER, kTransientSets * 8},
+  };
+  pool_info.maxSets = kTransientSets;
+  pool_info.poolSizeCount = 3;
+  pool_info.pPoolSizes = transient_sizes;
+  if (vk_.vkCreateDescriptorPool(dev, &pool_info, nullptr, &transient_pool_) != VK_SUCCESS) return false;
+  const VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, persistent_pool_, 1,
+                                          &set_layout_shared_};
+  if (vk_.vkAllocateDescriptorSets(dev, &alloc, &shared_set_) != VK_SUCCESS) return false;
+
+  // Guest physical memory, as the translated shaders address it (vertex fetch, index loads).
+  if (!CreateBuffer(shared_memory_, kSharedMemorySize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) ||
+      !CreateBuffer(ring_, kRingSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) {
+    std::fprintf(stderr, "native renderer: buffer allocation failed\n");
+    return false;
+  }
+  std::vector<VkDescriptorBufferInfo> ranges(shared_memory_bindings_);
+  const VkDeviceSize chunk = kSharedMemorySize / shared_memory_bindings_;
+  for (uint32_t i = 0; i < shared_memory_bindings_; ++i) ranges[i] = {shared_memory_.buffer, i * chunk, chunk};
+  const VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, shared_set_, 0, 0,
+                                   shared_memory_bindings_, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, ranges.data(),
+                                   nullptr};
+  vk_.vkUpdateDescriptorSets(dev, 1, &write, 0, nullptr);
+
+  // M5 replaces this with the guest's sampler state.
+  VkSamplerCreateInfo sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+  sampler.magFilter = sampler.minFilter = VK_FILTER_LINEAR;
+  sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+  sampler.addressModeU = sampler.addressModeV = sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+  sampler.maxLod = VK_LOD_CLAMP_NONE;
+  if (vk_.vkCreateSampler(dev, &sampler, nullptr, &sampler_) != VK_SUCCESS) return false;
+
+  // Bound for textures that aren't available yet.
+  if (!CreateImage(null_2d_array_, VK_FORMAT_R8G8B8A8_UNORM, 1, 1, false, VK_IMAGE_VIEW_TYPE_2D_ARRAY) ||
+      !CreateImage(null_3d_, VK_FORMAT_R8G8B8A8_UNORM, 1, 1, false, VK_IMAGE_VIEW_TYPE_3D) ||
+      !CreateImage(null_cube_, VK_FORMAT_R8G8B8A8_UNORM, 1, 1, false, VK_IMAGE_VIEW_TYPE_CUBE)) {
+    return false;
+  }
+  // BOTS_NULL_TEXTURE_WHITE=1 shows untextured draws as silhouettes (debugging geometry before textures work).
+  const char* white = std::getenv("BOTS_NULL_TEXTURE_WHITE");
+  const float fill = white && *white == '1' ? 1.0f : 0.0f;
+  const VkClearColorValue black{{fill, fill, fill, fill}};
+  for (const Image* image : {&null_2d_array_, &null_3d_, &null_cube_}) {
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
+    vk_.vkCmdClearColorImage(cmd_, image->image, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &range);
+  }
+  Barrier();
+  return true;
+}
+
+void Renderer::DestroyDrawing() {
+  const VkDevice dev = device_->device();
+  for (auto& [k, pipeline] : pipelines_) vk_.vkDestroyPipeline(dev, pipeline, nullptr);
+  for (auto& [k, layout] : pipeline_layouts_) vk_.vkDestroyPipelineLayout(dev, layout.layout, nullptr);
+  for (auto& [k, layout] : texture_set_layouts_) vk_.vkDestroyDescriptorSetLayout(dev, layout, nullptr);
+  for (VkDescriptorSetLayout layout : {set_layout_shared_, set_layout_constants_, set_layout_empty_}) {
+    if (layout) vk_.vkDestroyDescriptorSetLayout(dev, layout, nullptr);
+  }
+  for (VkDescriptorPool pool : {persistent_pool_, transient_pool_}) {
+    if (pool) vk_.vkDestroyDescriptorPool(dev, pool, nullptr);
+  }
+  if (sampler_) vk_.vkDestroySampler(dev, sampler_, nullptr);
+  for (Buffer* buffer : {&shared_memory_, &ring_}) {
+    if (buffer->buffer) vmaDestroyBuffer(allocator_, buffer->buffer, buffer->allocation);
+  }
+  shaders_.reset();
+}
+
+// Replay: the capture's memory snapshot, once. (In-process, P3/P4 track guest writes instead.)
+bool Renderer::UploadSharedMemory() {
+  const uint8_t* source = memory_(0);
+  if (!source) return false;
+  std::memcpy(shared_memory_.mapping, source, kSharedMemorySize);
+  vmaFlushAllocation(allocator_, shared_memory_.allocation, 0, VK_WHOLE_SIZE);
+  return true;
+}
+
+uint8_t* Renderer::Upload(VkDeviceSize size, VkDeviceSize alignment, VkDeviceSize& offset) {
+  const VkDeviceSize start = (ring_used_ + alignment - 1) / alignment * alignment;
+  if (start + size > ring_.size) return nullptr;  // IssueDraw reserves enough up front
+  offset = start;
+  ring_used_ = start + size;
+  return ring_.mapping + start;
+}
+
+VkDescriptorSet Renderer::AllocateSet(VkDescriptorSetLayout layout) {
+  const VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, transient_pool_, 1,
+                                          &layout};
+  VkDescriptorSet set = VK_NULL_HANDLE;
+  if (vk_.vkAllocateDescriptorSets(device_->device(), &alloc, &set) != VK_SUCCESS) return VK_NULL_HANDLE;
+  ++transient_sets_;
+  return set;
+}
+
+VkDescriptorSetLayout Renderer::TextureSetLayout(bool vertex, uint32_t textures, uint32_t samplers) {
+  if (!textures && !samplers) return set_layout_empty_;
+  auto& slot = texture_set_layouts_[{vertex, textures, samplers}];
+  if (slot) return slot;
+  std::vector<VkDescriptorSetLayoutBinding> bindings;
+  const VkShaderStageFlags stage = vertex ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+  for (uint32_t i = 0; i < textures; ++i) bindings.push_back({i, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, stage, nullptr});
+  for (uint32_t i = 0; i < samplers; ++i) {
+    bindings.push_back({textures + i, VK_DESCRIPTOR_TYPE_SAMPLER, 1, stage, nullptr});
+  }
+  VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+  info.bindingCount = uint32_t(bindings.size());
+  info.pBindings = bindings.data();
+  vk_.vkCreateDescriptorSetLayout(device_->device(), &info, nullptr, &slot);
+  return slot;
+}
+
+const Renderer::PipelineLayout* Renderer::GetPipelineLayout(const LayoutKey& key) {
+  auto& slot = pipeline_layouts_[key];
+  if (slot.layout) return &slot;
+  slot.textures_vertex = TextureSetLayout(true, key[0], key[1]);
+  slot.textures_pixel = TextureSetLayout(false, key[2], key[3]);
+  const VkDescriptorSetLayout sets[] = {set_layout_shared_, set_layout_constants_, slot.textures_vertex,
+                                        slot.textures_pixel};
+  VkPipelineLayoutCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+  info.setLayoutCount = 4;
+  info.pSetLayouts = sets;
+  if (!slot.textures_vertex || !slot.textures_pixel ||
+      vk_.vkCreatePipelineLayout(device_->device(), &info, nullptr, &slot.layout) != VK_SUCCESS) {
+    return nullptr;
+  }
+  return &slot;
+}
+
+VkPipeline Renderer::GetPipeline(const std::string& key, const VkGraphicsPipelineCreateInfo& info) {
+  auto& slot = pipelines_[key];
+  if (!slot) {
+    if (vk_.vkCreateGraphicsPipelines(device_->device(), VK_NULL_HANDLE, 1, &info, nullptr, &slot) != VK_SUCCESS) {
+      std::fprintf(stderr, "native renderer: pipeline creation failed\n");
+      slot = VK_NULL_HANDLE;
+    } else {
+      ++stats_.pipelines;
+    }
+  }
+  return slot;
+}
+
+void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
+                         const Draw& draw) {
+  const auto& props = device_->properties();
+  const auto mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
+  const auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+  if ((mode != xe::EdramMode::kColorDepth && mode != xe::EdramMode::kDepthOnly) || !surface_info.surface_pitch) {
+    ++stats_.skipped_draws;
+    return;
+  }
+  if (!shared_memory_uploaded_) {
+    if (!UploadSharedMemory()) {
+      ok_ = false;
+      return;
+    }
+    shared_memory_uploaded_ = true;
+  }
+
+  // Shaders.
+  auto ucode = [&](const ShaderLoad& s) {
+    return s.inline_ucode ? s.inline_ucode : reinterpret_cast<const uint32_t*>(memory_(s.address));
+  };
+  if (!vs.dwords || !ucode(vs)) {
+    ++stats_.skipped_draws;
+    return;
+  }
+  ShaderCache::Shader* vshader = shaders_->Get(xe::ShaderType::kVertex, ucode(vs), vs.dwords);
+  const bool polygonal = du::IsPrimitivePolygonal(regs);
+  if (!du::IsRasterizationPotentiallyDone(regs, polygonal)) {
+    ++stats_.skipped_draws;  // memexport-only draws: not used by this game so far
+    return;
+  }
+  ShaderCache::Shader* pshader = nullptr;
+  if (mode == xe::EdramMode::kColorDepth && ps.dwords && ucode(ps)) {
+    pshader = shaders_->Get(xe::ShaderType::kPixel, ucode(ps), ps.dwords);
+    if (!du::IsPixelShaderNeededWithRasterization(*pshader, regs)) pshader = nullptr;
+  }
+  const reg::RB_DEPTHCONTROL depth_control = du::GetNormalizedDepthControl(regs);
+  const auto program_cntl = regs.Get<reg::SQ_PROGRAM_CNTL>();
+  uint32_t param_gen_pos = UINT32_MAX;
+  const uint32_t interpolator_mask =
+      pshader ? vshader->writes_interpolators() &
+                    pshader->GetInterpolatorInputMask(program_cntl, regs.Get<reg::SQ_CONTEXT_MISC>(), param_gen_pos)
+              : 0;
+
+  // Primitive type -> host topology.
+  const xe::PrimitiveType prim = draw.initiator.prim_type;
+  const bool rect = prim == xe::PrimitiveType::kRectangleList;
+  VkPrimitiveTopology topology;
+  switch (prim) {
+    case xe::PrimitiveType::kLineList: topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST; break;
+    case xe::PrimitiveType::kLineStrip: topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP; break;
+    case xe::PrimitiveType::kTriangleList:
+    case xe::PrimitiveType::kTriangleFan:
+    case xe::PrimitiveType::kQuadList: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;
+    case xe::PrimitiveType::kTriangleStrip:
+    case xe::PrimitiveType::kRectangleList: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
+    default:
+      ++stats_.unsupported_primitives;
+      return;
+  }
+  const auto source = draw.initiator.source_select;
+  if (source == xe::SourceSelect::kImmediate) {
+    ++stats_.unsupported_primitives;
+    return;
+  }
+  const bool dma = source == xe::SourceSelect::kDMA;
+  uint32_t count = draw.initiator.num_indices;
+  if (dma) count = std::min(count, draw.index_words);
+  if (!count) return;
+  const bool index32 = draw.initiator.index_size == xe::IndexFormat::kInt32;
+
+  // Room for this draw's uploads and descriptor sets: flush first rather than mid-draw.
+  BeginCommands();
+  const VkDeviceSize upload_need = 64 * 1024 + VkDeviceSize(count) * 12;
+  if (upload_need > ring_.size) {
+    ++stats_.skipped_draws;
+    return;
+  }
+  if (ring_used_ + upload_need > ring_.size || transient_sets_ + 4 > kTransientSets) {
+    Flush();
+    BeginCommands();
+  }
+
+  // Shader modifications (VulkanPipelineCache::GetCurrent*ShaderModification).
+  const Translator& translator = shaders_->translator();
+  Translator::Modification vmod(translator.GetDefaultVertexShaderModification(
+      vshader->GetDynamicAddressableRegisterCount(program_cntl.vs_num_reg),
+      rect ? rg::Shader::HostVertexShaderType::kRectangleListAsTriangleStrip
+           : rg::Shader::HostVertexShaderType::kVertex));
+  const auto clip = regs.Get<reg::PA_CL_CLIP_CNTL>();
+  uint32_t user_clip_planes = clip.clip_disable ? 0 : clip.ucp_ena;
+  vmod.vertex.interpolator_mask = interpolator_mask;
+  vmod.vertex.user_clip_plane_cull = user_clip_planes && clip.ucp_cull_only_ena && props.shaderCullDistance;
+  if (!vmod.vertex.user_clip_plane_cull && !props.shaderClipDistance) user_clip_planes = 0;
+  vmod.vertex.user_clip_plane_count = std::popcount(user_clip_planes);
+  vmod.vertex.point_ps_ucp_mode = clip.ps_ucp_mode;
+  vmod.vertex.output_point_parameters = 0;
+  vmod.vertex.vertex_kill_and = props.shaderCullDistance &&
+                                (vshader->writes_point_size_edge_flag_kill_vertex() & 0b100) && !clip.vtx_kill_or;
+  Translator::Modification pmod(0);
+  if (pshader) {
+    pmod = Translator::Modification(translator.GetDefaultPixelShaderModification(
+        pshader->GetDynamicAddressableRegisterCount(program_cntl.ps_num_reg)));
+    pmod.pixel.interpolator_mask = interpolator_mask;
+    pmod.pixel.interpolators_centroid =
+        interpolator_mask & ~xe::GetInterpolatorSamplingPattern(
+                                surface_info.msaa_samples, regs.Get<reg::SQ_CONTEXT_MISC>().sc_sample_cntl,
+                                regs.Get<reg::SQ_INTERPOLATOR_CNTL>().sampling_pattern);
+    if (param_gen_pos < xe::kMaxInterpolators) {
+      pmod.pixel.param_gen_enable = 1;
+      pmod.pixel.param_gen_interpolator = param_gen_pos;
+      pmod.pixel.param_gen_point = prim == xe::PrimitiveType::kPointList;
+    }
+    using DepthStencilMode = Translator::Modification::DepthStencilMode;
+    pmod.pixel.depth_stencil_mode =
+        pshader->implicit_early_z_write_allowed() &&
+                (!pshader->writes_color_target(0) || !du::DoesCoverageDependOnAlpha(regs.Get<reg::RB_COLORCONTROL>()))
+            ? DepthStencilMode::kEarlyHint
+            : DepthStencilMode::kNoModifiers;
+  }
+  ShaderCache::Translation* vt = shaders_->Translate(*vshader, vmod.value);
+  ShaderCache::Translation* pt = pshader ? shaders_->Translate(*pshader, pmod.value) : nullptr;
+  if (!vt || (pshader && !pt)) {
+    ++stats_.failed_shaders;
+    return;
+  }
+
+  // Render targets.
+  const uint32_t color_mask = du::GetNormalizedColorMask(regs, pshader ? pshader->writes_color_targets() : 0);
+  Attachments attachments;
+  for (uint32_t i = 0; i < 4; ++i) {
+    if ((color_mask >> (4 * i)) & 0xF) attachments.color[i] = Surface(regs, false, i);
+  }
+  if (depth_control.z_enable || depth_control.stencil_enable) attachments.depth = Surface(regs, true, 0);
+  uint32_t width = UINT32_MAX, height = UINT32_MAX;
+  for (Image* image : attachments.color) {
+    if (image) width = std::min(width, image->width), height = std::min(height, image->height);
+  }
+  if (attachments.depth) {
+    width = std::min(width, attachments.depth->width), height = std::min(height, attachments.depth->height);
+  }
+  if (width == UINT32_MAX) {
+    ++stats_.skipped_draws;  // nothing written
+    return;
+  }
+
+  // Indices: the host index buffer holds guest vertex indices, already byte-swapped.
+  bool indexed = false, restart = false;
+  uint32_t host_count = count;
+  VkDeviceSize index_offset = 0;
+  std::vector<uint32_t> guest, host;
+  const xe::Endian index_endian = IndexEndian(draw.index_endian, index32);
+  auto load_guest = [&] {
+    guest.resize(count);
+    if (!dma) {
+      for (uint32_t i = 0; i < count; ++i) guest[i] = i;
+      return true;
+    }
+    const uint8_t* src = memory_(draw.index_base);
+    if (!src) return false;
+    const bool reset_enabled = regs.Get<reg::PA_SU_SC_MODE_CNTL>().multi_prim_ib_ena;
+    const uint32_t reset_index = regs.Get<reg::VGT_MULTI_PRIM_IB_RESET_INDX>().reset_indx;
+    for (uint32_t i = 0; i < count; ++i) {
+      uint32_t v;
+      if (index32) {
+        std::memcpy(&v, src + 4 * i, 4);
+        v = xe::GpuSwap(v, index_endian);
+      } else {
+        uint16_t h;
+        std::memcpy(&h, src + 2 * i, 2);
+        v = xe::GpuSwap(h, index_endian);
+      }
+      if (reset_enabled && (index32 ? v & 0xFFFFFF : v) == reset_index) {
+        v = UINT32_MAX;
+        restart = true;
+      }
+      guest[i] = v;
+    }
+    return true;
+  };
+  if (rect) {
+    // Two-triangle strips; the vertex shader turns host vertex (4 * rect + corner) into guest vertex
+    // (3 * rect + corner), loading the guest index itself for DMA draws.
+    const uint32_t rects = count / 3;
+    if (!rects) return;
+    host.reserve(size_t(rects) * 5);
+    for (uint32_t r = 0; r < rects; ++r) {
+      if (r) host.push_back(UINT32_MAX);
+      for (uint32_t k = 0; k < 4; ++k) host.push_back(r * 4 + k);
+    }
+    restart = true;
+  } else if (prim == xe::PrimitiveType::kQuadList || prim == xe::PrimitiveType::kTriangleFan || dma) {
+    if (!load_guest()) {
+      ++stats_.skipped_draws;
+      return;
+    }
+    if (prim == xe::PrimitiveType::kQuadList) {
+      for (uint32_t q = 0; q + 3 < count; q += 4) {
+        for (uint32_t k : {0, 1, 2, 0, 2, 3}) host.push_back(guest[q + k]);
+      }
+      restart = false;
+    } else if (prim == xe::PrimitiveType::kTriangleFan) {
+      for (uint32_t i = 1; i + 1 < count; ++i) host.insert(host.end(), {guest[0], guest[i], guest[i + 1]});
+      restart = false;
+    } else {
+      host = std::move(guest);
+      // Vulkan only restarts strips.
+      restart = restart && (topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP ||
+                            topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP);
+    }
+  }
+  if (!host.empty() || rect) {
+    uint8_t* p = Upload(host.size() * 4, 4, index_offset);
+    std::memcpy(p, host.data(), host.size() * 4);
+    host_count = uint32_t(host.size());
+    indexed = true;
+  }
+  if (!host_count) return;
+
+  // System constants (VulkanCommandProcessor::UpdateSystemConstantValues, host render targets).
+  du::ViewportInfo viewport;
+  du::GetHostViewportInfo(regs, 1, 1, false, props.maxViewportDimensions[0], props.maxViewportDimensions[1], true,
+                          depth_control, false, true, pshader && pshader->writes_depth(), viewport);
+  Translator::SystemConstants sc;
+  std::memset(&sc, 0, sizeof(sc));
+  uint32_t flags = 0;
+  if (rect && dma) {
+    flags |= Translator::kSysFlag_ComputeOrPrimitiveVertexIndexLoad;
+    if (index32) flags |= Translator::kSysFlag_ComputeOrPrimitiveVertexIndexLoad32Bit;
+    sc.vertex_index_load_address = draw.index_base;
+    sc.vertex_index_endian = index_endian;
+  } else {
+    sc.vertex_index_endian = xe::Endian::kNone;
+  }
+  const auto vte = regs.Get<reg::PA_CL_VTE_CNTL>();
+  if (vte.vtx_xy_fmt) flags |= Translator::kSysFlag_XYDividedByW;
+  if (vte.vtx_z_fmt) flags |= Translator::kSysFlag_ZDividedByW;
+  if (vte.vtx_w0_fmt) flags |= Translator::kSysFlag_WNotReciprocal;
+  if (polygonal) flags |= Translator::kSysFlag_PrimitivePolygonal;
+  if (du::IsPrimitiveLine(regs)) flags |= Translator::kSysFlag_PrimitiveLine;
+  flags |= uint32_t(surface_info.msaa_samples) << Translator::kSysFlag_MsaaSamples_Shift;
+  const auto depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+  if (depth_info.depth_format == xe::DepthRenderTargetFormat::kD24FS8) flags |= Translator::kSysFlag_DepthFloat24;
+  const auto color_control = regs.Get<reg::RB_COLORCONTROL>();
+  const xe::CompareFunction alpha_func =
+      color_control.alpha_test_enable ? color_control.alpha_func : xe::CompareFunction::kAlways;
+  flags |= uint32_t(alpha_func) << Translator::kSysFlag_AlphaPassIfLess_Shift;
+  for (uint32_t i = 0; i < 4; ++i) {
+    const auto info = regs.Get<reg::RB_COLOR_INFO>(reg::RB_COLOR_INFO::rt_register_indices[i]);
+    // Gamma targets are plain UNORM8 here: the shader applies the guest's piecewise-linear gamma.
+    if (info.color_format == xe::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
+      flags |= Translator::kSysFlag_ConvertColor0ToGamma << i;
+    }
+    int32_t exp_bias = info.color_exp_bias;
+    // 16-bit fixed targets are SNORM: map the guest's -32..32 to -1..1.
+    if (info.color_format == xe::ColorRenderTargetFormat::k_16_16 ||
+        info.color_format == xe::ColorRenderTargetFormat::k_16_16_16_16) {
+      exp_bias -= 5;
+    }
+    const uint32_t scale_bits = 0x3F800000u + uint32_t(exp_bias << 23);
+    std::memcpy(&sc.color_exp_bias[i], &scale_bits, 4);
+  }
+  sc.flags = flags;
+  sc.vertex_base_index = regs.Get<int32_t>(rg::XE_GPU_REG_VGT_INDX_OFFSET);
+  sc.vertex_index_min = regs.values[rg::XE_GPU_REG_VGT_MIN_VTX_INDX];
+  sc.vertex_index_max = regs.values[rg::XE_GPU_REG_VGT_MAX_VTX_INDX];
+  {
+    float* plane = sc.user_clip_planes[0];
+    for (uint32_t planes = user_clip_planes; planes; planes &= planes - 1) {
+      std::memcpy(plane, &regs.values[rg::XE_GPU_REG_PA_CL_UCP_0_X + std::countr_zero(planes) * 4], 16);
+      plane += 4;
+    }
+  }
+  for (int i = 0; i < 3; ++i) sc.ndc_scale[i] = viewport.ndc_scale[i], sc.ndc_offset[i] = viewport.ndc_offset[i];
+  for (uint32_t& swizzles : sc.texture_swizzles) swizzles = 0x688 | (0x688 << 12);  // identity, 2 per dword
+  sc.alpha_test_reference = regs.Get<float>(rg::XE_GPU_REG_RB_ALPHA_REF);
+  sc.alpha_to_mask = color_control.alpha_to_mask_enable ? (color_control.value >> 24) | (1u << 8) : 0;
+  sc.tessellation_factor_range_min = regs.Get<float>(rg::XE_GPU_REG_VGT_HOS_MIN_TESS_LEVEL) + 1.0f;
+  sc.tessellation_factor_range_max = regs.Get<float>(rg::XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL) + 1.0f;
+
+  // Constant buffers (VulkanCommandProcessor::UpdateBindings): float constants packed in use order.
+  const VkDeviceSize ubo_align = props.minUniformBufferOffsetAlignment;
+  VkDescriptorBufferInfo buffers[Translator::kConstantBufferCount];
+  auto put = [&](uint32_t index, const void* data, VkDeviceSize size) {
+    VkDeviceSize offset;
+    std::memcpy(Upload(size, ubo_align, offset), data, size);
+    buffers[index] = {ring_.buffer, offset, size};
+  };
+  auto put_floats = [&](uint32_t index, const ShaderCache::Shader* shader, uint32_t first_register) {
+    const uint32_t n = shader ? shader->constant_register_map().float_count : 0;
+    const VkDeviceSize size = 16 * std::max(n, 1u);
+    VkDeviceSize offset;
+    uint8_t* p = Upload(size, ubo_align, offset);
+    std::memset(p, 0, size);
+    for (uint32_t i = 0; shader && i < 4; ++i) {
+      for (uint64_t bits = shader->constant_register_map().float_bitmap[i]; bits; bits &= bits - 1) {
+        std::memcpy(p, &regs.values[first_register + (i << 8) + (std::countr_zero(bits) << 2)], 16);
+        p += 16;
+      }
+    }
+    buffers[index] = {ring_.buffer, offset, size};
+  };
+  put(Translator::kConstantBufferSystem, &sc, sizeof(sc));
+  put_floats(Translator::kConstantBufferFloatVertex, vshader, rg::XE_GPU_REG_SHADER_CONSTANT_000_X);
+  put_floats(Translator::kConstantBufferFloatPixel, pshader, rg::XE_GPU_REG_SHADER_CONSTANT_256_X);
+  put(Translator::kConstantBufferBoolLoop, &regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031], 4 * (8 + 32));
+  put(Translator::kConstantBufferFetch, &regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0], 4 * 6 * 32);
+
+  // Descriptor sets.
+  static const bool trace = [] {
+    const char* v = std::getenv("BOTS_DRAW_TRACE");
+    return v && *v == '1';
+  }();
+  std::string trace_textures;
+  const auto& vtextures = vshader->GetTextureBindingsAfterTranslation();
+  const auto& vsamplers = vshader->GetSamplerBindingsAfterTranslation();
+  static const std::vector<rg::SpirvShader::TextureBinding> kNoTextures;
+  static const std::vector<rg::SpirvShader::SamplerBinding> kNoSamplers;
+  const auto& ptextures = pshader ? pshader->GetTextureBindingsAfterTranslation() : kNoTextures;
+  const auto& psamplers = pshader ? pshader->GetSamplerBindingsAfterTranslation() : kNoSamplers;
+  const PipelineLayout* layout = GetPipelineLayout({uint32_t(vtextures.size()), uint32_t(vsamplers.size()),
+                                                    uint32_t(ptextures.size()), uint32_t(psamplers.size())});
+  if (!layout) {
+    ++stats_.skipped_draws;
+    return;
+  }
+  VkDescriptorSet sets[4] = {shared_set_, AllocateSet(set_layout_constants_), VK_NULL_HANDLE, VK_NULL_HANDLE};
+  std::vector<VkWriteDescriptorSet> writes;
+  std::vector<VkDescriptorImageInfo> images;
+  images.reserve(vtextures.size() + vsamplers.size() + ptextures.size() + psamplers.size());
+  writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, sets[1], 0, 0, Translator::kConstantBufferCount,
+                    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, buffers, nullptr});
+  auto texture_set = [&](VkDescriptorSet& set, VkDescriptorSetLayout set_layout, const auto& textures,
+                         const auto& samplers) {
+    if (textures.empty() && samplers.empty()) return;
+    set = AllocateSet(set_layout);
+    const size_t first = images.size();
+    for (const auto& binding : textures) {
+      VkImageView view;
+      if (binding.dimension == xe::FetchOpDimension::k3DOrStacked) {
+        view = null_3d_.view;
+      } else if (binding.dimension == xe::FetchOpDimension::kCube) {
+        view = null_cube_.view;
+      } else {
+        // Render-to-texture: a resolve destination is sampled straight from its host image. Other textures: M5.
+        const auto fetch = regs.GetTextureFetch(binding.fetch_constant);
+        const auto it = texture_at_.find(fetch.base_address << 12);
+        view = it != texture_at_.end() ? it->second->view : null_2d_array_.view;
+        if (trace) {
+          char t[48];
+          std::snprintf(t, sizeof(t), " t%u=%08X%s", binding.fetch_constant, fetch.base_address << 12,
+                        it != texture_at_.end() ? "(rt)" : "");
+          trace_textures += t;
+        }
+      }
+      images.push_back({VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL});
+    }
+    for (size_t i = 0; i < samplers.size(); ++i) images.push_back({sampler_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL});
+    if (!textures.empty()) {
+      writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 0, 0, uint32_t(textures.size()),
+                        VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, images.data() + first, nullptr, nullptr});
+    }
+    if (!samplers.empty()) {
+      writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, uint32_t(textures.size()), 0,
+                        uint32_t(samplers.size()), VK_DESCRIPTOR_TYPE_SAMPLER,
+                        images.data() + first + textures.size(), nullptr, nullptr});
+    }
+  };
+  texture_set(sets[2], layout->textures_vertex, vtextures, vsamplers);
+  texture_set(sets[3], layout->textures_pixel, ptextures, psamplers);
+  if (!sets[1] || (sets[2] == VK_NULL_HANDLE && !(vtextures.empty() && vsamplers.empty())) ||
+      (sets[3] == VK_NULL_HANDLE && !(ptextures.empty() && psamplers.empty()))) {
+    ++stats_.skipped_draws;
+    return;
+  }
+  vk_.vkUpdateDescriptorSets(device_->device(), uint32_t(writes.size()), writes.data(), 0, nullptr);
+
+  // Pipeline (VulkanPipelineCache::GetCurrentStateDescription + EnsurePipelineCreated, simplified).
+  PipelineKey key;
+  std::memset(&key, 0, sizeof(key));
+  key.vs = vt;
+  key.ps = pt;
+  key.layout = layout->layout;
+  key.topology = topology;
+  key.restart = restart;
+  const auto mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
+  if (polygonal) {
+    key.cull = (mode_cntl.cull_front ? VK_CULL_MODE_FRONT_BIT : 0) | (mode_cntl.cull_back ? VK_CULL_MODE_BACK_BIT : 0);
+    key.front_clockwise = mode_cntl.face != 0;
+    if (props.fillModeNonSolid && mode_cntl.poly_mode == xe::PolygonModeEnable::kDualMode) {
+      xe::PolygonType type = xe::PolygonType::kTriangles;
+      if (!mode_cntl.cull_front) type = std::min(type, mode_cntl.polymode_front_ptype);
+      if (!mode_cntl.cull_back) type = std::min(type, mode_cntl.polymode_back_ptype);
+      key.polygon_line = type != xe::PolygonType::kTriangles;
+    }
+  }
+  key.depth_clamp = props.depthClamp && clip.clip_disable;
+  if (attachments.depth) {
+    key.depth_test = 1;
+    key.depth_write = depth_control.z_enable && depth_control.z_write_enable;
+    key.depth_op = uint32_t(depth_control.z_enable ? depth_control.zfunc : xe::CompareFunction::kAlways);
+    key.depth = attachments.depth->format;
+    if (depth_control.stencil_enable) {
+      key.stencil = 1;
+      key.front[0] = uint32_t(depth_control.stencilfail), key.front[1] = uint32_t(depth_control.stencilzpass);
+      key.front[2] = uint32_t(depth_control.stencilzfail), key.front[3] = uint32_t(depth_control.stencilfunc);
+      if (polygonal && depth_control.backface_enable) {
+        key.back[0] = uint32_t(depth_control.stencilfail_bf), key.back[1] = uint32_t(depth_control.stencilzpass_bf);
+        key.back[2] = uint32_t(depth_control.stencilzfail_bf), key.back[3] = uint32_t(depth_control.stencilfunc_bf);
+      } else {
+        std::memcpy(key.back, key.front, sizeof(key.back));
+      }
+    }
+  }
+  for (uint32_t i = 0; i < 4; ++i) {
+    if (!attachments.color[i]) continue;
+    key.color[i] = attachments.color[i]->format;
+    key.write_mask[i] = (color_mask >> (4 * i)) & 0xF;
+    key.blend[i] = regs.values[reg::RB_BLENDCONTROL::rt_register_indices[i]] & 0x1FFF1FFF;
+  }
+
+  VkPipelineShaderStageCreateInfo stages[2] = {
+      {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT,
+       vt->shader_module(), "main", nullptr},
+      {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT,
+       pt ? pt->shader_module() : VK_NULL_HANDLE, "main", nullptr},
+  };
+  VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+  VkPipelineInputAssemblyStateCreateInfo input_assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+  input_assembly.topology = topology;
+  input_assembly.primitiveRestartEnable = restart;
+  VkPipelineViewportStateCreateInfo viewport_state{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+  viewport_state.viewportCount = viewport_state.scissorCount = 1;
+  VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+  raster.depthClampEnable = key.depth_clamp;
+  raster.polygonMode = key.polygon_line ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
+  raster.cullMode = key.cull;
+  raster.frontFace = key.front_clockwise ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  raster.depthBiasEnable = VK_TRUE;
+  raster.lineWidth = 1.0f;
+  VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+  multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineDepthStencilStateCreateInfo depth_stencil{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+  depth_stencil.depthTestEnable = key.depth_test;
+  depth_stencil.depthWriteEnable = key.depth_write;
+  depth_stencil.depthCompareOp = CompareOp(xe::CompareFunction(key.depth_op));
+  depth_stencil.stencilTestEnable = key.stencil;
+  auto stencil_state = [](const uint32_t ops[4]) {
+    VkStencilOpState s{};
+    s.failOp = StencilOp(xe::StencilOp(ops[0]));
+    s.passOp = StencilOp(xe::StencilOp(ops[1]));
+    s.depthFailOp = StencilOp(xe::StencilOp(ops[2]));
+    s.compareOp = CompareOp(xe::CompareFunction(ops[3]));
+    return s;
+  };
+  depth_stencil.front = stencil_state(key.front);
+  depth_stencil.back = stencil_state(key.back);
+  VkPipelineColorBlendAttachmentState blends[4]{};
+  for (uint32_t i = 0; i < 4; ++i) {
+    blends[i].colorWriteMask = key.write_mask[i];
+    reg::RB_BLENDCONTROL bc;
+    bc.value = key.blend[i];
+    blends[i].srcColorBlendFactor = BlendFactor(bc.color_srcblend);
+    blends[i].dstColorBlendFactor = BlendFactor(bc.color_destblend);
+    blends[i].colorBlendOp = BlendOp(bc.color_comb_fcn);
+    blends[i].srcAlphaBlendFactor = BlendFactor(bc.alpha_srcblend);
+    blends[i].dstAlphaBlendFactor = BlendFactor(bc.alpha_destblend);
+    blends[i].alphaBlendOp = BlendOp(bc.alpha_comb_fcn);
+    // 1 * src + 0 * dst is no blending.
+    blends[i].blendEnable = key.write_mask[i] && (key.blend[i] & 0x1FFF1FFF) != 0x00010001;
+  }
+  VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+  blend.attachmentCount = 4;
+  blend.pAttachments = blends;
+  const VkDynamicState dynamic_states[] = {VK_DYNAMIC_STATE_VIEWPORT,
+                                           VK_DYNAMIC_STATE_SCISSOR,
+                                           VK_DYNAMIC_STATE_DEPTH_BIAS,
+                                           VK_DYNAMIC_STATE_BLEND_CONSTANTS,
+                                           VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
+                                           VK_DYNAMIC_STATE_STENCIL_WRITE_MASK,
+                                           VK_DYNAMIC_STATE_STENCIL_REFERENCE};
+  VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+  dynamic.dynamicStateCount = uint32_t(std::size(dynamic_states));
+  dynamic.pDynamicStates = dynamic_states;
+  VkPipelineRenderingCreateInfo rendering_info{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+  rendering_info.colorAttachmentCount = 4;
+  rendering_info.pColorAttachmentFormats = key.color;
+  rendering_info.depthAttachmentFormat = rendering_info.stencilAttachmentFormat = key.depth;
+  VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &rendering_info};
+  info.stageCount = pt ? 2 : 1;
+  info.pStages = stages;
+  info.pVertexInputState = &vertex_input;
+  info.pInputAssemblyState = &input_assembly;
+  info.pViewportState = &viewport_state;
+  info.pRasterizationState = &raster;
+  info.pMultisampleState = &multisample;
+  info.pDepthStencilState = &depth_stencil;
+  info.pColorBlendState = &blend;
+  info.pDynamicState = &dynamic;
+  info.layout = layout->layout;
+  const VkPipeline pipeline = GetPipeline(std::string(reinterpret_cast<const char*>(&key), sizeof(key)), info);
+  if (!pipeline) {
+    ++stats_.skipped_draws;
+    return;
+  }
+
+  // Render pass: kept open across draws to the same targets.
+  if (!rendering_ || !(open_pass_ == attachments)) {
+    EndRendering();
+    Barrier();
+    VkRenderingAttachmentInfo colors[4];
+    for (uint32_t i = 0; i < 4; ++i) {
+      colors[i] = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+      colors[i].imageView = attachments.color[i] ? attachments.color[i]->view : VK_NULL_HANDLE;
+      colors[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+      colors[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+      colors[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    }
+    VkRenderingAttachmentInfo depth = colors[0];
+    depth.imageView = attachments.depth ? attachments.depth->view : VK_NULL_HANDLE;
+    VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    rendering.renderArea = {{0, 0}, {width, height}};
+    rendering.layerCount = 1;
+    rendering.colorAttachmentCount = 4;
+    rendering.pColorAttachments = colors;
+    if (attachments.depth) rendering.pDepthAttachment = rendering.pStencilAttachment = &depth;
+    vk_.vkCmdBeginRendering(cmd_, &rendering);
+    rendering_ = true;
+    open_pass_ = attachments;
+    ++stats_.render_passes;
+  }
+
+  vk_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+  vk_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout->layout, 0, 2, sets, 0, nullptr);
+  for (uint32_t i = 2; i < 4; ++i) {
+    if (sets[i]) {
+      vk_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout->layout, i, 1, &sets[i], 0, nullptr);
+    }
+  }
+
+  // Dynamic state (VulkanCommandProcessor::UpdateDynamicState).
+  VkViewport vp{-1.0f, -1.0f, 1.0f, 1.0f, viewport.z_min, viewport.z_max};
+  if (viewport.xy_extent[0] && viewport.xy_extent[1]) {
+    vp.x = float(viewport.xy_offset[0]), vp.y = float(viewport.xy_offset[1]);
+    vp.width = float(viewport.xy_extent[0]), vp.height = float(viewport.xy_extent[1]);
+  }
+  vk_.vkCmdSetViewport(cmd_, 0, 1, &vp);
+  du::Scissor scissor;
+  du::GetScissor(regs, scissor);
+  const uint32_t sx = std::min(scissor.offset[0], width), sy = std::min(scissor.offset[1], height);
+  const VkRect2D scissor_rect{{int32_t(sx), int32_t(sy)},
+                              {std::min(scissor.extent[0], width - sx), std::min(scissor.extent[1], height - sy)}};
+  vk_.vkCmdSetScissor(cmd_, 0, 1, &scissor_rect);
+  float bias_slope, bias_constant;
+  du::GetPreferredFacePolygonOffset(regs, polygonal, bias_slope, bias_constant);
+  bias_constant *= depth_info.depth_format == xe::DepthRenderTargetFormat::kD24S8
+                       ? du::kD3D10PolygonOffsetFactorUnorm24
+                       : du::kD3D10PolygonOffsetFactorFloat24;
+  vk_.vkCmdSetDepthBias(cmd_, bias_constant, 0.0f, bias_slope * xe::kPolygonOffsetScaleSubpixelUnit);
+  const float blend_constants[4] = {
+      regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_RED), regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_GREEN),
+      regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_BLUE), regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_ALPHA)};
+  vk_.vkCmdSetBlendConstants(cmd_, blend_constants);
+  const auto ref_front = regs.Get<reg::RB_STENCILREFMASK>();
+  const auto ref_back = polygonal && depth_control.backface_enable
+                            ? regs.Get<reg::RB_STENCILREFMASK>(rg::XE_GPU_REG_RB_STENCILREFMASK_BF)
+                            : ref_front;
+  vk_.vkCmdSetStencilReference(cmd_, VK_STENCIL_FACE_FRONT_BIT, ref_front.stencilref);
+  vk_.vkCmdSetStencilReference(cmd_, VK_STENCIL_FACE_BACK_BIT, ref_back.stencilref);
+  vk_.vkCmdSetStencilCompareMask(cmd_, VK_STENCIL_FACE_FRONT_BIT, ref_front.stencilmask);
+  vk_.vkCmdSetStencilCompareMask(cmd_, VK_STENCIL_FACE_BACK_BIT, ref_back.stencilmask);
+  vk_.vkCmdSetStencilWriteMask(cmd_, VK_STENCIL_FACE_FRONT_BIT, ref_front.stencilwritemask);
+  vk_.vkCmdSetStencilWriteMask(cmd_, VK_STENCIL_FACE_BACK_BIT, ref_back.stencilwritemask);
+
+  if (indexed) {
+    vk_.vkCmdBindIndexBuffer(cmd_, ring_.buffer, index_offset, VK_INDEX_TYPE_UINT32);
+    vk_.vkCmdDrawIndexed(cmd_, host_count, 1, 0, 0, 0);
+  } else {
+    vk_.vkCmdDraw(cmd_, host_count, 1, 0, 0);
+  }
+  ++stats_.draws;
+  if (trace) {
+    std::fprintf(stderr, "draw %llu: prim %u %s count %u mode %u rt0 %08X %ux%u%s ps %s blend %08X mask %X%s\n",
+                 (unsigned long long)stats_.draws, uint32_t(prim), dma ? "dma" : "auto", count, uint32_t(mode),
+                 regs.values[rg::XE_GPU_REG_RB_COLOR_INFO], width, height, attachments.depth ? " +depth" : "",
+                 pshader ? "yes" : "no", key.blend[0], color_mask, trace_textures.c_str());
+  }
+}
+
+}  // namespace bots::gfx::vk

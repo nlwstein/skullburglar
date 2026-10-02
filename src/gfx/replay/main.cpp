@@ -153,6 +153,9 @@ int Render(Capture& capture, const std::filesystem::path& out) {
   std::printf("native: %llu resolves (%llu dropped), %llu clears, %llu draws, %llu draws not rendered yet\n",
               (unsigned long long)s.resolves, (unsigned long long)s.dropped_resolves, (unsigned long long)s.clears,
               (unsigned long long)s.draws, (unsigned long long)s.skipped_draws);
+  std::printf("native: %llu render passes, %llu pipelines, %llu failed shaders, %llu unsupported primitives\n",
+              (unsigned long long)s.render_passes, (unsigned long long)s.pipelines,
+              (unsigned long long)s.failed_shaders, (unsigned long long)s.unsupported_primitives);
 
   std::vector<uint8_t> image, reference;
   uint32_t w, h, rw, rh;

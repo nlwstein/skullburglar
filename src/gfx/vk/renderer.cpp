@@ -154,7 +154,7 @@ Renderer::Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory m
   }
   const VkCommandBufferAllocateInfo cmd_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, nullptr, pool_,
                                              VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
-  ok_ = vk_.vkAllocateCommandBuffers(device_->device(), &cmd_info, &cmd_) == VK_SUCCESS;
+  ok_ = vk_.vkAllocateCommandBuffers(device_->device(), &cmd_info, &cmd_) == VK_SUCCESS && InitDrawing();
 }
 
 Renderer::~Renderer() {
@@ -167,6 +167,8 @@ Renderer::~Renderer() {
   };
   for (auto& [k, image] : surfaces_) destroy(*image);
   for (auto& [k, image] : textures_) destroy(*image);
+  for (Image* image : {&null_2d_array_, &null_3d_, &null_cube_}) destroy(*image);
+  DestroyDrawing();
   if (fence_) vk_.vkDestroyFence(dev, fence_, nullptr);
   if (pool_) vk_.vkDestroyCommandPool(dev, pool_, nullptr);
   if (allocator_) vmaDestroyAllocator(allocator_);
@@ -190,8 +192,16 @@ void Renderer::Barrier() {
                            &barrier, 0, nullptr, 0, nullptr);
 }
 
+void Renderer::EndRendering() {
+  if (!rendering_) return;
+  vk_.vkCmdEndRendering(cmd_);
+  rendering_ = false;
+}
+
 void Renderer::Flush() {
   if (!recording_) return;
+  EndRendering();
+  if (ring_used_) vmaFlushAllocation(allocator_, ring_.allocation, 0, ring_used_);
   vk_.vkEndCommandBuffer(cmd_);
   recording_ = false;
   VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -204,15 +214,21 @@ void Renderer::Flush() {
   vk_.vkWaitForFences(device_->device(), 1, &fence_, VK_TRUE, UINT64_MAX);
   vk_.vkResetFences(device_->device(), 1, &fence_);
   vk_.vkResetCommandPool(device_->device(), pool_, 0);
+  vk_.vkResetDescriptorPool(device_->device(), transient_pool_, 0);
+  ring_used_ = 0;
+  transient_sets_ = 0;
 }
 
-bool Renderer::CreateImage(Image& image, VkFormat format, uint32_t width, uint32_t height, bool depth) {
+bool Renderer::CreateImage(Image& image, VkFormat format, uint32_t width, uint32_t height, bool depth,
+                           VkImageViewType view_type) {
+  const bool cube = view_type == VK_IMAGE_VIEW_TYPE_CUBE;
   VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-  info.imageType = VK_IMAGE_TYPE_2D;
+  info.flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
+  info.imageType = view_type == VK_IMAGE_VIEW_TYPE_3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
   info.format = format;
   info.extent = {width, height, 1};
   info.mipLevels = 1;
-  info.arrayLayers = 1;
+  info.arrayLayers = cube ? 6 : 1;
   info.samples = VK_SAMPLE_COUNT_1_BIT;
   info.tiling = VK_IMAGE_TILING_OPTIMAL;
   info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -229,12 +245,13 @@ bool Renderer::CreateImage(Image& image, VkFormat format, uint32_t width, uint32
   image.height = height;
   VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   view.image = image.image;
-  view.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  view.viewType = view_type;
   view.format = format;
-  view.subresourceRange = {image.aspect, 0, 1, 0, 1};
+  view.subresourceRange = {image.aspect, 0, 1, 0, info.arrayLayers};
   if (vk_.vkCreateImageView(device_->device(), &view, nullptr, &image.view) != VK_SUCCESS) return false;
 
   BeginCommands();
+  EndRendering();
   VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
   barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
   barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -282,7 +299,8 @@ Renderer::Image* Renderer::ResolveTexture(uint32_t address, uint32_t format, uin
   auto& slot = textures_[key];
   if (!slot) {
     auto image = std::make_unique<Image>();
-    if (!CreateImage(*image, TextureFormat(format), width, height, false)) return nullptr;
+    // Shaders sample 2D textures as arrays.
+    if (!CreateImage(*image, TextureFormat(format), width, height, false, VK_IMAGE_VIEW_TYPE_2D_ARRAY)) return nullptr;
     slot = std::move(image);
   }
   texture_at_[address] = slot.get();
@@ -295,7 +313,7 @@ void Renderer::OnDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, const 
     Resolve(regs);
     return;
   }
-  ++stats_.skipped_draws;  // M3: shaders
+  IssueDraw(regs, vs, ps, draw);
 }
 
 void Renderer::Resolve(const rg::RegisterFile& regs) {
@@ -346,6 +364,7 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
   }
 
   BeginCommands();
+  EndRendering();
   Image* source = Surface(regs, depth_source, depth_source ? 0 : copy.copy_src_select);
   if (!source) {
     ++stats_.dropped_resolves;
