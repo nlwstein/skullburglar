@@ -1263,6 +1263,15 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   vk_.vkCmdSetStencilWriteMask(cmd_, VK_STENCIL_FACE_FRONT_BIT, ref_front.stencilwritemask);
   vk_.vkCmdSetStencilWriteMask(cmd_, VK_STENCIL_FACE_BACK_BIT, ref_back.stencilwritemask);
 
+  if (gpu_draw_labels_) {
+    char label[128];
+    std::snprintf(label, sizeof(label), "draw vs %016llX ps %016llX in %ux%u%s%s",
+                  (unsigned long long)vshader->ucode_data_hash(),
+                  (unsigned long long)(pshader ? pshader->ucode_data_hash() : 0), open_area_.width, open_area_.height,
+                  std::ranges::none_of(attachments.color, std::identity{}) ? " depth-only" : "",
+                  samples_x * samples_y > 1 ? " ss4" : "");
+    GpuLabel(kGpuDraw, label);
+  }
   if (indexed) {
     vk_.vkCmdBindIndexBuffer(cmd_, ring_.buffer, index_offset, index_type);
     vk_.vkCmdDrawIndexed(cmd_, host_count, 1, 0, 0, 0);

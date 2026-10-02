@@ -5,6 +5,7 @@
 //
 // Runs the capture's PM4 through the same executor the game uses in-process.
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -146,9 +147,20 @@ int Render(Capture& capture, const std::filesystem::path& out, int repeat) {
       renderer.EndFrame();
       if (std::getenv("BOTS_TRACE_RENDERING")) std::fprintf(stderr, "Frame %d\n", i);
     }
+    // Each frame finished before the next: with a GPU-bound frame the wall time is about its GPU time.
+    const auto start = std::chrono::steady_clock::now();
     executor.Execute(capture.pm4.data(), capture.pm4.size());
+    const auto recorded = std::chrono::steady_clock::now();
+    renderer.Finish();
+    if (repeat > 1) {
+      using ms = std::chrono::duration<double, std::milli>;
+      const auto end = std::chrono::steady_clock::now();
+      std::printf("frame %d: %.2f ms (%.2f recording)\n", i, ms(end - start).count(), ms(recorded - start).count());
+    }
   }
-  renderer.Finish();
+  if (std::getenv("BOTS_GPU_TIMING")) {
+    std::printf("GPU spans per frame:%s\n", renderer.TakeGpuLabelReport(repeat, 60).c_str());
+  }
   const auto& s = renderer.stats();
   std::printf("native: %llu resolves (%llu dropped, %llu multisampled not copied), %llu clears, %llu draws, "
               "%llu draws not rendered yet\n",

@@ -225,7 +225,7 @@ class Renderer : public Pm4Sink {
   void GpuMark(GpuCat cat, bool force = false);
   void GpuLabel(GpuCat cat, std::string label);  // a forced mark whose span is reported under its label
   std::unordered_map<std::string, std::pair<uint64_t, uint64_t>> gpu_labels_;  // ns, spans
-  static constexpr uint32_t kMaxGpuMarks = 4096;
+  static constexpr uint32_t kMaxGpuMarks = 16384;
   bool gpu_timing_ = false;
   uint8_t gpu_cat_ = 0xFF;
   double timestamp_ns_ = 1.0;
@@ -258,6 +258,7 @@ class Renderer : public Pm4Sink {
   bool draw_profile_ = false;
   bool trace_rendering_ = false;
   bool pass_merge_ = true;
+  bool gpu_draw_labels_ = false;  // BOTS_GPU_TIMING=2: a span per draw, by shader pair
   bool InitDrawing();
   void DestroyDrawing();
   bool UploadSharedMemory();

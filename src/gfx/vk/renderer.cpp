@@ -167,7 +167,8 @@ Renderer::Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory m
   if (const char* v = std::getenv("BOTS_GFX_DUMMY_DEPTH"); v && *v) dummy_depth_ = *v == '1';
   const VkPipelineCacheCreateInfo cache_info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
   vk_.vkCreatePipelineCache(device_->device(), &cache_info, nullptr, &pipeline_cache_);
-  if (const char* v = std::getenv("BOTS_GPU_TIMING"); v && *v == '1') {
+  if (const char* v = std::getenv("BOTS_GPU_TIMING"); v && (*v == '1' || *v == '2')) {
+    gpu_draw_labels_ = *v == '2';
     VkPhysicalDeviceProperties props;
     device_->vulkan_instance()->functions().vkGetPhysicalDeviceProperties(device_->physical_device(), &props);
     timestamp_ns_ = props.limits.timestampPeriod;
