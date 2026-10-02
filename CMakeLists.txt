@@ -62,12 +62,19 @@ if(REXSDK_DIR AND NOT WIN32)
         src/gfx/vk/draw.cpp
         src/gfx/vk/renderer.cpp
         src/gfx/vk/shaders.cpp
+        src/gfx/vk/texture.cpp
+        src/gfx/vk/transfer.cpp
         ${REX_GRAPHICS_SRC}/register_file.cpp
         ${REX_GRAPHICS_SRC}/registers.cpp
         # Xenos microcode -> SPIR-V
         ${REX_GRAPHICS_SRC}/flags.cpp
         ${REX_GRAPHICS_SRC}/format/ucode.cpp
         ${REX_GRAPHICS_SRC}/sampler_info.cpp
+        ${REX_GRAPHICS_SRC}/pipeline/texture/conversion.cpp
+        ${REX_GRAPHICS_SRC}/pipeline/texture/extent.cpp
+        ${REX_GRAPHICS_SRC}/pipeline/texture/info.cpp
+        ${REX_GRAPHICS_SRC}/pipeline/texture/info_formats.cpp
+        ${REX_GRAPHICS_SRC}/pipeline/texture/util.cpp
         ${REX_GRAPHICS_SRC}/util/draw.cpp
         ${REX_GRAPHICS_SRC}/pipeline/shader/shader.cpp
         ${REX_GRAPHICS_SRC}/pipeline/shader/translator.cpp

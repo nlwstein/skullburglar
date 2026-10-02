@@ -21,12 +21,14 @@ namespace bots::gfx::vk {
   X(vkCmdBlitImage)                  \
   X(vkCmdClearAttachments)           \
   X(vkCmdClearColorImage)            \
+  X(vkCmdCopyBufferToImage)          \
   X(vkCmdCopyImage)                  \
   X(vkCmdCopyImageToBuffer)          \
   X(vkCmdDraw)                       \
   X(vkCmdDrawIndexed)                \
   X(vkCmdEndRendering)               \
   X(vkCmdPipelineBarrier)            \
+  X(vkCmdPushConstants)              \
   X(vkCmdSetBlendConstants)          \
   X(vkCmdSetDepthBias)               \
   X(vkCmdSetScissor)                 \
@@ -42,6 +44,7 @@ namespace bots::gfx::vk {
   X(vkCreateImageView)               \
   X(vkCreatePipelineLayout)          \
   X(vkCreateSampler)                 \
+  X(vkCreateShaderModule)            \
   X(vkDestroyCommandPool)            \
   X(vkDestroyDescriptorPool)         \
   X(vkDestroyDescriptorSetLayout)    \
@@ -50,6 +53,7 @@ namespace bots::gfx::vk {
   X(vkDestroyPipeline)               \
   X(vkDestroyPipelineLayout)         \
   X(vkDestroySampler)                \
+  X(vkDestroyShaderModule)           \
   X(vkDeviceWaitIdle)                \
   X(vkResetDescriptorPool)           \
   X(vkUpdateDescriptorSets)          \

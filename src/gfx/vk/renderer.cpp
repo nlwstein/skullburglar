@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include <rex/graphics/registers.h>
@@ -162,12 +163,20 @@ Renderer::~Renderer() {
   const VkDevice dev = device_->device();
   if (vk_.vkDeviceWaitIdle) vk_.vkDeviceWaitIdle(dev);
   auto destroy = [&](Image& image) {
-    if (image.view) vk_.vkDestroyImageView(dev, image.view, nullptr);
+    for (VkImageView view : {image.view, image.depth_view, image.stencil_view}) {
+      if (view) vk_.vkDestroyImageView(dev, view, nullptr);
+    }
     if (image.image) vmaDestroyImage(allocator_, image.image, image.allocation);
   };
   for (auto& [k, image] : surfaces_) destroy(*image);
   for (auto& [k, image] : textures_) destroy(*image);
   for (Image* image : {&null_2d_array_, &null_3d_, &null_cube_}) destroy(*image);
+  for (auto& [k, texture] : guest_textures_) {
+    for (auto& [s, view] : texture->views) vk_.vkDestroyImageView(dev, view, nullptr);
+    destroy(texture->image);
+  }
+  for (auto& [k, sampler] : samplers_) vk_.vkDestroySampler(dev, sampler, nullptr);
+  DestroyTransfers();
   DestroyDrawing();
   if (fence_) vk_.vkDestroyFence(dev, fence_, nullptr);
   if (pool_) vk_.vkDestroyCommandPool(dev, pool_, nullptr);
@@ -220,7 +229,7 @@ void Renderer::Flush() {
 }
 
 bool Renderer::CreateImage(Image& image, VkFormat format, uint32_t width, uint32_t height, bool depth,
-                           VkImageViewType view_type) {
+                           VkImageViewType view_type, bool attachment) {
   const bool cube = view_type == VK_IMAGE_VIEW_TYPE_CUBE;
   VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   info.flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
@@ -231,8 +240,10 @@ bool Renderer::CreateImage(Image& image, VkFormat format, uint32_t width, uint32
   info.arrayLayers = cube ? 6 : 1;
   info.samples = VK_SAMPLE_COUNT_1_BIT;
   info.tiling = VK_IMAGE_TILING_OPTIMAL;
-  info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-               (depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+  info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+  if (attachment) {
+    info.usage |= depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  }
   info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   VmaAllocationCreateInfo alloc{};
   alloc.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
@@ -249,6 +260,12 @@ bool Renderer::CreateImage(Image& image, VkFormat format, uint32_t width, uint32
   view.format = format;
   view.subresourceRange = {image.aspect, 0, 1, 0, info.arrayLayers};
   if (vk_.vkCreateImageView(device_->device(), &view, nullptr, &image.view) != VK_SUCCESS) return false;
+  if (depth) {
+    view.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    if (vk_.vkCreateImageView(device_->device(), &view, nullptr, &image.depth_view) != VK_SUCCESS) return false;
+    view.subresourceRange.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+    if (vk_.vkCreateImageView(device_->device(), &view, nullptr, &image.stencil_view) != VK_SUCCESS) return false;
+  }
 
   BeginCommands();
   EndRendering();
@@ -270,17 +287,22 @@ Renderer::Image* Renderer::Surface(const rg::RegisterFile& regs, bool depth, uin
   bool is_64bpp = false;
   if (depth) {
     const auto info = regs.Get<rg::reg::RB_DEPTH_INFO>();
-    base = info.depth_base, format = uint32_t(info.depth_format);
+    // Both depth formats are one host format (D32_SFLOAT_S8_UINT); keep a single image per base.
+    base = info.depth_base, format = 0;
   } else {
     const auto info = regs.Get<rg::reg::RB_COLOR_INFO>(rg::reg::RB_COLOR_INFO::rt_register_indices[color_index]);
-    base = info.color_base, format = uint32_t(info.color_format);
+    // Formats that only differ in blending precision share storage; gamma is applied by the shader, so
+    // 8_8_8_8_GAMMA holds the same bytes as 8_8_8_8.
+    auto storage = xe::GetStorageColorFormat(info.color_format);
+    if (storage == xe::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) storage = xe::ColorRenderTargetFormat::k_8_8_8_8;
+    base = info.color_base, format = uint32_t(storage);
     is_64bpp = xe::IsColorRenderTargetFormat64bpp(info.color_format);
   }
   const uint32_t pitch = surface.surface_pitch;
   if (!pitch) return nullptr;
   const SurfaceKey key{base, depth, format, pitch};
   auto& slot = surfaces_[key];
-  if (slot) return slot.get();
+  if (slot) return Own(key, slot.get());
 
   // No height on Xenos: the surface can extend to the end of EDRAM.
   const uint32_t samples_x = surface.msaa_samples >= xe::MsaaSamples::k4X ? 2 : 1;
@@ -291,7 +313,32 @@ Renderer::Image* Renderer::Surface(const rg::RegisterFile& regs, bool depth, uin
   auto image = std::make_unique<Image>();
   if (!CreateImage(*image, depth ? kDepthFormat : ColorTargetFormat(format), pitch, height, depth)) return nullptr;
   slot = std::move(image);
-  return slot.get();
+  return Own(key, slot.get());
+}
+
+// If another format's surface at the same base and pitch was written more recently, takes over its contents.
+Renderer::Image* Renderer::Own(const SurfaceKey& key, Image* image) {
+  const auto [base, depth, format, pitch] = key;
+  if (depth || !IsTransferable(format)) return image;
+  Image* newest = nullptr;
+  uint32_t newest_format = 0;
+  for (auto& [other_key, other] : surfaces_) {
+    const auto [other_base, other_depth, other_format, other_pitch] = other_key;
+    // Colour surfaces of another format at the same base and pitch, and depth surfaces at the same base (the XDK
+    // clears colour tiles with depth-only draws).
+    const bool candidate = other_depth ? other_base == base
+                                       : other_base == base && other_pitch == pitch && other_format != format &&
+                                             IsTransferable(other_format);
+    if (!candidate || other->written <= image->written) continue;
+    if (!newest || other->written > newest->written) {
+      newest = other.get(), newest_format = other_depth ? kTransferDepth : other_format;
+    }
+  }
+  if (newest) {
+    Transfer(*newest, newest_format, *image, format);
+    image->written = newest->written;
+  }
+  return image;
 }
 
 Renderer::Image* Renderer::ResolveTexture(uint32_t address, uint32_t format, uint32_t width, uint32_t height) {
@@ -382,6 +429,18 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
   const uint32_t dest_address = regs.values[rg::XE_GPU_REG_RB_COPY_DEST_BASE];
   const bool copying = (copy.copy_command == xe::CopyCommand::kRaw || copy.copy_command == xe::CopyCommand::kConvert) &&
                        dest_pitch.copy_dest_pitch && dest_pitch.copy_dest_height;
+  if (trace_textures_) {
+    const auto color_info = regs.Get<rg::reg::RB_COLOR_INFO>(
+        rg::reg::RB_COLOR_INFO::rt_register_indices[depth_source ? 0 : copy.copy_src_select]);
+    std::fprintf(stderr,
+                 "resolve %llu: %s src %u (surface %ux%u fmt %u) rect %d,%d-%d,%d -> %08X fmt %u %ux%u cmd %u "
+                 "clear %s%s\n",
+                 (unsigned long long)stats_.resolves, depth_source ? "depth" : "color", copy.copy_src_select,
+                 source->width, source->height, depth_source ? 0u : uint32_t(color_info.color_format), x0, y0, x1, y1,
+                 dest_address, uint32_t(dest_info.copy_dest_format), uint32_t(dest_pitch.copy_dest_pitch),
+                 uint32_t(dest_pitch.copy_dest_height), uint32_t(copy.copy_command),
+                 copy.color_clear_enable ? "color " : "", copy.depth_clear_enable ? "depth" : "");
+  }
   if (copying && !depth_source) {  // depth resolves (to 24_8 textures) need a shader: M6
     const uint32_t format = uint32_t(dest_info.copy_dest_format);
     Image* dest = ResolveTexture(dest_address, format, dest_pitch.copy_dest_pitch, dest_pitch.copy_dest_height);
@@ -396,6 +455,23 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
       vk_.vkCmdBlitImage(cmd_, source->image, VK_IMAGE_LAYOUT_GENERAL, dest->image, VK_IMAGE_LAYOUT_GENERAL, 1,
                          &blit, VK_FILTER_NEAREST);
       last_resolve_address_ = dest_address;
+      // BOTS_DUMP_RESOLVES=<dir> writes every colour resolve as <dir>/resolve-<n>-<address>.ppm (debugging).
+      static const char* dump_dir = std::getenv("BOTS_DUMP_RESOLVES");
+      if (dump_dir && *dump_dir) {
+        std::vector<uint8_t> rgb;
+        uint32_t rw, rh;
+        if (ReadTexture(dest_address, rgb, rw, rh)) {
+          char path[512];
+          std::snprintf(path, sizeof(path), "%s/resolve-%02llu-%08X.ppm", dump_dir,
+                        (unsigned long long)stats_.resolves, dest_address);
+          if (FILE* f = std::fopen(path, "wb")) {
+            std::fprintf(f, "P6\n%u %u\n255\n", rw, rh);
+            std::fwrite(rgb.data(), 1, rgb.size(), f);
+            std::fclose(f);
+          }
+        }
+        BeginCommands();
+      }
     } else {
       ++stats_.dropped_resolves;
     }
@@ -429,6 +505,7 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
     const VkClearRect rect{{{x0, y0}, {uint32_t(w), uint32_t(h)}}, 0, 1};
     vk_.vkCmdClearAttachments(cmd_, 1, &what, 1, &rect);
     vk_.vkCmdEndRendering(cmd_);
+    image.written = ++write_clock_;
     ++stats_.clears;
   };
   if (copy.color_clear_enable && !depth_source) {
@@ -459,9 +536,11 @@ bool Renderer::ReadTexture(uint32_t address, std::vector<uint8_t>& rgb, uint32_t
   switch (image.format) {
     case VK_FORMAT_R8G8B8A8_UNORM:
     case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+    case VK_FORMAT_R16G16_SNORM:
       texel = 4;
       break;
     case VK_FORMAT_R16G16B16A16_SFLOAT:
+    case VK_FORMAT_R16G16B16A16_SNORM:
       texel = 8;
       break;
     default:
@@ -497,6 +576,12 @@ bool Renderer::ReadTexture(uint32_t address, std::vector<uint8_t>& rgb, uint32_t
       uint16_t h[4];
       std::memcpy(h, src + i * 8, 8);
       for (int k = 0; k < 3; ++k) c[k] = Half(h[k]);
+    } else if (image.format == VK_FORMAT_R16G16B16A16_SNORM || image.format == VK_FORMAT_R16G16_SNORM) {
+      // Guest 16-bit fixed point: -32..32.
+      const bool four = image.format == VK_FORMAT_R16G16B16A16_SNORM;
+      int16_t v[4] = {};
+      std::memcpy(v, src + i * texel, four ? 8 : 4);
+      for (int k = 0; k < 3; ++k) c[k] = (k < 2 || four) ? float(v[k]) / 32767.0f * 32.0f : 0.0f;
     } else {
       uint32_t p;
       std::memcpy(&p, src + i * 4, 4);

@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <rex/graphics/pipeline/texture/util.h>
 #include <rex/graphics/registers.h>
 #include <rex/graphics/util/draw.h>
 #include <rex/graphics/xenos.h>
@@ -26,7 +27,6 @@ using Translator = rg::SpirvShaderTranslator;
 
 constexpr VkDeviceSize kSharedMemorySize = VkDeviceSize(512) << 20;
 constexpr VkDeviceSize kRingSize = VkDeviceSize(128) << 20;
-constexpr uint32_t kTransientSets = 16384;
 constexpr VkShaderStageFlags kStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
 VkBlendFactor BlendFactor(xe::BlendFactor f) {
@@ -126,12 +126,13 @@ bool Renderer::InitDrawing() {
                                        &persistent_size};
   if (vk_.vkCreateDescriptorPool(dev, &pool_info, nullptr, &persistent_pool_) != VK_SUCCESS) return false;
   const VkDescriptorPoolSize transient_sizes[] = {
-      {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kTransientSets * Translator::kConstantBufferCount},
-      {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kTransientSets * 8},
-      {VK_DESCRIPTOR_TYPE_SAMPLER, kTransientSets * 8},
+      {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kTransientSetCount * Translator::kConstantBufferCount},
+      {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kTransientSetCount * 8},
+      {VK_DESCRIPTOR_TYPE_SAMPLER, kTransientSetCount * 8},
+      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kTransientSetCount},
   };
-  pool_info.maxSets = kTransientSets;
-  pool_info.poolSizeCount = 3;
+  pool_info.maxSets = kTransientSetCount;
+  pool_info.poolSizeCount = 4;
   pool_info.pPoolSizes = transient_sizes;
   if (vk_.vkCreateDescriptorPool(dev, &pool_info, nullptr, &transient_pool_) != VK_SUCCESS) return false;
   const VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, persistent_pool_, 1,
@@ -140,7 +141,8 @@ bool Renderer::InitDrawing() {
 
   // Guest physical memory, as the translated shaders address it (vertex fetch, index loads).
   if (!CreateBuffer(shared_memory_, kSharedMemorySize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) ||
-      !CreateBuffer(ring_, kRingSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) {
+      !CreateBuffer(ring_, kRingSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                                                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
     std::fprintf(stderr, "native renderer: buffer allocation failed\n");
     return false;
   }
@@ -175,7 +177,7 @@ bool Renderer::InitDrawing() {
     vk_.vkCmdClearColorImage(cmd_, image->image, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &range);
   }
   Barrier();
-  return true;
+  return InitTransfers();
 }
 
 void Renderer::DestroyDrawing() {
@@ -340,18 +342,6 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   if (!count) return;
   const bool index32 = draw.initiator.index_size == xe::IndexFormat::kInt32;
 
-  // Room for this draw's uploads and descriptor sets: flush first rather than mid-draw.
-  BeginCommands();
-  const VkDeviceSize upload_need = 64 * 1024 + VkDeviceSize(count) * 12;
-  if (upload_need > ring_.size) {
-    ++stats_.skipped_draws;
-    return;
-  }
-  if (ring_used_ + upload_need > ring_.size || transient_sets_ + 4 > kTransientSets) {
-    Flush();
-    BeginCommands();
-  }
-
   // Shader modifications (VulkanPipelineCache::GetCurrent*ShaderModification).
   const Translator& translator = shaders_->translator();
   Translator::Modification vmod(translator.GetDefaultVertexShaderModification(
@@ -394,6 +384,70 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   if (!vt || (pshader && !pt)) {
     ++stats_.failed_shaders;
     return;
+  }
+
+  // Textures. Loading one may record an upload (and flush), so this comes before the ring reservation.
+  static const std::vector<rg::SpirvShader::TextureBinding> kNoTextures;
+  static const std::vector<rg::SpirvShader::SamplerBinding> kNoSamplers;
+  const auto& vtextures = vshader->GetTextureBindingsAfterTranslation();
+  const auto& vsamplers = vshader->GetSamplerBindingsAfterTranslation();
+  const auto& ptextures = pshader ? pshader->GetTextureBindingsAfterTranslation() : kNoTextures;
+  const auto& psamplers = pshader ? pshader->GetSamplerBindingsAfterTranslation() : kNoSamplers;
+  static const bool trace = [] {
+    const char* v = std::getenv("BOTS_DRAW_TRACE");
+    return v && *v == '1';
+  }();
+  trace_textures_ = trace;
+  std::string trace_textures;
+  uint32_t texture_swizzles[32], texture_signs[32];
+  for (uint32_t i = 0; i < 32; ++i) texture_swizzles[i] = xe::XE_GPU_TEXTURE_SWIZZLE_RGBA, texture_signs[i] = 0;
+  auto texture_views = [&](const std::vector<rg::SpirvShader::TextureBinding>& bindings) {
+    std::vector<VkImageView> views;
+    for (const auto& binding : bindings) {
+      const auto fetch = regs.GetTextureFetch(binding.fetch_constant);
+      VkImageView view = VK_NULL_HANDLE;
+      const char* source = "null";
+      if (binding.dimension == xe::FetchOpDimension::k3DOrStacked) {
+        view = null_3d_.view;
+      } else if (binding.dimension == xe::FetchOpDimension::kCube) {
+        view = null_cube_.view;
+      } else if (const auto it = texture_at_.find(fetch.base_address << 12); it != texture_at_.end()) {
+        // Render-to-texture: a resolve destination is sampled straight from its host image.
+        view = it->second->view;
+        source = "rt";
+      } else {
+        uint32_t swizzle = xe::XE_GPU_TEXTURE_SWIZZLE_RGBA;
+        view = TextureView(fetch, swizzle);
+        if (view) {
+          texture_swizzles[binding.fetch_constant] = swizzle;
+          texture_signs[binding.fetch_constant] = rg::texture_util::SwizzleSigns(fetch);
+          source = "tex";
+        } else {
+          view = null_2d_array_.view;
+        }
+      }
+      views.push_back(view);
+      if (trace && !binding.is_signed) {
+        char t[64];
+        std::snprintf(t, sizeof(t), " t%u=%08X/%u(%s)", uint32_t(binding.fetch_constant), fetch.base_address << 12,
+                      uint32_t(fetch.format), source);
+        trace_textures += t;
+      }
+    }
+    return views;
+  };
+  const std::vector<VkImageView> vviews = texture_views(vtextures), pviews = texture_views(ptextures);
+
+  // Room for this draw's uploads and descriptor sets: flush first rather than mid-draw.
+  BeginCommands();
+  const VkDeviceSize upload_need = 64 * 1024 + VkDeviceSize(count) * 12;
+  if (upload_need > ring_.size) {
+    ++stats_.skipped_draws;
+    return;
+  }
+  if (ring_used_ + upload_need > ring_.size || transient_sets_ + 12 > kTransientSetCount) {
+    Flush();
+    BeginCommands();
   }
 
   // Render targets.
@@ -543,7 +597,10 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     }
   }
   for (int i = 0; i < 3; ++i) sc.ndc_scale[i] = viewport.ndc_scale[i], sc.ndc_offset[i] = viewport.ndc_offset[i];
-  for (uint32_t& swizzles : sc.texture_swizzles) swizzles = 0x688 | (0x688 << 12);  // identity, 2 per dword
+  for (uint32_t i = 0; i < 32; ++i) {
+    sc.texture_swizzles[i >> 1] |= texture_swizzles[i] << (12 * (i & 1));  // used without view swizzles
+    sc.texture_swizzled_signs[i >> 2] |= texture_signs[i] << (8 * (i & 3));
+  }
   sc.alpha_test_reference = regs.Get<float>(rg::XE_GPU_REG_RB_ALPHA_REF);
   sc.alpha_to_mask = color_control.alpha_to_mask_enable ? (color_control.value >> 24) | (1u << 8) : 0;
   sc.tessellation_factor_range_min = regs.Get<float>(rg::XE_GPU_REG_VGT_HOS_MIN_TESS_LEVEL) + 1.0f;
@@ -578,17 +635,6 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   put(Translator::kConstantBufferFetch, &regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0], 4 * 6 * 32);
 
   // Descriptor sets.
-  static const bool trace = [] {
-    const char* v = std::getenv("BOTS_DRAW_TRACE");
-    return v && *v == '1';
-  }();
-  std::string trace_textures;
-  const auto& vtextures = vshader->GetTextureBindingsAfterTranslation();
-  const auto& vsamplers = vshader->GetSamplerBindingsAfterTranslation();
-  static const std::vector<rg::SpirvShader::TextureBinding> kNoTextures;
-  static const std::vector<rg::SpirvShader::SamplerBinding> kNoSamplers;
-  const auto& ptextures = pshader ? pshader->GetTextureBindingsAfterTranslation() : kNoTextures;
-  const auto& psamplers = pshader ? pshader->GetSamplerBindingsAfterTranslation() : kNoSamplers;
   const PipelineLayout* layout = GetPipelineLayout({uint32_t(vtextures.size()), uint32_t(vsamplers.size()),
                                                     uint32_t(ptextures.size()), uint32_t(psamplers.size())});
   if (!layout) {
@@ -601,44 +647,28 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   images.reserve(vtextures.size() + vsamplers.size() + ptextures.size() + psamplers.size());
   writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, sets[1], 0, 0, Translator::kConstantBufferCount,
                     VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, buffers, nullptr});
-  auto texture_set = [&](VkDescriptorSet& set, VkDescriptorSetLayout set_layout, const auto& textures,
-                         const auto& samplers) {
-    if (textures.empty() && samplers.empty()) return;
+  auto texture_set = [&](VkDescriptorSet& set, VkDescriptorSetLayout set_layout, const std::vector<VkImageView>& views,
+                         const std::vector<rg::SpirvShader::SamplerBinding>& samplers) {
+    if (views.empty() && samplers.empty()) return;
     set = AllocateSet(set_layout);
     const size_t first = images.size();
-    for (const auto& binding : textures) {
-      VkImageView view;
-      if (binding.dimension == xe::FetchOpDimension::k3DOrStacked) {
-        view = null_3d_.view;
-      } else if (binding.dimension == xe::FetchOpDimension::kCube) {
-        view = null_cube_.view;
-      } else {
-        // Render-to-texture: a resolve destination is sampled straight from its host image. Other textures: M5.
-        const auto fetch = regs.GetTextureFetch(binding.fetch_constant);
-        const auto it = texture_at_.find(fetch.base_address << 12);
-        view = it != texture_at_.end() ? it->second->view : null_2d_array_.view;
-        if (trace) {
-          char t[48];
-          std::snprintf(t, sizeof(t), " t%u=%08X%s", binding.fetch_constant, fetch.base_address << 12,
-                        it != texture_at_.end() ? "(rt)" : "");
-          trace_textures += t;
-        }
-      }
-      images.push_back({VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL});
+    for (VkImageView view : views) images.push_back({VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL});
+    for (const auto& binding : samplers) {
+      images.push_back(
+          {GetSampler(regs.GetTextureFetch(binding.fetch_constant), binding), VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL});
     }
-    for (size_t i = 0; i < samplers.size(); ++i) images.push_back({sampler_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL});
-    if (!textures.empty()) {
-      writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 0, 0, uint32_t(textures.size()),
+    if (!views.empty()) {
+      writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 0, 0, uint32_t(views.size()),
                         VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, images.data() + first, nullptr, nullptr});
     }
     if (!samplers.empty()) {
-      writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, uint32_t(textures.size()), 0,
-                        uint32_t(samplers.size()), VK_DESCRIPTOR_TYPE_SAMPLER,
-                        images.data() + first + textures.size(), nullptr, nullptr});
+      writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, uint32_t(views.size()), 0,
+                        uint32_t(samplers.size()), VK_DESCRIPTOR_TYPE_SAMPLER, images.data() + first + views.size(),
+                        nullptr, nullptr});
     }
   };
-  texture_set(sets[2], layout->textures_vertex, vtextures, vsamplers);
-  texture_set(sets[3], layout->textures_pixel, ptextures, psamplers);
+  texture_set(sets[2], layout->textures_vertex, vviews, vsamplers);
+  texture_set(sets[3], layout->textures_pixel, pviews, psamplers);
   if (!sets[1] || (sets[2] == VK_NULL_HANDLE && !(vtextures.empty() && vsamplers.empty())) ||
       (sets[3] == VK_NULL_HANDLE && !(ptextures.empty() && psamplers.empty()))) {
     ++stats_.skipped_draws;
@@ -850,11 +880,19 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     vk_.vkCmdDraw(cmd_, host_count, 1, 0, 0);
   }
   ++stats_.draws;
+  for (uint32_t i = 0; i < 4; ++i) {
+    if (attachments.color[i] && key.write_mask[i]) attachments.color[i]->written = ++write_clock_;
+  }
+  if (attachments.depth && (key.depth_write || key.stencil)) attachments.depth->written = ++write_clock_;
   if (trace) {
-    std::fprintf(stderr, "draw %llu: prim %u %s count %u mode %u rt0 %08X %ux%u%s ps %s blend %08X mask %X%s\n",
+    std::fprintf(stderr,
+                 "draw %llu: prim %u %s count %u mode %u rt0 %08X %ux%u%s ps %s blend %08X mask %X%s | depth %08X "
+                 "dc %08X pitch %u\n",
                  (unsigned long long)stats_.draws, uint32_t(prim), dma ? "dma" : "auto", count, uint32_t(mode),
                  regs.values[rg::XE_GPU_REG_RB_COLOR_INFO], width, height, attachments.depth ? " +depth" : "",
-                 pshader ? "yes" : "no", key.blend[0], color_mask, trace_textures.c_str());
+                 pshader ? "yes" : "no", key.blend[0], color_mask, trace_textures.c_str(),
+                 regs.values[rg::XE_GPU_REG_RB_DEPTH_INFO], regs.values[rg::XE_GPU_REG_RB_DEPTHCONTROL],
+                 uint32_t(surface_info.surface_pitch));
   }
 }
 

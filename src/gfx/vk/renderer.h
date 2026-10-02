@@ -28,6 +28,8 @@ namespace bots::gfx::vk {
 
 class Renderer : public Pm4Sink {
  public:
+  static constexpr uint32_t kTransientSetCount = 16384;  // descriptor sets per submission
+
   Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory memory);
   ~Renderer() override;
   bool ok() const { return ok_; }
@@ -46,6 +48,7 @@ class Renderer : public Pm4Sink {
   struct Stats {
     uint64_t draws = 0, resolves = 0, clears = 0, skipped_draws = 0, dropped_resolves = 0;
     uint64_t render_passes = 0, pipelines = 0, failed_shaders = 0, unsupported_primitives = 0;
+    uint64_t textures = 0, unsupported_textures = 0, transfers = 0;
   };
   const Stats& stats() const { return stats_; }
 
@@ -57,6 +60,8 @@ class Renderer : public Pm4Sink {
     VkImageAspectFlags aspect = 0;
     VkImageView view = VK_NULL_HANDLE;
     uint32_t width = 0, height = 0;
+    uint64_t written = 0;  // surfaces: write_clock_ at the last write
+    VkImageView depth_view = VK_NULL_HANDLE, stencil_view = VK_NULL_HANDLE;  // depth surfaces, for sampling
   };
   struct Buffer {
     VkBuffer buffer = VK_NULL_HANDLE;
@@ -74,6 +79,15 @@ class Renderer : public Pm4Sink {
     VkPipelineLayout layout = VK_NULL_HANDLE;
     VkDescriptorSetLayout textures_vertex = VK_NULL_HANDLE, textures_pixel = VK_NULL_HANDLE;
   };
+  // A guest texture's host image (null image if unsupported) and its views by host swizzle.
+  struct GuestTexture {
+    Image image;
+    uint32_t host_format_swizzle = 0;
+    std::map<uint32_t, VkImageView> views;
+  };
+  using TextureCacheKey = std::array<uint32_t, 4>;
+  // Filters (mag, min, mip), clamp modes (x, y, z), border colour.
+  using SamplerKey = std::array<uint32_t, 7>;
   // The attachments of the open render pass.
   struct Attachments {
     std::array<Image*, 4> color{};
@@ -82,9 +96,10 @@ class Renderer : public Pm4Sink {
   };
 
   Image* Surface(const rex::graphics::RegisterFile& regs, bool depth, uint32_t color_index);
+  Image* Own(const SurfaceKey& key, Image* image);
   Image* ResolveTexture(uint32_t address, uint32_t format, uint32_t width, uint32_t height);
   bool CreateImage(Image& image, VkFormat format, uint32_t width, uint32_t height, bool depth,
-                   VkImageViewType view_type = VK_IMAGE_VIEW_TYPE_2D);
+                   VkImageViewType view_type = VK_IMAGE_VIEW_TYPE_2D, bool attachment = true);
   bool CreateBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage);
   void Resolve(const rex::graphics::RegisterFile& regs);
   void Barrier();
@@ -103,6 +118,21 @@ class Renderer : public Pm4Sink {
   VkDescriptorSetLayout TextureSetLayout(bool vertex, uint32_t textures, uint32_t samplers);
   const PipelineLayout* GetPipelineLayout(const LayoutKey& key);
   VkPipeline GetPipeline(const std::string& key, const VkGraphicsPipelineCreateInfo& info);
+
+  // EDRAM ownership transfers (transfer.cpp).
+  static constexpr uint32_t kTransferDepth = 100;  // Transfer source format for depth/stencil surfaces
+  static bool IsTransferable(uint32_t format);
+  bool InitTransfers();
+  void DestroyTransfers();
+  VkShaderModule CreateShaderModule(int stage, const std::string& source);
+  VkPipeline TransferPipeline(uint32_t source_format, uint32_t dest_format, VkFormat host_format);
+  void Transfer(Image& source, uint32_t source_format, Image& dest, uint32_t dest_format);
+
+  // Textures (texture.cpp). TextureView may record an upload, so call it before a draw's ring reservation.
+  VkImageView TextureView(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch, uint32_t& host_swizzle);
+  void LoadTexture(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch, GuestTexture& texture);
+  VkSampler GetSampler(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch,
+                       const rex::graphics::SpirvShader::SamplerBinding& binding);
 
   const rex::ui::vulkan::VulkanDevice* device_;
   PhysicalMemory memory_;
@@ -138,6 +168,15 @@ class Renderer : public Pm4Sink {
   Image null_2d_array_, null_3d_, null_cube_;
   Attachments open_pass_;
   bool rendering_ = false;
+  std::map<TextureCacheKey, std::unique_ptr<GuestTexture>> guest_textures_;
+  std::map<SamplerKey, VkSampler> samplers_;
+  bool trace_textures_ = false;
+  uint64_t write_clock_ = 0;
+  VkDescriptorSetLayout transfer_set_layout_ = VK_NULL_HANDLE;
+  VkPipelineLayout transfer_layout_ = VK_NULL_HANDLE;
+  VkShaderModule transfer_vs_ = VK_NULL_HANDLE;
+  std::vector<VkShaderModule> transfer_modules_;
+  std::map<std::pair<uint32_t, uint32_t>, VkPipeline> transfer_pipelines_;
 };
 
 }  // namespace bots::gfx::vk
