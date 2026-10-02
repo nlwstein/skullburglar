@@ -16,6 +16,7 @@
 
 #include <rex/ui/vulkan/provider.h>
 
+#include "../image_diff.h"
 #include "../pm4.h"
 #include "../vk/renderer.h"
 #include "capture_file.h"
@@ -130,14 +131,6 @@ bool ReadPpm(const std::filesystem::path& path, std::vector<uint8_t>& rgb, uint3
   return read;
 }
 
-void WritePpm(const std::filesystem::path& path, const std::vector<uint8_t>& rgb, uint32_t width, uint32_t height) {
-  std::FILE* f = std::fopen(path.c_str(), "wb");
-  if (!f) throw std::runtime_error("cannot write " + path.string());
-  std::fprintf(f, "P6\n%u %u\n255\n", width, height);
-  std::fwrite(rgb.data(), 1, rgb.size(), f);
-  std::fclose(f);
-}
-
 // Renders the capture with the native renderer, writes `out`, compares with the capture's reference.ppm.
 int Render(Capture& capture, const std::filesystem::path& out) {
   auto provider = rex::ui::vulkan::VulkanProvider::Create(true, false);
@@ -167,42 +160,26 @@ int Render(Capture& capture, const std::filesystem::path& out) {
   if (!renderer.ReadTexture(renderer.last_resolve_address(), image, w, h)) {
     throw std::runtime_error("nothing resolved");
   }
-  // The presenter applies the guest's gamma ramp (256-entry table for 8-bit front buffers); so does the reference.
   if (std::FILE* f = std::fopen((capture.dir / "gamma.bin").c_str(), "rb")) {
     uint32_t table[256];
     if (std::fread(table, 4, 256, f) == 256) {
-      for (size_t i = 0; i < image.size(); ++i) {
-        const uint32_t shift = (2 - i % 3) * 10;  // red in bits 20-29, blue in 0-9
-        image[i] = uint8_t(((table[image[i]] >> shift) & 0x3FF) * 255 / 1023.0f + 0.5f);
-      }
+      bots::gfx::ApplyGammaRamp(image, table);
       std::printf("gamma ramp applied\n");
     }
     std::fclose(f);
   }
-  WritePpm(out, image, w, h);
+  if (!bots::gfx::WritePpm(out, image.data(), w, h, size_t(w) * 3, 3)) {
+    throw std::runtime_error("cannot write " + out.string());
+  }
   std::printf("frame: %ux%u from resolve to %08X -> %s\n", w, h, renderer.last_resolve_address(), out.c_str());
   if (!ReadPpm(capture.dir / "reference.ppm", reference, rw, rh)) {
     std::printf("no reference.ppm\n");
     return 0;
   }
   // Compare the overlapping area (the reference is the presenter's output and may be a different size).
-  const uint32_t cw = std::min(w, rw), ch = std::min(h, rh);
-  double sum = 0, sq = 0;
-  uint64_t bad = 0;
-  for (uint32_t y = 0; y < ch; ++y) {
-    for (uint32_t x = 0; x < cw; ++x) {
-      int worst = 0;
-      for (int k = 0; k < 3; ++k) {
-        const int d = std::abs(int(image[(size_t(y) * w + x) * 3 + k]) - int(reference[(size_t(y) * rw + x) * 3 + k]));
-        sum += d, sq += double(d) * d, worst = std::max(worst, d);
-      }
-      bad += worst > 16;
-    }
-  }
-  const double n = double(cw) * ch * 3;
-  const double mse = sq / n;
-  std::printf("vs reference %ux%u: mean abs diff %.2f, PSNR %.1f dB, %.2f%% pixels off by >16\n", rw, rh, sum / n,
-              mse > 0 ? 10 * std::log10(255.0 * 255.0 / mse) : 99.0, 100.0 * double(bad) / (double(cw) * ch));
+  const auto d = bots::gfx::CompareImages(image, w, h, reference.data(), rw, rh, size_t(rw) * 3, 3);
+  std::printf("vs reference %ux%u: mean abs diff %.2f, PSNR %.1f dB, %.2f%% pixels off by >16\n", rw, rh,
+              d.mean_abs, d.psnr, d.bad_percent);
   return 0;
 }
 

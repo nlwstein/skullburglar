@@ -16,6 +16,7 @@ set(BOTS_SOURCES
     src/game_hooks.cpp
     src/gfx/d3d_hooks.cpp
     src/gfx/capture.cpp
+    src/gfx/shadow.cpp
     src/setup/iso_extract.cpp
     src/setup/settings.cpp
 )
@@ -51,14 +52,13 @@ if(TARGET imgui)
     target_include_directories(bots PRIVATE $<TARGET_PROPERTY:imgui,INTERFACE_INCLUDE_DIRECTORIES>)
 endif()
 
-# bots-replay: offline renderer for D3D frame captures (native renderer, P2). Needs the SDK source tree: the
-# Xenos register and shader-translation code it reuses lives in the rexgpu-xenos plugin, which exports nothing.
+# Native renderer (src/gfx/vk): bots-replay, and in-process shadow mode (BOTS_GFX_SHADOW) in the game where enabled.
+# Needs the SDK source tree: the Xenos register and shader-translation code it reuses lives in the rexgpu-xenos
+# plugin, a shared library that exports nothing, so it is compiled in again here.
 if(REXSDK_DIR AND NOT WIN32)
     set(REX_GRAPHICS_SRC ${REXSDK_DIR}/src/graphics)
-    add_executable(bots-replay
+    set(BOTS_NATIVE_GFX_SOURCES
         src/gfx/pm4.cpp
-        src/gfx/replay/capture_file.cpp
-        src/gfx/replay/main.cpp
         src/gfx/vk/draw.cpp
         src/gfx/vk/renderer.cpp
         src/gfx/vk/shaders.cpp
@@ -88,9 +88,24 @@ if(REXSDK_DIR AND NOT WIN32)
         ${REX_GRAPHICS_SRC}/pipeline/shader/spirv_translator_rb.cpp
         ${REX_GRAPHICS_SRC}/vulkan/shader.cpp
     )
-    target_link_libraries(bots-replay PRIVATE rexruntime Vulkan::Headers GPUOpen::VulkanMemoryAllocator
+    set(BOTS_NATIVE_GFX_LIBS Vulkan::Headers GPUOpen::VulkanMemoryAllocator
         xxHash::xxhash glslang::SPIRV glslang MachineIndependent GenericCodeGen OSDependent OGLCompiler)
+
+    add_executable(bots-replay src/gfx/replay/capture_file.cpp src/gfx/replay/main.cpp ${BOTS_NATIVE_GFX_SOURCES})
+    target_link_libraries(bots-replay PRIVATE rexruntime ${BOTS_NATIVE_GFX_LIBS})
     target_include_directories(bots-replay PRIVATE ${REXSDK_DIR}/thirdparty/renderdoc)  # rex/ui/vulkan headers
+
+    # In the game: Linux first (the shadow-mode test host); macOS and Windows once it is proven there.
+    option(BOTS_NATIVE_GFX "Build the native renderer into the game (shadow mode)" ${LINUX})
+    if(BOTS_NATIVE_GFX)
+        target_sources(bots PRIVATE ${BOTS_NATIVE_GFX_SOURCES})
+        target_link_libraries(bots PRIVATE ${BOTS_NATIVE_GFX_LIBS})
+        target_include_directories(bots PRIVATE ${REXSDK_DIR}/thirdparty/renderdoc)
+        target_compile_definitions(bots PRIVATE BOTS_NATIVE_GFX=1)
+        # The SDK sources are not written against the game's precompiled header.
+        set_source_files_properties(${BOTS_NATIVE_GFX_SOURCES} TARGET_DIRECTORY bots
+            PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+    endif()
 endif()
 
 # bots_register.cpp is one function with ~143k SetFunction() calls (runs once at startup).

@@ -158,22 +158,45 @@ Renderer::Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory m
   ok_ = vk_.vkAllocateCommandBuffers(device_->device(), &cmd_info, &cmd_) == VK_SUCCESS && InitDrawing();
 }
 
+void Renderer::DestroyImage(Image& image) {
+  const VkDevice dev = device_->device();
+  for (VkImageView view : {image.view, image.depth_view, image.stencil_view}) {
+    if (view) vk_.vkDestroyImageView(dev, view, nullptr);
+  }
+  for (auto& [s, view] : image.swizzled_views) vk_.vkDestroyImageView(dev, view, nullptr);
+  if (image.image) vmaDestroyImage(allocator_, image.image, image.allocation);
+  image = Image{};
+}
+
+void Renderer::DestroyFrameState() {
+  for (auto& [k, image] : surfaces_) DestroyImage(*image);
+  for (auto& [k, image] : textures_) DestroyImage(*image);
+  for (auto& [k, image] : crops_) DestroyImage(*image);
+  for (auto& [k, texture] : guest_textures_) DestroyImage(texture->image);
+  surfaces_.clear();
+  textures_.clear();
+  crops_.clear();
+  guest_textures_.clear();
+  texture_at_.clear();
+  depth_texture_at_.clear();
+}
+
+void Renderer::ResetFrame() {
+  Flush();
+  if (vk_.vkDeviceWaitIdle) vk_.vkDeviceWaitIdle(device_->device());
+  DestroyFrameState();
+  open_pass_ = {};
+  shared_memory_uploaded_ = false;
+  last_resolve_address_ = 0;
+  stats_ = {};
+}
+
 Renderer::~Renderer() {
   if (!device_) return;
   const VkDevice dev = device_->device();
   if (vk_.vkDeviceWaitIdle) vk_.vkDeviceWaitIdle(dev);
-  auto destroy = [&](Image& image) {
-    for (VkImageView view : {image.view, image.depth_view, image.stencil_view}) {
-      if (view) vk_.vkDestroyImageView(dev, view, nullptr);
-    }
-    for (auto& [s, view] : image.swizzled_views) vk_.vkDestroyImageView(dev, view, nullptr);
-    if (image.image) vmaDestroyImage(allocator_, image.image, image.allocation);
-  };
-  for (auto& [k, image] : surfaces_) destroy(*image);
-  for (auto& [k, image] : textures_) destroy(*image);
-  for (auto& [k, image] : crops_) destroy(*image);
-  for (Image* image : {&null_2d_array_, &null_3d_, &null_cube_}) destroy(*image);
-  for (auto& [k, texture] : guest_textures_) destroy(texture->image);
+  DestroyFrameState();
+  for (Image* image : {&null_2d_array_, &null_3d_, &null_cube_}) DestroyImage(*image);
   for (auto& [k, sampler] : samplers_) vk_.vkDestroySampler(dev, sampler, nullptr);
   DestroyTransfers();
   DestroyDrawing();

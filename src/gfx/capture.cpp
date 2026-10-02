@@ -17,8 +17,12 @@
 //   reference.ppm  the emulated output of this frame (the render thread waits for the GPU before taking it)
 //   meta.json
 // Layouts: tools/gfxcap.py reads them. Guest data stays big-endian. Debug tool: it stalls the frame it records.
+//
+// The same recording feeds shadow mode (BOTS_GFX_SHADOW, shadow.cpp): a frame every N seconds, rendered natively
+// in-process and compared with the presented one, without writing files.
 #include "capture.h"
 #include "capture_format.h"
+#include "shadow.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -77,6 +81,8 @@ struct Capture {
   std::string dir;
   std::chrono::steady_clock::time_point first_swap{};
   bool seen_swap = false;
+  bool write_files = false;  // this recording is a capture (else only a shadow sample)
+  double next_shadow = 0;    // seconds
   uint64_t frame = 0;
   std::vector<CallRecord> calls;
   std::vector<uint8_t> blobs;
@@ -241,9 +247,13 @@ struct GammaRamp : rex::graphics::CommandProcessor {
   static const void* Pwl(const CommandProcessor& cp) { return (cp.*&GammaRamp::gamma_ramp_pwl_rgb)(); }
 };
 
-void WriteGamma(const std::filesystem::path& path) {
+const rex::graphics::CommandProcessor* GetCommandProcessor() {
   auto* gfx = static_cast<rex::graphics::GraphicsSystem*>(rex::system::kernel_state()->emulator()->graphics_system());
-  auto* cp = gfx ? gfx->command_processor() : nullptr;
+  return gfx ? gfx->command_processor() : nullptr;
+}
+
+void WriteGamma(const std::filesystem::path& path) {
+  const auto* cp = GetCommandProcessor();
   if (!cp) return;
   std::vector<uint32_t> ramp(256 + 128 * 3);
   std::memcpy(ramp.data(), GammaRamp::Table(*cp), 256 * 4);
@@ -251,14 +261,17 @@ void WriteGamma(const std::filesystem::path& path) {
   WriteFile(path, ramp.data(), ramp.size() * 4);
 }
 
-void WriteReference(const std::filesystem::path& path) {
+bool GuestOutput(rex::ui::RawImage& img) {
   auto* gfx = rex::system::kernel_state()->emulator()->graphics_system();
   auto* presenter = gfx ? gfx->presenter() : nullptr;
-  rex::ui::RawImage img;
   if (!presenter || !presenter->CaptureGuestOutput(img) || !img.width) {
     REXLOG_WARN("gfx capture: no guest output for the reference image");
-    return;
+    return false;
   }
+  return true;
+}
+
+void WriteReference(const std::filesystem::path& path, const rex::ui::RawImage& img) {
   std::ofstream out(path, std::ios::binary);
   out << "P6\n" << img.width << " " << img.height << "\n255\n";
   for (uint32_t y = 0; y < img.height; ++y) {
@@ -288,7 +301,7 @@ void StartRecording(Capture& c) {
   c.pm4_mark = LoadBE32(c.device_ptr + kCursorOffset);
   const uint8_t* dev = Guest(c.device_ptr);
   c.device.assign(dev, dev + kDeviceBytes);
-  REXLOG_INFO("gfx capture: recording frame {} (device {:08X})", c.frame, c.device_ptr);
+  if (c.write_files) REXLOG_INFO("gfx capture: recording frame {} (device {:08X})", c.frame, c.device_ptr);
 }
 
 }  // namespace
@@ -296,7 +309,7 @@ void StartRecording(Capture& c) {
 bool CaptureConfigured() {
   static const bool on = [] {
     const char* v = std::getenv("BOTS_GFX_CAPTURE");
-    return v && *v;
+    return (v && *v) || ShadowInterval() > 0;
   }();
   return on;
 }
@@ -329,16 +342,19 @@ int64_t CapturePre(uint32_t entry, PPCContext& ctx) {
   }
 
   // End of the recorded frame: the Swap belongs to it. Memory is taken before the original runs.
-  const auto dir = std::filesystem::path(c.dir) / fmt::format("f{}", c.frame);
-  uint64_t mem_bytes = 0;
-  Finish(c, dir, &mem_bytes);
-  REXLOG_INFO("gfx capture: frame {}: {} calls, {} blob bytes, {} KB PM4 ({} lost), {} MB memory -> {}", c.frame,
-              c.calls.size(), c.blobs.size(), c.pm4.size() >> 10, c.pm4_lost, mem_bytes >> 20, dir.string());
-  std::ofstream(dir / "meta.json") << fmt::format(
-      "{{\"version\": 2, \"frame\": {}, \"device\": {}, \"device_bytes\": {}, \"front_buffer\": {}, "
-      "\"calls\": {}, \"record_bytes\": {}, \"mem_bytes\": {}, \"pm4_bytes\": {}, \"pm4_lost\": {}}}\n",
-      c.frame, c.device_ptr, kDeviceBytes, LoadBE32(kFrontBufferGlobal), c.calls.size(), sizeof(CallRecord),
-      mem_bytes, c.pm4.size(), c.pm4_lost);
+  if (c.write_files) {
+    const auto dir = std::filesystem::path(c.dir) / fmt::format("f{}", c.frame);
+    uint64_t mem_bytes = 0;
+    Finish(c, dir, &mem_bytes);
+    REXLOG_INFO("gfx capture: frame {}: {} calls, {} blob bytes, {} KB PM4 ({} lost), {} MB memory -> {}", c.frame,
+                c.calls.size(), c.blobs.size(), c.pm4.size() >> 10, c.pm4_lost, mem_bytes >> 20, dir.string());
+    std::ofstream(dir / "meta.json") << fmt::format(
+        "{{\"version\": 2, \"frame\": {}, \"device\": {}, \"device_bytes\": {}, \"front_buffer\": {}, "
+        "\"calls\": {}, \"record_bytes\": {}, \"mem_bytes\": {}, \"pm4_bytes\": {}, \"pm4_lost\": {}}}\n",
+        c.frame, c.device_ptr, kDeviceBytes, LoadBE32(kFrontBufferGlobal), c.calls.size(), sizeof(CallRecord),
+        mem_bytes, c.pm4.size(), c.pm4_lost);
+  }
+  if (ShadowInterval() > 0) ShadowRender(c.frame, c.pm4);
   c.state = State::kIdle;
   return -2;  // CapturePost takes the reference image once the original Swap has run
 }
@@ -354,14 +370,28 @@ void CapturePost(uint32_t entry, int64_t token, PPCContext& ctx) {
       // presenter's guest output is exactly it.
       lock.unlock();
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
-      WriteReference(std::filesystem::path(c.dir) / fmt::format("f{}", c.frame) / "reference.ppm");
+      rex::ui::RawImage img;
+      if (GuestOutput(img)) {
+        if (c.write_files) {
+          WriteReference(std::filesystem::path(c.dir) / fmt::format("f{}", c.frame) / "reference.ppm", img);
+        }
+        const auto* cp = GetCommandProcessor();
+        ShadowCompare(c.frame, img, cp ? static_cast<const uint32_t*>(GammaRamp::Table(*cp)) : nullptr);
+      }
       lock.lock();
     }
     ++c.frame;
     const double t = std::chrono::duration<double>(now - c.first_swap).count();
-    if (c.state == State::kIdle && !c.times.empty() && t >= c.times.front()) {
-      c.times.erase(c.times.begin());
-      StartRecording(c);
+    if (c.state == State::kIdle) {
+      const bool capture = !c.times.empty() && t >= c.times.front();
+      const double interval = ShadowInterval();
+      const bool shadow = interval > 0 && t >= c.next_shadow;
+      if (capture) c.times.erase(c.times.begin());
+      if (shadow) c.next_shadow = t + interval;
+      if (capture || shadow) {
+        c.write_files = capture;
+        StartRecording(c);
+      }
     }
     return;
   }

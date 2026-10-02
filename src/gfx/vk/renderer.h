@@ -39,6 +39,9 @@ class Renderer : public Pm4Sink {
 
   // Submits everything recorded so far and waits for it.
   void Flush();
+  // Forgets everything taken from guest memory or rendered (surfaces, textures, the shared-memory copy, stats);
+  // keeps shaders, pipelines and samplers. In-process shadow mode renders each sampled frame from scratch.
+  void ResetFrame();
 
   // Guest address of the last resolve destination (the frame ends with a resolve into the front buffer).
   uint32_t last_resolve_address() const { return last_resolve_address_; }
@@ -97,6 +100,8 @@ class Renderer : public Pm4Sink {
     bool operator==(const Attachments&) const = default;
   };
 
+  void DestroyImage(Image& image);
+  void DestroyFrameState();
   Image* Surface(const rex::graphics::RegisterFile& regs, bool depth, uint32_t color_index);
   // Host pixels per guest pixel of the current surface (its MSAA sample grid).
   static void SampleGrid(const rex::graphics::RegisterFile& regs, uint32_t& x, uint32_t& y);
