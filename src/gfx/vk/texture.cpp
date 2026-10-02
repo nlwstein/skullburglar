@@ -346,9 +346,19 @@ VkSampler Renderer::GetSampler(const rg::xenos::xe_gpu_texture_fetch_t& fetch,
   const xe::TextureFilter mag = pick(binding.mag_filter, fetch.mag_filter);
   const xe::TextureFilter min = pick(binding.min_filter, fetch.min_filter);
   const xe::TextureFilter mip = pick(binding.mip_filter, fetch.mip_filter);
+  xe::AnisoFilter aniso =
+      binding.aniso_filter == xe::AnisoFilter::kUseFetchConst ? fetch.aniso_filter : binding.aniso_filter;
+  // Host max anisotropy as an AnisoFilter (kMax_1_1 = 1x ... kMax_16_1 = 16x).
+  const auto& props = device_->properties();
+  uint32_t host_max = uint32_t(xe::AnisoFilter::kDisabled);
+  if (props.samplerAnisotropy) {
+    for (uint32_t n = 1; n <= std::min(16.0f, props.maxSamplerAnisotropy); n <<= 1) ++host_max;
+  }
+  if (aniso == xe::AnisoFilter::kUseFetchConst) aniso = xe::AnisoFilter::kDisabled;
+  aniso = xe::AnisoFilter(std::min(uint32_t(aniso), host_max));
   const SamplerKey key{uint32_t(mag),           uint32_t(min),          uint32_t(mip),
                        uint32_t(fetch.clamp_x),  uint32_t(fetch.clamp_y), uint32_t(fetch.clamp_z),
-                       uint32_t(fetch.border_color), fetch.mip_min_level, fetch.mip_max_level};
+                       uint32_t(fetch.border_color), fetch.mip_min_level, fetch.mip_max_level, uint32_t(aniso)};
   VkSampler& sampler = samplers_[key];
   if (sampler) return sampler;
   VkSamplerCreateInfo info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -359,8 +369,16 @@ VkSampler Renderer::GetSampler(const rg::xenos::xe_gpu_texture_fetch_t& fetch,
   info.addressModeV = AddressMode(fetch.clamp_y);
   info.addressModeW = AddressMode(fetch.clamp_z);
   // Host level n is guest level n, so the fetch's mip range is the LOD range.
-  info.minLod = mip == xe::TextureFilter::kBaseMap ? 0.0f : float(fetch.mip_min_level);
-  info.maxLod = mip == xe::TextureFilter::kBaseMap ? 0.25f : float(std::max(fetch.mip_min_level, fetch.mip_max_level));
+  info.minLod = float(fetch.mip_min_level);
+  info.maxLod = mip == xe::TextureFilter::kBaseMap ? info.minLod + 0.25f
+                                                   : float(std::max(fetch.mip_min_level, fetch.mip_max_level));
+  if (aniso != xe::AnisoFilter::kDisabled) {
+    // Like the SDK (and D3D): anisotropic filtering forces linear min/mag/mip.
+    info.magFilter = info.minFilter = VK_FILTER_LINEAR;
+    info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    info.anisotropyEnable = VK_TRUE;
+    info.maxAnisotropy = float(1u << (uint32_t(aniso) - uint32_t(xe::AnisoFilter::kMax_1_1)));
+  }
   switch (fetch.border_color) {
     case xe::BorderColor::k_ABGR_White: info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE; break;
     case xe::BorderColor::k_ABGR_Black: info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK; break;

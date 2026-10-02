@@ -88,8 +88,8 @@ class Renderer : public Pm4Sink {
     uint32_t host_format_swizzle = 0;
   };
   using TextureCacheKey = std::array<uint32_t, 5>;
-  // Filters (mag, min, mip), clamp modes (x, y, z), border colour, mip range.
-  using SamplerKey = std::array<uint32_t, 9>;
+  // Filters (mag, min, mip), clamp modes (x, y, z), border colour, mip range, anisotropy.
+  using SamplerKey = std::array<uint32_t, 10>;
   // The attachments of the open render pass.
   struct Attachments {
     std::array<Image*, 4> color{};
