@@ -1,5 +1,7 @@
 #include "memory_sync.h"
 
+#include <rex/logging.h>
+
 namespace bots::gfx::vk {
 
 MemorySync::MemorySync(rex::memory::Memory& memory, Renderer& renderer) : SharedMemory(memory), renderer_(renderer) {
@@ -37,16 +39,24 @@ bool MemorySync::Request(uint32_t start, uint32_t length) {
     const uint64_t bits = (hi == 63 ? ~uint64_t(0) : (uint64_t(1) << (hi + 1)) - 1) & ~((uint64_t(1) << lo) - 1);
     all_valid = (valid_[block].load(std::memory_order_acquire) & bits) == bits;
   }
+  if (++requests_ % 10000000 == 0) {
+    REXLOG_INFO("gfx memory sync: {} requests, {} took the lock, {} of those uploaded", requests_, locked_, uploaded_);
+  }
   if (all_valid) return true;
+  ++locked_;
+  uploading_ = false;
   // Set before the SDK validates the pages: an invalidation from here on clears the bits again.
   SetValidBits(page_first, page_last, true);
-  if (RequestRange(start, length)) return true;
+  const bool ok = RequestRange(start, length);
+  uploaded_ += uploading_;
+  if (ok) return true;
   SetValidBits(page_first, page_last, false);
   return false;
 }
 
 bool MemorySync::UploadRanges(const std::vector<std::pair<uint32_t, uint32_t>>& page_ranges) {
   const uint32_t page_log2 = page_size_log2();
+  uploading_ = uploading_ || !page_ranges.empty();
   for (const auto& [page_first, page_count] : page_ranges) {
     const uint32_t start = page_first << page_log2, length = page_count << page_log2;
     // Valid (and watched) before the copy: a write during it invalidates the pages again.

@@ -78,6 +78,12 @@ SERIES.append(
     # write on the main thread). Hunk-scoped: the co-op branch (B-057) edits other XGI messages.
     ("0011-xam-xuserreadstats-empty-results.patch", [],
      {"src/kernel/xam/apps/xgi_app.cpp": r"XUserReadStats|results_size|<atomic>|<cstring>"}))
+SERIES.append(
+    # Linux: no /proc/self/maps parse (QueryProtect) on every write-watch fault. It ran under the global
+    # critical region thousands of times a second, costing the game's main thread ~25% and stalling the GPU
+    # command processor on the lock; the race it guarded is covered by the access violation recovery path.
+    ("0012-linux-write-watch-fault-without-maps-parse.patch",
+     ["src/system/mmio_handler.cpp"], {}))
 
 
 def git(sdk, *args, **kw):

@@ -47,6 +47,9 @@ class MemorySync final : public rex::graphics::SharedMemory, public GuestMemoryT
   // every invalidation), so a set bit can be stale-cleared but never stale-set.
   std::unique_ptr<std::atomic<uint64_t>[]> valid_;
   void SetValidBits(uint32_t page_first, uint32_t page_last, bool valid);
+  // Command-processor thread only: requests, ones that took the lock, and ones of those that uploaded.
+  uint64_t requests_ = 0, locked_ = 0, uploaded_ = 0;
+  bool uploading_ = false;
 };
 
 }  // namespace bots::gfx::vk

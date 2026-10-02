@@ -1,0 +1,26 @@
+diff --git a/src/system/mmio_handler.cpp b/src/system/mmio_handler.cpp
+index 2b93005..6d71ce8 100644
+--- a/src/system/mmio_handler.cpp
++++ b/src/system/mmio_handler.cpp
+@@ -406,6 +406,7 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
+     // clears the watch we just hit).
+     // Do this under the lock so we don't introduce another race condition.
+     auto lock = global_critical_region_.Acquire();
++#if !REX_PLATFORM_LINUX
+     memory::PageAccess cur_access;
+     size_t page_length = memory::page_size();
+     memory::QueryProtect(fault_host_address, page_length, cur_access);
+@@ -414,6 +415,13 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
+       // Another thread has cleared this watch. Abort.
+       return true;
+     }
++#else
++    // Linux has no cheap protection query: QueryProtect parses /proc/self/maps, and on every write-watch fault
++    // (thousands a second while a game rewrites its dynamic vertex data) that cost the faulting thread a
++    // quarter of its time, under the global lock everyone else waits for. Skipped: if another thread already
++    // cleared the watch, the physical heap finds no watched page and the access violation callback's recovery
++    // path restores write access from the guest's own page metadata.
++#endif
+     // The address is not found within any range, so either a write watch or an
+     // actual access violation.
+     if (access_violation_callback_) {
