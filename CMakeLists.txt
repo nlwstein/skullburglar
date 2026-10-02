@@ -7,6 +7,10 @@ project(bots LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# Before the SDK: built from source (REXSDK_DIR), its SDL compiles Objective-C, which otherwise gets C++ flags.
+if(APPLE)
+    enable_language(C OBJC OBJCXX)
+endif()
 
 include(generated/rexglue.cmake)
 
@@ -111,6 +115,11 @@ if(REXSDK_DIR AND NOT WIN32)
         target_link_libraries(bots PRIVATE ${BOTS_NATIVE_GFX_LIBS})
         target_include_directories(bots PRIVATE ${REXSDK_DIR}/thirdparty/renderdoc)
         target_compile_definitions(bots PRIVATE BOTS_NATIVE_GFX=1)
+        if(APPLE)
+            # The GPU plugins compile glslang in too; dyld would bind their weak glslang template instances to the
+            # game's (the first image exporting them), mixing two pool allocators: a crash on the first shader.
+            target_link_options(bots PRIVATE LINKER:-unexported_symbol,*glslang*)
+        endif()
         # The SDK sources are not written against the game's precompiled header.
         set_source_files_properties(${BOTS_NATIVE_GFX_GAME_SOURCES} TARGET_DIRECTORY bots
             PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
@@ -132,6 +141,13 @@ if(REXSDK_DIR AND NOT WIN32)
             LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
         target_include_directories(rexgpu-native PRIVATE src ${REXSDK_DIR}/thirdparty/renderdoc)
         target_link_libraries(rexgpu-native PRIVATE rex::runtime ${BOTS_NATIVE_GFX_LIBS})
+        if(APPLE)
+            # Export only the plugin entry points. Otherwise dyld coalesces the plugin's weak glslang template
+            # instances with the game's copies (it links glslang too), and the plugin's parser runs the game's
+            # code against its own pool allocator: a crash in TIntermediate::addSwizzle on the first shader.
+            target_link_options(rexgpu-native PRIVATE
+                LINKER:-exported_symbol,_rex_gpu_abi_version LINKER:-exported_symbol,_rex_gpu_create)
+        endif()
         add_dependencies(bots rexgpu-native)
     endif()
 endif()
