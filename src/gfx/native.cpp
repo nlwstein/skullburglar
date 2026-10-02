@@ -60,10 +60,10 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
       const auto& st = renderer_->stats();
       REXLOG_INFO(
           "gfx native: frame {}: {} draws, {} resolves, {} presents, {} failed shaders, {} unsupported prims, "
-          "{} unsupported textures, {:.1f} MB uploaded, {} invalidations, {} texture reloads, {} evictions (totals)",
+          "{} unsupported textures, {:.1f} MB uploaded, {} invalidations, {} texture reloads, {} evictions, {} indirect draws skipped (totals)",
           frames_, st.draws, st.resolves, st.presents, st.failed_shaders, st.unsupported_primitives,
           st.unsupported_textures, st.uploaded_bytes / 1048576.0, st.invalidations, st.texture_reloads,
-          st.texture_evictions);
+          st.texture_evictions, indirect_draws_);
     }
   }
 
@@ -107,9 +107,24 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     return nullptr;
   }
 
+  // The ring kicks the runtime's command buffers as indirect buffers (depth 1: the stream captures record).
+  // Inside those, nested indirect buffers hold predicated-tiling replays (draws and resolves already issued,
+  // once per tile; the renderer does each once over the whole surface) and the XDK's pipeline flush (point
+  // draws with colour writes off). Their sync packets still run; their draws are dropped, as the replay
+  // executor (pm4.h) does.
+  void ExecuteIndirectBuffer(uint32_t ptr, uint32_t length) override {
+    ++indirect_depth_;
+    CommandProcessor::ExecuteIndirectBuffer(ptr, length);
+    --indirect_depth_;
+  }
+
   bool IssueDraw(xe::PrimitiveType prim_type, uint32_t index_count, IndexBufferInfo* index_buffer_info,
                  bool major_mode_explicit) override {
     if (!renderer_) return false;
+    if (indirect_depth_ > 1) {
+      ++indirect_draws_;
+      return true;
+    }
     Draw draw;
     draw.initiator.value = register_file_->values[rg::XE_GPU_REG_VGT_DRAW_INITIATOR];
     if (index_buffer_info) {
@@ -130,7 +145,8 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   std::unique_ptr<vk::MemorySync> sync_;
   ShaderLoad vs_, ps_;
   std::vector<uint32_t> vs_inline_, ps_inline_;
-  uint64_t frames_ = 0;
+  uint64_t frames_ = 0, indirect_draws_ = 0;
+  uint32_t indirect_depth_ = 0;
 };
 
 class NativeGraphicsSystem final : public rg::GraphicsSystem {

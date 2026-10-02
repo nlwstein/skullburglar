@@ -145,7 +145,7 @@ class BotsApp : public rex::ReXApp {
                 PPCImageConfig.image_size, path);
   }
 
-  // On SIGABRT (REX_FATAL, or an unhandled host fault: the SDK's handler aborts), write the raw
+  // On SIGABRT (REX_FATAL, or an unhandled host fault: the SDK's handler aborts) or SIGBUS, write the raw
   // host backtrace + image slide to stderr (lands in logs/run-N.out). Resolve offline:
   //   macOS: atos -o out/build/mac-arm64-relwithdebinfo/bots -l <load addr> <addrs...>
   //   Linux: frames print as module(+offset); addr2line -f -C -e <module> <offset>
@@ -171,6 +171,9 @@ class BotsApp : public rex::ReXApp {
   }
   void OnPostInitLogging() override {
     signal(SIGABRT, CrashHandler);
+#if defined(__linux__)
+    signal(SIGBUS, CrashHandler);  // the SDK claims SIGBUS on macOS only
+#endif
   }
 #elif defined(_WIN32)
   void OnPostInitLogging() override { InstallWindowsCrashLogger(); }

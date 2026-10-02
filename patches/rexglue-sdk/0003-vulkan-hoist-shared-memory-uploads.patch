@@ -1,5 +1,5 @@
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
-index da8e432..9e1a8fc 100644
+index da8e432..5e565d4 100644
 --- a/include/rex/graphics/command_processor.h
 +++ b/include/rex/graphics/command_processor.h
 @@ -12,6 +12,8 @@
@@ -28,7 +28,17 @@ index da8e432..9e1a8fc 100644
  
    void InitializeRingBuffer(uint32_t ptr, uint32_t size_log2);
    void EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size_log2);
-@@ -245,6 +257,22 @@ class CommandProcessor {
+@@ -171,7 +183,8 @@ class CommandProcessor {
+ 
+   uint32_t ExecutePrimaryBuffer(uint32_t start_index, uint32_t end_index);
+   virtual void OnPrimaryBufferEnd() {}
+-  void ExecuteIndirectBuffer(uint32_t ptr, uint32_t length);
++  // Virtual so a backend can tell indirect-buffer packets from primary-ring ones.
++  virtual void ExecuteIndirectBuffer(uint32_t ptr, uint32_t length);
+   bool ExecutePacket(memory::RingBuffer* reader);
+   bool ExecutePacketType0(memory::RingBuffer* reader, uint32_t packet);
+   bool ExecutePacketType1(memory::RingBuffer* reader, uint32_t packet);
+@@ -245,6 +258,22 @@ class CommandProcessor {
  
    uint32_t counter_ = 0;
  
@@ -51,7 +61,7 @@ index da8e432..9e1a8fc 100644
    uint32_t primary_buffer_ptr_ = 0;
    uint32_t primary_buffer_size_ = 0;
  
-@@ -276,6 +304,10 @@ class CommandProcessor {
+@@ -276,6 +305,10 @@ class CommandProcessor {
    // Set by backend command processors to their legacy memexport readback cvar
    // name (for explicit-override compatibility).
    const char* legacy_readback_memexport_cvar_name_ = nullptr;
