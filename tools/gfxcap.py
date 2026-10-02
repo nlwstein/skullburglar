@@ -2,6 +2,7 @@
 
     python3 tools/gfxcap.py summary CAPDIR        # calls per entry point, draws, memory
     python3 tools/gfxcap.py calls CAPDIR [N]      # first N calls (default all), with arguments
+    python3 tools/gfxcap.py pm4 CAPDIR [FIRST [N]] # calls with the PM4 packets each emitted
     python3 tools/gfxcap.py mem CAPDIR ADDR [LEN] # guest bytes at a virtual address (snapshot, then blobs)
 
 Names come from docs/knowledge/d3d-runtime.md (outside this repo); NAMES below keeps the ones the
@@ -13,7 +14,7 @@ import os
 import struct
 import sys
 
-CALL = struct.Struct("<4IQ8Q8d8IQd")
+CALL = struct.Struct("<6IQ8Q8d8IQdQQ")
 REGION = struct.Struct("<4IQ")
 
 NAMES = {
@@ -53,6 +54,53 @@ NAMES = {
 }
 
 
+PM4_OPS = {
+    0x10: "NOP", 0x13: "REG_RMW", 0x21: "CONTEXT_UPDATE", 0x22: "DRAW_INDX", 0x27: "IM_LOAD",
+    0x2B: "IM_LOAD_IMMEDIATE", 0x2D: "SET_CONSTANT", 0x2F: "LOAD_ALU_CONSTANT", 0x36: "DRAW_INDX_2",
+    0x37: "INDIRECT_BUFFER_PFD", 0x3C: "WAIT_REG_MEM", 0x3F: "INDIRECT_BUFFER", 0x46: "EVENT_WRITE",
+    0x48: "ME_INIT", 0x50: "SET_BIN_MASK_LO", 0x51: "SET_BIN_MASK_HI", 0x52: "SET_BIN_SELECT_LO",
+    0x53: "SET_BIN_SELECT_HI", 0x55: "SET_CONSTANT2", 0x58: "EVENT_WRITE_SHD", 0x59: "EVENT_WRITE_CFL",
+    0x5B: "EVENT_WRITE_ZPD", 0x5D: "INVALIDATE_STATE",
+}
+# SET_CONSTANT type -> register file base (Xenos): ALU, fetch, bool, loop, registers.
+CONST_BASE = {0: 0x4000, 1: 0x4800, 2: 0x4900, 3: 0x4908, 4: 0x2000}
+
+
+def pm4_packets(data):
+    """Yields (dword offset, text) for big-endian PM4 dwords."""
+    n = len(data) // 4
+    d = struct.unpack(f">{n}I", data[: n * 4])
+    i = 0
+    while i < n:
+        h = d[i]
+        t = h >> 30
+        if t == 0:
+            count = ((h >> 16) & 0x3FFF) + 1
+            reg, one = h & 0x7FFF, (h >> 15) & 1
+            vals = d[i + 1 : i + 1 + count]
+            yield i, f"type0 {reg:04X}{'' if one else '+'} = " + " ".join(f"{v:08X}" for v in vals[:8]) + \
+                (" …" if count > 8 else "")
+            i += 1 + count
+        elif t == 1:
+            yield i, f"type1 {h & 0x7FF:04X}={d[i + 1]:08X} {(h >> 11) & 0x7FF:04X}={d[i + 2]:08X}"
+            i += 3
+        elif t == 2:
+            i += 1
+        else:
+            op, count = (h >> 8) & 0x7F, ((h >> 16) & 0x3FFF) + 1
+            body = d[i + 1 : i + 1 + count]
+            name = PM4_OPS.get(op, f"op{op:02X}")
+            if op == 0x2D and body:
+                kind, index = (body[0] >> 16) & 0xFF, body[0] & 0x7FF
+                reg = CONST_BASE.get(kind, 0) + index
+                text = f"SET_CONSTANT {reg:04X}+{count - 1}: " + " ".join(f"{v:08X}" for v in body[1:7]) + \
+                    (" …" if count > 7 else "")
+            else:
+                text = f"{name} " + " ".join(f"{v:08X}" for v in body[:8]) + (" …" if count > 8 else "")
+            yield i, text
+            i += 1 + count
+
+
 def load(capdir):
     meta = json.load(open(os.path.join(capdir, "meta.json")))
     raw = open(os.path.join(capdir, "calls.bin"), "rb").read()
@@ -61,8 +109,9 @@ def load(capdir):
     for i in range(0, len(raw), CALL.size):
         v = CALL.unpack_from(raw, i)
         calls.append({
-            "entry": v[0], "lr": v[1], "thread": v[2], "blob_count": v[3], "blob_offset": v[4],
-            "r": v[5:13], "f": v[13:21], "stack": v[21:29], "ret_r3": v[29], "ret_f1": v[30],
+            "entry": v[0], "lr": v[1], "thread": v[2], "blob_count": v[3], "depth": v[4], "blob_offset": v[6],
+            "r": v[7:15], "f": v[15:23], "stack": v[23:31], "ret_r3": v[31], "ret_f1": v[32],
+            "pm4_begin": v[33], "pm4_end": v[34],
         })
     return meta, calls
 
@@ -90,6 +139,38 @@ def calls_cmd(capdir, limit):
               f"  lr={c['lr']:08X}")
 
 
+def own_pm4(calls, i):
+    """Byte ranges call i emitted itself: its range minus those of the calls nested in it."""
+    c = calls[i]
+    ranges, pos = [], c["pm4_begin"]
+    for j in range(i + 1, len(calls)):
+        d = calls[j]
+        if d["thread"] != c["thread"]:
+            continue
+        if d["depth"] <= c["depth"]:
+            break
+        if d["depth"] == c["depth"] + 1:
+            if d["pm4_begin"] > pos:
+                ranges.append((pos, d["pm4_begin"]))
+            pos = max(pos, d["pm4_end"])
+    if c["pm4_end"] > pos:
+        ranges.append((pos, c["pm4_end"]))
+    return ranges
+
+
+def pm4_cmd(capdir, first, count):
+    """Calls first..first+count with the PM4 each emitted itself, indented by nesting depth."""
+    _, calls = load(capdir)
+    data = open(os.path.join(capdir, "pm4.bin"), "rb").read()
+    for i, c in enumerate(calls[first : first + count], first):
+        args = " ".join(f"{x & 0xFFFFFFFF:X}" for x in c["r"][1:6])
+        pad = "  " * c["depth"]
+        print(f"{i:6} {pad}{name(c['entry'])} ({args})")
+        for lo, hi in own_pm4(calls, i):
+            for off, text in pm4_packets(data[lo:hi]):
+                print(f"         {pad}{lo // 4 + off:5} {text}")
+
+
 def mem(capdir, addr, length):
     idx = open(os.path.join(capdir, "mem.idx"), "rb").read()
     with open(os.path.join(capdir, "mem.bin"), "rb") as f:
@@ -108,6 +189,8 @@ def main():
         summary(capdir)
     elif cmd == "calls":
         calls_cmd(capdir, int(sys.argv[3]) if len(sys.argv) > 3 else None)
+    elif cmd == "pm4":
+        pm4_cmd(capdir, int(sys.argv[3]) if len(sys.argv) > 3 else 0, int(sys.argv[4]) if len(sys.argv) > 4 else 50)
     elif cmd == "mem":
         mem(capdir, int(sys.argv[3], 16), int(sys.argv[4], 0) if len(sys.argv) > 4 else 64)
 

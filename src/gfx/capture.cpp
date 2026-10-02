@@ -6,6 +6,9 @@
 //               8 stack words from the caller's frame (args 9+ at +0x54), and the returned r3/f1
 //   blobs.bin   guest bytes that are only valid at call time: shader constants, the viewport, UP vertex/index
 //               data, Begin*Vertices data (copied at EndVertices)
+//   pm4.bin     the PM4 the runtime wrote during the frame, in order; each call record has the [begin, end)
+//               it emitted (nested calls nest). The runtime writes at the device's cursor (dev+0x30, pre-increment
+//               stwu) and 0x8231FA50 starts a new segment when one fills; that function is hooked to stitch them
 //   device.bin  the D3DDevice at frame start (0x4000 bytes)
 //   mem.bin     committed guest memory at frame end (non-zero 4 KB pages; physical memory once, by physical
 //               address), index in mem.idx
@@ -42,9 +45,11 @@ constexpr uint32_t kDeviceGlobal = 0x838191B0;       // D3DDevice*
 constexpr uint32_t kFrontBufferGlobal = 0x838191BC;  // texture UE3 resolves the frame into and passes to Swap
 constexpr uint32_t kDeviceBytes = 0x4000;
 constexpr uint32_t kMaxBlob = 8u << 20;
+constexpr uint32_t kCursorOffset = 0x30;  // D3DDevice: PM4 write cursor (last written dword); limit at +0x38
 
 // Entry points (knowledge/d3d-runtime.md).
 constexpr uint32_t kSwap = 0x82317110;
+constexpr uint32_t kNewSegment = 0x8231FA50;  // runtime-internal: submit the full segment, return the new cursor
 constexpr uint32_t kSetVSConstantF = 0x823216B0;
 constexpr uint32_t kSetPSConstantF = 0x82321790;
 constexpr uint32_t kSetViewport = 0x82313448;
@@ -57,12 +62,14 @@ constexpr uint32_t kEndVertices = 0x82334A60;
 #pragma pack(push, 1)
 struct CallRecord {
   uint32_t entry, lr, thread, blob_count;
+  uint32_t depth, pad;   // depth: hooked calls already open on this thread (nested runtime calls)
   uint64_t blob_offset;  // into blobs.bin: blob_count x {u32 guest address, u32 size, bytes}
   uint64_t r[8];         // r3..r10
   double f[8];           // f1..f8
   uint32_t stack[8];     // caller's r1+0x50.. (host order)
   uint64_t ret_r3;
   double ret_f1;
+  uint64_t pm4_begin, pm4_end;  // byte offsets into pm4.bin
 };
 struct MemRegion {
   uint32_t physical;  // 1: address is physical (0..0x1FFFFFFF), 0: virtual
@@ -90,6 +97,9 @@ struct Capture {
   std::vector<uint8_t> blobs;
   std::vector<uint8_t> device;
   uint32_t device_ptr = 0;
+  std::vector<uint8_t> pm4;
+  uint32_t pm4_mark = 0;  // cursor value up to which pm4 holds the segment
+  uint64_t pm4_lost = 0;  // cursor moved back without a hooked segment switch
 };
 
 Capture& Cap() {
@@ -118,6 +128,7 @@ uint32_t ThreadIndex() {
 }
 
 thread_local Pending pending;
+thread_local uint32_t call_depth = 0;  // recorded calls open on this thread
 
 uint8_t* Guest(uint32_t address) { return rex::system::kernel_memory()->TranslateVirtual<uint8_t*>(address); }
 
@@ -165,6 +176,18 @@ void AddCallBlobs(Capture& c, CallRecord& rec) {
     default:
       break;
   }
+}
+
+// Appends what the runtime wrote since the last mark: dwords (mark, cursor].
+void FlushPm4(Capture& c) {
+  const uint32_t cursor = LoadBE32(c.device_ptr + kCursorOffset);
+  if (cursor > c.pm4_mark && cursor - c.pm4_mark < (16u << 20)) {
+    const uint8_t* src = Guest(c.pm4_mark + 4);
+    c.pm4.insert(c.pm4.end(), src, src + (cursor - c.pm4_mark));
+  } else if (cursor != c.pm4_mark) {
+    ++c.pm4_lost;
+  }
+  c.pm4_mark = cursor;
 }
 
 void WriteFile(const std::filesystem::path& path, const void* data, size_t size) {
@@ -248,6 +271,7 @@ void Finish(Capture& c, const std::filesystem::path& dir, uint64_t* mem_bytes) {
   WriteFile(dir / "calls.bin", c.calls.data(), c.calls.size() * sizeof(CallRecord));
   WriteFile(dir / "blobs.bin", c.blobs.data(), c.blobs.size());
   WriteFile(dir / "device.bin", c.device.data(), c.device.size());
+  WriteFile(dir / "pm4.bin", c.pm4.data(), c.pm4.size());
   WriteMemory(dir, mem_bytes);
 }
 
@@ -255,7 +279,10 @@ void StartRecording(Capture& c) {
   c.state = State::kRecording;
   c.calls.clear();
   c.blobs.clear();
+  c.pm4.clear();
+  c.pm4_lost = 0;
   c.device_ptr = LoadBE32(kDeviceGlobal);
+  c.pm4_mark = LoadBE32(c.device_ptr + kCursorOffset);
   const uint8_t* dev = Guest(c.device_ptr);
   c.device.assign(dev, dev + kDeviceBytes);
   REXLOG_INFO("gfx capture: recording frame {} (device {:08X})", c.frame, c.device_ptr);
@@ -279,6 +306,7 @@ int64_t CapturePre(uint32_t entry, PPCContext& ctx) {
   rec.entry = entry;
   rec.lr = uint32_t(ctx.lr);
   rec.thread = ThreadIndex();
+  rec.depth = call_depth;
   rec.blob_offset = c.blobs.size();
   const PPCRegister* gpr[8] = {&ctx.r3, &ctx.r4, &ctx.r5, &ctx.r6, &ctx.r7, &ctx.r8, &ctx.r9, &ctx.r10};
   const PPCRegister* fpr[8] = {&ctx.f1, &ctx.f2, &ctx.f3, &ctx.f4, &ctx.f5, &ctx.f6, &ctx.f7, &ctx.f8};
@@ -288,21 +316,26 @@ int64_t CapturePre(uint32_t entry, PPCContext& ctx) {
     rec.stack[i] = LoadBE32(uint32_t(ctx.r1.u32 + 0x50 + 4 * i));
   }
   AddCallBlobs(c, rec);
+  FlushPm4(c);
+  rec.pm4_begin = rec.pm4_end = c.pm4.size();
   c.calls.push_back(rec);
   const int64_t token = int64_t(c.calls.size() - 1);
-  if (entry != kSwap) return token;
+  if (entry != kSwap) {
+    ++call_depth;
+    return token;
+  }
 
   // End of the recorded frame: the Swap belongs to it. Memory is taken before the original runs.
   const auto dir = std::filesystem::path(c.dir) / fmt::format("f{}", c.frame);
   uint64_t mem_bytes = 0;
   Finish(c, dir, &mem_bytes);
-  REXLOG_INFO("gfx capture: frame {}: {} calls, {} blob bytes, {} MB memory -> {}", c.frame, c.calls.size(),
-              c.blobs.size(), mem_bytes >> 20, dir.string());
+  REXLOG_INFO("gfx capture: frame {}: {} calls, {} blob bytes, {} KB PM4 ({} lost), {} MB memory -> {}", c.frame,
+              c.calls.size(), c.blobs.size(), c.pm4.size() >> 10, c.pm4_lost, mem_bytes >> 20, dir.string());
   std::ofstream(dir / "meta.json") << fmt::format(
-      "{{\"version\": 1, \"frame\": {}, \"device\": {}, \"device_bytes\": {}, \"front_buffer\": {}, "
-      "\"calls\": {}, \"record_bytes\": {}, \"mem_bytes\": {}}}\n",
+      "{{\"version\": 2, \"frame\": {}, \"device\": {}, \"device_bytes\": {}, \"front_buffer\": {}, "
+      "\"calls\": {}, \"record_bytes\": {}, \"mem_bytes\": {}, \"pm4_bytes\": {}, \"pm4_lost\": {}}}\n",
       c.frame, c.device_ptr, kDeviceBytes, LoadBE32(kFrontBufferGlobal), c.calls.size(), sizeof(CallRecord),
-      mem_bytes);
+      mem_bytes, c.pm4.size(), c.pm4_lost);
   c.state = State::kIdle;
   return -2;  // CapturePost takes the reference image once the original Swap has run
 }
@@ -330,9 +363,16 @@ void CapturePost(uint32_t entry, int64_t token, PPCContext& ctx) {
     return;
   }
   if (token < 0) return;
+  --call_depth;
   std::unique_lock lock(c.mutex);
   if (size_t(token) >= c.calls.size()) return;
+  if (entry == kNewSegment) {
+    c.pm4_mark = LoadBE32(c.device_ptr + kCursorOffset);  // the old segment was flushed in CapturePre
+  } else {
+    FlushPm4(c);
+  }
   CallRecord& rec = c.calls[size_t(token)];
+  rec.pm4_end = c.pm4.size();
   rec.ret_r3 = ctx.r3.u64;
   rec.ret_f1 = ctx.f1.f64;
   const uint64_t* r = rec.r;

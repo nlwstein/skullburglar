@@ -134,4 +134,6 @@ void Observe(Entry& entry, PPCContext& ctx, uint8_t* base, void (*original)(PPCC
     __imp__sub_##a(ctx, base);                                                      \
   }
 #include "d3d_entries.inc"
+// Runtime-internal: submits a full PM4 segment and starts the next (the capture stitches segments here).
+D3D_ENTRY(8231FA50)
 #undef D3D_ENTRY
