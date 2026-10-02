@@ -139,6 +139,12 @@ class Renderer : public Pm4Sink {
     // Depth surfaces: the colour targets of the last pass with colour that used this depth (pass merging,
     // draw.cpp). Surfaces are only destroyed all together.
     std::array<Image*, 4> companions{};
+    // A depth resolve's raw 8888 image, not written yet: derived from this depth-value image (same size, rect
+    // raw_depth_rect) when first sampled. Games mostly sample only the value (UE3: every shadow map), so a depth
+    // resolve writes just that. The stencil byte reads as 0 (Xenos shaders cannot export stencil anyway).
+    Image* raw_depth_from = nullptr;
+    bool raw_depth_float = false;
+    VkRect2D raw_depth_rect{};
   };
   struct Buffer {
     VkBuffer buffer = VK_NULL_HANDLE;
@@ -258,6 +264,7 @@ class Renderer : public Pm4Sink {
   bool draw_profile_ = false;
   bool trace_rendering_ = false;
   bool pass_merge_ = true;
+  bool lazy_raw_depth_ = true;  // BOTS_GFX_LAZY_RAW_DEPTH=0: write a depth resolve's raw 8888 image at once (A/B)
   bool gpu_draw_labels_ = false;  // BOTS_GPU_TIMING=2: a span per draw, by shader pair
   bool InitDrawing();
   void DestroyDrawing();
@@ -280,6 +287,8 @@ class Renderer : public Pm4Sink {
   // EDRAM ownership transfers (transfer.cpp).
   static constexpr uint32_t kTransferDepth = 100;       // Transfer source format for D24S8 depth/stencil
   static constexpr uint32_t kTransferFloatDepth = 101;  // ... and for D24FS8 (20e4 depth)
+  static constexpr uint32_t kTransferValueDepth = 102;  // Transfer source: a depth-value image, encoded as D24
+  static constexpr uint32_t kTransferValueFloatDepth = 103;  // ... and as 20e4
   static constexpr uint32_t kTransferDepthValue = 200;  // Transfer destination: the depth value as R32_SFLOAT
   static constexpr uint32_t kTransferResolve = 300;     // Transfer destination: a colour resolve (exponent bias)
   static bool IsTransferable(uint32_t format);
@@ -303,6 +312,7 @@ class Renderer : public Pm4Sink {
   Image* ResolvedTexture(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch);
   // A view of a resolve destination as the fetch constant sees it (swizzle; red/blue swap).
   Image* Crop(Image& image, uint32_t width, uint32_t height);
+  void MaterializeRawDepth(Image& raw);  // writes a lazy depth resolve's raw image (Image::raw_depth_from)
   VkImageView ResolvedTextureView(Image& image, const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch,
                                   bool is_signed, uint32_t& host_swizzle);
   VkImageView SwizzledView(Image& image, uint32_t host_swizzle, bool is_signed);

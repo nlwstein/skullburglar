@@ -28,12 +28,21 @@ void main() {
 )";
 
 // SRC and DST are ColorRenderTargetFormat values (storage formats); SRC 100 and 101 are depth/stencil surfaces
-// encoded as D24S8 and D24FS8, DST 200 writes the depth value itself (resolves to 24_8 textures), and DST 300 is a
-// colour resolve: the value scaled by the exponent bias.
+// encoded as D24S8 and D24FS8, SRC 102 and 103 the same from a depth-value image (stencil 0), DST 200 writes the
+// depth value itself (resolves to 24_8 textures), and DST 300 is a colour resolve: the value scaled by the exponent
+// bias.
 // The source is scaled to the destination: a 4x MSAA surface covers the tiles of a 1x one twice its size.
 constexpr const char* kFragmentShader = R"(
+#if SRC == 102 || SRC == 103
+layout(set = 0, binding = 0) uniform sampler2DArray source;  // a resolve texture: array views
+#define FETCH(p) texelFetch(source, ivec3(p, 0), 0)
+#define SOURCE_SIZE textureSize(source, 0).xy
+#else
 layout(set = 0, binding = 0) uniform sampler2D source;
-#if SRC >= 100
+#define FETCH(p) texelFetch(source, p, 0)
+#define SOURCE_SIZE textureSize(source, 0)
+#endif
+#if SRC == 100 || SRC == 101
 layout(set = 0, binding = 1) uniform usampler2D stencil;
 #endif
 layout(push_constant) uniform Constants { ivec2 dest_size; float scale; };
@@ -57,8 +66,8 @@ uint To20e4(float f) {
 uint ToUnorm(float f, float scale) { return uint(round(clamp(f, 0.0, 1.0) * scale)); }
 
 void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy) * textureSize(source, 0) / dest_size;
-  vec4 v = texelFetch(source, p, 0);
+  ivec2 p = ivec2(gl_FragCoord.xy) * SOURCE_SIZE / dest_size;
+  vec4 v = FETCH(p);
 #if DST == 200
   result = vec4(v.r, 0.0, 0.0, 0.0);
   return;
@@ -71,6 +80,10 @@ void main() {
   bits = (uint(round(clamp(v.r, 0.0, 1.0) * 16777215.0)) << 8) | (texelFetch(stencil, p, 0).r & 0xFFu);
 #elif SRC == 101
   bits = (To20e4(v.r) << 8) | (texelFetch(stencil, p, 0).r & 0xFFu);
+#elif SRC == 102
+  bits = uint(round(clamp(v.r, 0.0, 1.0) * 16777215.0)) << 8;
+#elif SRC == 103
+  bits = To20e4(v.r) << 8;
 #elif SRC == 0
   bits = packUnorm4x8(v);
 #elif SRC == 2
@@ -269,7 +282,7 @@ void Renderer::Transfer(Image& source, uint32_t source_format, Image& dest, uint
   }
   const VkDescriptorSet set = AllocateSet(transfer_set_layout_);
   if (!set) return;
-  const bool depth = source_format >= kTransferDepth;
+  const bool depth = source_format == kTransferDepth || source_format == kTransferFloatDepth;
   const VkDescriptorImageInfo images[2] = {{sampler_, depth ? source.depth_view : source.view, VK_IMAGE_LAYOUT_GENERAL},
                                            {sampler_, source.stencil_view, VK_IMAGE_LAYOUT_GENERAL}};
   const VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 0, 0, depth ? 2u : 1u,

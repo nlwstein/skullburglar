@@ -824,9 +824,18 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
     int32_t w, h, dw, dh;
     if (raw && value && clamp_rect(*source, w, h) && clamp_rect(*raw, dw, dh)) {
       const VkRect2D rect{{x0, y0}, {uint32_t(std::min(w, dw)), uint32_t(std::min(h, dh))}};
-      Transfer(*source, float_depth ? kTransferFloatDepth : kTransferDepth, *raw,
-               uint32_t(xe::ColorRenderTargetFormat::k_8_8_8_8), &rect);
+      // The raw image waits until something samples it (Image::raw_depth_from); one still pending for another
+      // rect is written first, before the value image changes.
+      if (raw->raw_depth_from && std::memcmp(&raw->raw_depth_rect, &rect, sizeof(rect))) MaterializeRawDepth(*raw);
       Transfer(*source, kTransferDepth, *value, kTransferDepthValue, &rect);
+      if (lazy_raw_depth_) {
+        raw->raw_depth_from = value;
+        raw->raw_depth_float = float_depth;
+        raw->raw_depth_rect = rect;
+      } else {
+        Transfer(*source, float_depth ? kTransferFloatDepth : kTransferDepth, *raw,
+                 uint32_t(xe::ColorRenderTargetFormat::k_8_8_8_8), &rect);
+      }
       raw->written = value->written = ++write_clock_;
       DumpResolve(*value, dest_address);
     } else {
@@ -850,6 +859,7 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
       const bool fixed = source_format == xe::ColorRenderTargetFormat::k_16_16 ||
                          source_format == xe::ColorRenderTargetFormat::k_16_16_16_16;
       const VkRect2D rect{{x0, y0}, {uint32_t(std::min(w, dw)), uint32_t(std::min(h, dh))}};
+      if (dest->raw_depth_from) MaterializeRawDepth(*dest);  // outside this rect it still holds that depth
       Transfer(*source, 0, *dest, kTransferResolve, &rect,
                std::ldexp(1.0f, int(dest_info.copy_dest_exp_bias) + (fixed ? 5 : 0)));
       dest->swapped = dest_info.copy_dest_swap;
@@ -911,6 +921,13 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
       clear(*depth, true, value);
     }
   }
+}
+
+void Renderer::MaterializeRawDepth(Image& raw) {
+  Image* const value = std::exchange(raw.raw_depth_from, nullptr);
+  const VkRect2D rect = raw.raw_depth_rect;
+  Transfer(*value, raw.raw_depth_float ? kTransferValueFloatDepth : kTransferValueDepth, raw,
+           uint32_t(xe::ColorRenderTargetFormat::k_8_8_8_8), &rect);
 }
 
 // BOTS_DUMP_RESOLVES=<dir> writes every resolve as <dir>/resolve-<n>-<address>.ppm (debugging; depth resolves
