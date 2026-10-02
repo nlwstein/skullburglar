@@ -6,6 +6,7 @@
 // and their cvars live in their own module, as the xenos plugin's do.
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <string_view>
 #include <vector>
 
@@ -38,7 +39,12 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     if (!renderer_) return;
     renderer_->EndFrame();
     ++frames_;
-    rex::ui::Presenter* presenter = graphics_system_->presenter();
+    // BOTS_GFX_NO_PRESENT=1 (benchmarking): render everything but never hand the frame to the presenter. Under a
+    // GPU-less X server (Xvfb) the Vulkan surface falls back to xcb_put_image and presenting costs more than the
+    // whole frame's rendering, which hides the renderer's own throughput.
+    static const bool no_present = std::getenv("BOTS_GFX_NO_PRESENT") != nullptr;
+    rex::ui::Presenter* presenter = no_present ? nullptr : graphics_system_->presenter();
+    if (no_present) renderer_->Flush();  // Present normally submits the frame
     if (presenter) {
       rex::system::X_VIDEO_MODE video_mode;
       rex::kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
