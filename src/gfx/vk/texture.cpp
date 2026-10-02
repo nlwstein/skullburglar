@@ -119,7 +119,28 @@ VkSamplerAddressMode AddressMode(xe::ClampMode mode) {
 
 }  // namespace
 
-VkImageView Renderer::TextureView(const rg::xenos::xe_gpu_texture_fetch_t& fetch, uint32_t& host_swizzle) {
+VkFormat Renderer::SignTwin(VkFormat format, bool* is_signed) {
+  static constexpr std::pair<VkFormat, VkFormat> kTwins[] = {
+      {VK_FORMAT_R8_UNORM, VK_FORMAT_R8_SNORM},
+      {VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8_SNORM},
+      {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SNORM},
+      {VK_FORMAT_R16_UNORM, VK_FORMAT_R16_SNORM},
+      {VK_FORMAT_R16G16_UNORM, VK_FORMAT_R16G16_SNORM},
+      {VK_FORMAT_R16G16B16A16_UNORM, VK_FORMAT_R16G16B16A16_SNORM},
+      {VK_FORMAT_BC4_UNORM_BLOCK, VK_FORMAT_BC4_SNORM_BLOCK},
+      {VK_FORMAT_BC5_UNORM_BLOCK, VK_FORMAT_BC5_SNORM_BLOCK},
+  };
+  for (const auto& [unorm, snorm] : kTwins) {
+    if (format == unorm || format == snorm) {
+      if (is_signed) *is_signed = format == snorm;
+      return format == unorm ? snorm : unorm;
+    }
+  }
+  return VK_FORMAT_UNDEFINED;
+}
+
+VkImageView Renderer::TextureView(const rg::xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed,
+                                  uint32_t& host_swizzle) {
   // The fields that describe the memory: pitch/tiled, format/endian/stacked/address, size, dimension/packing.
   const TextureCacheKey key{fetch.dword_0 & 0xFFC00000u, fetch.dword_1, fetch.dword_2, fetch.dword_5 & 0x00000E00u};
   auto& slot = guest_textures_[key];
@@ -130,7 +151,7 @@ VkImageView Renderer::TextureView(const rg::xenos::xe_gpu_texture_fetch_t& fetch
   GuestTexture& texture = *slot;
   if (!texture.image.image) return VK_NULL_HANDLE;
   host_swizzle = HostSwizzle(fetch.swizzle, texture.host_format_swizzle);
-  return SwizzledView(texture.image, host_swizzle);
+  return SwizzledView(texture.image, host_swizzle, is_signed);
 }
 
 Renderer::Image* Renderer::ResolvedTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch) {
@@ -143,7 +164,7 @@ Renderer::Image* Renderer::ResolvedTexture(const rg::xenos::xe_gpu_texture_fetch
 }
 
 VkImageView Renderer::ResolvedTextureView(Image& image, const rg::xenos::xe_gpu_texture_fetch_t& fetch,
-                                          uint32_t& host_swizzle) {
+                                          bool is_signed, uint32_t& host_swizzle) {
   // Channels the host format lacks read like the guest's (1- and 2-component formats repeat their last one).
   uint32_t host_format = xe::XE_GPU_TEXTURE_SWIZZLE_RGBA;
   switch (image.format) {
@@ -157,19 +178,25 @@ VkImageView Renderer::ResolvedTextureView(Image& image, const rg::xenos::xe_gpu_
   // After a swapping resolve the guest's first component is blue; the host image keeps red first.
   if (image.swapped) host_format = 2u | (1u << 3) | (0u << 6) | (3u << 9);
   host_swizzle = HostSwizzle(fetch.swizzle, host_format);
-  return SwizzledView(image, host_swizzle);
+  return SwizzledView(image, host_swizzle, is_signed);
 }
 
-VkImageView Renderer::SwizzledView(Image& image, uint32_t host_swizzle) {
-  if (!device_->properties().imageViewFormatSwizzle) return image.view;  // swizzled in the shader
-  VkImageView& view = image.swizzled_views[host_swizzle];
+VkImageView Renderer::SwizzledView(Image& image, uint32_t host_swizzle, bool is_signed) {
+  bool image_signed = false;
+  const VkFormat twin = SignTwin(image.format, &image_signed);
+  const bool other = twin != VK_FORMAT_UNDEFINED && is_signed != image_signed;
+  // Without view swizzles the shader swizzles (the translator reads texture_swizzles).
+  const uint32_t swizzle =
+      device_->properties().imageViewFormatSwizzle ? host_swizzle : uint32_t(xe::XE_GPU_TEXTURE_SWIZZLE_RGBA);
+  if (!other && swizzle == xe::XE_GPU_TEXTURE_SWIZZLE_RGBA) return image.view;
+  VkImageView& view = image.swizzled_views[swizzle | uint32_t(other) << 12];
   if (!view) {
     VkImageViewCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     info.image = image.image;
     info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-    info.format = image.format;
-    info.components = {ComponentSwizzle(host_swizzle & 7), ComponentSwizzle((host_swizzle >> 3) & 7),
-                       ComponentSwizzle((host_swizzle >> 6) & 7), ComponentSwizzle((host_swizzle >> 9) & 7)};
+    info.format = other ? twin : image.format;
+    info.components = {ComponentSwizzle(swizzle & 7), ComponentSwizzle((swizzle >> 3) & 7),
+                       ComponentSwizzle((swizzle >> 6) & 7), ComponentSwizzle((swizzle >> 9) & 7)};
     info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     if (vk_.vkCreateImageView(device_->device(), &info, nullptr, &view) != VK_SUCCESS) view = VK_NULL_HANDLE;
   }

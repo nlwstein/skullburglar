@@ -62,7 +62,7 @@ class Renderer : public Pm4Sink {
     uint32_t width = 0, height = 0;
     uint64_t written = 0;  // surfaces: write_clock_ at the last write
     VkImageView depth_view = VK_NULL_HANDLE, stencil_view = VK_NULL_HANDLE;  // depth surfaces, for sampling
-    std::map<uint32_t, VkImageView> swizzled_views;  // sampled images: by host swizzle
+    std::map<uint32_t, VkImageView> swizzled_views;  // sampled images: by host swizzle | other signedness << 12
     bool swapped = false;  // resolve destinations: red and blue swapped (RB_COPY_DEST_INFO copy_dest_swap)
   };
   struct Buffer {
@@ -97,8 +97,11 @@ class Renderer : public Pm4Sink {
   };
 
   Image* Surface(const rex::graphics::RegisterFile& regs, bool depth, uint32_t color_index);
+  bool ReadImage(const Image& image, std::vector<uint8_t>& rgb, uint32_t& width, uint32_t& height);
+  void DumpResolve(const Image& image, uint32_t address);
   Image* Own(const SurfaceKey& key, Image* image);
-  Image* ResolveTexture(uint32_t address, uint32_t format, uint32_t width, uint32_t height, bool depth_value = false);
+  Image* ResolveTexture(uint32_t address, uint32_t format, uint32_t width, uint32_t height, bool depth_value = false,
+                        bool is_signed = false);
   bool CreateImage(Image& image, VkFormat format, uint32_t width, uint32_t height, bool depth,
                    VkImageViewType view_type = VK_IMAGE_VIEW_TYPE_2D, bool attachment = true);
   bool CreateBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage);
@@ -134,13 +137,17 @@ class Renderer : public Pm4Sink {
                 const VkRect2D* rect = nullptr, float scale = 1.0f);
 
   // Textures (texture.cpp). TextureView may record an upload, so call it before a draw's ring reservation.
-  VkImageView TextureView(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch, uint32_t& host_swizzle);
+  // Views for the translator's unsigned or signed binding of a fetch: formats with both signednesses get a view of
+  // the other one over the same bits (hardware reads 16-bit EDRAM resolves as unorm when the fetch says unsigned).
+  static VkFormat SignTwin(VkFormat format, bool* is_signed = nullptr);
+  VkImageView TextureView(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed,
+                          uint32_t& host_swizzle);
   // The resolve destination a fetch reads, if any (a depth resolve read as 24_8 gives the depth value).
   Image* ResolvedTexture(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch);
   // A view of a resolve destination as the fetch constant sees it (swizzle; red/blue swap).
   VkImageView ResolvedTextureView(Image& image, const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch,
-                                  uint32_t& host_swizzle);
-  VkImageView SwizzledView(Image& image, uint32_t host_swizzle);
+                                  bool is_signed, uint32_t& host_swizzle);
+  VkImageView SwizzledView(Image& image, uint32_t host_swizzle, bool is_signed);
   void LoadTexture(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch, GuestTexture& texture);
   VkSampler GetSampler(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch,
                        const rex::graphics::SpirvShader::SamplerBinding& binding);

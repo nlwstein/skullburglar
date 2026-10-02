@@ -327,6 +327,13 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
                  vshader->ucode_disassembly().c_str());
     if (pshader) {
       std::fprintf(stderr, "--- pixel shader %08X\n%s", ps.address, pshader->ucode_disassembly().c_str());
+      for (uint32_t c = 0; c < 256; ++c) {
+        const uint32_t* v = &regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_256_X + 4 * c];
+        if (!(v[0] | v[1] | v[2] | v[3])) continue;
+        float f[4];
+        std::memcpy(f, v, sizeof(f));
+        std::fprintf(stderr, "  c%u = %g %g %g %g\n", c, f[0], f[1], f[2], f[3]);
+      }
     }
   }
   const reg::RB_DEPTHCONTROL depth_control = du::GetNormalizedDepthControl(regs);
@@ -420,6 +427,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     return v && *v == '1';
   }();
   trace_textures_ = trace;
+  static const bool trace_signs = std::getenv("BOTS_TRACE_SIGNS") != nullptr;  // fetch swizzle/signs/exp_adjust
   std::string trace_textures;
   uint32_t texture_swizzles[32], texture_signs[32];
   for (uint32_t i = 0; i < 32; ++i) texture_swizzles[i] = xe::XE_GPU_TEXTURE_SWIZZLE_RGBA, texture_signs[i] = 0;
@@ -436,13 +444,13 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
       } else if (Image* resolved = ResolvedTexture(fetch)) {
         // Render-to-texture: a resolve destination is sampled straight from its host image.
         uint32_t swizzle = xe::XE_GPU_TEXTURE_SWIZZLE_RGBA;
-        view = ResolvedTextureView(*resolved, fetch, swizzle);
+        view = ResolvedTextureView(*resolved, fetch, binding.is_signed, swizzle);
         texture_swizzles[binding.fetch_constant] = swizzle;
         texture_signs[binding.fetch_constant] = rg::texture_util::SwizzleSigns(fetch);
         source = resolved->format == VK_FORMAT_R32_SFLOAT ? "depth" : "rt";
       } else {
         uint32_t swizzle = xe::XE_GPU_TEXTURE_SWIZZLE_RGBA;
-        view = TextureView(fetch, swizzle);
+        view = TextureView(fetch, binding.is_signed, swizzle);
         if (view) {
           texture_swizzles[binding.fetch_constant] = swizzle;
           texture_signs[binding.fetch_constant] = rg::texture_util::SwizzleSigns(fetch);
@@ -453,9 +461,13 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
       }
       views.push_back(view);
       if (trace && !binding.is_signed) {
-        char t[64];
+        char t[96];
         std::snprintf(t, sizeof(t), " t%u=%08X/%u(%s)", uint32_t(binding.fetch_constant), fetch.base_address << 12,
                       uint32_t(fetch.format), source);
+        if (trace_signs) {
+          std::snprintf(t + std::strlen(t), sizeof(t) - std::strlen(t), "[sw%03o sg%02X x%d]", fetch.swizzle,
+                        rg::texture_util::SwizzleSigns(fetch), int(fetch.exp_adjust));
+        }
         trace_textures += t;
       }
     }

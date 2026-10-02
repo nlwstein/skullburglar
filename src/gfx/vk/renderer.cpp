@@ -43,23 +43,23 @@ VkFormat ColorTargetFormat(uint32_t format) {
   }
 }
 
-// Resolve destination (guest texture) format -> host format.
-VkFormat TextureFormat(uint32_t format) {
+// Resolve destination (guest texture) format and signedness (RB_COPY_DEST_INFO copy_dest_number) -> host format.
+VkFormat TextureFormat(uint32_t format, bool is_signed) {
   switch (xe::TextureFormat(format)) {
     case xe::TextureFormat::k_8:
-      return VK_FORMAT_R8_UNORM;
+      return is_signed ? VK_FORMAT_R8_SNORM : VK_FORMAT_R8_UNORM;
     case xe::TextureFormat::k_8_8_8_8:
     case xe::TextureFormat::k_8_8_8_8_A:
-      return VK_FORMAT_R8G8B8A8_UNORM;
+      return is_signed ? VK_FORMAT_R8G8B8A8_SNORM : VK_FORMAT_R8G8B8A8_UNORM;
     case xe::TextureFormat::k_2_10_10_10:
       return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
     case xe::TextureFormat::k_10_11_11:
     case xe::TextureFormat::k_11_11_10:
       return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
     case xe::TextureFormat::k_16_16:
-      return VK_FORMAT_R16G16_SNORM;
+      return is_signed ? VK_FORMAT_R16G16_SNORM : VK_FORMAT_R16G16_UNORM;
     case xe::TextureFormat::k_16_16_16_16:
-      return VK_FORMAT_R16G16B16A16_SNORM;
+      return is_signed ? VK_FORMAT_R16G16B16A16_SNORM : VK_FORMAT_R16G16B16A16_UNORM;
     case xe::TextureFormat::k_16_16_FLOAT:
       return VK_FORMAT_R16G16_SFLOAT;
     case xe::TextureFormat::k_24_8:
@@ -231,6 +231,7 @@ bool Renderer::CreateImage(Image& image, VkFormat format, uint32_t width, uint32
   const bool cube = view_type == VK_IMAGE_VIEW_TYPE_CUBE;
   VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   info.flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
+  if (!depth && SignTwin(format) != VK_FORMAT_UNDEFINED) info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
   info.imageType = view_type == VK_IMAGE_VIEW_TYPE_3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
   info.format = format;
   info.extent = {width, height, 1};
@@ -344,13 +345,13 @@ Renderer::Image* Renderer::Own(const SurfaceKey& key, Image* image) {
 }
 
 Renderer::Image* Renderer::ResolveTexture(uint32_t address, uint32_t format, uint32_t width, uint32_t height,
-                                          bool depth_value) {
-  const TextureKey key{address, depth_value ? 0x100 | format : format, width, height};
+                                          bool depth_value, bool is_signed) {
+  const TextureKey key{address, format | (depth_value ? 0x100 : 0) | (is_signed ? 0x200 : 0), width, height};
   auto& slot = textures_[key];
   if (!slot) {
     auto image = std::make_unique<Image>();
     // Shaders sample 2D textures as arrays.
-    const VkFormat host_format = depth_value ? VK_FORMAT_R32_SFLOAT : TextureFormat(format);
+    const VkFormat host_format = depth_value ? VK_FORMAT_R32_SFLOAT : TextureFormat(format, is_signed);
     if (!CreateImage(*image, host_format, width, height, false, VK_IMAGE_VIEW_TYPE_2D_ARRAY)) return nullptr;
     slot = std::move(image);
   }
@@ -466,37 +467,33 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
       Transfer(*source, float_depth ? kTransferFloatDepth : kTransferDepth, *raw,
                uint32_t(xe::ColorRenderTargetFormat::k_8_8_8_8), &rect);
       Transfer(*source, kTransferDepth, *value, kTransferDepthValue, &rect);
+      DumpResolve(*value, dest_address);
     } else {
       ++stats_.dropped_resolves;
     }
   } else if (copying) {
     const uint32_t format = uint32_t(dest_info.copy_dest_format);
-    Image* dest = ResolveTexture(dest_address, format, dest_pitch.copy_dest_pitch, dest_pitch.copy_dest_height);
+    const auto number = dest_info.copy_dest_number;
+    const bool is_signed = number == xe::SurfaceNumberFormat::kSignedRepeatingFraction ||
+                           number == xe::SurfaceNumberFormat::kSignedInteger;
+    Image* dest = ResolveTexture(dest_address, format, dest_pitch.copy_dest_pitch, dest_pitch.copy_dest_height,
+                                 false, is_signed);
     int32_t w, h, dw, dh;
     if (dest && clamp_rect(*source, w, h) && clamp_rect(*dest, dw, dh)) {
-      // The resolve converts through the shader: exponent bias (UE3 copies its HDR scene out at 1/8) and the
-      // red/blue swap. The host image keeps red first and remembers the swap for sampling.
+      // The resolve converts through the shader into the destination's format and signedness, with the exponent
+      // bias (UE3 copies its HDR scene out at 1/8). Fixed-point 16-bit surfaces hold value / 32 on the host. The
+      // red/blue swap is not applied: the host image keeps red first and remembers the swap for sampling.
+      const auto source_format = xe::GetStorageColorFormat(
+          regs.Get<rg::reg::RB_COLOR_INFO>(rg::reg::RB_COLOR_INFO::rt_register_indices[copy.copy_src_select])
+              .color_format);
+      const bool fixed = source_format == xe::ColorRenderTargetFormat::k_16_16 ||
+                         source_format == xe::ColorRenderTargetFormat::k_16_16_16_16;
       const VkRect2D rect{{x0, y0}, {uint32_t(std::min(w, dw)), uint32_t(std::min(h, dh))}};
-      Transfer(*source, 0, *dest, kTransferResolve, &rect, std::ldexp(1.0f, int(dest_info.copy_dest_exp_bias)));
+      Transfer(*source, 0, *dest, kTransferResolve, &rect,
+               std::ldexp(1.0f, int(dest_info.copy_dest_exp_bias) + (fixed ? 5 : 0)));
       dest->swapped = dest_info.copy_dest_swap;
       last_resolve_address_ = dest_address;
-      // BOTS_DUMP_RESOLVES=<dir> writes every colour resolve as <dir>/resolve-<n>-<address>.ppm (debugging).
-      static const char* dump_dir = std::getenv("BOTS_DUMP_RESOLVES");
-      if (dump_dir && *dump_dir) {
-        std::vector<uint8_t> rgb;
-        uint32_t rw, rh;
-        if (ReadTexture(dest_address, rgb, rw, rh)) {
-          char path[512];
-          std::snprintf(path, sizeof(path), "%s/resolve-%02llu-%08X.ppm", dump_dir,
-                        (unsigned long long)stats_.resolves, dest_address);
-          if (FILE* f = std::fopen(path, "wb")) {
-            std::fprintf(f, "P6\n%u %u\n255\n", rw, rh);
-            std::fwrite(rgb.data(), 1, rgb.size(), f);
-            std::fclose(f);
-          }
-        }
-        BeginCommands();
-      }
+      DumpResolve(*dest, dest_address);
     } else {
       ++stats_.dropped_resolves;
     }
@@ -551,19 +548,44 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
   }
 }
 
+// BOTS_DUMP_RESOLVES=<dir> writes every resolve as <dir>/resolve-<n>-<address>.ppm (debugging; depth resolves
+// show the depth value).
+void Renderer::DumpResolve(const Image& image, uint32_t address) {
+  static const char* dump_dir = std::getenv("BOTS_DUMP_RESOLVES");
+  if (!dump_dir || !*dump_dir) return;
+  std::vector<uint8_t> rgb;
+  uint32_t width, height;
+  if (ReadImage(image, rgb, width, height)) {
+    char path[512];
+    std::snprintf(path, sizeof(path), "%s/resolve-%02llu-%08X.ppm", dump_dir, (unsigned long long)stats_.resolves,
+                  address);
+    if (FILE* f = std::fopen(path, "wb")) {
+      std::fprintf(f, "P6\n%u %u\n255\n", width, height);
+      std::fwrite(rgb.data(), 1, rgb.size(), f);
+      std::fclose(f);
+    }
+  }
+  BeginCommands();
+}
+
 bool Renderer::ReadTexture(uint32_t address, std::vector<uint8_t>& rgb, uint32_t& width, uint32_t& height) {
   const auto it = texture_at_.find(address);
-  if (it == texture_at_.end()) return false;
-  const Image& image = *it->second;
+  return it != texture_at_.end() && ReadImage(*it->second, rgb, width, height);
+}
+
+bool Renderer::ReadImage(const Image& image, std::vector<uint8_t>& rgb, uint32_t& width, uint32_t& height) {
   uint32_t texel;
   switch (image.format) {
+    case VK_FORMAT_R32_SFLOAT:
     case VK_FORMAT_R8G8B8A8_UNORM:
     case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
     case VK_FORMAT_R16G16_SNORM:
+    case VK_FORMAT_R16G16_UNORM:
       texel = 4;
       break;
     case VK_FORMAT_R16G16B16A16_SFLOAT:
     case VK_FORMAT_R16G16B16A16_SNORM:
+    case VK_FORMAT_R16G16B16A16_UNORM:
       texel = 8;
       break;
     default:
@@ -602,10 +624,19 @@ bool Renderer::ReadTexture(uint32_t address, std::vector<uint8_t>& rgb, uint32_t
   const auto* src = static_cast<const uint8_t*>(mapped.pMappedData);
   for (size_t i = 0; i < size_t(width) * height; ++i) {
     float c[3];
-    if (image.format == VK_FORMAT_R16G16B16A16_SFLOAT) {
+    if (image.format == VK_FORMAT_R32_SFLOAT) {
+      float v;
+      std::memcpy(&v, src + i * 4, 4);
+      c[0] = c[1] = c[2] = v;
+    } else if (image.format == VK_FORMAT_R16G16B16A16_SFLOAT) {
       uint16_t h[4];
       std::memcpy(h, src + i * 8, 8);
       for (int k = 0; k < 3; ++k) c[k] = Half(h[k]);
+    } else if (image.format == VK_FORMAT_R16G16B16A16_UNORM || image.format == VK_FORMAT_R16G16_UNORM) {
+      const bool four = image.format == VK_FORMAT_R16G16B16A16_UNORM;
+      uint16_t v[4] = {};
+      std::memcpy(v, src + i * texel, four ? 8 : 4);
+      for (int k = 0; k < 3; ++k) c[k] = (k < 2 || four) ? float(v[k]) / 65535.0f : 0.0f;
     } else if (image.format == VK_FORMAT_R16G16B16A16_SNORM || image.format == VK_FORMAT_R16G16_SNORM) {
       // Guest 16-bit fixed point: -32..32.
       const bool four = image.format == VK_FORMAT_R16G16B16A16_SNORM;
