@@ -84,6 +84,11 @@ SERIES.append(
     # command processor on the lock; the race it guarded is covered by the access violation recovery path.
     ("0012-linux-write-watch-fault-without-maps-parse.patch",
      ["src/system/mmio_handler.cpp"], {}))
+SERIES.append(
+    # Linux: attach to RenderDoc only when it's already loaded. dlopen()ing it whenever it's installed (SteamOS
+    # ships it in /usr/lib) injected its capture layer into every Vulkan call: ~32% of the GPU thread on the Deck.
+    ("0013-linux-renderdoc-only-when-attached.patch",
+     ["src/ui/renderdoc_api.cpp"], {}))
 
 
 def git(sdk, *args, **kw):
