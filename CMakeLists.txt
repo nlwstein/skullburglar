@@ -58,8 +58,9 @@ endif()
 
 # Native renderer (src/gfx/vk): bots-replay, and in-process shadow mode (BOTS_GFX_SHADOW) in the game where enabled.
 # Needs the SDK source tree: the Xenos register and shader-translation code it reuses lives in the rexgpu-xenos
-# plugin, a shared library that exports nothing, so it is compiled in again here.
-if(REXSDK_DIR AND NOT WIN32)
+# plugin, a shared library that exports nothing, so it is compiled in again here. On Windows the SDK builds Vulkan
+# only when asked (-DREXGLUE_USE_VULKAN=ON; D3D12 is its default there).
+if(REXSDK_DIR AND (NOT WIN32 OR REXGLUE_USE_VULKAN))
     set(REX_GRAPHICS_SRC ${REXSDK_DIR}/src/graphics)
     set(BOTS_NATIVE_GFX_SOURCES
         src/gfx/pm4.cpp
@@ -100,9 +101,11 @@ if(REXSDK_DIR AND NOT WIN32)
     set(BOTS_NATIVE_GFX_LIBS Vulkan::Headers GPUOpen::VulkanMemoryAllocator
         xxHash::xxhash glslang::SPIRV glslang MachineIndependent GenericCodeGen OSDependent OGLCompiler)
 
-    add_executable(bots-replay src/gfx/replay/capture_file.cpp src/gfx/replay/main.cpp ${BOTS_NATIVE_GFX_SOURCES})
-    target_link_libraries(bots-replay PRIVATE rexruntime ${BOTS_NATIVE_GFX_LIBS})
-    target_include_directories(bots-replay PRIVATE ${REXSDK_DIR}/thirdparty/renderdoc)  # rex/ui/vulkan headers
+    if(NOT WIN32)  # the capture reader maps files with POSIX mmap
+        add_executable(bots-replay src/gfx/replay/capture_file.cpp src/gfx/replay/main.cpp ${BOTS_NATIVE_GFX_SOURCES})
+        target_link_libraries(bots-replay PRIVATE rexruntime ${BOTS_NATIVE_GFX_LIBS})
+        target_include_directories(bots-replay PRIVATE ${REXSDK_DIR}/thirdparty/renderdoc)  # rex/ui/vulkan headers
+    endif()
 
     # In the game: Linux first (the shadow-mode test host); macOS and Windows once it is proven there.
     option(BOTS_NATIVE_GFX "Build the native renderer into the game (shadow mode)" ${LINUX})
@@ -125,7 +128,8 @@ if(REXSDK_DIR AND NOT WIN32)
             PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
         # Native mode (B-075): the renderer as a GPU plugin on the SDK's command processor, staged next to the game
-        # under the name the plugin loader expects (librexgpu-native[d|rd].so). REX_GPU_PLUGIN=native selects it.
+        # under the name the plugin loader expects (librexgpu-native[d|rd].so/.dylib, rexgpu-native[d|rd].dll).
+        # REX_GPU_PLUGIN=native selects it.
         add_library(rexgpu-native SHARED
             src/gfx/native.cpp
             src/gfx/vk/memory_sync.cpp
@@ -138,7 +142,8 @@ if(REXSDK_DIR AND NOT WIN32)
             VISIBILITY_INLINES_HIDDEN ON
             DEBUG_POSTFIX d
             RELWITHDEBINFO_POSTFIX rd
-            LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+            LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})  # a Windows DLL is a runtime output
         target_include_directories(rexgpu-native PRIVATE src ${REXSDK_DIR}/thirdparty/renderdoc)
         target_link_libraries(rexgpu-native PRIVATE rex::runtime ${BOTS_NATIVE_GFX_LIBS})
         if(APPLE)
