@@ -89,6 +89,12 @@ SERIES.append(
     # ships it in /usr/lib) injected its capture layer into every Vulkan call: ~32% of the GPU thread on the Deck.
     ("0013-linux-renderdoc-only-when-attached.patch",
      ["src/ui/renderdoc_api.cpp"], {}))
+SERIES.append(
+    # POSIX multi-handle waits polled with sleep_for(remaining truncated to ms): alertable waits poll in 1 ms slices,
+    # so every slice slept 0 and spun - the audio worker burned ~80% of a core, as did any guest alertable
+    # KeWaitForMultipleObjects.
+    ("0014-posix-wait-multiple-no-spin.patch",
+     ["src/core/threading_posix.cpp"], {}))
 
 
 def git(sdk, *args, **kw):

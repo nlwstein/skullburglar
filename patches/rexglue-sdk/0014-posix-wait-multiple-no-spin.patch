@@ -1,0 +1,29 @@
+diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
+index 9ac8d15..655e99c 100644
+--- a/src/core/threading_posix.cpp
++++ b/src/core/threading_posix.cpp
+@@ -414,9 +414,10 @@ class PosixConditionBase {
+       if (timeout == std::chrono::milliseconds::max()) {
+         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+       } else {
+-        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
+-        auto sleep_time = std::min(remaining, std::chrono::milliseconds(1));
+-        std::this_thread::sleep_for(sleep_time);
++        // Not truncated to whole milliseconds: under 1 ms left (always, for the 1 ms slices alertable waits poll
++        // in) made it sleep_for(0) and spin until the deadline.
++        std::this_thread::sleep_for(
++            std::min<std::chrono::steady_clock::duration>(end_time - now, std::chrono::milliseconds(1)));
+       }
+     }
+   }
+@@ -1106,8 +1107,8 @@ std::chrono::milliseconds ComputeAlertableWaitTimeout(
+   if (deadline == std::chrono::steady_clock::time_point::max()) {
+     return kAlertablePollSlice;
+   }
+-  auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+-      deadline - std::chrono::steady_clock::now());
++  // Rounded up: truncated, the last partial millisecond became a zero timeout and spun.
++  auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+   if (remaining <= std::chrono::milliseconds::zero()) {
+     return std::chrono::milliseconds::zero();
+   }
