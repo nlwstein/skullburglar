@@ -45,15 +45,16 @@ Workers::~Workers() {
     std::lock_guard lock(mutex_);
     stop_ = true;
     queue_.clear();
+    background_.clear();
   }
   work_.notify_all();
   for (std::thread& thread : threads_) thread.join();
 }
 
-void Workers::Submit(Job job) {
+void Workers::Submit(Job job, bool background) {
   {
     std::lock_guard lock(mutex_);
-    queue_.push_back(std::move(job));
+    (background ? background_ : queue_).push_back(std::move(job));
   }
   work_.notify_one();
 }
@@ -63,14 +64,27 @@ size_t Workers::queued() const {
   return queue_.size();
 }
 
+size_t Workers::background_queued() const {
+  std::lock_guard lock(mutex_);
+  return background_.size();
+}
+
+bool Workers::Take(Job& job) {
+  std::deque<Job>& from = !queue_.empty() ? queue_ : background_;
+  if (from.empty()) return false;
+  job = std::move(from.front());
+  from.pop_front();
+  return true;
+}
+
 void Workers::Run(const rex::ui::vulkan::VulkanDevice* device) {
   rg::SpirvShaderTranslator translator(BOTS_TRANSLATOR_ARGS(device));
   std::unique_lock lock(mutex_);
   for (;;) {
-    work_.wait(lock, [this] { return stop_ || !queue_.empty(); });
+    work_.wait(lock, [this] { return stop_ || !queue_.empty() || !background_.empty(); });
     if (stop_) return;
-    Job job = std::move(queue_.front());
-    queue_.pop_front();
+    Job job;
+    Take(job);
     lock.unlock();
     job(translator);
     lock.lock();
@@ -80,10 +94,9 @@ void Workers::Run(const rex::ui::vulkan::VulkanDevice* device) {
 
 void Workers::Wait(const std::atomic<Async>& state, rg::SpirvShaderTranslator& translator) {
   std::unique_lock lock(mutex_);
+  // What's awaited may itself be a queued background job, so those run here too (the warm-up keeps that queue short).
   while (state.load(std::memory_order_acquire) == Async::kPending) {
-    if (!queue_.empty()) {
-      Job job = std::move(queue_.front());
-      queue_.pop_front();
+    if (Job job; Take(job)) {
       lock.unlock();
       job(translator);
       lock.lock();
@@ -131,7 +144,8 @@ bool ShaderCache::Translate(rg::SpirvShaderTranslator& translator, Translation& 
   return translation.is_valid() && translation.GetOrCreateShaderModule();
 }
 
-Async ShaderCache::Request(Shader& shader, uint64_t modification, Translation*& translation, bool sync) {
+Async ShaderCache::Request(Shader& shader, uint64_t modification, Translation*& translation, bool sync,
+                           bool background) {
   // GetOrCreateTranslation is only ever called here, on the GPU thread; workers only fill in the translation.
   translation = static_cast<Translation*>(shader.GetOrCreateTranslation(modification));
   auto& state = states_[translation];
@@ -150,9 +164,11 @@ Async ShaderCache::Request(Shader& shader, uint64_t modification, Translation*& 
     }
     state->store(Async::kPending, std::memory_order_relaxed);
     translating_[&shader] = state.get();
-    workers_->Submit([this, translation, done = state.get()](rg::SpirvShaderTranslator& translator) {
-      done->store(Translate(translator, *translation) ? Async::kReady : Async::kFailed, std::memory_order_release);
-    });
+    workers_->Submit(
+        [this, translation, done = state.get()](rg::SpirvShaderTranslator& translator) {
+          done->store(Translate(translator, *translation) ? Async::kReady : Async::kFailed, std::memory_order_release);
+        },
+        background);
     return Async::kPending;
   }
   if (now == Async::kPending && sync) {

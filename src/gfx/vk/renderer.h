@@ -14,6 +14,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -70,8 +71,20 @@ class Renderer : public Pm4Sink {
   // Pipelines persist in a VkPipelineCache file (the driver checks it was made by the same GPU and driver, and
   // ignores it otherwise). Load merges the file into the cache in use; Save writes it when pipelines were created
   // since the last save.
+  // Also loads the pipeline manifest next to it (manifest.cpp).
   void LoadPipelineCache(const std::filesystem::path& path);
   void SavePipelineCache();
+  // Pipeline precompile (manifest.cpp). Every draw pipeline created live is appended to a manifest (its shaders'
+  // microcode, their translation modifications, the binding counts and the fixed-function state); a later launch
+  // creates the recorded pipelines again in the background, a few jobs at a time behind live work, so gameplay finds
+  // them ready instead of skipping draws (or stalling, for rect lists) while they compile. Records are guest state
+  // plus a device feature class, so manifests from other machines of the same class work too: a read-only master
+  // (`<title>.master.bin` next to it, e.g. merged by tools/pipeline_manifest.py) is warmed along with the
+  // machine's own. BOTS_GFX_PRECOMPILE=0 turns the warm-up off; recording stays on.
+  void LoadManifest(const std::filesystem::path& path);
+  // Warm-up progress: pipelines recorded in the manifest, and how many of them are created (ready or failed).
+  size_t warmup_total() const { return warm_.size(); }
+  size_t warmup_done() const { return warm_done_; }
   // For the tracker: records a copy of guest physical [start, start + length) into the shared-memory buffer.
   bool UploadGuestMemory(uint32_t start, uint32_t length);
   // Live: after each guest frame's Flush. Evicts guest textures no draw used for a while.
@@ -279,11 +292,26 @@ class Renderer : public Pm4Sink {
   VkDescriptorSet AllocateSet(VkDescriptorSetLayout layout);
   VkDescriptorSetLayout TextureSetLayout(bool vertex, uint32_t textures, uint32_t samplers);
   const PipelineLayout* GetPipelineLayout(const LayoutKey& key);
-  struct PipelineKey;  // draw.cpp
+  // Everything that selects a draw pipeline: translations (ShaderCache::Translation*), layout, then fixed-function
+  // state (plain values from `topology` on; the manifest stores those bytes as they are). Zero-initialised (padding
+  // included) and compared as bytes. A pipeline warmed from the master isn't recorded again in this machine's
+  // manifest, which so holds what this machine needed beyond the master (what intake should merge back).
+  struct PipelineKey {
+    const void* vs;
+    const void* ps;
+    VkPipelineLayout layout;
+    uint32_t topology, restart, cull, front_clockwise, polygon_line, depth_clamp;
+    uint32_t depth_test, depth_write, depth_op, stencil, front[4], back[4];
+    VkFormat color[4], depth;
+    uint32_t blend[4], write_mask[4];
+  };
   VkPipeline CreateDrawPipeline(const PipelineKey& key) const;
   // The previous draw's pipeline is checked first (consecutive draws mostly share it). Not yet created: created now
-  // (sync), or queued on a worker and null with `pending` set.
-  VkPipeline GetPipeline(const PipelineKey& key, bool sync, bool& pending);
+  // (sync), or queued on a worker and null with `pending` set. `background`: queued behind live work (warm-up).
+  VkPipeline GetPipeline(const PipelineKey& key, bool sync, bool& pending, bool background = false);
+  // Manifest (manifest.cpp): append a newly created live pipeline; feed the warm-up queue (from EndFrame).
+  void RecordPipeline(const PipelineKey& key);
+  void PumpWarmup();
 
   // EDRAM ownership transfers (transfer.cpp).
   static constexpr uint32_t kTransferDepth = 100;       // Transfer source format for D24S8 depth/stencil
@@ -387,6 +415,24 @@ class Renderer : public Pm4Sink {
   std::vector<std::unique_ptr<Image>> dummy_depths_;
   std::filesystem::path pipeline_cache_path_;
   uint64_t pipelines_saved_ = 0;
+  // Pipeline manifest (manifest.cpp).
+  struct ManifestShader {
+    uint32_t type;
+    std::vector<uint32_t> ucode;  // big-endian, as in guest memory (so it hashes as it does live)
+    ShaderCache::Shader* shader = nullptr;  // once looked up for warm-up
+    bool in_file = false;                   // in this machine's manifest (not only the master's)
+  };
+  struct WarmPipeline {
+    std::string record;  // the manifest record
+    bool started = false, done = false;
+  };
+  std::FILE* manifest_ = nullptr;  // open for appending
+  std::unordered_map<uint64_t, ManifestShader> manifest_shaders_;  // by ShaderCache hash, read or written
+  std::unordered_map<std::string, bool> manifest_records_;         // all known records -> in this machine's file
+  std::vector<WarmPipeline> warm_;
+  size_t warm_next_ = 0, warm_done_ = 0;
+  std::chrono::steady_clock::time_point warm_start_;
+  bool warm_enabled_ = true, warm_logged_ = false;
   std::string last_pipeline_key_;
   VkPipeline last_pipeline_ = VK_NULL_HANDLE;
   // What the current command buffer has bound, so unchanged pipelines aren't rebound (VK_NULL_HANDLE: unknown).

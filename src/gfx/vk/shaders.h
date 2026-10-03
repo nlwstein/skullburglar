@@ -30,17 +30,20 @@ class Workers {
   Workers(const rex::ui::vulkan::VulkanDevice* device, uint32_t count);
   ~Workers();  // finishes the queue's running jobs, drops the rest
   uint32_t count() const { return uint32_t(threads_.size()); }
-  void Submit(Job job);
+  // Background jobs (pipeline warm-up) run only when no other job is queued.
+  void Submit(Job job, bool background = false);
   // Blocks until `state` is no longer kPending, running queued jobs on this thread (with `translator`) meanwhile, so
   // a waiting GPU thread is never stuck behind a long queue.
   void Wait(const std::atomic<Async>& state, rex::graphics::SpirvShaderTranslator& translator);
   size_t queued() const;
+  size_t background_queued() const;
 
  private:
   void Run(const rex::ui::vulkan::VulkanDevice* device);
   mutable std::mutex mutex_;
   std::condition_variable work_, done_;
-  std::deque<Job> queue_;
+  std::deque<Job> queue_, background_;
+  bool Take(Job& job);  // under mutex_: the next job, live work first
   bool stop_ = false;
   std::vector<std::thread> threads_;
 };
@@ -58,7 +61,8 @@ class ShaderCache {
   Shader* Get(rex::graphics::xenos::ShaderType type, const uint32_t* ucode, uint32_t dwords);
   // The shader's translation for `modification`, translated and with a module once kReady. Starts the translation
   // on a worker if it hasn't been; sync waits for it (kReady or kFailed then).
-  Async Request(Shader& shader, uint64_t modification, Translation*& translation, bool sync);
+  Async Request(Shader& shader, uint64_t modification, Translation*& translation, bool sync,
+                bool background = false);
 
   const rex::graphics::SpirvShaderTranslator& translator() const { return translator_; }
   // Joins the workers (dropping queued jobs) before what their jobs use goes away.

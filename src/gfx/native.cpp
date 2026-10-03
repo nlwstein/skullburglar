@@ -114,10 +114,12 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
       std::copy(std::begin(st.draw_phase_ns), std::end(st.draw_phase_ns), last_.draw_phase_ns);
       REXLOG_INFO(
           "gfx native: frame {}: {} draws, {} resolves, {} presents, {} failed shaders, {} unsupported prims, "
-          "{} unsupported textures, {:.1f} MB uploaded, {} invalidations, {} texture reloads, {} evictions, {} indirect draws skipped (totals)",
+          "{} unsupported textures, {:.1f} MB uploaded, {} invalidations, {} texture reloads, {} evictions, {} indirect draws skipped, "
+          "{} draws skipped for pipelines, {}/{} pipelines warmed (totals)",
           frames_, st.draws, st.resolves, st.presents, st.failed_shaders, st.unsupported_primitives,
           st.unsupported_textures, st.uploaded_bytes / 1048576.0, st.invalidations, st.texture_reloads,
-          st.texture_evictions, indirect_draws_);
+          st.texture_evictions, indirect_draws_, st.pending_draws, renderer_->warmup_done(),
+          renderer_->warmup_total());
     }
   }
 

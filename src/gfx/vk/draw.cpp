@@ -125,17 +125,6 @@ bool ConvertIndices(const uint8_t* src, T* dst, uint32_t count, xe::Endian endia
 
 }  // namespace
 
-// Everything that selects a pipeline. Zero-initialised (padding included) and compared as bytes.
-struct Renderer::PipelineKey {
-  const void* vs;
-  const void* ps;
-  VkPipelineLayout layout;
-  uint32_t topology, restart, cull, front_clockwise, polygon_line, depth_clamp;
-  uint32_t depth_test, depth_write, depth_op, stencil, front[4], back[4];
-  VkFormat color[4], depth;
-  uint32_t blend[4], write_mask[4];
-};
-
 bool Renderer::CreateBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage) {
   VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   info.size = size;
@@ -440,7 +429,7 @@ VkPipeline Renderer::CreateDrawPipeline(const PipelineKey& key) const {
   return pipeline;
 }
 
-VkPipeline Renderer::GetPipeline(const PipelineKey& key, bool sync, bool& pending) {
+VkPipeline Renderer::GetPipeline(const PipelineKey& key, bool sync, bool& pending, bool background) {
   const std::string_view bytes(reinterpret_cast<const char*>(&key), sizeof(key));
   pending = false;
   if (last_pipeline_ && bytes == last_pipeline_key_) return last_pipeline_;
@@ -449,6 +438,7 @@ VkPipeline Renderer::GetPipeline(const PipelineKey& key, bool sync, bool& pendin
   PipelineSlot& slot = *it->second;
   Async state = slot.state.load(std::memory_order_acquire);
   if (state == Async::kNone) {
+    if (!background) RecordPipeline(key);
     Workers* workers = shaders_->workers();
     if (sync || !workers) {
       slot.pipeline = CreateDrawPipeline(key);
@@ -456,10 +446,12 @@ VkPipeline Renderer::GetPipeline(const PipelineKey& key, bool sync, bool& pendin
       slot.state.store(state, std::memory_order_release);
     } else {
       slot.state.store(Async::kPending, std::memory_order_relaxed);
-      workers->Submit([this, key, s = &slot](rex::graphics::SpirvShaderTranslator&) {
-        s->pipeline = CreateDrawPipeline(key);
-        s->state.store(s->pipeline ? Async::kReady : Async::kFailed, std::memory_order_release);
-      });
+      workers->Submit(
+          [this, key, s = &slot](rex::graphics::SpirvShaderTranslator&) {
+            s->pipeline = CreateDrawPipeline(key);
+            s->state.store(s->pipeline ? Async::kReady : Async::kFailed, std::memory_order_release);
+          },
+          background);
       state = Async::kPending;
     }
   }

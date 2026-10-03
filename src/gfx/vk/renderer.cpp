@@ -230,6 +230,7 @@ VkImageView Renderer::DummyDepth(uint32_t width, uint32_t height) {
 
 void Renderer::LoadPipelineCache(const std::filesystem::path& path) {
   pipeline_cache_path_ = path;
+  if (device_) LoadManifest(std::filesystem::path(path).replace_extension().replace_extension(".manifest.bin"));
   std::vector<char> data;
   if (FILE* f = std::fopen(path.string().c_str(), "rb")) {
     std::fseek(f, 0, SEEK_END);
@@ -358,6 +359,7 @@ void Renderer::ProcessInvalidations() {
 
 void Renderer::EndFrame() {
   constexpr uint64_t kUnusedFrames = 600;  // ~10 s at 60 fps
+  PumpWarmup();
   if (++frame_ % 64) return;
   for (auto it = guest_textures_.begin(); it != guest_textures_.end();) {
     if (frame_ - it->second->last_used > kUnusedFrames) {
@@ -422,6 +424,7 @@ void Renderer::ResetFrame() {
 Renderer::~Renderer() {
   if (!device_) return;
   if (shaders_) shaders_->StopWorkers();  // their jobs use the pipeline cache and shader modules
+  if (manifest_) std::fclose(manifest_);
   const VkDevice dev = device_->device();
   if (vk_.vkDeviceWaitIdle) vk_.vkDeviceWaitIdle(dev);
   SavePipelineCache();
