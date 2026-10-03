@@ -9,6 +9,8 @@
 #   GEN=<dir>   generated/ to use (default ./generated; a worktree has none, so point it at the main checkout's)
 #   CPUS=<n>    container CPU cap and build parallelism (default: all cores of the build machine)
 #   CMAKE_ARGS  extra -D settings for the build dir (e.g. "-DBOTS_PROFILING=ON" for Tracy + SDK perf counters)
+#   IMAGE=steamrt  build in the Steam Runtime 3 (sniper) image (docker/linux-steamrt): glibc 2.31, static libstdc++,
+#               so the binaries run on the Steam Deck and other distros as they are. Use its own LINUX_NAME.
 # The game itself is mounted read-only from ~/bots/game on the build machine (used by runs, not the build).
 set -eu
 cd "$(dirname "$0")/../.."
@@ -17,6 +19,11 @@ SDK=${SDK:-$HOME/repos/bots-recomp-ext/rexglue-sdk}
 GEN=${GEN:-generated}
 N=${LINUX_NAME:-linux}
 C=bots-$N
+case ${IMAGE:-} in
+  "") D=docker/linux; I=bots-linux ;;
+  steamrt) D=docker/linux-steamrt; I=bots-linux-steamrt ;;
+  *) echo "unknown IMAGE=$IMAGE" >&2; exit 1 ;;
+esac
 on_host() { if [ -n "$H" ]; then ssh "$H" "$1"; else sh -c "$1"; fi; }
 dest() { if [ -n "$H" ]; then echo "$H:$1"; else echo "$HOME/$1"; fi; }
 [ -f "$GEN/rexglue.cmake" ] || { echo "no codegen output in $GEN (run codegen, or set GEN)" >&2; exit 1; }
@@ -27,18 +34,18 @@ rsync -az --delete --exclude out/ --exclude .git/ --exclude .claude/ --exclude g
   --exclude run/ --exclude dumps/ --exclude docs/ --exclude ops/ --exclude shaders/ --exclude generated/ \
   ./ "$(dest bots/$N/game/)"
 rsync -az --delete "$GEN/" "$(dest bots/$N/game/generated/)"
-rsync -a docker/linux/Dockerfile "$(dest bots/$N/image/)"
+rsync -a $D/Dockerfile "$(dest bots/$N/image/)"
 
-on_host "CPUS=${CPUS:-} N=$N C=$C CMAKE_ARGS='${CMAKE_ARGS:-}'"'
+on_host "CPUS=${CPUS:-} N=$N C=$C I=$I CMAKE_ARGS='${CMAKE_ARGS:-}'"'
 set -e
 c=${CPUS:-$(nproc)}
 cd ~/bots/$N
-docker build -q -t bots-linux image >/dev/null
+docker build -q -t $I image >/dev/null
 # Guest memory is POSIX shm (SDK memory_posix.cpp): the Docker default 64 MB /dev/shm = SIGBUS at boot.
 if ! docker ps --format "{{.Names}}" | grep -qx $C; then
   docker rm -f $C 2>/dev/null || true
   docker run -d --name $C --cpus $c --memory 40g --shm-size 8g --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all \
-    -v ~/bots/$N:/w -v ~/bots/game:/g:ro bots-linux sleep infinity
+    -v ~/bots/$N:/w -v ~/bots/game:/g:ro $I sleep infinity
 fi
 # x86-64-v2 (SSSE3/SSE4) is the SDK minimum, as in its presets: reconfigure a build dir made without it or a higher
 # level (build/ is written by root in the container, so clean it from there).
