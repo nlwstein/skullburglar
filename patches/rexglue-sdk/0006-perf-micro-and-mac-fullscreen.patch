@@ -43,7 +43,7 @@ index dc0b4c2..9ef52f9 100644
    if (!requested_driver.empty()) {
      SDL_SetHint(SDL_HINT_VIDEO_DRIVER, requested_driver.c_str());
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index a744375..5fcf826 100644
+index a744375..a737e4f 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
 @@ -182,8 +197,12 @@ ReadbackResolveMode CommandProcessor::GetReadbackResolveMode(
@@ -80,6 +80,18 @@ index a744375..5fcf826 100644
      REXGPU_DEBUG("GPU: Write to unknown register ({:04X} = {:08X})", index, value);
    }
  
+@@ -702,6 +731,11 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
+ 
+   uint32_t base_index = (packet & 0x7FFF);
+   uint32_t write_one_reg = (packet >> 15) & 0x1;
++  if (!write_one_reg) {
++    // A sequential range: through the (virtual) range writer, which a backend can do in bulk.
++    WriteRegisterRangeFromRing(reader, base_index, count);
++    return true;
++  }
+   for (uint32_t m = 0; m < count; m++) {
+     uint32_t reg_data = reader->ReadAndSwap<uint32_t>();
+     uint32_t target_index = write_one_reg ? base_index : base_index + m;
 diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
 index 7360ed9..64a0f44 100644
 --- a/src/ui/presenter.cpp

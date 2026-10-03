@@ -20,6 +20,7 @@
 #include <rex/graphics/registers.h>
 #include <rex/kernel/xboxkrnl/video.h>
 #include <rex/logging.h>
+#include <rex/memory/utils.h>
 #include <rex/runtime.h>
 #include <rex/system/gpu_plugin.h>
 #include <rex/system/kernel_state.h>
@@ -280,6 +281,17 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   void WriteRegister(uint32_t index, uint32_t value) override {
     CommandProcessor::WriteRegister(index, value);
     constant_writes_.Note(index);
+  }
+
+  // Shader constant uploads (SET_CONSTANT, LOAD_ALU_CONSTANT) are most of the register writes. Nothing in
+  // WriteRegister reacts to a constant register, so a range entirely inside them is stored in one pass.
+  void WriteRegistersFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers) override {
+    if (start_index < 0x4000 || start_index + num_registers > 0x4928) {
+      CommandProcessor::WriteRegistersFromMem(start_index, base, num_registers);
+      return;
+    }
+    rex::memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
+    if (num_registers) constant_writes_.NoteRange(start_index, num_registers);
   }
 
   // Copies arrive as draws in EDRAM copy mode, which the renderer resolves itself.

@@ -58,6 +58,10 @@ class ConstantWriteTracker {
                                             : kBoolLoopConstantGroup;
     writes_[group] = ++counter_;
   }
+  // Registers [first, first + count), all inside the constant registers [0x4000, 0x4928).
+  void NoteRange(uint32_t first, uint32_t count) {
+    for (uint32_t index = first, end = first + count; index < end; index = (index | 63) + 1) Note(index);
+  }
   const uint64_t* writes() const { return writes_; }
 
  private:

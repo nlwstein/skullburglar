@@ -287,10 +287,10 @@ index b49e033..6612eb6 100644
    size_t arguments_size_elements =
        (arguments_size_bytes + sizeof(uintmax_t) - 1) / sizeof(uintmax_t);
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index a744375..5fcf826 100644
+index a744375..a737e4f 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
-@@ -960,6 +1004,63 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+@@ -960,6 +1009,63 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
  
    IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
  

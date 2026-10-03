@@ -539,7 +539,7 @@ index 001f36b..9ab9f99 100644
    }
    if (pipeline == VK_NULL_HANDLE || pipeline_layout_provider == nullptr) {
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index a744375..5fcf826 100644
+index a744375..a737e4f 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
 @@ -80,6 +89,12 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",

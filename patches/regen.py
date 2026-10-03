@@ -39,7 +39,7 @@ SERIES = [
     # register-write micro-optimizations.
     ("0006-perf-micro-and-mac-fullscreen.patch",
      ["src/ui/vulkan/vulkan_presenter.cpp", "src/ui/windowed_app_context_sdl.cpp"],
-     {"src/graphics/command_processor.cpp": r"known_registers|legacy_readback",
+     {"src/graphics/command_processor.cpp": r"known_registers|legacy_readback|write_one_reg",
       "src/ui/presenter.cpp": r"fullscreen|Fullscreen|paint rectangle|PRESENTER_LOG"}),
     ("0007-input-system-thread-safety.patch",
      ["include/rex/input/input_system.h", "src/input/input_system.cpp"], {}),
