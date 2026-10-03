@@ -13,6 +13,22 @@ recompiled output: you extract your disc and run the recompiler yourself. See [B
 Early development. The game boots, menus work and the story is playable on macOS (Apple silicon,
 Vulkan through MoltenVK), Windows (D3D12, cross-compiled) and Linux (Vulkan).
 
+## Compared with emulation
+
+Xenia can run this game too. What a port does differently:
+
+- **No CPU emulation.** The PowerPC code is translated to C++ ahead of time and compiled for the host CPU
+  (x86-64 or ARM64), with no JIT at run time.
+- **Native renderer** (the default). The game's Direct3D calls go straight to Vulkan, so there is no emulation of
+  the Xbox 360 GPU's command stream and EDRAM. The emulated GPU is still available as a fallback with
+  `--gpu_plugin=xenos`.
+- **macOS on Apple silicon.** Xenia has no macOS build.
+- **Mouse and keyboard in menus.** You can point and click on menu items, toggles and sliders.
+
+Performance comparison (Xenia-canary vs. this port with the emulated GPU vs. the native renderer, same machine and
+scene) is in progress. Measured so far, native renderer on Windows, RTX 3090 / i7-12700K at 4K output: a 36-minute
+run through all nine missions held a median of 60 fps (the game's cap) in every mission, with 3 frames over 100 ms.
+
 ## How it works
 
 ReXGlue translates the game's PowerPC executable (`default.xex`) into C++ at build time and links it
