@@ -139,6 +139,7 @@ class Renderer : public Pm4Sink {
     uint64_t uploaded_bytes = 0, invalidations = 0, texture_reloads = 0, texture_evictions = 0;  // live
     uint64_t presents = 0, barriers = 0;  // native
     uint64_t constant_reuses = 0;  // constant buffers bound from an earlier draw's upload
+    uint64_t index_reuses = 0;  // DMA index buffers bound from an earlier draw's conversion
     uint64_t pending_draws = 0;  // live: skipped while their shaders or pipeline were still being made
     // Occlusion queries ended, and those answered "visible" without counting (occlusion_hidden(): counted 0).
     uint64_t occlusion_queries = 0, occlusion_inexact = 0;
@@ -474,6 +475,24 @@ class Renderer : public Pm4Sink {
   };
   static constexpr uint32_t kConstantBuffers = 5;
   ConstantUpload constant_uploads_[kConstantBuffers];
+  // DMA index buffers converted into the ring this epoch (B-085): a draw with the same indices and format binds the
+  // earlier conversion. Entries go when the CPU writes their guest range (ProcessInvalidations).
+  struct IndexKey {
+    uint32_t base, count, reset_index, flags;
+    bool operator==(const IndexKey&) const = default;
+  };
+  struct IndexKeyHash {
+    size_t operator()(const IndexKey& k) const {
+      uint64_t h = (uint64_t(k.base) << 32 | k.count) * 0x9E3779B97F4A7C15ull;
+      return size_t(h ^ (uint64_t(k.reset_index) << 8 | k.flags) * 0xC2B2AE3D27D4EB4Full);
+    }
+  };
+  struct IndexUpload {
+    uint32_t offset, bytes;  // bytes: the guest range read
+    bool index32, restart;
+  };
+  std::unordered_map<IndexKey, IndexUpload, IndexKeyHash> index_uploads_;
+  uint64_t index_uploads_epoch_ = 0;
   std::vector<uint8_t> last_system_constants_;
   uint64_t system_constants_version_ = 0;  // bumped when they change
   uint32_t transient_sets_ = 0;  // allocated from transient_pool_ this submission

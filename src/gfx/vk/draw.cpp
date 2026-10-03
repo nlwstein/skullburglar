@@ -859,7 +859,20 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     const bool reset_enabled = regs.Get<reg::PA_SU_SC_MODE_CNTL>().multi_prim_ib_ena;
     const uint32_t reset_index = regs.Get<reg::VGT_MULTI_PRIM_IB_RESET_INDX>().reset_indx;
     const bool strip = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP || topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
-    if (!index32 && (!reset_enabled || strip)) {
+    if (index_uploads_epoch_ != ring_epoch_) {
+      index_uploads_.clear();
+      index_uploads_epoch_ = ring_epoch_;
+    }
+    const IndexKey key{draw.index_base, count, reset_enabled ? reset_index : 0,
+                       uint32_t(index32) | uint32_t(reset_enabled) << 1 | uint32_t(strip) << 2 |
+                           uint32_t(index_endian) << 3};
+    if (auto it = index_uploads_.find(key); it != index_uploads_.end()) {
+      index_offset = it->second.offset;
+      index_type = it->second.index32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+      restart = it->second.restart;
+      indexed = true;
+      ++stats_.index_reuses;
+    } else if (!index32 && (!reset_enabled || strip)) {
       auto* dst = reinterpret_cast<uint16_t*>(Upload(VkDeviceSize(count) * 2, 4, index_offset));
       restart = ConvertIndices(src, dst, count, index_endian, reset_enabled, reset_index);
       index_type = VK_INDEX_TYPE_UINT16;
@@ -873,8 +886,12 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
       auto* dst = reinterpret_cast<uint32_t*>(Upload(VkDeviceSize(count) * 4, 4, index_offset));
       for (uint32_t i = 0; i < count; ++i) dst[i] = narrow[i] == reset_index ? UINT32_MAX : narrow[i];
     }
-    restart = restart && strip;  // Vulkan only restarts strips
-    indexed = true;
+    if (!indexed) {
+      restart = restart && strip;  // Vulkan only restarts strips
+      indexed = true;
+      index_uploads_[key] = {uint32_t(index_offset), count * (index32 ? 4u : 2u),
+                             index_type == VK_INDEX_TYPE_UINT32, restart};
+    }
   } else if (prim == xe::PrimitiveType::kQuadList || prim == xe::PrimitiveType::kTriangleFan || dma) {
     if (!load_guest()) {
       ++stats_.skipped_draws;

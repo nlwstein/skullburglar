@@ -360,6 +360,9 @@ void Renderer::ProcessInvalidations() {
                                                                                                 : std::next(it);
       }
     }
+    for (auto it = index_uploads_.begin(); it != index_uploads_.end();) {
+      it = overlaps(it->first.base, it->first.base + it->second.bytes) ? index_uploads_.erase(it) : std::next(it);
+    }
   }
 }
 
@@ -434,6 +437,7 @@ void Renderer::ResetFrame() {
   open_pass_ = {};
   shared_memory_uploaded_ = false;
   last_resolve_address_ = 0;
+  index_uploads_.clear();
   stats_ = {};
 }
 
