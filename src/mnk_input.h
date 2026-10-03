@@ -51,6 +51,9 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   // The live driver, or null. Read by the ProcessInput hook on the game thread.
   static MouseKeyboardDriver* instance() { return instance_.load(std::memory_order_acquire); }
 
+  // Which device the button prompts show (prompt_state.h). Normally the last device used; public for BOTS_PROMPT_TEST.
+  static void SetPromptMode(bool keyboard_mouse);
+
   // Mouse motion since the last call, in pixels (+x right, +y up), scaled by kbm_sensitivity and
   // kbm_invert_y. Zero while the pointer isn't captured.
   void TakeMouseDelta(float& dx, float& dy);
@@ -112,7 +115,6 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   void ApplyCaptureOnUIThread();
   void ReleaseCaptureOnUIThread(rex::ui::Window* window);
   void Detach();
-  static void SetPromptMode(bool keyboard_mouse);
 
   static inline std::atomic<MouseKeyboardDriver*> instance_{nullptr};
 

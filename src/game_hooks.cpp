@@ -19,6 +19,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
 
 #include <rex/logging.h>
@@ -28,6 +29,7 @@
 #include <rex/system/xmemory.h>
 
 #include "mnk_input.h"
+#include "prompt_state.h"
 
 extern "C" void __imp__sub_82E1AC28(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_823598E0(PPCContext& __restrict ctx, uint8_t* base);
@@ -307,6 +309,129 @@ void MemoryDumpTick(uint8_t* base, float dt) {
   REXLOG_INFO("BOTS_MEMDUMP: {:.1f} s -> {} ({} MB)", clock, d.path, total >> 20);
 }
 
+// B-105 text prompts: the one localized string that names a pad button is [ButtonBar] PressStart, "Press START
+// button" (title screen). While keyboard/mouse prompts are shown it reads "Press ENTER" (kbm_confirm). The config
+// cache's value and any labels already built from it are FStrings {data, count, max}; the new text is shorter, so it
+// is written into the same buffers (and back for a controller). The guest heap is rescanned only when the prompt
+// device changes; labels built later copy the config value, which is already right.
+namespace press_start {
+constexpr char16_t kPad[] = u"Press START button", kKeyboard[] = u"Press ENTER";
+constexpr uint32_t kPadCount = std::size(kPad), kKeyboardCount = std::size(kKeyboard);  // FString count: with the null
+
+std::vector<uint8_t> Utf16Be(const char16_t* s, uint32_t count) {
+  std::vector<uint8_t> out;
+  for (uint32_t i = 0; i < count; ++i) out.insert(out.end(), {uint8_t(s[i] >> 8), uint8_t(s[i])});
+  return out;
+}
+
+// Committed guest regions below 0xC0000000, as BOTS_MEMDUMP walks them.
+template <class F>
+void ForEachRegion(F&& f) {
+  auto* memory = rex::system::kernel_memory();
+  for (uint64_t address = 0x10000; address < 0xC0000000ull;) {
+    auto* heap = memory->LookupHeap(uint32_t(address));
+    rex::memory::HeapAllocationInfo info{};
+    if (!heap || !heap->QueryRegionInfo(uint32_t(address), &info) || !info.region_size) {
+      address += 0x10000;
+      continue;
+    }
+    const uint64_t next = uint64_t(info.base_address) + info.region_size;
+    if ((info.state & rex::memory::kMemoryAllocationCommit) && info.protect) f(info.base_address, info.region_size);
+    address = next > address ? next : address + 0x1000;
+  }
+}
+
+bool Committed(uint32_t address, uint32_t size) {
+  auto* heap = rex::system::kernel_memory()->LookupHeap(address);
+  rex::memory::HeapAllocationInfo info{};
+  if (!heap || !heap->QueryRegionInfo(address, &info)) return false;
+  return (info.state & rex::memory::kMemoryAllocationCommit) && info.protect &&
+         uint64_t(address) + size <= uint64_t(info.base_address) + info.region_size;
+}
+
+void Rewrite(uint8_t* base, bool keyboard) {
+  using clock = std::chrono::steady_clock;
+  const auto t0 = clock::now();
+  const auto pad = Utf16Be(kPad, kPadCount), key = Utf16Be(kKeyboard, kKeyboardCount);
+  const std::vector<uint8_t>& from = keyboard ? pad : key;
+  const std::vector<uint8_t>& to = keyboard ? key : pad;
+  const uint32_t from_count = keyboard ? kPadCount : kKeyboardCount, to_count = keyboard ? kKeyboardCount : kPadCount;
+  const uint32_t from_count_be = __builtin_bswap32(from_count), to_count_be = __builtin_bswap32(to_count);
+  // One pass over UE3's heap (0x40000000-0x5FFFFFFF in every dump so far): an FString header {data, count, max} with
+  // the right count (rare) whose data, also in the heap, holds the text.
+  auto in_heap = [](uint32_t a) { return a >= 0x40000000u && a < 0x60000000u; };
+  uint32_t strings = 0;
+  ForEachRegion([&](uint32_t address, uint32_t size) {
+    if (!in_heap(address)) return;
+    uint8_t* p = Raw(base, address);
+    for (uint32_t off = 4; off + 8 <= size; off += 4) {
+      uint32_t count;
+      std::memcpy(&count, p + off, 4);
+      if (count != from_count_be) continue;
+      const uint32_t data = LoadU32(base, address + off - 4), max = LoadU32(base, address + off + 4);
+      if (!in_heap(data) || data & 1 || max < kPadCount || max > 0x1000) continue;
+      if (!Committed(data, kPadCount * 2)) continue;
+      uint8_t* text = Raw(base, data);
+      if (std::memcmp(text, from.data(), from.size())) continue;
+      std::memcpy(text, to.data(), to.size());
+      std::memcpy(p + off, &to_count_be, 4);
+      ++strings;
+    }
+  });
+  const auto ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+  REXLOG_INFO("prompts: PressStart text -> '{}' ({} strings, {:.0f} ms)", keyboard ? "Press ENTER" : "Press START button",
+              strings, ms);
+}
+
+// BOTS_PROMPT_TEST=<secs>:k|p[;...] (test only): switch the prompts to keyboard/mouse (k) or the pad (p) at that time.
+void TestSwitch(float dt) {
+  struct Switch {
+    float at;
+    bool keyboard;
+  };
+  static std::vector<Switch> plan = [] {
+    std::vector<Switch> out;
+    const char* v = std::getenv("BOTS_PROMPT_TEST");
+    for (const char* p = v ? v : ""; *p;) {
+      float at;
+      char device;
+      if (std::sscanf(p, "%f:%c", &at, &device) != 2) break;
+      out.push_back({at, device == 'k'});
+      p = std::strchr(p, ';');
+      if (!p) break;
+      ++p;
+    }
+    return out;
+  }();
+  static float clock = 0;
+  if (plan.empty()) return;
+  clock += dt;
+  if (clock < plan.front().at) return;
+  REXLOG_INFO("BOTS_PROMPT_TEST: {} at {:.1f} s", plan.front().keyboard ? "keyboard/mouse" : "pad", clock);
+  bots::MouseKeyboardDriver::SetPromptMode(plan.front().keyboard);
+  plan.erase(plan.begin());
+}
+
+// ProcessInput also runs on a second guest thread during level loads: one caller at a time, the other skips.
+void Tick(uint8_t* base, float dt) {
+  static std::mutex mutex;
+  std::unique_lock lock(mutex, std::try_to_lock);
+  if (!lock) return;
+  TestSwitch(dt);
+  static const bots::PromptState* state = bots::FindPromptState();
+  static uint32_t seen = 0;
+  static bool rewritten = false;
+  if (!state) return;
+  const uint32_t generation = state->generation.load(std::memory_order_relaxed);
+  if (generation == seen) return;
+  seen = generation;
+  const bool keyboard = state->keyboard_mouse.load(std::memory_order_relaxed) != 0;
+  if (!keyboard && !rewritten) return;
+  Rewrite(base, keyboard);
+  rewritten = true;
+}
+}  // namespace press_start
+
 // B-107 menu pointer: focus follows the free cursor over menu options. The UE3 UI's own mouse picking needs viewport
 // hit proxies, which the console build never renders, so we hit-test the menu options ourselves and call SetFocus on
 // the hovered one. A click is then the engine's Enter (MouseKeyboardDriver menu mode).
@@ -515,6 +640,7 @@ extern "C" void sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base) {
   }();
   if (!vp) return;
   MemoryDumpTick(base, dt);
+  press_start::Tick(base, dt);
   float dx = 0, dy = 0;
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) {
     kbm->TakeMouseDelta(dx, dy);
