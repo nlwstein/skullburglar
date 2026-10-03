@@ -25,9 +25,31 @@ Xenia can run this game too. What a port does differently:
 - **macOS on Apple silicon.** Xenia has no macOS build.
 - **Mouse and keyboard in menus.** You can point and click on menu items, toggles and sliders.
 
-Performance comparison (Xenia-canary vs. this port with the emulated GPU vs. the native renderer, same machine and
-scene) is in progress. Measured so far, native renderer on Windows, RTX 3090 / i7-12700K at 4K output: a 36-minute
-run through all nine missions held a median of 60 fps (the game's cap) in every mission, with 3 frames over 100 ms.
+### Performance
+
+Median fps with the frame cap lifted (the game normally runs at 60), same scene, warm shader caches, game resolution
+1280x720 for every renderer.
+
+- **Xenia-canary**: build 02d2cb5, vsync and frame limit off, D3D12. Measured with PresentMon; Xenia presents once
+  per game frame.
+- **Emulated GPU**: this port with `--gpu_plugin=xenos` (D3D12 on Windows, Vulkan on Linux). It runs the same recompiled
+  CPU code as the native renderer, so the gap between those two columns is the renderer alone.
+- **Native renderer**: this port's default. Measured with the game's own frame counter.
+
+| Machine | Scene | Xenia-canary | Emulated GPU | Native renderer |
+|---|---|---|---|---|
+| RTX 3090 / i7-12700K, Windows, 4K output | Mission 6, helicopter | 89 | 108 | **275** |
+| RTX 3090 / i7-12700K, Windows, 4K output | Mission 2, Humvee | 113 | 86 | **349** |
+| Steam Deck, 1280x720 window | Mission 6, helicopter | – | 20.8 | **74.4** |
+| ThinkPad T480 (Intel UHD 620), Windows | Mission 6, helicopter | – | 5.3 | **18.5** |
+
+On the 3090 the native renderer is 3.1x Xenia in both scenes. The emulated-GPU column is slower than Xenia in the
+Humvee level; the two use different render-target paths (ours ROV, Xenia's RTV), which we haven't compared yet. Xenia
+on the Deck and the T480 hasn't been measured yet. The native renderer's "auto" render resolution picks 2/3 scale on
+the T480, which gives 34.5 fps; the table uses full scale so the columns match.
+
+Also on the RTX 3090, at the normal 60 fps cap: a 36-minute run through all nine missions held a median of 60 fps in
+every mission, with 3 frames over 100 ms.
 
 ## How it works
 
