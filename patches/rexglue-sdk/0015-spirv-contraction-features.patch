@@ -20,7 +20,7 @@ index fe0aa4e..5962f86 100644
  }
  
 diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
-index 1774f97..5575da0 100644
+index 1774f97..15808b4 100644
 --- a/src/graphics/pipeline/shader/spirv_translator.cpp
 +++ b/src/graphics/pipeline/shader/spirv_translator.cpp
 @@ -175,6 +175,8 @@ void SpirvShaderTranslator::StartTranslation() {
@@ -32,3 +32,31 @@ index 1774f97..5575da0 100644
  
    builder_->addCapability(IsSpirvTessEvalShader() ? spv::CapabilityTessellation
                                                    : spv::CapabilityShader);
+@@ -3210,10 +3212,11 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
+             builder_->createAccessChain(spv::StorageClassInput, input_fragment_coordinates_,
+                                         id_vector_temp_),
+             spv::NoPrecision));
+-    if (draw_resolution_scale_x_ > 1) {
++    if (draw_resolution_scale_x_ > 1 || features_.render_scale != 1.0f) {
+       param_gen_x = builder_->createNoContractionBinOp(
+           spv::OpFMul, type_float_, param_gen_x,
+-          builder_->makeFloatConstant(1.0f / float(draw_resolution_scale_x_)));
++          builder_->makeFloatConstant(1.0f /
++                                      (float(draw_resolution_scale_x_) * features_.render_scale)));
+     }
+     param_gen_x = builder_->createUnaryBuiltinCall(type_float_, ext_inst_glsl_std_450_,
+                                                    GLSLstd450FAbs, param_gen_x);
+@@ -3246,10 +3249,11 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
+             builder_->createAccessChain(spv::StorageClassInput, input_fragment_coordinates_,
+                                         id_vector_temp_),
+             spv::NoPrecision));
+-    if (draw_resolution_scale_y_ > 1) {
++    if (draw_resolution_scale_y_ > 1 || features_.render_scale != 1.0f) {
+       param_gen_y = builder_->createNoContractionBinOp(
+           spv::OpFMul, type_float_, param_gen_y,
+-          builder_->makeFloatConstant(1.0f / float(draw_resolution_scale_y_)));
++          builder_->makeFloatConstant(1.0f /
++                                      (float(draw_resolution_scale_y_) * features_.render_scale)));
+     }
+     param_gen_y = builder_->createUnaryBuiltinCall(type_float_, ext_inst_glsl_std_450_,
+                                                    GLSLstd450FAbs, param_gen_y);

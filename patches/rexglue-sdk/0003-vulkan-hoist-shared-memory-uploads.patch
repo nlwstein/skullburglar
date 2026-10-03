@@ -157,10 +157,10 @@ index dbd6b01..8c54bc6 100644
    spv::Id createNoContractionBinOp(spv::Op op_code, spv::Id type_id, spv::Id operand1,
                                     spv::Id operand2);
 diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
-index dce3dbf..1e83207 100644
+index dce3dbf..bcb2f67 100644
 --- a/include/rex/graphics/pipeline/shader/spirv_translator.h
 +++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
-@@ -399,6 +399,14 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -399,6 +399,17 @@ class SpirvShaderTranslator : public ShaderTranslator {
  
      bool demote_to_helper_invocation;
      bool sample_rate_shading;
@@ -172,6 +172,9 @@ index dce3dbf..1e83207 100644
 +    // The same for vertex shaders, leaving cross-shader position equality to the Invariant decoration on the outputs
 +    // (Metal: [[invariant]] with preserveInvariance).
 +    bool vertex_contraction = false;
++    // Host pixels per guest pixel of a fractional render resolution (below 1; on top of the integer draw
++    // resolution scale): pixel shader positions (param gen) are divided by it to stay in guest pixels.
++    float render_scale = 1.0f;
    };
  
    SpirvShaderTranslator(const Features& features, bool native_2x_msaa_with_attachments,

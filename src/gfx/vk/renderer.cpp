@@ -684,7 +684,9 @@ Renderer::Image* Renderer::Surface(const rg::RegisterFile& regs, bool depth, uin
   const uint32_t rows = std::max(1u, (kEdramTiles - base % kEdramTiles) / pitch_tiles);
   const uint32_t height = std::min(rows * kTileHeightSamples, kMaxSurfaceHeight);
   auto image = std::make_unique<Image>();
-  if (!CreateImage(*image, depth ? kDepthFormat : ColorTargetFormat(format), pitch, height, depth)) return nullptr;
+  if (!CreateImage(*image, depth ? kDepthFormat : ColorTargetFormat(format), Host(pitch), Host(height), depth)) {
+    return nullptr;
+  }
   slot = std::move(image);
   return Own(key, slot.get());
 }
@@ -732,7 +734,9 @@ Renderer::Image* Renderer::ResolveTexture(uint32_t address, uint32_t format, uin
     auto image = std::make_unique<Image>();
     // Shaders sample 2D textures as arrays.
     const VkFormat host_format = depth_value ? VK_FORMAT_R32_SFLOAT : TextureFormat(format, is_signed);
-    if (!CreateImage(*image, host_format, width, height, false, VK_IMAGE_VIEW_TYPE_2D_ARRAY)) return nullptr;
+    if (!CreateImage(*image, host_format, Host(width), Host(height), false, VK_IMAGE_VIEW_TYPE_2D_ARRAY)) {
+      return nullptr;
+    }
     slot = std::move(image);
   }
   if (depth_value) {
@@ -801,6 +805,8 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
     ++stats_.dropped_resolves;
     return;
   }
+  const int32_t guest_x0 = x0, guest_y0 = y0, guest_x1 = x1, guest_y1 = y1;
+  x0 = Host(x0), y0 = Host(y0), x1 = Host(x1), y1 = Host(y1);
 
   BeginCommands(kGpuResolve);
   EndRendering("resolve");
@@ -899,7 +905,8 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
   }
 
   // Clears, after the copy, of every sample in the rect.
-  x0 *= samples_x, x1 *= samples_x, y0 *= samples_y, y1 *= samples_y;
+  x0 = Host(guest_x0 * int32_t(samples_x)), x1 = Host(guest_x1 * int32_t(samples_x));
+  y0 = Host(guest_y0 * int32_t(samples_y)), y1 = Host(guest_y1 * int32_t(samples_y));
   auto clear = [&](Image& image, bool depth, const VkClearValue& value) {
     int32_t w, h;
     if (!clamp_rect(image, w, h)) return;

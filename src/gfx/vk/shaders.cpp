@@ -22,6 +22,7 @@ bool EnvFlag(const char* name, bool fallback) {
 // honours it natively, so contraction is on there only. BOTS_GFX_PS_CONTRACTION / BOTS_GFX_VS_CONTRACTION=0|1.
 rg::SpirvShaderTranslator::Features TranslatorFeatures(const rex::ui::vulkan::VulkanDevice* device) {
   rg::SpirvShaderTranslator::Features features(device);
+  features.render_scale = RenderScale();
   features.fragment_contraction = EnvFlag("BOTS_GFX_PS_CONTRACTION", true);
 #ifdef __APPLE__
   features.vertex_contraction = EnvFlag("BOTS_GFX_VS_CONTRACTION", true);
@@ -35,6 +36,15 @@ rg::SpirvShaderTranslator::Features TranslatorFeatures(const rex::ui::vulkan::Vu
 #define BOTS_TRANSLATOR_ARGS(device) TranslatorFeatures(device), false, false, false
 
 }  // namespace
+
+float RenderScale() {
+  static const float scale = [] {
+    const char* v = std::getenv("BOTS_GFX_RENDER_SCALE");
+    const float s = v && *v ? float(std::atof(v)) : 1.0f;
+    return s >= 0.25f && s < 1.0f ? s : 1.0f;
+  }();
+  return scale;
+}
 
 Workers::Workers(const rex::ui::vulkan::VulkanDevice* device, uint32_t count) {
   for (uint32_t i = 0; i < count; ++i) threads_.emplace_back([this, device] { Run(device); });

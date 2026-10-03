@@ -195,6 +195,28 @@ int Render(Capture& capture, const std::filesystem::path& out, int repeat) {
     std::printf("no reference.ppm\n");
     return 0;
   }
+  // A reduced render scale (BOTS_GFX_RENDER_SCALE): box-filter the reference down to the frame's size first.
+  if (const float scale = bots::gfx::vk::RenderScale(); scale != 1.0f) {
+    const uint32_t sw = std::min(w, uint32_t(float(rw) * scale + 0.5f));
+    const uint32_t sh = std::min(h, uint32_t(float(rh) * scale + 0.5f));
+    std::vector<uint8_t> scaled(size_t(sw) * sh * 3);
+    for (uint32_t y = 0; y < sh; ++y) {
+      const uint32_t y0 = y * rh / sh, y1 = std::max(y0 + 1, (y + 1) * rh / sh);
+      for (uint32_t x = 0; x < sw; ++x) {
+        const uint32_t x0 = x * rw / sw, x1 = std::max(x0 + 1, (x + 1) * rw / sw);
+        uint32_t sum[3] = {};
+        for (uint32_t ry = y0; ry < y1; ++ry) {
+          for (uint32_t rx = x0; rx < x1; ++rx) {
+            for (int c = 0; c < 3; ++c) sum[c] += reference[(size_t(ry) * rw + rx) * 3 + c];
+          }
+        }
+        const uint32_t n = (y1 - y0) * (x1 - x0);
+        for (int c = 0; c < 3; ++c) scaled[(size_t(y) * sw + x) * 3 + c] = uint8_t((sum[c] + n / 2) / n);
+      }
+    }
+    reference = std::move(scaled), rw = sw, rh = sh;
+    std::printf("reference box-filtered to %ux%u (render scale %g)\n", rw, rh, scale);
+  }
   // Compare the overlapping area (the reference is the presenter's output and may be a different size).
   const auto d = bots::gfx::CompareImages(image, w, h, reference.data(), rw, rh, size_t(rw) * 3, 3);
   std::printf("vs reference %ux%u: mean abs diff %.2f, PSNR %.1f dB, %.2f%% pixels off by >16\n", rw, rh,

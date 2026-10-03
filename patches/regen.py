@@ -100,6 +100,7 @@ SERIES.append(
     # / vertex shaders. SPIRV-Cross's Metal backend turns every decorated add/sub/mul into a [[clang::optnone]] helper
     # call - the GPU time of a frame on an M2 Pro fell 41 ms -> 11 ms without them. Default off (exact, as before). The
     # Features/SpirvBuilder members are in 0003's header diff (include/rex/graphics is claimed whole there).
+    # Also Features::render_scale: a fractional render resolution (< 1) for param gen pixel positions.
     ("0015-spirv-contraction-features.patch",
      ["src/graphics/pipeline/shader/spirv_builder.cpp", "src/graphics/pipeline/shader/spirv_translator.cpp"],
      {}))

@@ -14,6 +14,7 @@
 #include <rex/graphics/registers.h>
 #include <rex/graphics/util/draw.h>
 #include <rex/graphics/xenos.h>
+#include <rex/logging.h>
 
 #include "renderer.h"
 
@@ -153,6 +154,8 @@ bool Renderer::InitDrawing() {
   if (const char* v = std::getenv("BOTS_GFX_PASS_MERGE"); v && *v) pass_merge_ = *v == '1';
   if (const char* v = std::getenv("BOTS_GFX_LAZY_RAW_DEPTH"); v && *v) lazy_raw_depth_ = *v == '1';
   if (const char* v = std::getenv("BOTS_GFX_MAX_ANISO"); v && *v) max_anisotropy_ = uint32_t(std::atoi(v));
+  scale_ = RenderScale();
+  if (scale_ != 1.0f) REXLOG_INFO("gfx native: render scale {}", scale_);
   shaders_ = std::make_unique<ShaderCache>(device_, workers);
   shared_memory_bindings_ = 1u << Translator::GetSharedMemoryStorageBufferCountLog2(props.maxStorageBufferRange);
 
@@ -1081,8 +1084,15 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   GpuMark(kGpuDraw);  // after any transfers Surface() recorded
   du::Scissor scissor;
   du::GetScissor(regs, scissor);
-  scissor.offset[0] *= samples_x, scissor.extent[0] *= samples_x;
-  scissor.offset[1] *= samples_y, scissor.extent[1] *= samples_y;
+  // Guest samples -> host pixels (render scale), edge by edge.
+  for (uint32_t i = 0; i < 2; ++i) {
+    const uint32_t samples = i ? samples_y : samples_x;
+    const uint32_t x0 = Host(scissor.offset[i] * samples);
+    scissor.extent[i] = Host((scissor.offset[i] + scissor.extent[i]) * samples) - x0;
+    scissor.offset[i] = x0;
+  }
+  const uint32_t viewport_x1 = Host(viewport.xy_offset[0] + viewport.xy_extent[0]);
+  const uint32_t viewport_y1 = Host(viewport.xy_offset[1] + viewport.xy_extent[1]);
   const uint32_t sx = std::min(scissor.offset[0], width), sy = std::min(scissor.offset[1], height);
   VkRect2D scissor_rect{{int32_t(sx), int32_t(sy)},
                         {std::min(scissor.extent[0], width - sx), std::min(scissor.extent[1], height - sy)}};
@@ -1090,13 +1100,11 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   // viewport), with some slack for wide points. Games leave the scissor wide open, so the viewport is the real bound.
   uint32_t scissor_x1 = sx + scissor_rect.extent.width, scissor_y1 = sy + scissor_rect.extent.height;
   if (viewport.xy_extent[0] && viewport.xy_extent[1]) {
-    scissor_x1 = std::min(scissor_x1, viewport.xy_offset[0] + viewport.xy_extent[0] + 16);
-    scissor_y1 = std::min(scissor_y1, viewport.xy_offset[1] + viewport.xy_extent[1] + 16);
+    scissor_x1 = std::min(scissor_x1, viewport_x1 + 16);
+    scissor_y1 = std::min(scissor_y1, viewport_y1 + 16);
   }
   // Screen-space draws (VTE off) get a viewport bigger than the surface: they don't shape the render area hint.
-  bool bounded = viewport.xy_extent[0] && viewport.xy_extent[1] &&
-                 viewport.xy_offset[0] + viewport.xy_extent[0] <= width &&
-                 viewport.xy_offset[1] + viewport.xy_extent[1] <= height;
+  bool bounded = viewport.xy_extent[0] && viewport.xy_extent[1] && viewport_x1 <= width && viewport_y1 <= height;
   // Except screen-space rectangle lists - XDK Clear() and the like, with the scissor wide open too - whose vertex
   // shader passes positions (guest pixels) through: their rectangle is in the vertex data. Bounded by it (scissor
   // included, so the draw stays defined if a shader didn't pass them through), they stop counting as covering the
@@ -1104,7 +1112,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   if (!bounded && rect) {
     uint32_t x1, y1;
     if (RectListBound(regs, *vshader, source, count, x1, y1)) {
-      x1 = std::min(x1 * samples_x, width), y1 = std::min(y1 * samples_y, height);
+      x1 = std::min(Host(x1 * samples_x), width), y1 = std::min(Host(y1 * samples_y), height);
       scissor_x1 = std::min(scissor_x1, x1), scissor_y1 = std::min(scissor_y1, y1);
       scissor_rect.extent.width = scissor_x1 > sx ? std::min(scissor_rect.extent.width, scissor_x1 - sx) : 0;
       scissor_rect.extent.height = scissor_y1 > sy ? std::min(scissor_rect.extent.height, scissor_y1 - sy) : 0;
@@ -1231,8 +1239,8 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   // Dynamic state (VulkanCommandProcessor::UpdateDynamicState).
   VkViewport vp{-1.0f, -1.0f, 1.0f, 1.0f, viewport.z_min, viewport.z_max};
   if (viewport.xy_extent[0] && viewport.xy_extent[1]) {
-    vp.x = float(viewport.xy_offset[0]), vp.y = float(viewport.xy_offset[1]);
-    vp.width = float(viewport.xy_extent[0]), vp.height = float(viewport.xy_extent[1]);
+    vp.x = float(viewport.xy_offset[0]) * scale_, vp.y = float(viewport.xy_offset[1]) * scale_;
+    vp.width = float(viewport.xy_extent[0]) * scale_, vp.height = float(viewport.xy_extent[1]) * scale_;
   }
   vk_.vkCmdSetViewport(cmd_, 0, 1, &vp);
   // BOTS_DEBUG_PIXEL_FRACTION=f (0 < f < 1): draws shade only the top-left f x f of their scissor - a wrong picture,

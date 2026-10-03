@@ -234,6 +234,11 @@ class Renderer : public Pm4Sink {
   Image* Surface(const rex::graphics::RegisterFile& regs, bool depth, uint32_t color_index);
   // Host pixels per guest pixel of the current surface (its MSAA sample grid).
   static void SampleGrid(const rex::graphics::RegisterFile& regs, uint32_t& x, uint32_t& y);
+  // Render scale (RenderScale()): a guest coordinate (in samples) -> host pixels. Edges map through the same
+  // rounding everywhere, so rectangles that tile in guest pixels still tile on the host.
+  float scale_ = 1.0f;
+  uint32_t Host(uint32_t v) const { return scale_ == 1.0f ? v : uint32_t(float(v) * scale_ + 0.5f); }
+  int32_t Host(int32_t v) const { return int32_t(Host(uint32_t(std::max(v, 0)))); }
   bool ReadImage(const Image& image, std::vector<uint8_t>& rgb, uint32_t& width, uint32_t& height);
   void DumpResolve(const Image& image, uint32_t address);
   Image* Own(const SurfaceKey& key, Image* image);
