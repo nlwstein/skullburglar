@@ -219,6 +219,9 @@ class Renderer : public Pm4Sink {
     std::array<std::pair<uint32_t, uint32_t>, 2> ranges{};
     bool dirty = false;  // the CPU wrote that memory since (tracked memory)
     uint64_t last_used = 0;  // frame_
+    // The controller-button atlas (B-105): reloaded when the prompt device changes (PromptState generation).
+    bool prompt_atlas = false;
+    uint32_t prompt_generation = 0;
   };
   using TextureCacheKey = std::array<uint32_t, 5>;
   // Filters (mag, min, mip), clamp modes (x, y, z), border colour, mip range, anisotropy.
@@ -400,6 +403,7 @@ class Renderer : public Pm4Sink {
                                   bool is_signed, uint32_t& host_swizzle);
   VkImageView SwizzledView(Image& image, uint32_t host_swizzle, bool is_signed);
   void LoadTexture(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch, GuestTexture& texture);
+  bool LoadPromptAtlas(GuestTexture& texture, uint32_t address);
   VkSampler GetSampler(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch,
                        const rex::graphics::SpirvShader::SamplerBinding& binding);
 

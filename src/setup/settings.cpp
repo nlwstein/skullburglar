@@ -2,6 +2,8 @@
 #include "settings.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <system_error>
 
@@ -45,6 +47,32 @@ std::vector<Setting> Catalog() {
   s.back().emulated_only = true;
   s.push_back({"framerate_limit", "", "Frame rate limit", "",
                {{"30", "30 fps"}, {"60", "60 fps (recommended)"}, {"0", "Unlimited"}}});
+  s.push_back({"kbm", "", "Keyboard and mouse", "Play with keyboard and mouse. A controller always works too.", {}});
+  s.back().section = "Keyboard and mouse";
+  s.push_back({"kbm_sensitivity", "", "Mouse sensitivity", "",
+               {{"0.25", "0.25"}, {"0.5", "0.5"}, {"0.75", "0.75"}, {"1", "1 (default)"}, {"1.5", "1.5"},
+                {"2", "2"}, {"3", "3"}, {"4", "4"}}});
+  s.push_back({"kbm_invert_y", "", "Invert mouse up/down", "", {}});
+  s.push_back({"kbm_prompts", "", "Keyboard and mouse button prompts",
+               "Show keys instead of controller buttons in prompts while you play with keyboard and mouse.", {}});
+  static const struct {
+    const char* cvar;
+    const char* label;
+  } kBindings[] = {
+      {"kbm_move_forward", "Move forward"}, {"kbm_move_back", "Move back"}, {"kbm_move_left", "Move left"},
+      {"kbm_move_right", "Move right"}, {"kbm_right_trigger", "Fire"}, {"kbm_left_trigger", "Aim"},
+      {"kbm_a", "Cover / use / confirm"}, {"kbm_b", "Special move / counter-kill / back"},
+      {"kbm_x", "Reload / pick up weapon"}, {"kbm_y", "Gangsta Fury / skip"},
+      {"kbm_right_shoulder", "Throw grenade"}, {"kbm_left_shoulder", "Next grenade"},
+      {"kbm_dpad_up", "Weapon slot up"}, {"kbm_dpad_right", "Weapon slot right"},
+      {"kbm_dpad_down", "Weapon slot down"}, {"kbm_dpad_left", "Weapon slot left"},
+      {"kbm_left_thumb", "Taunt"}, {"kbm_right_thumb", "Right stick click"}, {"kbm_back", "Objectives"},
+      {"kbm_start", "Pause"}, {"kbm_confirm", "Menu confirm / Press START"},
+  };
+  for (const auto& b : kBindings) {
+    s.push_back({b.cvar, "", b.label, "", {}});
+    s.back().binding = true;
+  }
 #if defined(_WIN32)
   s.push_back({"d3d12_present_sync_interval", "", "VSync", "Off has the lowest latency but can tear.",
                {{"0", "Off"}, {"1", "On"}}});
@@ -80,6 +108,16 @@ std::vector<Setting> LoadSettings() {
   for (auto& s : settings) {
     s.value = rex::cvar::GetFlagByName(s.cvar);
     s.locked = IsLocked(s.cvar);
+    const auto* info = rex::cvar::GetFlagInfo(s.cvar);
+    s.default_value = info->default_value;
+    // A double reads back as "1.000000": show it as the matching choice.
+    if (info->type == rex::cvar::FlagType::Double) {
+      for (const auto& choice : s.choices) {
+        if (std::abs(std::strtod(choice.value.c_str(), nullptr) - std::strtod(s.value.c_str(), nullptr)) < 1e-6) {
+          s.value = choice.value;
+        }
+      }
+    }
   }
   return settings;
 }
@@ -105,6 +143,8 @@ std::string SaveSettings(const std::vector<Setting>& settings, const fs::path& c
       auto type = info ? info->type : rex::cvar::FlagType::String;
       if (type == rex::cvar::FlagType::Boolean) {
         table.insert_or_assign(name, s.value == "true");
+      } else if (type == rex::cvar::FlagType::Double) {
+        table.insert_or_assign(name, std::strtod(s.value.c_str(), nullptr));
       } else if (type == rex::cvar::FlagType::String) {
         table.insert_or_assign(name, s.value);
       } else {

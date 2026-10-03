@@ -138,8 +138,15 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     ImGui::TextUnformatted("Settings");
     ImGui::TextDisabled("Saved in %s", config_path_.string().c_str());
     for (auto& s : settings_) {
+      if (s.binding) continue;  // DrawBindings
+      if (!s.section.empty()) {
+        ImGui::Spacing();
+        ImGui::SeparatorText(s.section.c_str());
+      }
       ImGui::PushID(s.cvar.c_str());
-      ImGui::BeginDisabled(s.locked || Extracting());
+      // The rest of the keyboard and mouse section only matters with it on.
+      const bool kbm_off = s.cvar.starts_with("kbm_") && Value("kbm") == "false";
+      ImGui::BeginDisabled(s.locked || Extracting() || kbm_off);
       if (s.choices.empty()) {
         bool on = s.value == "true";
         if (ImGui::Checkbox(s.label.c_str(), &on)) s.value = on ? "true" : "false";
@@ -164,6 +171,142 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       }
       ImGui::PopID();
     }
+    DrawBindings();
+  }
+
+  std::string Value(const std::string& cvar) const {
+    for (const auto& s : settings_)
+      if (s.cvar == cvar) return s.value;
+    return {};
+  }
+
+  // Key bindings (kbm_* cvars): each action lists its keys. Set waits for the next key, mouse button or wheel
+  // notch and makes it the only key; + adds one; Reset restores the default.
+  void DrawBindings() {
+    if (std::none_of(settings_.begin(), settings_.end(), [](const Setting& s) { return s.binding; })) return;
+    ImGui::BeginDisabled(Value("kbm") == "false" || Extracting());
+    if (ImGui::TreeNode("Key bindings")) {
+      if (capture_ >= 0) PollCapture();
+      if (ImGui::BeginTable("##bindings", 3,
+                            ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY,
+                            ImVec2(0, 240))) {
+        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn("Keys", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("##edit", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+        for (int i = 0; i < int(settings_.size()); ++i) {
+          Setting& s = settings_[i];
+          if (!s.binding) continue;
+          ImGui::PushID(s.cvar.c_str());
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted(s.label.c_str());
+          ImGui::TableNextColumn();
+          if (capture_ == i) {
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Press a key or mouse button...");
+          } else {
+            std::string keys = s.value;
+            for (size_t at = keys.find(','); at != std::string::npos; at = keys.find(',', at + 2)) keys.insert(at + 1, " ");
+            ImGui::TextUnformatted(keys.empty() ? "(none)" : keys.c_str());
+          }
+          ImGui::TableNextColumn();
+          ImGui::BeginDisabled(s.locked);
+          if (capture_ == i) {
+            if (ImGui::SmallButton("Cancel")) capture_ = -1;
+          } else {
+            if (ImGui::SmallButton("Set")) StartCapture(i, false);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("+")) StartCapture(i, true);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset")) s.value = s.default_value;
+          }
+          ImGui::EndDisabled();
+          ImGui::PopID();
+        }
+        ImGui::EndTable();
+      }
+      if (ImGui::SmallButton("Reset all keys")) {
+        for (auto& s : settings_)
+          if (s.binding && !s.locked) s.value = s.default_value;
+      }
+      ImGui::TreePop();
+    } else {
+      capture_ = -1;
+    }
+    ImGui::EndDisabled();
+  }
+
+  void StartCapture(int index, bool append) {
+    capture_ = index;
+    capture_append_ = append;
+    capture_armed_ = false;  // from the next frame, so the click on Set isn't taken as the key
+  }
+
+  // Key names as the kbm_* cvars spell them (rex/ui/keybinds.cpp).
+  static std::string KeyName(ImGuiKey key) {
+    if (key >= ImGuiKey_A && key <= ImGuiKey_Z) return std::string(1, char('A' + (key - ImGuiKey_A)));
+    if (key >= ImGuiKey_0 && key <= ImGuiKey_9) return std::string(1, char('0' + (key - ImGuiKey_0)));
+    if (key >= ImGuiKey_F1 && key <= ImGuiKey_F12) return "F" + std::to_string(1 + (key - ImGuiKey_F1));
+    if (key >= ImGuiKey_Keypad0 && key <= ImGuiKey_Keypad9) return "Numpad" + std::to_string(key - ImGuiKey_Keypad0);
+    switch (key) {
+      case ImGuiKey_Space: return "Space";
+      case ImGuiKey_Enter: return "Return";
+      case ImGuiKey_KeypadEnter: return "NumpadEnter";
+      case ImGuiKey_Escape: return "Escape";
+      case ImGuiKey_Tab: return "Tab";
+      case ImGuiKey_Backspace: return "Backspace";
+      case ImGuiKey_LeftShift: case ImGuiKey_RightShift: return "Shift";
+      case ImGuiKey_LeftCtrl: case ImGuiKey_RightCtrl: return "Control";
+      case ImGuiKey_LeftAlt: case ImGuiKey_RightAlt: return "Alt";
+      case ImGuiKey_UpArrow: return "Up";
+      case ImGuiKey_DownArrow: return "Down";
+      case ImGuiKey_LeftArrow: return "Left";
+      case ImGuiKey_RightArrow: return "Right";
+      case ImGuiKey_Delete: return "Delete";
+      case ImGuiKey_Insert: return "Insert";
+      case ImGuiKey_Home: return "Home";
+      case ImGuiKey_End: return "End";
+      case ImGuiKey_PageUp: return "PageUp";
+      case ImGuiKey_PageDown: return "PageDown";
+      case ImGuiKey_CapsLock: return "CapsLock";
+      case ImGuiKey_GraveAccent: return "Backtick";
+      case ImGuiKey_Minus: return "Minus";
+      case ImGuiKey_Equal: return "Plus";
+      case ImGuiKey_Comma: return "Comma";
+      case ImGuiKey_Period: return "Period";
+      case ImGuiKey_Semicolon: return "Semicolon";
+      case ImGuiKey_Slash: return "Slash";
+      case ImGuiKey_Backslash: return "Backslash";
+      case ImGuiKey_LeftBracket: return "LBracket";
+      case ImGuiKey_RightBracket: return "RBracket";
+      case ImGuiKey_Apostrophe: return "Quote";
+      default: return {};
+    }
+  }
+
+  void PollCapture() {
+    if (!capture_armed_) {
+      capture_armed_ = true;
+      return;
+    }
+    std::string name;
+    for (int k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_NamedKey_END && name.empty(); ++k) {
+      if (ImGui::IsKeyPressed(ImGuiKey(k), false)) name = KeyName(ImGuiKey(k));
+    }
+    // Mouse buttons count unless they are clicking a button in this window (Cancel, another row).
+    if (name.empty() && !ImGui::IsAnyItemHovered()) {
+      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) name = "LMB";
+      else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) name = "RMB";
+      else if (ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) name = "MMB";
+    }
+    if (name.empty() && ImGui::GetIO().MouseWheel != 0) name = ImGui::GetIO().MouseWheel > 0 ? "WheelUp" : "WheelDown";
+    if (name.empty()) return;
+    std::string& value = settings_[capture_].value;
+    if (!capture_append_ || value.empty()) {
+      value = name;
+    } else if (("," + value + ",").find("," + name + ",") == std::string::npos) {
+      value += "," + name;
+    }
+    capture_ = -1;
   }
 
   void DrawButtons() {
@@ -239,6 +382,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   bool installed_ = false;
   bool show_reinstall_ = false;
   bool auto_ = false;
+  int capture_ = -1;  // settings_ index of the binding waiting for a key, or -1
+  bool capture_append_ = false, capture_armed_ = false;
   char iso_path_[1024] = {};
   std::string error_;
   std::thread worker_;

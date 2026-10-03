@@ -1,7 +1,10 @@
 // Keyboard and mouse driver (backlog B-104); see mnk_input.h.
 #include "mnk_input.h"
 
+#include "prompt_state.h"
+
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 
 #include <rex/input/input.h>
@@ -9,6 +12,8 @@
 REXCVAR_DEFINE_BOOL(kbm, true, "bots/Input", "Keyboard and mouse controls (mouse look locks the pointer)");
 REXCVAR_DEFINE_DOUBLE(kbm_sensitivity, 1.0, "bots/Input", "Mouse look sensitivity").range(0.05, 10.0);
 REXCVAR_DEFINE_BOOL(kbm_invert_y, false, "bots/Input", "Invert mouse look up/down");
+REXCVAR_DEFINE_BOOL(kbm_prompts, true, "bots/Input",
+                    "Show keyboard/mouse button prompts while keyboard/mouse is the last device used");
 
 // Default layout follows Gears of War on PC, adapted to this game's actions. Each value is a
 // comma-separated list of key names (rex/ui/keybinds.cpp; LMB RMB MMB, plus WheelUp WheelDown).
@@ -20,7 +25,7 @@ BOTS_KBM_BIND(move_left, "A", "Move left (left stick)");
 BOTS_KBM_BIND(move_right, "D", "Move right (left stick)");
 BOTS_KBM_BIND(right_trigger, "LMB", "Fire (RT)");
 BOTS_KBM_BIND(left_trigger, "RMB", "Aim (LT)");
-BOTS_KBM_BIND(a, "Space,E,Return", "Cover / use / confirm (A)");
+BOTS_KBM_BIND(a, "Space,E", "Cover / use / confirm (A)");
 BOTS_KBM_BIND(b, "Shift,F,Backspace", "Special move / counter-kill / back (B)");
 BOTS_KBM_BIND(x, "R", "Reload / pick up weapon (X)");
 BOTS_KBM_BIND(y, "Q", "Gangsta Fury / skip (Y)");
@@ -34,6 +39,7 @@ BOTS_KBM_BIND(left_thumb, "C", "Taunt (L3)");
 BOTS_KBM_BIND(right_thumb, "V", "Right stick click (R3)");
 BOTS_KBM_BIND(back, "Tab", "Objectives (Back)");
 BOTS_KBM_BIND(start, "Escape", "Pause (Start)");
+BOTS_KBM_BIND(confirm, "Return", "Menu confirm / Press START (the engine's Enter key, not a pad button)");
 #undef BOTS_KBM_BIND
 
 namespace bots {
@@ -46,7 +52,43 @@ using rex::ui::VirtualKey;
 // input sampling to see a press and a release.
 constexpr auto kWheelTap = std::chrono::milliseconds(70);
 
+// The one PromptState, published for the renderer plugin before main (prompt_state.h).
+PromptState g_prompt_state;
+const bool g_prompt_state_published = [] {
+  char value[32];
+  std::snprintf(value, sizeof(value), "%llx", static_cast<unsigned long long>(uintptr_t(&g_prompt_state)));
+#ifdef _WIN32
+  SetEnvironmentVariableA(kPromptStateEnv, value);
+#else
+  setenv(kPromptStateEnv, value, 1);
+#endif
+  return true;
+}();
+
 }  // namespace
+
+void MouseKeyboardDriver::SetPromptMode(bool keyboard_mouse) {
+  keyboard_mouse = keyboard_mouse && REXCVAR_GET(kbm_prompts);
+  if (g_prompt_state.keyboard_mouse.exchange(keyboard_mouse) == uint32_t(keyboard_mouse)) return;
+  g_prompt_state.generation.fetch_add(1);
+  REXLOG_INFO("prompts: {}", keyboard_mouse ? "keyboard/mouse" : "controller");
+}
+
+void MouseKeyboardDriver::NoteGuestPad(uint16_t buttons, uint8_t lt, uint8_t rt, int16_t lx, int16_t ly, int16_t rx,
+                                       int16_t ry) {
+  if (!g_prompt_state.keyboard_mouse.load(std::memory_order_relaxed)) return;
+  rex::input::X_INPUT_STATE ours;
+  {
+    std::lock_guard lock(mutex_);
+    ours = last_out_;
+  }
+  const auto& g = ours.gamepad;
+  constexpr int kStick = 16000, kTrigger = 64;
+  const bool pad = (buttons & ~g.buttons) || (lt > kTrigger && !g.left_trigger) ||
+                   (rt > kTrigger && !g.right_trigger) || (!g.thumb_lx && std::abs(lx) > kStick) ||
+                   (!g.thumb_ly && std::abs(ly) > kStick) || std::abs(rx) > kStick || std::abs(ry) > kStick;
+  if (pad) SetPromptMode(false);
+}
 
 MouseKeyboardDriver::MouseKeyboardDriver() : InputDriver(nullptr, 0) {
   instance_.store(this, std::memory_order_release);
@@ -94,11 +136,56 @@ uint16_t MouseKeyboardDriver::ButtonKey(rex::ui::MouseEvent& e) {
   }
 }
 
+bool MouseKeyboardDriver::MenuMode() const {
+  // The HUD ticks every gameplay frame; a short gap (a hitch, a level stream) mustn't drop the pointer lock.
+  constexpr int64_t kHudGapMs = 500;
+  return paused_.load(std::memory_order_relaxed) || Now() - hud_tick_.load(std::memory_order_relaxed) > kHudGapMs;
+}
+
+void MouseKeyboardDriver::TakeEnterEvents(std::vector<bool>& out) {
+  std::lock_guard lock(mutex_);
+  out.swap(enter_events_);
+  enter_events_.clear();
+}
+
+// Must be called with mutex_ held.
+void MouseKeyboardDriver::PushEnter(uint16_t vk, bool down) {
+  if (enter_down_[vk] == down) return;  // key repeat
+  enter_down_[vk] = down;
+  if (enter_events_.size() < 32) enter_events_.push_back(down);
+}
+
 void MouseKeyboardDriver::SetKey(uint16_t vk, bool down) {
   if (!vk || vk >= kKeyCount || !Enabled()) return;
   if (down && !has_focus_) return;
-  std::lock_guard lock(mutex_);
-  key_down_[vk] = down;
+  {
+    std::lock_guard lock(mutex_);
+    if (vk == uint16_t(VirtualKey::kLButton)) {
+      // A click that starts in a menu is Enter (confirm) until it is released, not the fire trigger.
+      if (down && !key_down_[vk] && !enter_down_[vk]) click_is_enter_ = MenuMode();
+      if (click_is_enter_) {
+        PushEnter(vk, down);
+        if (!down) click_is_enter_ = false;
+        return;
+      }
+    }
+    if (Lists(REXCVAR_GET(kbm_confirm), vk)) PushEnter(vk, down);
+    key_down_[vk] = down;
+  }
+  if (down) SetPromptMode(true);
+}
+
+bool MouseKeyboardDriver::Lists(const std::string& keys, uint16_t vk) {
+  std::string_view rest(keys);
+  while (!rest.empty()) {
+    const size_t comma = rest.find(',');
+    std::string_view name = rest.substr(0, comma);
+    rest = comma == std::string_view::npos ? std::string_view() : rest.substr(comma + 1);
+    while (!name.empty() && name.front() == ' ') name.remove_prefix(1);
+    while (!name.empty() && name.back() == ' ') name.remove_suffix(1);
+    if (!name.empty() && uint16_t(rex::ui::ParseVirtualKey(name)) == vk) return true;
+  }
+  return false;
 }
 
 void MouseKeyboardDriver::OnMouseMove(rex::ui::MouseEvent& e) {
@@ -106,13 +193,19 @@ void MouseKeyboardDriver::OnMouseMove(rex::ui::MouseEvent& e) {
   const int32_t x = e.x(), y = e.y();
   {
     std::lock_guard lock(mutex_);
+    float dx = 0, dy = 0;
     if (relative_) {
-      mouse_dx_ += e.dx();
-      mouse_dy_ += e.dy();
+      dx = e.dx(), dy = e.dy();
     } else if (captured_) {
-      mouse_dx_ += float(x - prev_x_);
-      mouse_dy_ += float(y - prev_y_);
+      dx = float(x - prev_x_), dy = float(y - prev_y_);
     }
+    mouse_dx_ += dx;
+    mouse_dy_ += dy;
+    moved_ += std::abs(dx) + std::abs(dy);
+  }
+  if (moved_ > 40) {  // a deliberate move, not a nudged desk
+    moved_ = 0;
+    SetPromptMode(true);
   }
   prev_x_ = x;
   prev_y_ = y;
@@ -130,7 +223,7 @@ void MouseKeyboardDriver::OnMouseMove(rex::ui::MouseEvent& e) {
 }
 
 void MouseKeyboardDriver::OnMouseWheel(rex::ui::MouseEvent& e) {
-  if (!Enabled() || !has_focus_ || !captured_) return;
+  if (!Enabled() || !has_focus_ || !is_active()) return;
   // Trackpads send many fractional events; tap once per detent's worth of scrolling.
   static int32_t accum = 0;
   accum += e.scroll_y();
@@ -139,6 +232,7 @@ void MouseKeyboardDriver::OnMouseWheel(rex::ui::MouseEvent& e) {
   std::lock_guard lock(mutex_);
   wheel_until_[accum > 0 ? 0 : 1] = std::chrono::steady_clock::now() + kWheelTap;
   accum = 0;
+  SetPromptMode(true);
 }
 
 void MouseKeyboardDriver::OnLostFocus(rex::ui::UISetupEvent&) {
@@ -147,6 +241,8 @@ void MouseKeyboardDriver::OnLostFocus(rex::ui::UISetupEvent&) {
   {
     std::lock_guard lock(mutex_);
     std::memset(key_down_, 0, sizeof(key_down_));
+    for (uint16_t vk = 0; vk < kKeyCount; ++vk) PushEnter(vk, false);
+    click_is_enter_ = false;
     mouse_dx_ = mouse_dy_ = 0;
   }
   if (window_) ReleaseCaptureOnUIThread(window_);
@@ -197,7 +293,12 @@ void MouseKeyboardDriver::EnumerateDevices(std::vector<rex::input::DeviceInfo>& 
 X_RESULT MouseKeyboardDriver::GetDeviceState(rex::input::DeviceId id, rex::input::X_INPUT_STATE* out) {
   if (!Enabled() || id != kDevice) return X_ERROR_DEVICE_NOT_CONNECTED;
   const bool live = has_focus_ && is_active();
-  QueueCapture(live);
+  const bool menu = MenuMode();
+  if (menu != last_menu_) {
+    last_menu_ = menu;
+    REXLOG_INFO("keyboard/mouse: {}", menu ? "menu (pointer free, click = Enter)" : "gameplay (pointer locked)");
+  }
+  QueueCapture(live && !menu);
   if (!out) return X_ERROR_SUCCESS;
   std::memset(out, 0, sizeof(*out));
   if (live) {
@@ -244,6 +345,8 @@ X_RESULT MouseKeyboardDriver::GetDeviceState(rex::input::DeviceId id, rex::input
     ++packet_;
   }
   out->packet_number = packet_;
+  std::lock_guard lock(mutex_);
+  last_out_ = *out;
   return X_ERROR_SUCCESS;
 }
 

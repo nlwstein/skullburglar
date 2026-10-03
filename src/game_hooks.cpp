@@ -30,6 +30,9 @@ extern "C" void __imp__sub_82E1AC28(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_823598E0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_823501E0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void __imp__sub_82E2EB38(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void __imp__sub_82E2EBB8(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void __imp__sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base);
 
 namespace {
 // Guest address → host pointer, as REX_RAW_ADDR in generated/default/bots_pch.h (Mac arm64 layout).
@@ -184,7 +187,16 @@ void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std:
 }  // namespace
 
 extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
+  const uint32_t user = ctx.r3.u32, state = ctx.r4.u32;  // XInputGetState(user, XINPUT_STATE*)
   __imp__sub_823598E0(ctx, base);
+  // Button prompts follow the last device used: tell the keyboard/mouse driver what controller 0 reported.
+  if (user == 0 && state && ctx.r3.u32 == 0) {
+    if (auto* kbm = bots::MouseKeyboardDriver::instance()) {
+      const uint8_t* s = Raw(base, state);  // big-endian XINPUT_STATE: packet, buttons, LT, RT, LX, LY, RX, RY
+      auto i16 = [&](int at) { return int16_t(uint16_t(s[at] << 8 | s[at + 1])); };
+      kbm->NoteGuestPad(uint16_t(i16(4)), s[6], s[7], i16(8), i16(10), i16(12), i16(14));
+    }
+  }
   ExecState* st = Exec();
   if (!st) return;
   auto now = std::chrono::steady_clock::now();
@@ -218,7 +230,8 @@ extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
 // Real mouse motion comes from MouseKeyboardDriver (mnk_input.h), sent as controller 0's MouseX / MouseY.
 //   BOTS_MOUSE_TEST=<dx>[,<dy>[,<cid>]]   also inject a constant mouse delta every frame (test only)
 namespace {
-constexpr uint32_t kKeyMouseX = 0x8380DEC0, kKeyMouseY = 0x8380D5B8;
+// tools/key_names.py lists them all.
+constexpr uint32_t kKeyMouseX = 0x8380DEC0, kKeyMouseY = 0x8380D5B8, kKeyEnter = 0x8380E394;
 
 uint64_t LoadU64(uint8_t* base, uint32_t address) {
   return (uint64_t(LoadU32(base, address)) << 32) | LoadU32(base, address + 4);
@@ -237,7 +250,39 @@ void InputAxis(PPCContext& ctx, uint8_t* base, uint32_t vp, uint32_t cid, uint32
   ctx.r9.u64 = gamepad;
   rex::runtime::ResolveIndirectFunction(LoadU32(base, LoadU32(base, client) + 0x18))(ctx, base);
 }
+
+// event: 0 pressed, 1 released (EInputEvent).
+void InputKey(PPCContext& ctx, uint8_t* base, uint32_t vp, uint32_t cid, uint32_t key, uint32_t event, float amount,
+              bool gamepad) {
+  const uint32_t client = LoadU32(base, vp + 0x34);
+  if (!client) return;
+  ctx.r3.u64 = client;
+  ctx.r4.u64 = vp;
+  ctx.r5.u64 = cid;
+  ctx.r6.u64 = LoadU64(base, key);
+  ctx.r7.u64 = event;
+  ctx.f1.f64 = amount;
+  ctx.r9.u64 = gamepad;
+  rex::runtime::ResolveIndirectFunction(LoadU32(base, LoadU32(base, client) + 0x10))(ctx, base);
+}
 }  // namespace
+
+// Menu mode for the keyboard/mouse driver (mnk_input.h): C1HUD natives. execNativePauseGame / execNativeUnpauseGame
+// bracket the pause menu; execTickCashAndScore runs every gameplay HUD tick.
+extern "C" void sub_82E2EB38(PPCContext& __restrict ctx, uint8_t* base) {
+  __imp__sub_82E2EB38(ctx, base);
+  if (auto* kbm = bots::MouseKeyboardDriver::instance()) kbm->SetPaused(true);
+}
+
+extern "C" void sub_82E2EBB8(PPCContext& __restrict ctx, uint8_t* base) {
+  __imp__sub_82E2EBB8(ctx, base);
+  if (auto* kbm = bots::MouseKeyboardDriver::instance()) kbm->SetPaused(false);
+}
+
+extern "C" void sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base) {
+  __imp__sub_82E2E860(ctx, base);
+  if (auto* kbm = bots::MouseKeyboardDriver::instance()) kbm->NoteHudTick();
+}
 
 extern "C" void sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base) {
   const uint32_t vp = ctx.r3.u32;
@@ -258,7 +303,12 @@ extern "C" void sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base) {
   }();
   if (!vp) return;
   float dx = 0, dy = 0;
-  if (auto* kbm = bots::MouseKeyboardDriver::instance()) kbm->TakeMouseDelta(dx, dy);
+  if (auto* kbm = bots::MouseKeyboardDriver::instance()) {
+    kbm->TakeMouseDelta(dx, dy);
+    static std::vector<bool> enter;
+    kbm->TakeEnterEvents(enter);
+    for (const bool down : enter) InputKey(ctx, base, vp, 0, kKeyEnter, down ? 0 : 1, 1.0f, false);
+  }
   if (dx) InputAxis(ctx, base, vp, 0, kKeyMouseX, dx, dt, false);
   if (dy) InputAxis(ctx, base, vp, 0, kKeyMouseY, dy, dt, false);
   if (!test.on) return;

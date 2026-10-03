@@ -14,6 +14,9 @@
 
 #include "renderer.h"
 
+#include "../../prompt_state.h"
+#include "../prompt_atlas.h"
+
 namespace bots::gfx::vk {
 namespace {
 
@@ -149,7 +152,8 @@ VkImageView Renderer::TextureView(const rg::xenos::xe_gpu_texture_fetch_t& fetch
   if (!slot) {
     slot = std::make_unique<GuestTexture>();
     LoadTexture(fetch, *slot);
-  } else if (slot->dirty) {
+  } else if (slot->dirty || (slot->prompt_atlas && bots::FindPromptState() &&
+                              slot->prompt_generation != bots::FindPromptState()->generation.load())) {
     Retire(slot->image);  // earlier draws of this submission still sample the old contents
     *slot = GuestTexture{};
     LoadTexture(fetch, *slot);
@@ -269,6 +273,22 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
   const VkImageViewType view_type = is_3d ? VK_IMAGE_VIEW_TYPE_3D
                                     : cube ? VK_IMAGE_VIEW_TYPE_CUBE
                                            : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+  if (std::getenv("BOTS_PROMPT_TRACE") && width == 256 && height == 128 && base_page) {
+    std::fprintf(stderr, "prompts: candidate %08X fmt %u tiled %u endian %u mips %u-%u pitch %u hash %016llX\n",
+                 base_page << 12, uint32_t(fetch.format), uint32_t(fetch.tiled), uint32_t(fetch.endianness), mip_min,
+                 mip_max, uint32_t(fetch.pitch),
+                 (unsigned long long)bots::prompts::Hash(memory_(base_page << 12), bots::prompts::kButtonAtlasBytes));
+  }
+  // B-105: the controller-button atlas, swapped for keyboard/mouse glyphs while that is the last device used.
+  if (width == bots::prompts::kButtonAtlasWidth && height == bots::prompts::kButtonAtlasHeight && depth == 1 &&
+      base_page && fetch.tiled && fetch.format == xe::TextureFormat::k_DXT4_5 &&
+      bots::prompts::Hash(memory_(base_page << 12), bots::prompts::kButtonAtlasBytes) ==
+          bots::prompts::kButtonAtlasHash) {
+    const bots::PromptState* state = bots::FindPromptState();
+    texture.prompt_atlas = true;
+    texture.prompt_generation = state ? state->generation.load() : 0;
+    if (state && state->keyboard_mouse.load() && LoadPromptAtlas(texture, base_page << 12)) return;
+  }
   if (!CreateImage(texture.image, host.format, width, height, false, view_type, false, depth, mip_max + 1)) {
     std::fprintf(stderr, "native renderer: texture image %ux%ux%u format %d failed\n", width, height, depth,
                  int(host.format));
@@ -353,6 +373,43 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
                  width, height, depth, uint32_t(dimension), mip_min, mip_max, uint32_t(fetch.format),
                  fetch.tiled ? " tiled" : "", uint32_t(fetch.endianness), int(host.format));
   }
+}
+
+bool Renderer::LoadPromptAtlas(GuestTexture& texture, uint32_t address) {
+  namespace p = bots::prompts;
+  const std::vector<uint8_t> pixels = p::BuildButtonAtlas();
+  if (pixels.empty()) return false;
+  if (!CreateImage(texture.image, VK_FORMAT_R8G8B8A8_UNORM, p::kButtonAtlasWidth, p::kButtonAtlasHeight, false,
+                   VK_IMAGE_VIEW_TYPE_2D_ARRAY, false, 1, 1)) {
+    texture.image = {};
+    return false;
+  }
+  texture.host_format_swizzle = xe::XE_GPU_TEXTURE_SWIZZLE_RGBA;
+  // Still watch the guest atlas: if the game replaces it, the slot reloads (and is matched again).
+  texture.ranges[0] = {address, address + p::kButtonAtlasBytes};
+  if (tracker_) tracker_->Request(address, p::kButtonAtlasBytes);
+  VkDeviceSize offset;
+  uint8_t* staging = Upload(pixels.size(), 16, offset);
+  if (!staging) {
+    Flush();
+    BeginCommands(kGpuTexture);
+    staging = Upload(pixels.size(), 16, offset);
+    if (!staging) return false;
+  }
+  std::memcpy(staging, pixels.data(), pixels.size());
+  VkBufferImageCopy region{};
+  region.bufferOffset = offset;
+  region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  region.imageExtent = {p::kButtonAtlasWidth, p::kButtonAtlasHeight, 1};
+  vk_.vkCmdCopyBufferToImage(cmd_, ring_.buffer, texture.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+  Barrier();
+  ++stats_.textures;
+  static bool logged = false;
+  if (!logged) {
+    logged = true;
+    std::fprintf(stderr, "prompts: keyboard/mouse button atlas loaded\n");
+  }
+  return true;
 }
 
 VkSampler Renderer::GetSampler(const rg::xenos::xe_gpu_texture_fetch_t& fetch,

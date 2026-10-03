@@ -6,8 +6,12 @@
 // wrong for a mouse. Instead game_hooks.cpp drains TakeMouseDelta() each frame and feeds the engine's
 // own PC MouseX / MouseY axes (linear, after the stick curve), as UE3 does on PC.
 //
-// The pointer is locked while the window has focus and no settings overlay is open (is_active()).
-// The mouse wheel taps D-pad up/down (weapon select).
+// The pointer is locked while the window has focus, no settings overlay is open (is_active()) and the game isn't
+// in a menu (MenuMode()). The mouse wheel taps D-pad up/down (weapon select). Keys bound to kbm_confirm (and a left
+// click in menus) send the engine's own Enter key instead of a pad button.
+//
+// Button prompts (B-105): the last device used wins. Keyboard/mouse input switches the prompts to keyboard/mouse
+// glyphs (kbm_prompts), real controller input switches them back; see prompt_state.h.
 #pragma once
 
 #include <atomic>
@@ -30,6 +34,7 @@
 REXCVAR_DECLARE(bool, kbm);
 REXCVAR_DECLARE(double, kbm_sensitivity);
 REXCVAR_DECLARE(bool, kbm_invert_y);
+REXCVAR_DECLARE(bool, kbm_prompts);
 
 namespace bots {
 
@@ -49,6 +54,19 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   // Mouse motion since the last call, in pixels (+x right, +y up), scaled by kbm_sensitivity and
   // kbm_invert_y. Zero while the pointer isn't captured.
   void TakeMouseDelta(float& dx, float& dy);
+
+  // The merged controller state the game read for user 0 (guest XInputGetState). Input beyond what this driver
+  // contributed came from a real controller: prompts switch back to it.
+  void NoteGuestPad(uint16_t buttons, uint8_t lt, uint8_t rt, int16_t lx, int16_t ly, int16_t rx, int16_t ry);
+
+  // Menu mode: the game is paused (C1HUD NativePauseGame/NativeUnpauseGame) or the gameplay HUD stopped ticking
+  // (title, front end, loading, cutscenes). The pointer is free and a left click is the engine's Enter key, which
+  // the game's UI input aliases accept as confirm / "Press START" (Xe-C1Input.ini WidgetInputAliases).
+  void SetPaused(bool paused) { paused_.store(paused, std::memory_order_relaxed); }
+  void NoteHudTick() { hud_tick_.store(Now(), std::memory_order_relaxed); }
+  bool MenuMode() const;
+  // Engine Enter key edges (true = pressed) since the last call, oldest first. Game thread.
+  void TakeEnterEvents(std::vector<bool>& out);
 
   X_STATUS Setup() override { return X_STATUS_SUCCESS; }
   void EnumerateDevices(std::vector<rex::input::DeviceInfo>& out) override;
@@ -76,23 +94,38 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   // Pseudo virtual keys for the wheel, above the 0..255 range of real ones.
   static constexpr uint16_t kWheelUp = 256, kWheelDown = 257, kKeyCount = 258;
 
+  static int64_t Now() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  }
   static uint16_t ButtonKey(rex::ui::MouseEvent& e);
   bool Pressed(const std::string& keys) const;
+  static bool Lists(const std::string& keys, uint16_t vk);
+  void PushEnter(uint16_t vk, bool down);
   void SetKey(uint16_t vk, bool down);
   bool Enabled() const;
   void QueueCapture(bool want);
   void ApplyCaptureOnUIThread();
   void ReleaseCaptureOnUIThread(rex::ui::Window* window);
   void Detach();
+  static void SetPromptMode(bool keyboard_mouse);
 
   static inline std::atomic<MouseKeyboardDriver*> instance_{nullptr};
 
   rex::ui::Window* window_ = nullptr;  // written on the UI thread only
   mutable std::mutex mutex_;
   bool key_down_[kKeyCount] = {};
+  bool enter_down_[kKeyCount] = {};  // keys currently holding the engine's Enter down
   // Wheel notches are taps: the pad button stays down until this time.
   std::chrono::steady_clock::time_point wheel_until_[2] = {};
   float mouse_dx_ = 0, mouse_dy_ = 0;
+  rex::input::X_INPUT_STATE last_out_{};  // what GetDeviceState last returned
+  float moved_ = 0;                        // mouse travel toward switching the prompts, pixels
+  std::vector<bool> enter_events_;         // engine Enter edges for the game thread
+  bool click_is_enter_ = false;            // the left button went down in menu mode: its release is Enter's too
+  std::atomic<bool> paused_{false};
+  std::atomic<int64_t> hud_tick_{0};       // Now() of the last gameplay HUD tick
+  bool last_menu_ = false;                 // GetDeviceState (guest thread), for the log
   uint32_t packet_ = 0;
   uint64_t last_sig_ = ~0ull;
 

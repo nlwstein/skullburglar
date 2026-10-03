@@ -22,6 +22,9 @@ struct Setting {
   std::string label;
   std::string help;
   std::vector<Choice> choices;    // empty = checkbox (bool cvar)
+  std::string section;            // starts a new heading in the window
+  bool binding = false;           // a key binding (kbm_*: comma-separated key names), shown in the bindings table
+  std::string default_value;      // the cvar's built-in value (Reset)
   // Live state for the window.
   std::string value;              // current value as text
   bool locked = false;            // set by env or command line: shown, not editable
