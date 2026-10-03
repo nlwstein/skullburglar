@@ -1,8 +1,16 @@
 diff --git a/src/system/xsocket.cpp b/src/system/xsocket.cpp
-index 2d13ac8..a71e43e 100644
+index 2d13ac8..83cb231 100644
 --- a/src/system/xsocket.cpp
 +++ b/src/system/xsocket.cpp
-@@ -76,7 +76,34 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
+@@ -28,6 +28,7 @@
+ #include <arpa/inet.h>
+ #include <netinet/in.h>
+ #include <netinet/ip.h>
++#include <sys/ioctl.h>
+ #include <sys/socket.h>
+ #endif
+ 
+@@ -76,7 +77,34 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
      return X_STATUS_SUCCESS;
    }
  
@@ -38,3 +46,34 @@ index 2d13ac8..a71e43e 100644
    if (ret < 0) {
      // TODO: WSAGetLastError()
      return X_STATUS_UNSUCCESSFUL;
+@@ -91,6 +119,30 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
+ }
+ 
+ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
++  // Guest commands are Winsock numbers with a big-endian u_long argument. Linux
++  // numbers FIONBIO/FIONREAD differently (macOS shares the BSD values), and the
++  // host ioctl reads/writes a host-endian int, so translate both.
++  constexpr uint32_t kGuestFionbio = 0x8004667E, kGuestFionread = 0x4004667F;
++  if ((cmd == kGuestFionbio || cmd == kGuestFionread) && arg_ptr) {
++    uint32_t value;
++    std::memcpy(&value, arg_ptr, 4);
++    value = __builtin_bswap32(value);
++#if REX_PLATFORM_WIN32
++    u_long host_arg = value;
++#else
++    int host_arg = int(value);
++#endif
++    int ret = rex::net::socket_ioctl(native_handle_, cmd == kGuestFionbio ? FIONBIO : FIONREAD,
++                                     reinterpret_cast<uint8_t*>(&host_arg));
++    if (ret < 0) {
++      return X_STATUS_UNSUCCESSFUL;
++    }
++    if (cmd == kGuestFionread) {
++      value = __builtin_bswap32(uint32_t(host_arg));
++      std::memcpy(arg_ptr, &value, 4);
++    }
++    return X_STATUS_SUCCESS;
++  }
+   int ret = rex::net::socket_ioctl(native_handle_, cmd, arg_ptr);
+   if (ret < 0) {
+     // TODO: Get last error

@@ -529,3 +529,51 @@ extern "C" void sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base) {
   if (test.dx) InputAxis(ctx, base, vp, test.cid, kKeyMouseX, test.dx, dt, false);
   if (test.dy) InputAxis(ctx, base, vp, test.cid, kKeyMouseY, test.dy, dt, false);
 }
+
+// BOTS_TRAVEL_TRACE=1 (diagnostics): log the front end's map launch path. C1UIAction_CreateAndLaunchOnlineGame
+// LaunchMap (0x82FA6250) -> GameEngine SetClientTravel (0x827CF678, TravelURL +0x46C) -> GameEngine::Tick
+// (0x827DB2C0) -> Browse (0x827DA828). A request that never reaches Browse means Tick is stuck.
+extern "C" void __imp__sub_82FA6250(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void __imp__sub_827CF678(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void __imp__sub_827DA828(PPCContext& __restrict ctx, uint8_t* base);
+
+namespace {
+bool TravelTrace() {
+  static const bool on = [] {
+    const char* v = std::getenv("BOTS_TRAVEL_TRACE");
+    return v && *v && *v != '0';
+  }();
+  return on;
+}
+
+// FString {TCHAR* data, int count, int max}, big-endian UTF-16; ASCII only.
+std::string FStr(uint8_t* base, uint32_t address) {
+  const uint32_t data = LoadU32(base, address), count = LoadU32(base, address + 4);
+  std::string out;
+  if (!data || count > 512) return out;
+  for (uint32_t i = 0; i + 1 < count; ++i) out += char(Raw(base, data + 2 * i)[1]);
+  return out;
+}
+}  // namespace
+
+extern "C" void sub_82FA6250(PPCContext& __restrict ctx, uint8_t* base) {
+  if (TravelTrace()) REXLOG_INFO("travel trace: LaunchMap({:08X})", ctx.r3.u32);
+  __imp__sub_82FA6250(ctx, base);
+}
+
+extern "C" void sub_827CF678(PPCContext& __restrict ctx, uint8_t* base) {
+  const uint32_t engine = ctx.r3.u32, type = ctx.r5.u32;
+  __imp__sub_827CF678(ctx, base);
+  if (TravelTrace())
+    REXLOG_INFO("travel trace: SetClientTravel -> TravelURL '{}' type {}", FStr(base, engine + 0x46C), type);
+}
+
+extern "C" void sub_827DA828(PPCContext& __restrict ctx, uint8_t* base) {
+  const uint32_t engine = ctx.r3.u32;
+  if (TravelTrace())
+    REXLOG_INFO("travel trace: Browse enter, TravelURL '{}' LastURL map '{}'", FStr(base, engine + 0x46C),
+                FStr(base, engine + 0x3D8 + 0x1C));
+  __imp__sub_827DA828(ctx, base);
+  if (TravelTrace())
+    REXLOG_INFO("travel trace: Browse -> {} , TravelURL '{}'", ctx.r3.u32, FStr(base, engine + 0x46C));
+}

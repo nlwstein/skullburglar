@@ -108,6 +108,9 @@ SERIES.append(
     # XSocket::SetOption passed the guest's Winsock SOL_SOCKET level/option numbers to the host as-is. BSD/macOS use
     # the same numbers, Linux doesn't: UE3's LAN beacon SetBroadcast failed, so creating the (LAN) game session for
     # New Story reported failure and the front end never launched the map (Steam Deck / Linux only).
+    # IOControl had the same problem with FIONBIO (Linux 0x5421 vs 0x8004667E): the beacon socket stayed blocking, so
+    # the per-tick beacon poll's recvfrom blocked the game thread inside GameEngine::Tick right after the travel
+    # request. FIONBIO/FIONREAD are translated, and their big-endian u_long argument swapped, on every platform.
     ("0016-posix-socket-option-translation.patch",
      ["src/system/xsocket.cpp"], {}))
 
