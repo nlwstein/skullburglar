@@ -35,6 +35,34 @@ struct Draw {
   const uint32_t* immediate_indices = nullptr;  // source_select immediate: inline in the packet (big-endian)
   uint32_t immediate_dwords = 0;
   bool draw_indx_2 = false;
+  // When each group of shader constant registers was last written (kConstantGroups entries, a counter that only
+  // grows), so a renderer can reuse an upload nothing it reads has changed since. Null: unknown.
+  const uint64_t* constant_writes = nullptr;
+};
+
+// Constant register groups for Draw::constant_writes: float constants 0x4000-0x47FF in blocks of 64 registers
+// (16 float4 constants; group = float4 index / 16), then fetch constants 0x4800-0x48FF, then bool/loop constants
+// 0x4900-0x4927.
+constexpr uint32_t kFloatConstantGroups = 32;
+constexpr uint32_t kFetchConstantGroup = 32;
+constexpr uint32_t kBoolLoopConstantGroup = 33;
+constexpr uint32_t kConstantGroups = 34;
+
+// Fills Draw::constant_writes: call Note for every register write.
+class ConstantWriteTracker {
+ public:
+  void Note(uint32_t index) {
+    if (index < 0x4000 || index >= 0x4928) return;
+    const uint32_t group = index < 0x4800 ? (index - 0x4000) >> 6
+                           : index < 0x4900 ? kFetchConstantGroup
+                                            : kBoolLoopConstantGroup;
+    writes_[group] = ++counter_;
+  }
+  const uint64_t* writes() const { return writes_; }
+
+ private:
+  uint64_t writes_[kConstantGroups] = {};
+  uint64_t counter_ = 0;
 };
 
 class Pm4Sink {
@@ -71,6 +99,7 @@ class Pm4Executor {
   Pm4Sink* sink_;
   std::unique_ptr<rex::graphics::RegisterFile> regs_;
   ShaderLoad vs_, ps_;
+  ConstantWriteTracker constant_writes_;
   Stats stats_;
   size_t packet_offset_ = 0;
 };

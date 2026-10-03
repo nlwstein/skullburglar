@@ -225,6 +225,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
       return true;
     }
     Draw draw;
+    draw.constant_writes = constant_writes_.writes();
     draw.initiator.value = register_file_->values[rg::XE_GPU_REG_VGT_DRAW_INITIATOR];
     if (index_buffer_info) {
       draw.index_base = index_buffer_info->guest_base;
@@ -234,6 +235,11 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     }
     renderer_->OnDraw(*register_file_, vs_, ps_, draw);
     return true;
+  }
+
+  void WriteRegister(uint32_t index, uint32_t value) override {
+    CommandProcessor::WriteRegister(index, value);
+    constant_writes_.Note(index);
   }
 
   // Copies arrive as draws in EDRAM copy mode, which the renderer resolves itself.
@@ -289,6 +295,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   std::filesystem::path pipeline_cache_path_;
   ShaderLoad vs_, ps_;
   std::vector<uint32_t> vs_inline_, ps_inline_;
+  ConstantWriteTracker constant_writes_;
   uint64_t frames_ = 0, indirect_draws_ = 0;
   struct {
     uint64_t frames = 0;

@@ -13,7 +13,7 @@ namespace {
 // std140 packs the 256 ramp entries as 64 uvec4s.
 constexpr const char* kPresentShader = R"(#version 450
 layout(set = 0, binding = 0) uniform sampler2DArray source;
-layout(set = 0, binding = 1) uniform Gamma { uvec4 ramp[64]; };
+layout(set = 0, binding = 1) uniform Gamma { uvec4 ramp[64]; vec4 render_scale; };
 layout(location = 0) out vec4 result;
 
 uint Ramp(float v) {
@@ -22,14 +22,17 @@ uint Ramp(float v) {
 }
 
 void main() {
-  vec3 c = texelFetch(source, ivec3(ivec2(gl_FragCoord.xy), 0), 0).rgb;
+  // Output pixel centres -> source texels (the front buffer is render_scale.x of the output's size): at 1 that is
+  // each texel's centre, so the linear sampler returns it exactly; below 1 it upscales bilinearly.
+  vec2 uv = gl_FragCoord.xy * render_scale.x / vec2(textureSize(source, 0).xy);
+  vec3 c = textureLod(source, vec3(uv, 0.0), 0.0).rgb;
   result = vec4(float((Ramp(c.r) >> 20) & 0x3FFu), float((Ramp(c.g) >> 10) & 0x3FFu), float(Ramp(c.b) & 0x3FFu),
                 1023.0) / 1023.0;
 }
 )";
 
 constexpr VkFormat kGuestOutputFormat = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
-constexpr VkDeviceSize kRampBytes = 256 * 4;
+constexpr VkDeviceSize kRampBytes = 256 * 4 + 16;  // + render_scale
 
 }  // namespace
 
@@ -91,7 +94,9 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
     ramp = Upload(kRampBytes, ubo_align, offset);
     if (!ramp) return false;
   }
-  std::memcpy(ramp, gamma_ramp, kRampBytes);
+  std::memcpy(ramp, gamma_ramp, 256 * 4);
+  const float params[4] = {scale_, scale_, 0.0f, 0.0f};
+  std::memcpy(ramp + 256 * 4, params, sizeof(params));
   const VkDescriptorSet set = AllocateSet(present_set_layout_);
   if (!set) {
     static bool warned = false;
@@ -137,6 +142,7 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
   BeginRendering(rendering, "present");
   vk_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, present_pipeline_);
   bound_pipeline_ = present_pipeline_;
+  dynamic_valid_ = false;
   vk_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout_, 0, 1, &set, 0, nullptr);
   const VkViewport vp{0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f};
   vk_.vkCmdSetViewport(cmd_, 0, 1, &vp);

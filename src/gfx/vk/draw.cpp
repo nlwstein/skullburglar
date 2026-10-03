@@ -436,7 +436,7 @@ VkPipeline Renderer::GetPipeline(const PipelineKey& key, bool sync, bool& pendin
   const std::string_view bytes(reinterpret_cast<const char*>(&key), sizeof(key));
   pending = false;
   if (last_pipeline_ && bytes == last_pipeline_key_) return last_pipeline_;
-  auto it = pipelines_.find(std::string(bytes));
+  auto it = pipelines_.find(bytes);
   if (it == pipelines_.end()) it = pipelines_.emplace(std::string(bytes), std::make_unique<PipelineSlot>()).first;
   PipelineSlot& slot = *it->second;
   Async state = slot.state.load(std::memory_order_acquire);
@@ -698,9 +698,12 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   uint32_t texture_swizzles[32], texture_signs[32];
   for (uint32_t i = 0; i < 32; ++i) texture_swizzles[i] = xe::XE_GPU_TEXTURE_SWIZZLE_RGBA, texture_signs[i] = 0;
   draw_reads_.clear();
-  auto texture_views = [&](const std::vector<rg::SpirvShader::TextureBinding>& bindings) {
-    std::vector<VkImageView> views;
+  // At most 32 fetch constants, two bindings each (3D-or-stacked fetches); fixed arrays, no allocation per draw.
+  using Views = std::array<VkImageView, 64>;
+  auto texture_views = [&](const std::vector<rg::SpirvShader::TextureBinding>& bindings, Views& views) {
+    uint32_t n = 0;
     for (const auto& binding : bindings) {
+      if (n == views.size()) break;
       const auto fetch = regs.GetTextureFetch(binding.fetch_constant);
       VkImageView view = VK_NULL_HANDLE;
       const char* source = "null";
@@ -736,7 +739,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
           view = null_image->view;
         }
       }
-      views.push_back(view);
+      views[n++] = view;
       if (trace && !binding.is_signed) {
         char t[96];
         std::snprintf(t, sizeof(t), " t%u=%08X/%u(%s)", uint32_t(binding.fetch_constant), fetch.base_address << 12,
@@ -748,9 +751,15 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
         trace_textures += t;
       }
     }
-    return views;
+    return std::span<const VkImageView>(views.data(), n);
   };
-  const std::vector<VkImageView> vviews = texture_views(vtextures), pviews = texture_views(ptextures);
+  if (vtextures.size() > Views{}.size() || ptextures.size() > Views{}.size()) {
+    ++stats_.skipped_draws;
+    return;
+  }
+  Views vview_storage, pview_storage;
+  const std::span<const VkImageView> vviews = texture_views(vtextures, vview_storage),
+                                     pviews = texture_views(ptextures, pview_storage);
 
   profile.Mark(kPhaseRing);
   // Room for this draw's uploads and descriptor sets: flush first rather than mid-draw.
@@ -960,12 +969,39 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   // Constant buffers (VulkanCommandProcessor::UpdateBindings): float constants packed in use order.
   const VkDeviceSize ubo_align = props.minUniformBufferOffsetAlignment;
   uint32_t constant_offsets[Translator::kConstantBufferCount];
-  auto put = [&](uint32_t index, const void* data, VkDeviceSize size) {
+  static_assert(Translator::kConstantBufferCount == kConstantBuffers);
+  // Reuses the last upload of a buffer when its key matches (see constant_uploads_); key 0: always upload.
+  auto reuse = [&](uint32_t index, uint64_t key, const void* shader) {
+    ConstantUpload& last = constant_uploads_[index];
+    if (!key || last.epoch != ring_epoch_ || last.key != key || last.shader != shader) return false;
+    constant_offsets[index] = last.offset;
+    ++stats_.constant_reuses;
+    return true;
+  };
+  auto remember = [&](uint32_t index, uint64_t key, const void* shader) {
+    constant_uploads_[index] = {ring_epoch_, key, shader, constant_offsets[index]};
+  };
+  auto put = [&](uint32_t index, const void* data, VkDeviceSize size, uint64_t key) {
+    if (reuse(index, key, nullptr)) return;
     VkDeviceSize offset;
     std::memcpy(Upload(size, ubo_align, offset), data, size);
     constant_offsets[index] = uint32_t(offset);
+    remember(index, key, nullptr);
   };
   auto put_floats = [&](uint32_t index, const ShaderCache::Shader* shader, uint32_t first_register) {
+    // The latest write to a group of 16 constants this shader reads (bitmap word i covers groups 4i..4i+3).
+    uint64_t key = 0;
+    if (draw.constant_writes) {
+      const uint32_t first_group = (first_register - rg::XE_GPU_REG_SHADER_CONSTANT_000_X) >> 6;
+      key = 1;
+      for (uint32_t i = 0; shader && i < 4; ++i) {
+        const uint64_t bits = shader->constant_register_map().float_bitmap[i];
+        for (uint32_t g = 0; g < 4; ++g) {
+          if (bits >> (16 * g) & 0xFFFF) key = std::max(key, draw.constant_writes[first_group + 4 * i + g] + 1);
+        }
+      }
+    }
+    if (reuse(index, key, shader)) return;
     const uint32_t n = shader ? shader->constant_register_map().float_count : 0;
     const VkDeviceSize size = 16 * std::max(n, 1u);
     VkDeviceSize offset;
@@ -978,12 +1014,23 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
       }
     }
     constant_offsets[index] = uint32_t(offset);
+    remember(index, key, shader);
   };
-  put(Translator::kConstantBufferSystem, &sc, sizeof(sc));
+  // System constants are built per draw: compared by value.
+  const bool same_system = last_system_constants_.size() == sizeof(sc) &&
+                           std::memcmp(last_system_constants_.data(), &sc, sizeof(sc)) == 0;
+  if (!same_system) {
+    last_system_constants_.assign(reinterpret_cast<const uint8_t*>(&sc), reinterpret_cast<const uint8_t*>(&sc + 1));
+    ++system_constants_version_;
+  }
+  put(Translator::kConstantBufferSystem, &sc, sizeof(sc), system_constants_version_);
   put_floats(Translator::kConstantBufferFloatVertex, vshader, rg::XE_GPU_REG_SHADER_CONSTANT_000_X);
   put_floats(Translator::kConstantBufferFloatPixel, pshader, rg::XE_GPU_REG_SHADER_CONSTANT_256_X);
-  put(Translator::kConstantBufferBoolLoop, &regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031], 4 * (8 + 32));
-  put(Translator::kConstantBufferFetch, &regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0], 4 * 6 * 32);
+  const uint64_t* group_writes = draw.constant_writes;
+  put(Translator::kConstantBufferBoolLoop, &regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031], 4 * (8 + 32),
+      group_writes ? group_writes[kBoolLoopConstantGroup] + 1 : 0);
+  put(Translator::kConstantBufferFetch, &regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0], 4 * 6 * 32,
+      group_writes ? group_writes[kFetchConstantGroup] + 1 : 0);
 
   profile.Mark(kPhaseDescriptors);
   // Descriptor sets.
@@ -994,44 +1041,42 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     return;
   }
   VkDescriptorSet sets[4] = {shared_set_, constant_set_, VK_NULL_HANDLE, VK_NULL_HANDLE};
-  std::vector<VkWriteDescriptorSet> writes;
-  std::vector<VkDescriptorImageInfo> images;
-  images.reserve(vtextures.size() + vsamplers.size() + ptextures.size() + psamplers.size());
+  VkWriteDescriptorSet writes[4];
+  uint32_t write_count = 0;
+  VkDescriptorImageInfo images[2 * (64 + 32)];
+  size_t image_count = 0;
   // Texture sets are reused within a submission when a draw binds exactly what an earlier one did (consecutive draws
   // of a material mostly do). Views and samplers outlive the submission (Retire), so a handle can't be reused in it.
-  auto texture_set = [&](VkDescriptorSet& set, VkDescriptorSetLayout set_layout, const std::vector<VkImageView>& views,
+  auto texture_set = [&](VkDescriptorSet& set, VkDescriptorSetLayout set_layout, std::span<const VkImageView> views,
                          const std::vector<rg::SpirvShader::SamplerBinding>& samplers) {
-    if (views.empty() && samplers.empty()) return;
-    const size_t first = images.size();
-    for (VkImageView view : views) images.push_back({VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL});
+    if ((views.empty() && samplers.empty()) || samplers.size() > 32) return;
+    const size_t first = image_count;
+    for (VkImageView view : views) images[image_count++] = {VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
     for (const auto& binding : samplers) {
-      images.push_back(
-          {GetSampler(regs.GetTextureFetch(binding.fetch_constant), binding), VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL});
+      images[image_count++] = {GetSampler(regs.GetTextureFetch(binding.fetch_constant), binding), VK_NULL_HANDLE,
+                               VK_IMAGE_LAYOUT_GENERAL};
     }
     set_key_.assign(reinterpret_cast<const char*>(&set_layout), sizeof(set_layout));
-    for (size_t i = first; i < images.size(); ++i) {
+    for (size_t i = first; i < image_count; ++i) {
       const uint64_t handle = images[i].imageView ? uint64_t(images[i].imageView) : uint64_t(images[i].sampler);
       set_key_.append(reinterpret_cast<const char*>(&handle), sizeof(handle));
     }
-    auto [cached, added] = texture_sets_.try_emplace(set_key_, VK_NULL_HANDLE);
-    if (!added) {
-      set = cached->second;
-      images.resize(first);
+    if (const auto it = texture_sets_.find(std::string_view(set_key_)); it != texture_sets_.end()) {
+      set = it->second;
+      image_count = first;
       return;
     }
-    set = cached->second = AllocateSet(set_layout);
-    if (!set) {
-      texture_sets_.erase(cached);
-      return;
-    }
+    set = AllocateSet(set_layout);
+    if (!set) return;
+    texture_sets_.emplace(set_key_, set);
     if (!views.empty()) {
-      writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 0, 0, uint32_t(views.size()),
-                        VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, images.data() + first, nullptr, nullptr});
+      writes[write_count++] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 0, 0, uint32_t(views.size()),
+                               VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, images + first, nullptr, nullptr};
     }
     if (!samplers.empty()) {
-      writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, uint32_t(views.size()), 0,
-                        uint32_t(samplers.size()), VK_DESCRIPTOR_TYPE_SAMPLER, images.data() + first + views.size(),
-                        nullptr, nullptr});
+      writes[write_count++] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, uint32_t(views.size()), 0,
+                               uint32_t(samplers.size()), VK_DESCRIPTOR_TYPE_SAMPLER, images + first + views.size(),
+                               nullptr, nullptr};
     }
   };
   texture_set(sets[2], layout->textures_vertex, vviews, vsamplers);
@@ -1041,7 +1086,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     ++stats_.skipped_draws;
     return;
   }
-  if (!writes.empty()) vk_.vkUpdateDescriptorSets(device_->device(), uint32_t(writes.size()), writes.data(), 0, nullptr);
+  if (write_count) vk_.vkUpdateDescriptorSets(device_->device(), write_count, writes, 0, nullptr);
 
   profile.Mark(kPhasePipeline);
   // Pipeline (VulkanPipelineCache::GetCurrentStateDescription + EnsurePipelineCreated, simplified).
@@ -1242,7 +1287,6 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     vp.x = float(viewport.xy_offset[0]) * scale_, vp.y = float(viewport.xy_offset[1]) * scale_;
     vp.width = float(viewport.xy_extent[0]) * scale_, vp.height = float(viewport.xy_extent[1]) * scale_;
   }
-  vk_.vkCmdSetViewport(cmd_, 0, 1, &vp);
   // BOTS_DEBUG_PIXEL_FRACTION=f (0 < f < 1): draws shade only the top-left f x f of their scissor - a wrong picture,
   // for measuring how much of a frame's GPU time is per-pixel (what a lower render resolution could save).
   static const float pixel_fraction = [] {
@@ -1254,27 +1298,39 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     scissor_rect.extent.width = uint32_t(float(scissor_rect.extent.width) * pixel_fraction);
     scissor_rect.extent.height = uint32_t(float(scissor_rect.extent.height) * pixel_fraction);
   }
-  vk_.vkCmdSetScissor(cmd_, 0, 1, &scissor_rect);
   float bias_slope, bias_constant;
   du::GetPreferredFacePolygonOffset(regs, polygonal, bias_slope, bias_constant);
   bias_constant *= depth_info.depth_format == xe::DepthRenderTargetFormat::kD24S8
                        ? du::kD3D10PolygonOffsetFactorUnorm24
                        : du::kD3D10PolygonOffsetFactorFloat24;
-  vk_.vkCmdSetDepthBias(cmd_, bias_constant, 0.0f, bias_slope * xe::kPolygonOffsetScaleSubpixelUnit);
-  const float blend_constants[4] = {
-      regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_RED), regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_GREEN),
-      regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_BLUE), regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_ALPHA)};
-  vk_.vkCmdSetBlendConstants(cmd_, blend_constants);
   const auto ref_front = regs.Get<reg::RB_STENCILREFMASK>();
   const auto ref_back = polygonal && depth_control.backface_enable
                             ? regs.Get<reg::RB_STENCILREFMASK>(rg::XE_GPU_REG_RB_STENCILREFMASK_BF)
                             : ref_front;
-  vk_.vkCmdSetStencilReference(cmd_, VK_STENCIL_FACE_FRONT_BIT, ref_front.stencilref);
-  vk_.vkCmdSetStencilReference(cmd_, VK_STENCIL_FACE_BACK_BIT, ref_back.stencilref);
-  vk_.vkCmdSetStencilCompareMask(cmd_, VK_STENCIL_FACE_FRONT_BIT, ref_front.stencilmask);
-  vk_.vkCmdSetStencilCompareMask(cmd_, VK_STENCIL_FACE_BACK_BIT, ref_back.stencilmask);
-  vk_.vkCmdSetStencilWriteMask(cmd_, VK_STENCIL_FACE_FRONT_BIT, ref_front.stencilwritemask);
-  vk_.vkCmdSetStencilWriteMask(cmd_, VK_STENCIL_FACE_BACK_BIT, ref_back.stencilwritemask);
+  const DynamicState state{vp,
+                           scissor_rect,
+                           {bias_constant, bias_slope * xe::kPolygonOffsetScaleSubpixelUnit},
+                           {regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_RED), regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_GREEN),
+                            regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_BLUE), regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_ALPHA)},
+                           {ref_front.stencilref, ref_back.stencilref, ref_front.stencilmask, ref_back.stencilmask,
+                            ref_front.stencilwritemask, ref_back.stencilwritemask}};
+  const DynamicState* last = dynamic_valid_ ? &dynamic_ : nullptr;
+  auto changed = [&](auto member) { return !last || std::memcmp(&(last->*member), &(state.*member), sizeof(state.*member)); };
+  if (changed(&DynamicState::viewport)) vk_.vkCmdSetViewport(cmd_, 0, 1, &state.viewport);
+  if (changed(&DynamicState::scissor)) vk_.vkCmdSetScissor(cmd_, 0, 1, &state.scissor);
+  if (changed(&DynamicState::bias)) vk_.vkCmdSetDepthBias(cmd_, state.bias[0], 0.0f, state.bias[1]);
+  if (changed(&DynamicState::blend)) vk_.vkCmdSetBlendConstants(cmd_, state.blend);
+  if (changed(&DynamicState::stencil)) {
+    const uint32_t* s = state.stencil;
+    const uint32_t* o = last ? last->stencil : nullptr;
+    if (!o || s[0] != o[0]) vk_.vkCmdSetStencilReference(cmd_, VK_STENCIL_FACE_FRONT_BIT, s[0]);
+    if (!o || s[1] != o[1]) vk_.vkCmdSetStencilReference(cmd_, VK_STENCIL_FACE_BACK_BIT, s[1]);
+    if (!o || s[2] != o[2]) vk_.vkCmdSetStencilCompareMask(cmd_, VK_STENCIL_FACE_FRONT_BIT, s[2]);
+    if (!o || s[3] != o[3]) vk_.vkCmdSetStencilCompareMask(cmd_, VK_STENCIL_FACE_BACK_BIT, s[3]);
+    if (!o || s[4] != o[4]) vk_.vkCmdSetStencilWriteMask(cmd_, VK_STENCIL_FACE_FRONT_BIT, s[4]);
+    if (!o || s[5] != o[5]) vk_.vkCmdSetStencilWriteMask(cmd_, VK_STENCIL_FACE_BACK_BIT, s[5]);
+  }
+  dynamic_ = state, dynamic_valid_ = true;
 
   if (gpu_draw_labels_) {
     char label[128];

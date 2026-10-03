@@ -323,6 +323,7 @@ void Renderer::Transfer(Image& source, uint32_t source_format, Image& dest, uint
   }
   vk_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
   bound_pipeline_ = pipeline;
+  dynamic_valid_ = false;
   vk_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, transfer_layout_, 0, 1, &set, 0, nullptr);
   const VkViewport vp{0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f};
   vk_.vkCmdSetViewport(cmd_, 0, 1, &vp);

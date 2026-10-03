@@ -286,6 +286,7 @@ void Renderer::UseSubmission(uint32_t index) {
   pool_ = s.pool, cmd_ = s.cmd, fence_ = s.fence, transient_pool_ = s.transient_pool;
   ring_ = rings_[index];
   ring_used_ = 0;
+  ++ring_epoch_;
   transient_sets_ = 0;
   constant_set_ = constant_sets_[index];
   texture_sets_.clear();
@@ -353,7 +354,8 @@ void Renderer::ProcessInvalidations() {
     for (auto* map : {&texture_at_, &depth_texture_at_}) {
       for (auto it = map->begin(); it != map->end();) {
         const auto& image = *it->second;
-        const uint64_t bytes = uint64_t(image.width) * image.height * 4;  // close enough: pages, not texels
+        // Close enough: pages, not texels. Guest texels: the host image is render-scaled.
+        const uint64_t bytes = uint64_t(double(image.width) * image.height * 4 / (double(scale_) * scale_));
         it = overlaps(it->first, uint32_t(std::min<uint64_t>(it->first + bytes, UINT32_MAX))) ? map->erase(it)
                                                                                                 : std::next(it);
       }
@@ -469,6 +471,7 @@ void Renderer::BeginCommands(GpuCat cat) {
     vk_.vkBeginCommandBuffer(cmd_, &begin);
     recording_ = true;
     bound_pipeline_ = VK_NULL_HANDLE;
+    dynamic_valid_ = false;
     if (gpu_timing_) {
       vk_.vkCmdResetQueryPool(cmd_, submissions_[current_].timing_pool, 0, kMaxGpuMarks);
       submissions_[current_].marks.clear();

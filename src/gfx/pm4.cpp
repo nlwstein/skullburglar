@@ -45,6 +45,7 @@ void Pm4Executor::WriteRegister(uint32_t index, uint32_t value) {
   if (index >= rg::RegisterFile::kRegisterCount) return;
   regs_->values[index] = value;
   ++stats_.register_writes;
+  constant_writes_.Note(index);
 }
 
 void Pm4Executor::Execute(const uint8_t* data, size_t bytes) {
@@ -127,6 +128,7 @@ void Pm4Executor::Type3(uint32_t opcode, const uint32_t* body, uint32_t count) {
       if (!left) break;
       Draw draw;
       draw.draw_indx_2 = opcode == kDrawIndx2;
+      draw.constant_writes = constant_writes_.writes();
       draw.initiator.value = BE(p);
       WriteRegister(uint32_t(rg::XE_GPU_REG_VGT_DRAW_INITIATOR), draw.initiator.value);
       const auto source = draw.initiator.source_select;

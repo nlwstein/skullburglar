@@ -135,6 +135,7 @@ class Renderer : public Pm4Sink {
     uint64_t textures = 0, unsupported_textures = 0, transfers = 0;
     uint64_t uploaded_bytes = 0, invalidations = 0, texture_reloads = 0, texture_evictions = 0;  // live
     uint64_t presents = 0, barriers = 0;  // native
+    uint64_t constant_reuses = 0;  // constant buffers bound from an earlier draw's upload
     uint64_t pending_draws = 0;  // live: skipped while their shaders or pipeline were still being made
     // Occlusion queries ended, and those answered "visible" without counting (occlusion_hidden(): counted 0).
     uint64_t occlusion_queries = 0, occlusion_inexact = 0;
@@ -218,6 +219,19 @@ class Renderer : public Pm4Sink {
   using TextureCacheKey = std::array<uint32_t, 5>;
   // Filters (mag, min, mip), clamp modes (x, y, z), border colour, mip range, anisotropy.
   using SamplerKey = std::array<uint32_t, 10>;
+  // Hashes for the per-draw lookups (hash maps rather than ordered maps: B-085).
+  struct WordsHash {
+    template <size_t N>
+    size_t operator()(const std::array<uint32_t, N>& words) const {
+      uint64_t h = 0x9E3779B97F4A7C15ull;
+      for (uint32_t w : words) h = (h ^ w) * 0xFF51AFD7ED558CCDull, h ^= h >> 32;
+      return size_t(h);
+    }
+  };
+  struct BytesHash {  // std::string keys looked up by std::string_view without a temporary string
+    using is_transparent = void;
+    size_t operator()(std::string_view s) const { return std::hash<std::string_view>{}(s); }
+  };
   // The attachments of the open render pass.
   struct Attachments {
     std::array<Image*, 4> color{};
@@ -434,9 +448,9 @@ class Renderer : public Pm4Sink {
 
   std::map<SurfaceKey, std::unique_ptr<Image>> surfaces_;
   std::map<TextureKey, std::unique_ptr<Image>> textures_;
-  std::map<uint32_t, Image*> texture_at_;  // guest address -> latest resolve destination there
+  std::unordered_map<uint32_t, Image*> texture_at_;  // guest address -> latest resolve destination there
   // Depth resolves also keep the depth value, for 24_8 fetches (the 8888 destination holds the raw bits).
-  std::map<uint32_t, Image*> depth_texture_at_;
+  std::unordered_map<uint32_t, Image*> depth_texture_at_;
   // Resolve destinations are pitch wide; a fetch of a narrower (or shorter) texture samples a copy of its corner.
   std::map<std::tuple<const Image*, uint32_t, uint32_t>, std::unique_ptr<Image>> crops_;
   uint32_t last_resolve_address_ = 0;
@@ -446,6 +460,19 @@ class Renderer : public Pm4Sink {
   std::unique_ptr<ShaderCache> shaders_;
   Buffer shared_memory_, ring_;
   VkDeviceSize ring_used_ = 0;
+  uint64_t ring_epoch_ = 1;  // bumped whenever ring_ is reset: earlier uploads can no longer be reused
+  // The last upload of each constant buffer (B-085). A draw reuses it while the ring is the same and nothing it
+  // holds has changed: the same shader (float constants) and no write to its register groups since
+  // (Draw::constant_writes; key is the latest write among them), or equal bytes (system constants).
+  struct ConstantUpload {
+    uint64_t epoch = 0, key = 0;
+    const void* shader = nullptr;
+    uint32_t offset = 0;
+  };
+  static constexpr uint32_t kConstantBuffers = 5;
+  ConstantUpload constant_uploads_[kConstantBuffers];
+  std::vector<uint8_t> last_system_constants_;
+  uint64_t system_constants_version_ = 0;  // bumped when they change
   uint32_t transient_sets_ = 0;  // allocated from transient_pool_ this submission
   bool shared_memory_uploaded_ = false;
   uint32_t shared_memory_bindings_ = 1;
@@ -458,7 +485,7 @@ class Renderer : public Pm4Sink {
     VkPipeline pipeline = VK_NULL_HANDLE;  // set by whoever creates it, before state becomes kReady
     bool counted = false;                  // in stats_.pipelines
   };
-  std::unordered_map<std::string, std::unique_ptr<PipelineSlot>> pipelines_;
+  std::unordered_map<std::string, std::unique_ptr<PipelineSlot>, BytesHash, std::equal_to<>> pipelines_;
   bool async_pipelines_ = false;
   VkPipelineCache pipeline_cache_ = VK_NULL_HANDLE;
   bool dummy_depth_ = false;  // every pass gets a depth attachment (driver workaround, renderer.cpp)
@@ -510,20 +537,32 @@ class Renderer : public Pm4Sink {
   VkPipeline last_pipeline_ = VK_NULL_HANDLE;
   // What the current command buffer has bound, so unchanged pipelines aren't rebound (VK_NULL_HANDLE: unknown).
   VkPipeline bound_pipeline_ = VK_NULL_HANDLE;
+  // The draw dynamic state last set in the current command buffer, so unchanged state isn't set again (B-085).
+  // Invalid after BeginCommands starts a buffer and after a transfer/present pipeline is bound (binding a pipeline
+  // with static state disturbs it).
+  struct DynamicState {
+    VkViewport viewport;
+    VkRect2D scissor;
+    float bias[2];
+    float blend[4];
+    uint32_t stencil[6];
+  };
+  DynamicState dynamic_{};
+  bool dynamic_valid_ = false;
   VkDescriptorPool persistent_pool_ = VK_NULL_HANDLE, transient_pool_ = VK_NULL_HANDLE;
   VkDescriptorSet shared_set_ = VK_NULL_HANDLE;
   std::array<VkDescriptorSet, kSubmissions> constant_sets_{};  // per ring (draw.cpp)
   VkDescriptorSet constant_set_ = VK_NULL_HANDLE;              // the current ring's
   // This submission's texture sets by layout + bound handles (draw.cpp); cleared with its transient pool.
-  std::unordered_map<std::string, VkDescriptorSet> texture_sets_;
+  std::unordered_map<std::string, VkDescriptorSet, BytesHash, std::equal_to<>> texture_sets_;
   std::string set_key_;
   VkSampler sampler_ = VK_NULL_HANDLE;
   Image null_2d_array_, null_3d_, null_cube_;
   Attachments open_pass_;
   VkExtent2D open_area_{};  // the open pass's render area (from the origin)
   bool rendering_ = false;
-  std::map<TextureCacheKey, std::unique_ptr<GuestTexture>> guest_textures_;
-  std::map<SamplerKey, VkSampler> samplers_;
+  std::unordered_map<TextureCacheKey, std::unique_ptr<GuestTexture>, WordsHash> guest_textures_;
+  std::unordered_map<SamplerKey, VkSampler, WordsHash> samplers_;
   bool trace_textures_ = false;
   uint64_t write_clock_ = 0;
   VkDescriptorSetLayout transfer_set_layout_ = VK_NULL_HANDLE;
