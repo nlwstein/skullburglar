@@ -74,6 +74,7 @@ if(REXSDK_DIR AND (NOT WIN32 OR REXGLUE_USE_VULKAN))
         src/gfx/pm4.cpp
         src/gfx/vk/draw.cpp
         src/gfx/vk/manifest.cpp
+        src/gfx/vk/occlusion.cpp
         src/gfx/vk/present.cpp
         src/gfx/vk/renderer.cpp
         src/gfx/vk/shaders.cpp

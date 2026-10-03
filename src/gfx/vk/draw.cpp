@@ -1266,12 +1266,14 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
                   samples_x * samples_y > 1 ? " ss4" : "");
     GpuLabel(kGpuDraw, label);
   }
+  if (indexed) vk_.vkCmdBindIndexBuffer(cmd_, ring_.buffer, index_offset, index_type);
+  BeginDrawQuery();
   if (indexed) {
-    vk_.vkCmdBindIndexBuffer(cmd_, ring_.buffer, index_offset, index_type);
     vk_.vkCmdDrawIndexed(cmd_, host_count, 1, 0, 0, 0);
   } else {
     vk_.vkCmdDraw(cmd_, host_count, 1, 0, 0);
   }
+  EndDrawQuery();
   ++stats_.draws;
   for (Image* image : attachments.color) {
     if (image) image->Use(scissor_x1, scissor_y1, bounded);

@@ -14,6 +14,7 @@ namespace bots::gfx::vk {
   X(vkAllocateCommandBuffers)        \
   X(vkAllocateDescriptorSets)        \
   X(vkBeginCommandBuffer)            \
+  X(vkCmdBeginQuery)                 \
   X(vkCmdBeginRendering)             \
   X(vkCmdBindDescriptorSets)         \
   X(vkCmdBindIndexBuffer)            \
@@ -27,6 +28,7 @@ namespace bots::gfx::vk {
   X(vkCmdCopyImageToBuffer)          \
   X(vkCmdDraw)                       \
   X(vkCmdDrawIndexed)                \
+  X(vkCmdEndQuery)                   \
   X(vkCmdEndRendering)               \
   X(vkCmdPipelineBarrier)            \
   X(vkCmdPushConstants)              \

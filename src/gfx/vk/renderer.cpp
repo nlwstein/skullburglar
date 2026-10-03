@@ -279,7 +279,10 @@ void Renderer::SavePipelineCache() {
 
 void Renderer::UseSubmission(uint32_t index) {
   current_ = index;
-  const Submission& s = submissions_[index];
+  Submission& s = submissions_[index];
+  // Its occlusion results are read (WaitSubmission): reset the slots used when it next begins recording.
+  s.occlusion_reset = std::max(s.occlusion_reset, s.occlusion_slots);
+  s.occlusion_slots = 0;
   pool_ = s.pool, cmd_ = s.cmd, fence_ = s.fence, transient_pool_ = s.transient_pool;
   ring_ = rings_[index];
   ring_used_ = 0;
@@ -290,6 +293,7 @@ void Renderer::UseSubmission(uint32_t index) {
 
 void Renderer::WaitSubmission(Submission& submission) {
   if (!submission.pending) return;
+  WaitResolved(uint32_t(&submission - submissions_.data()));
   {
     ScopedMicros wait(stats_.wait_us);
     vk_.vkWaitForFences(device_->device(), 1, &submission.fence, VK_TRUE, UINT64_MAX);
@@ -359,6 +363,16 @@ void Renderer::ProcessInvalidations() {
 
 void Renderer::EndFrame() {
   constexpr uint64_t kUnusedFrames = 600;  // ~10 s at 60 fps
+  // Frames in flight: frame N - 2 must be done before frame N is presented, as when kFramesInFlight slots with one
+  // submission per frame were the only limit.
+  frame_ends_.push_back(stats_.flushes);
+  if (frame_ends_.size() >= kFramesInFlight - 1) {
+    const uint64_t done = frame_ends_.front();
+    frame_ends_.pop_front();
+    for (Submission& s : submissions_) {
+      if (s.pending && s.serial <= done) WaitSubmission(s);
+    }
+  }
   PumpWarmup();
   if (++frame_ % 64) return;
   for (auto it = guest_textures_.begin(); it != guest_textures_.end();) {
@@ -427,6 +441,7 @@ Renderer::~Renderer() {
   if (manifest_) std::fclose(manifest_);
   const VkDevice dev = device_->device();
   if (vk_.vkDeviceWaitIdle) vk_.vkDeviceWaitIdle(dev);
+  StopOcclusion();  // after the GPU is idle: its fence waits all return
   SavePipelineCache();
   if (pipeline_cache_) vk_.vkDestroyPipelineCache(dev, pipeline_cache_, nullptr);
   DestroyFrameState();
@@ -442,6 +457,7 @@ Renderer::~Renderer() {
     if (submission.fence) vk_.vkDestroyFence(dev, submission.fence, nullptr);
     if (submission.pool) vk_.vkDestroyCommandPool(dev, submission.pool, nullptr);
     if (submission.timing_pool) vk_.vkDestroyQueryPool(dev, submission.timing_pool, nullptr);
+    if (submission.occlusion_pool) vk_.vkDestroyQueryPool(dev, submission.occlusion_pool, nullptr);
   }
   if (allocator_) vmaDestroyAllocator(allocator_);
 }
@@ -458,6 +474,11 @@ void Renderer::BeginCommands(GpuCat cat) {
       submissions_[current_].marks.clear();
       submissions_[current_].labels.clear();
       gpu_cat_ = 0xFF;
+    }
+    Submission& s = submissions_[current_];
+    if (s.occlusion_pool && s.occlusion_reset) {
+      vk_.vkCmdResetQueryPool(cmd_, s.occlusion_pool, 0, std::min(s.occlusion_reset, occlusion_pool_size_));
+      s.occlusion_reset = 0;
     }
   }
   GpuMark(cat);
@@ -557,8 +578,10 @@ void Renderer::Flush() {
   ++stats_.flushes;
   Submission& submitted = submissions_[current_];
   submitted.pending = true;
+  submitted.serial = stats_.flushes;
   submitted.retired.insert(submitted.retired.end(), retired_.begin(), retired_.end());
   retired_.clear();
+  QueueResolve(current_);
   const uint32_t next = (current_ + 1) % kSubmissions;
   WaitSubmission(submissions_[next]);
   UseSubmission(next);
@@ -728,6 +751,7 @@ void Renderer::OnDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, const 
     Resolve(regs);
     return;
   }
+  if (occlusion_open_) ++occlusion_draws_;
   IssueDraw(regs, vs, ps, draw);
 }
 

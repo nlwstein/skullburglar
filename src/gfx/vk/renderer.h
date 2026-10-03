@@ -13,14 +13,18 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <cstdio>
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <tuple>
 #include <utility>
@@ -85,6 +89,21 @@ class Renderer : public Pm4Sink {
   // Warm-up progress: pipelines recorded in the manifest, and how many of them are created (ready or failed).
   size_t warmup_total() const { return warm_.size(); }
   size_t warmup_done() const { return warm_done_; }
+  // Occlusion queries (occlusion.cpp). The guest brackets a query's draws with EVENT_WRITE_ZPD; at the end D3D
+  // leaves 0xFFFFFEED markers in the sample-count struct at `address` and waits for the GPU to replace them. Each
+  // draw in between is counted by a Vulkan occlusion query, and a resolver thread writes the sum into the guest
+  // struct once the GPU has finished that submission. A query the renderer can't count exactly (a draw skipped or
+  // split across submissions, no draws, out of slots) reports `visible_samples` at once.
+  void EnableOcclusionQueries(uint32_t visible_samples);
+  // On by default, except on Intel: the T480 (GPU-bound) gains no GPU time from the culled draws and loses the
+  // CPU/GPU overlap while the guest waits for results (14.95 vs 15.5 fps). BOTS_GFX_OCCLUSION=0/1 overrides.
+  bool occlusion_queries_by_default() const;
+  bool occlusion_queries() const { return occlusion_pool_size_ != 0; }
+  void BeginOcclusionQuery();
+  void EndOcclusionQuery(uint32_t address);
+  // Queries recorded but not submitted: the guest may be waiting for them (submit when the command stream runs dry).
+  bool occlusion_unsubmitted() const;
+  uint64_t occlusion_hidden() const { return occlusion_hidden_.load(std::memory_order_relaxed); }
   // For the tracker: records a copy of guest physical [start, start + length) into the shared-memory buffer.
   bool UploadGuestMemory(uint32_t start, uint32_t length);
   // Live: after each guest frame's Flush. Evicts guest textures no draw used for a while.
@@ -107,6 +126,8 @@ class Renderer : public Pm4Sink {
     uint64_t uploaded_bytes = 0, invalidations = 0, texture_reloads = 0, texture_evictions = 0;  // live
     uint64_t presents = 0, barriers = 0;  // native
     uint64_t pending_draws = 0;  // live: skipped while their shaders or pipeline were still being made
+    // Occlusion queries ended, and those answered "visible" without counting (occlusion_hidden(): counted 0).
+    uint64_t occlusion_queries = 0, occlusion_inexact = 0;
     uint64_t draw_phase_ns[12] = {};  // BOTS_DRAW_PROFILE=1: IssueDraw's time by phase (kDrawPhaseNames)
     // Profiling (P5): submits, and microseconds blocked on the GPU fence, inside OnDraw (recording, including
     // texture loads and any flush it triggers) and inside LoadTexture (untile + upload).
@@ -358,6 +379,10 @@ class Renderer : public Pm4Sink {
   Api vk_;
   bool ok_ = false;
   VmaAllocator allocator_ = nullptr;
+  struct OcclusionQuery {
+    uint32_t address, first, count;  // guest sample-count struct; slots in the submission's pool
+    uint64_t generation;             // occlusion_generations_[address] when it ended
+  };
   // Submissions in flight. The members below (pool_, cmd_, fence_, ring_, transient_pool_, retired_) are the
   // current one's; Flush submits it and moves on to the next slot, waiting only if that slot is still pending.
   struct Submission {
@@ -370,8 +395,18 @@ class Renderer : public Pm4Sink {
     VkQueryPool timing_pool = VK_NULL_HANDLE;
     std::vector<uint8_t> marks;  // GpuCat per timestamp written
     std::vector<std::string> labels;  // parallel to marks
+    // Occlusion queries: one slot per counted draw; the guest queries they sum into, resolved after the fence.
+    VkQueryPool occlusion_pool = VK_NULL_HANDLE;
+    uint32_t occlusion_slots = 0;           // used in this recording
+    uint32_t occlusion_reset = UINT32_MAX;  // slots to reset when recording begins (all, at first)
+    std::vector<OcclusionQuery> occlusion;
+    bool resolving = false;  // queued for the resolver (occlusion_mutex_)
+    uint64_t serial = 0;     // stats_.flushes once submitted
   };
-  static constexpr uint32_t kSubmissions = 3;
+  // More slots than frames in flight: occlusion queries add a submission mid-frame (the guest waits on them), and
+  // with only 3 slots that one waited for a free slot. EndFrame keeps the frames in flight at kFramesInFlight.
+  static constexpr uint32_t kSubmissions = 6, kFramesInFlight = 3;
+  std::deque<uint64_t> frame_ends_;  // stats_.flushes at the last EndFrames
   std::array<Submission, kSubmissions> submissions_;
   std::array<Buffer, kSubmissions> rings_;
   uint32_t current_ = 0;
@@ -415,6 +450,26 @@ class Renderer : public Pm4Sink {
   std::vector<std::unique_ptr<Image>> dummy_depths_;
   std::filesystem::path pipeline_cache_path_;
   uint64_t pipelines_saved_ = 0;
+  // Occlusion queries (occlusion.cpp).
+  void ResolveOcclusion();  // the resolver thread
+  void WriteOcclusionResult(uint32_t address, uint64_t generation, uint32_t samples);  // occlusion_mutex_ held
+  void WaitResolved(uint32_t index);  // until the resolver is done with that submission
+  void QueueResolve(uint32_t index);  // just submitted
+  void StopOcclusion();
+  // Around each draw recorded: count it if a query is open (OnDraw counts the draws that reach the renderer).
+  void BeginDrawQuery();
+  void EndDrawQuery();
+  uint32_t occlusion_pool_size_ = 0, occlusion_visible_ = 1000;
+  VkQueryControlFlags occlusion_flags_ = 0;
+  bool occlusion_open_ = false, occlusion_drawing_ = false, occlusion_inexact_ = false;  uint64_t occlusion_flush_ = 0;  // stats_.flushes when the open query's slots began
+  uint32_t occlusion_first_ = 0, occlusion_draws_ = 0, occlusion_counted_ = 0;
+  std::mutex occlusion_mutex_;
+  std::condition_variable occlusion_cv_;
+  std::deque<uint32_t> occlusion_jobs_;  // submission indices, in submit order
+  bool occlusion_stop_ = false;
+  std::unordered_map<uint32_t, uint64_t> occlusion_generations_;  // by guest address: queries ended there
+  std::thread occlusion_thread_;
+  std::atomic<uint64_t> occlusion_hidden_{0};
   // Pipeline manifest (manifest.cpp).
   struct ManifestShader {
     uint32_t type;

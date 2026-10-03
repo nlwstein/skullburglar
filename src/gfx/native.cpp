@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <iterator>
 #include <string>
 #include <string_view>
@@ -105,7 +106,11 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
           REXLOG_INFO("gfx native: GPU ms per frame: {:.2f} total:{}", total, gpu);
           REXLOG_INFO("gfx native: top GPU spans per frame:{}", renderer_->TakeGpuLabelReport(n, 25));
         }
+        REXLOG_INFO("gfx native: CP idle {:.2f} ms per frame, {:.2f} ms of it after submitting queries",
+                    double(idle_us_ - last_idle_us_) / 1000.0 / n,
+                    double(query_idle_us_ - last_query_idle_us_) / 1000.0 / n);
       }
+      last_idle_us_ = idle_us_, last_query_idle_us_ = query_idle_us_;
       last_ = {frames_, now, st.draw_us, st.texture_us, st.wait_us, st.flushes, st.draws, st.resolves};
       last_.render_passes = st.render_passes, last_.transfers = st.transfers, last_.barriers = st.barriers;
       last_.pending_draws = st.pending_draws;
@@ -115,11 +120,12 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
       REXLOG_INFO(
           "gfx native: frame {}: {} draws, {} resolves, {} presents, {} failed shaders, {} unsupported prims, "
           "{} unsupported textures, {:.1f} MB uploaded, {} invalidations, {} texture reloads, {} evictions, {} indirect draws skipped, "
-          "{} draws skipped for pipelines, {}/{} pipelines warmed (totals)",
+          "{} draws skipped for pipelines, {}/{} pipelines warmed, {} occlusion queries ({} uncounted, {} hidden) "
+          "(totals)",
           frames_, st.draws, st.resolves, st.presents, st.failed_shaders, st.unsupported_primitives,
           st.unsupported_textures, st.uploaded_bytes / 1048576.0, st.invalidations, st.texture_reloads,
           st.texture_evictions, indirect_draws_, st.pending_draws, renderer_->warmup_done(),
-          renderer_->warmup_total());
+          renderer_->warmup_total(), st.occlusion_queries, st.occlusion_inexact, renderer_->occlusion_hidden());
     }
   }
 
@@ -139,6 +145,11 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     sync_ = std::make_unique<vk::MemorySync>(*memory_, *renderer_);
     renderer_->SetMemoryTracker(sync_.get());
     if (!pipeline_cache_path_.empty()) renderer_->LoadPipelineCache(pipeline_cache_path_);
+    const char* occlusion = std::getenv("BOTS_GFX_OCCLUSION");
+    if (occlusion && *occlusion ? *occlusion == '1' : renderer_->occlusion_queries_by_default()) {
+      renderer_->EnableOcclusionQueries(1000);  // "visible": the SDK's fake count
+    }
+    REXLOG_INFO("gfx native: occlusion queries {}", renderer_->occlusion_queries() ? "on" : "off");
     REXLOG_INFO("gfx native: renderer up");
     return true;
   }
@@ -203,6 +214,50 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   // Copies arrive as draws in EDRAM copy mode, which the renderer resolves itself.
   bool IssueCopy() override { return true; }
 
+  // Occlusion queries (renderer.h; BOTS_GFX_OCCLUSION=0/1). The SDK reports every query visible, so the game's
+  // occlusion culling culls nothing. D3D marks a query's end by writing 0xFFFFFEED into the sample-count struct
+  // before the event; a begin has no marker and starts from zero.
+  bool ExecutePacketType3_EVENT_WRITE_ZPD(rex::memory::RingBuffer* reader, uint32_t packet,
+                                          uint32_t count) override {
+    if (!renderer_ || !renderer_->occlusion_queries()) {
+      return CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(reader, packet, count);
+    }
+    const uint32_t initiator = reader->ReadAndSwap<uint32_t>();
+    WriteRegister(rg::XE_GPU_REG_VGT_EVENT_INITIATOR, initiator & 0x3F);
+    const uint32_t address = register_file_->values[rg::XE_GPU_REG_RB_SAMPLE_COUNT_ADDR];
+    auto* counts = memory_->TranslatePhysical<xe::xe_gpu_depth_sample_counts*>(address);
+    if (!counts) return true;
+    const uint32_t marker = rex::byte_swap(0xFFFFFEEDu);
+    const bool end = counts->ZPass_A == marker || counts->ZPass_B == marker || counts->ZFail_A == marker ||
+                     counts->ZFail_B == marker;
+    if (end) {
+      renderer_->EndOcclusionQuery(address);
+    } else {
+      std::memset(counts, 0, sizeof(*counts));
+      renderer_->BeginOcclusionQuery();
+    }
+    return true;
+  }
+
+  // The command stream ran dry (or the CP waits on memory): the guest may be spinning on a query result, so submit
+  // the recorded queries now rather than at the frame's end. UE3 waits (GetQueryResult, bWait = 1) on queries of the
+  // frame it is drawing, and its GetData spin kicks the ring every iteration, so holding back until the stream has
+  // stayed dry for a while never fires (tried: Deck 64 -> 39.5 fps).
+  void PrepareForWait() override {
+    query_wait_ = renderer_ && renderer_->occlusion_unsubmitted();
+    if (query_wait_) renderer_->Flush();
+    wait_start_ = std::chrono::steady_clock::now();
+    CommandProcessor::PrepareForWait();
+  }
+  // Profiling: time the CP spent with nothing to do, and the part of it that began with queries just submitted.
+  void ReturnFromWait() override {
+    const auto us = uint64_t(
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - wait_start_).count());
+    idle_us_ += us;
+    if (query_wait_) query_idle_us_ += us;
+    CommandProcessor::ReturnFromWait();
+  }
+
  private:
   std::unique_ptr<vk::Renderer> renderer_;
   std::unique_ptr<vk::MemorySync> sync_;
@@ -217,6 +272,9 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     uint64_t render_passes = 0, transfers = 0, barriers = 0, pending_draws = 0, gpu_ns[7] = {}, draw_phase_ns[12] = {};
   } last_;
   uint32_t indirect_depth_ = 0;
+  bool query_wait_ = false;
+  std::chrono::steady_clock::time_point wait_start_;
+  uint64_t idle_us_ = 0, query_idle_us_ = 0, last_idle_us_ = 0, last_query_idle_us_ = 0;
 };
 
 class NativeGraphicsSystem final : public rg::GraphicsSystem {
