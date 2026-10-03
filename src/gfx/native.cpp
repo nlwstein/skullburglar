@@ -103,7 +103,11 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
             phases += fmt::format(" {} {:.2f},", vk::Renderer::kDrawPhaseNames[i],
                                   double(st.draw_phase_ns[i] - last_.draw_phase_ns[i]) / 1e6 / n);
           }
-          REXLOG_INFO("gfx native: draw CPU ms per frame:{}", phases);
+          REXLOG_INFO("gfx native: draw CPU ms per frame:{} index buffers {:.0f} reused, {:.0f} converted, "
+                      "{:.1f} invalidations",
+                      phases, double(st.index_reuses - last_.index_reuses) / n,
+                      double(st.index_converts - last_.index_converts) / n,
+                      double(st.invalidations - last_.invalidations) / n);
         }
         if (renderer_->gpu_timing()) {
           std::string gpu;
@@ -124,6 +128,8 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
       last_ = {frames_, now, st.draw_us, st.texture_us, st.wait_us, st.flushes, st.draws, st.resolves};
       last_.render_passes = st.render_passes, last_.transfers = st.transfers, last_.barriers = st.barriers;
       last_.pending_draws = st.pending_draws;
+      last_.index_reuses = st.index_reuses, last_.index_converts = st.index_converts;
+      last_.invalidations = st.invalidations;
       renderer_->SavePipelineCache();  // runs are often killed rather than shut down
       std::copy(std::begin(st.gpu_ns), std::end(st.gpu_ns), last_.gpu_ns);
       std::copy(std::begin(st.draw_phase_ns), std::end(st.draw_phase_ns), last_.draw_phase_ns);
@@ -354,6 +360,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     std::chrono::steady_clock::time_point time;
     uint64_t draw_us = 0, texture_us = 0, wait_us = 0, flushes = 0, draws = 0, resolves = 0;
     uint64_t render_passes = 0, transfers = 0, barriers = 0, pending_draws = 0, gpu_ns[7] = {}, draw_phase_ns[12] = {};
+    uint64_t index_reuses = 0, index_converts = 0, invalidations = 0;
   } last_;
   uint32_t indirect_depth_ = 0;
   bool query_wait_ = false;

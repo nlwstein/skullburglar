@@ -139,7 +139,7 @@ class Renderer : public Pm4Sink {
     uint64_t uploaded_bytes = 0, invalidations = 0, texture_reloads = 0, texture_evictions = 0;  // live
     uint64_t presents = 0, barriers = 0;  // native
     uint64_t constant_reuses = 0;  // constant buffers bound from an earlier draw's upload
-    uint64_t index_reuses = 0;  // DMA index buffers bound from an earlier draw's conversion
+    uint64_t index_reuses = 0, index_converts = 0;  // DMA index buffers bound from an earlier conversion / converted
     uint64_t pending_draws = 0;  // live: skipped while their shaders or pipeline were still being made
     // Occlusion queries ended, and those answered "visible" without counting (occlusion_hidden(): counted 0).
     uint64_t occlusion_queries = 0, occlusion_inexact = 0;

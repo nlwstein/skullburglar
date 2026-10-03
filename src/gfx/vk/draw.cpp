@@ -889,6 +889,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     if (!indexed) {
       restart = restart && strip;  // Vulkan only restarts strips
       indexed = true;
+      ++stats_.index_converts;
       index_uploads_[key] = {uint32_t(index_offset), count * (index32 ? 4u : 2u),
                              index_type == VK_INDEX_TYPE_UINT32, restart};
     }
