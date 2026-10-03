@@ -1235,6 +1235,17 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     vp.width = float(viewport.xy_extent[0]), vp.height = float(viewport.xy_extent[1]);
   }
   vk_.vkCmdSetViewport(cmd_, 0, 1, &vp);
+  // BOTS_DEBUG_PIXEL_FRACTION=f (0 < f < 1): draws shade only the top-left f x f of their scissor - a wrong picture,
+  // for measuring how much of a frame's GPU time is per-pixel (what a lower render resolution could save).
+  static const float pixel_fraction = [] {
+    const char* v = std::getenv("BOTS_DEBUG_PIXEL_FRACTION");
+    const float f = v ? float(std::atof(v)) : 0.0f;
+    return f > 0.0f && f < 1.0f ? f : 1.0f;
+  }();
+  if (pixel_fraction < 1.0f) {
+    scissor_rect.extent.width = uint32_t(float(scissor_rect.extent.width) * pixel_fraction);
+    scissor_rect.extent.height = uint32_t(float(scissor_rect.extent.height) * pixel_fraction);
+  }
   vk_.vkCmdSetScissor(cmd_, 0, 1, &scissor_rect);
   float bias_slope, bias_constant;
   du::GetPreferredFacePolygonOffset(regs, polygonal, bias_slope, bias_constant);

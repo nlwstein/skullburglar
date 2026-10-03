@@ -9,11 +9,14 @@
 // GPUs of the same feature class and can be merged into one master per class (in practice: MoltenVK, and the rest).
 // Bump the magic when the record layout or the meaning of the translator's modification bits changes. A header for
 // another class or record size starts the file over. A truncated last chunk (a killed run) is ignored.
+#include <algorithm>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
 
+#include <fmt/ranges.h>
 #include <rex/logging.h>
+#include <xxhash.h>
 
 #include "renderer.h"
 #include "shaders.h"
@@ -104,6 +107,18 @@ void Renderer::LoadManifest(const std::filesystem::path& path) {
   size_t master_size = 0;
   const auto master = std::filesystem::path(path).replace_extension().replace_extension(".master.bin");
   const bool have_master = read(master, false, master_size) != 0;
+  const size_t before_refs = manifest_records_.size();
+  if (refs_reader_) {
+    std::vector<std::filesystem::path> dirs = refs_dirs_;
+    dirs.push_back(path.parent_path());
+    for (const auto& dir : dirs) {
+      std::error_code ec;
+      for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        if (entry.path().extension() == ".refs") LoadShaderRefs(entry.path(), &header, sizeof(header));
+      }
+    }
+  }
+  const size_t from_refs = manifest_records_.size() - before_refs;
   std::error_code ec;
   std::filesystem::create_directories(path.parent_path(), ec);
   if (valid) {
@@ -119,11 +134,106 @@ void Renderer::LoadManifest(const std::filesystem::path& path) {
   }
   if (!warm_enabled_) warm_.clear();
   warm_start_ = std::chrono::steady_clock::now();
-  REXLOG_INFO("gfx native: pipeline manifest {}: {} pipelines{}, {} shaders, class {}{}", path.string(), own,
-              have_master ? fmt::format(" + {} from the master", manifest_records_.size() - own) : std::string(),
+  REXLOG_INFO("gfx native: pipeline manifest {}: {} pipelines{}{}, {} shaders, class {}{}", path.string(), own,
+              have_master ? fmt::format(" + {} from the master", before_refs - own) : std::string(),
+              from_refs ? fmt::format(" + {} from shader refs", from_refs) : std::string(),
               manifest_shaders_.size(), header.features,
               warm_enabled_ ? "" : " (warm-up off: BOTS_GFX_PRECOMPILE=0)");
   if (master_size && !have_master) REXLOG_WARN("gfx native: {} is for another device class; not used", master.string());
+}
+
+// A refs file (tools/shader_refs.py): magic "BOTSPR01" and the master's header, then chunks
+//   'R' u64 hash, u32 type, u32 dwords, u16 source length, source, u32 offset, u16 patches, (u16 index, u32 dword)...
+//   'P' record, as in a manifest
+// Only files whose master header matches this device's are used. Shaders already known (own manifest, master) aren't
+// read again; the rest come from the disc through refs_reader_ and must hash to what the record names.
+void Renderer::LoadShaderRefs(const std::filesystem::path& file, const void* header, size_t header_size) {
+  static constexpr char kRefsMagic[8] = {'B', 'O', 'T', 'S', 'P', 'R', '0', '1'};
+  std::vector<char> data;
+  if (std::FILE* f = std::fopen(file.string().c_str(), "rb")) {
+    char chunk[65536];
+    for (size_t n; (n = std::fread(chunk, 1, sizeof(chunk), f)) != 0;) data.insert(data.end(), chunk, chunk + n);
+    std::fclose(f);
+  }
+  if (data.size() < 8 + header_size || std::memcmp(data.data(), kRefsMagic, 8) != 0) return;
+  if (std::memcmp(data.data() + 8, header, header_size) != 0) {
+    REXLOG_INFO("gfx native: shader refs {} are for another device class; not used", file.string());
+    return;
+  }
+  uint32_t record_size;
+  std::memcpy(&record_size, data.data() + 8 + 8, 4);
+  struct Ref {
+    uint64_t hash;
+    uint32_t type, dwords, offset;
+    std::string source;
+    size_t patches;  // offset of the patch list in `data`
+    uint16_t patch_count;
+  };
+  std::vector<Ref> refs;
+  size_t records = 0, at = 8 + header_size;
+  auto fits = [&](size_t n) { return at + n <= data.size(); };
+  while (at < data.size()) {
+    const char tag = data[at];
+    if (tag == 'R' && fits(19)) {
+      Ref r;
+      uint16_t length;
+      std::memcpy(&r.hash, &data[at + 1], 8);
+      std::memcpy(&r.type, &data[at + 9], 4);
+      std::memcpy(&r.dwords, &data[at + 13], 4);
+      std::memcpy(&length, &data[at + 17], 2);
+      at += 19;
+      if (!fits(size_t(length) + 6)) break;
+      r.source.assign(&data[at], length);
+      std::memcpy(&r.offset, &data[at + length], 4);
+      std::memcpy(&r.patch_count, &data[at + length + 4], 2);
+      at += length + 6;
+      r.patches = at;
+      if (!fits(size_t(r.patch_count) * 6)) break;
+      at += size_t(r.patch_count) * 6;
+      refs.push_back(std::move(r));
+    } else if (tag == 'P' && fits(1 + size_t(record_size))) {
+      std::string record(&data[at + 1], record_size);
+      if (manifest_records_.emplace(record, false).second) warm_.push_back({std::move(record)}), ++records;
+      at += 1 + record_size;
+    } else {
+      REXLOG_WARN("gfx native: shader refs {}: bad chunk at {}", file.string(), at);
+      break;
+    }
+  }
+  // Grouped by source so each package is opened once.
+  std::stable_sort(refs.begin(), refs.end(), [](const Ref& a, const Ref& b) { return a.source < b.source; });
+  const auto start = std::chrono::steady_clock::now();
+  size_t rebuilt = 0, known = 0;
+  std::vector<std::string> failed;
+  std::vector<uint8_t> bytes;
+  for (const Ref& r : refs) {
+    if (manifest_shaders_.count(r.hash)) {
+      ++known;
+      continue;
+    }
+    const bool safe = r.source.find("..") == std::string::npos && !r.source.empty() && r.source[0] != '/' &&
+                      r.source.find(':') == std::string::npos && r.dwords && r.dwords < (1u << 20);
+    bool ok = safe && refs_reader_(r.source, r.offset, r.dwords * 4, bytes) && bytes.size() == size_t(r.dwords) * 4;
+    for (uint16_t i = 0; ok && i < r.patch_count; ++i) {
+      uint16_t index;
+      std::memcpy(&index, &data[r.patches + i * 6], 2);
+      ok = index < r.dwords;
+      if (ok) std::memcpy(&bytes[size_t(index) * 4], &data[r.patches + i * 6 + 2], 4);
+    }
+    if (!ok || (XXH3_64bits(bytes.data(), bytes.size()) ^ uint64_t(r.type)) != r.hash) {
+      if (failed.size() < 8) failed.push_back(fmt::format("{:016X} ({})", r.hash, r.source));
+      continue;
+    }
+    ManifestShader& shader = manifest_shaders_[r.hash];
+    shader.type = r.type;
+    shader.ucode.resize(r.dwords);
+    std::memcpy(shader.ucode.data(), bytes.data(), bytes.size());
+    ++rebuilt;
+  }
+  REXLOG_INFO("gfx native: shader refs {}: {} pipelines, {} shaders rebuilt from the disc in {:.0f} ms, {} known{}",
+              file.string(), records, rebuilt,
+              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(), known,
+              failed.empty() ? std::string() : fmt::format(", failed: {}", fmt::join(failed, " ")));
 }
 
 void Renderer::RecordPipeline(const PipelineKey& key) {

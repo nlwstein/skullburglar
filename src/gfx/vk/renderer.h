@@ -18,6 +18,7 @@
 #include <deque>
 #include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -86,6 +87,15 @@ class Renderer : public Pm4Sink {
   // (`<title>.master.bin` next to it, e.g. merged by tools/pipeline_manifest.py) is warmed along with the
   // machine's own. BOTS_GFX_PRECOMPILE=0 turns the warm-up off; recording stays on.
   void LoadManifest(const std::filesystem::path& path);
+  // Shader refs (tools/shader_refs.py): a master that names each shader by where it is on the game disc instead of
+  // carrying its microcode, so it can ship. `*.refs` files of this device class in `refs_dirs` are warmed like a
+  // master, their shaders read through `reader` ("image" = the loaded XEX image, else a path under the game root,
+  // offsets into a package's decompressed body) and checked against their hashes. Set before LoadPipelineCache.
+  using ShaderSourceReader =
+      std::function<bool(const std::string& source, uint32_t offset, uint32_t size, std::vector<uint8_t>& out)>;
+  void SetShaderRefs(std::vector<std::filesystem::path> refs_dirs, ShaderSourceReader reader) {
+    refs_dirs_ = std::move(refs_dirs), refs_reader_ = std::move(reader);
+  }
   // Warm-up progress: pipelines recorded in the manifest, and how many of them are created (ready or failed).
   size_t warmup_total() const { return warm_.size(); }
   size_t warmup_done() const { return warm_done_; }
@@ -488,6 +498,9 @@ class Renderer : public Pm4Sink {
   size_t warm_next_ = 0, warm_done_ = 0;
   std::chrono::steady_clock::time_point warm_start_;
   bool warm_enabled_ = true, warm_logged_ = false;
+  std::vector<std::filesystem::path> refs_dirs_;
+  ShaderSourceReader refs_reader_;
+  void LoadShaderRefs(const std::filesystem::path& file, const void* header, size_t header_size);
   std::string last_pipeline_key_;
   VkPipeline last_pipeline_ = VK_NULL_HANDLE;
   // What the current command buffer has bound, so unchanged pipelines aren't rebound (VK_NULL_HANDLE: unknown).

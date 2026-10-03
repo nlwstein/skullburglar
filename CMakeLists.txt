@@ -143,6 +143,7 @@ if(REXSDK_DIR AND (NOT WIN32 OR REXGLUE_USE_VULKAN))
         add_library(rexgpu-native SHARED
             src/gfx/native.cpp
             src/gfx/vk/memory_sync.cpp
+            src/upk.cpp
             ${BOTS_NATIVE_GFX_SOURCES}
             ${REX_GRAPHICS_SRC}/shared_memory.cpp
             ${REX_GRAPHICS_SRC}/graphics_system.cpp

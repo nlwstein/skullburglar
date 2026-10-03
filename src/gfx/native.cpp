@@ -13,17 +13,23 @@
 #include <string_view>
 #include <vector>
 
+#include <rex/filesystem.h>
 #include <rex/graphics/command_processor.h>
 #include <rex/graphics/graphics_system.h>
 #include <rex/graphics/registers.h>
 #include <rex/kernel/xboxkrnl/video.h>
 #include <rex/logging.h>
+#include <rex/runtime.h>
 #include <rex/system/gpu_plugin.h>
+#include <rex/system/kernel_state.h>
+#include <rex/system/user_module.h>
+#include <rex/system/xex_module.h>
 #include <rex/system/xmemory.h>
 #include <rex/ui/vulkan/presenter.h>
 #include <rex/ui/vulkan/provider.h>
 
 #include "pm4.h"
+#include "upk.h"
 #include "vk/memory_sync.h"
 #include "vk/renderer.h"
 
@@ -144,6 +150,25 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     }
     sync_ = std::make_unique<vk::MemorySync>(*memory_, *renderer_);
     renderer_->SetMemoryTracker(sync_.get());
+    // Shipped shader refs (B-098): next to the executable in pipelines/, read from the player's disc and XEX image.
+    auto package = std::make_shared<std::pair<std::string, std::unique_ptr<upk::Package>>>();
+    renderer_->SetShaderRefs(
+        {rex::filesystem::GetExecutableFolder() / "pipelines"},
+        [this, package](const std::string& source, uint32_t offset, uint32_t size, std::vector<uint8_t>& out) {
+          if (source == "image") {
+            auto module = kernel_state_->GetExecutableModule();
+            const auto* xex = module ? module->xex_module() : nullptr;
+            if (!xex || uint64_t(offset) + size > xex->image_size()) return false;
+            const auto* bytes = memory_->TranslateVirtual<const uint8_t*>(xex->base_address() + offset);
+            out.assign(bytes, bytes + size);
+            return true;
+          }
+          if (package->first != source || !package->second) {
+            package->first = source;
+            package->second = std::make_unique<upk::Package>(kernel_state_->emulator()->game_data_root() / source);
+          }
+          return package->second->Read(offset, size, out);
+        });
     if (!pipeline_cache_path_.empty()) renderer_->LoadPipelineCache(pipeline_cache_path_);
     const char* occlusion = std::getenv("BOTS_GFX_OCCLUSION");
     if (occlusion && *occlusion ? *occlusion == '1' : renderer_->occlusion_queries_by_default()) {
