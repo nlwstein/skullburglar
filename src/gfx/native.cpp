@@ -254,7 +254,10 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   // and the warm-up gets the whole CPU: on a 4-core laptop the game and a background warm-up starve each other
   // (B-098). Ends when the warm-up does or the player sends the panel to the background.
   void HoldForWarmup() {
-    if (!shader_precompile_foreground_.load(std::memory_order_relaxed)) return;
+    if (!shader_precompile_foreground_.load(std::memory_order_relaxed) ||
+        renderer_->warmup_done() >= renderer_->warmup_total()) {
+      return;
+    }
     const auto start = std::chrono::steady_clock::now();
     auto report = start + std::chrono::seconds(5);
     const size_t from = renderer_->warmup_done();

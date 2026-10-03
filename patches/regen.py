@@ -65,7 +65,7 @@ SERIES.append(
     ("0009-diagnostics-present-stats-vmem-ring.patch",
      ["include/rex/ui", "src/ui/d3d12", "src/ui/overlay", "src/system/xmemory.cpp"],
      {"src/ui/presenter.cpp": r"PresentStat|PaintModeName|GetDisplayedFrameCounts|<chrono>|"
-                              r"<cstdlib>|fmt/format|Presenter paint mode"}))
+                              r"<cstdlib>|fmt/format|Presenter paint mode|UIOnlyPaint|ui_tick_forced_|<thread>"}))
 SERIES.append(
     # No audio output device (headless Linux, no sound card, unplugged headset): register a silent,
     # device-paced driver instead of failing XAudioRegisterRenderDriverClient, which a real console

@@ -81,10 +81,10 @@ index a744375..5fcf826 100644
    }
  
 diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
-index 7360ed9..3274208 100644
+index 7360ed9..64a0f44 100644
 --- a/src/ui/presenter.cpp
 +++ b/src/ui/presenter.cpp
-@@ -1014,6 +1059,24 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
+@@ -1014,6 +1060,24 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
      output_right = int32_t(output_width);
      output_bottom = int32_t(output_height);
    }

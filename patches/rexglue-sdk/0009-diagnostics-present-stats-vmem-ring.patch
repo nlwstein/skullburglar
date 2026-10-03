@@ -47,10 +47,18 @@ index 7642601..dcd6c30 100644
  };
  
 diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
-index afb4a30..9af389c 100644
+index afb4a30..00b3c7a 100644
 --- a/include/rex/ui/presenter.h
 +++ b/include/rex/ui/presenter.h
-@@ -715,6 +715,14 @@ class Presenter {
+@@ -13,6 +13,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
++#include <chrono>
+ #include <climits>
+ #include <cmath>
+ #include <condition_variable>
+@@ -715,6 +716,14 @@ class Presenter {
    //
    // Call via PaintAndPresent.
    virtual PaintResult PaintAndPresentImpl(bool execute_ui_drawers) = 0;
@@ -65,6 +73,19 @@ index afb4a30..9af389c 100644
  
    // For calling from the painting implementations if requested.
    void ExecuteUIDrawersFromUIThread(UIDrawContext& ui_draw_context);
+@@ -859,8 +868,12 @@ class Presenter {
+   }
+   void UpdateUITicksNeededFromUIThread();
+   void WaitForUITickFromUIThread();
++  void WaitForDXGIUITickFromUIThread();
+   // May be called from any thread.
+   void ForceUIThreadPaintTick();
++  // UI-only repaints (no forced tick: no new guest output) are at most 120/s on every platform.
++  std::atomic<bool> ui_tick_forced_{false};
++  std::chrono::steady_clock::time_point last_ui_tick_{};
+ 
+   // Must be called only in the end of entry points - reinitialization of the
+   // presenter may be done by the handler if it was called from the UI thread
 diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
 index 76cc877..63de9d3 100644
 --- a/src/system/xmemory.cpp
@@ -371,16 +392,17 @@ index 53b8c0b..54e37a7 100644
      }
      toast = queue_.front();
 diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
-index 7360ed9..3274208 100644
+index 7360ed9..64a0f44 100644
 --- a/src/ui/presenter.cpp
 +++ b/src/ui/presenter.cpp
-@@ -12,8 +12,13 @@
+@@ -12,8 +12,14 @@
  #include <algorithm>
  #include <atomic>
  #include <cctype>
 +#include <chrono>
 +#include <cstdlib>
 +#include <string>
++#include <thread>
  #include <utility>
  
 +#include <fmt/format.h>
@@ -388,7 +410,7 @@ index 7360ed9..3274208 100644
  #include <rex/assert.h>
  #include <rex/cvar.h>
  #include <rex/logging.h>
-@@ -26,6 +31,40 @@
+@@ -26,6 +32,40 @@
  #include <ffx_api/ffx_upscale.h>
  #endif
  
@@ -429,7 +451,7 @@ index 7360ed9..3274208 100644
  REXCVAR_DEFINE_BOOL(host_present_from_non_ui_thread, true, "UI/Presenter",
                      "Allow presentation from non-UI thread");
  
-@@ -584,6 +623,12 @@ bool Presenter::RefreshGuestOutput(
+@@ -584,6 +624,12 @@ bool Presenter::RefreshGuestOutput(
    // the host present call on the CPU and all frames reaching a present call).
    uint32_t last_acquired_and_ready =
        guest_output_mailbox_acquired_and_ready_.load(std::memory_order_relaxed);
@@ -442,7 +464,7 @@ index 7360ed9..3274208 100644
    // Desired acquired = current acquired (changed only by the consumers).
    // Desired ready = current writable.
    // memory_order_acq_rel to acquire the new writable image and to release the
-@@ -1300,6 +1363,11 @@ void Presenter::SetPaintModeFromUIThread(PaintMode new_mode) {
+@@ -1300,6 +1364,11 @@ void Presenter::SetPaintModeFromUIThread(PaintMode new_mode) {
      std::lock_guard<std::mutex> lock(paint_mode_mutex_);
      paint_mode_ = new_mode;
    }
@@ -454,7 +476,26 @@ index 7360ed9..3274208 100644
    UpdateUITicksNeededFromUIThread();
  }
  
-@@ -1497,7 +1565,62 @@ bool Presenter::InSurfaceOnMonitorFromUIThread() const {
+@@ -1414,13 +1483,15 @@ bool Presenter::RequestPaintOrConnectionRecoveryViaWindow(bool force_ui_thread_p
+   // theoretically. For safety, check whether the window exists unconditionally.
+   assert_not_null(window_);
+   assert_not_null(surface_);
++  // Forced before the pending check: a guest frame arriving while a UI-only repaint (UIOnlyPaint limit) is pending
++  // must not wait for that repaint's tick.
++  if (force_ui_thread_paint_tick) {
++    ForceUIThreadPaintTick();
++  }
+   if (ui_thread_paint_requested_.exchange(true, std::memory_order_relaxed)) {
+     // Invalidation pending already, no need to do it twice.
+     return false;
+   }
+-  if (force_ui_thread_paint_tick) {
+-    ForceUIThreadPaintTick();
+-  }
+   window_->RequestPaint();
+   return true;
+ }
+@@ -1497,7 +1568,62 @@ bool Presenter::InSurfaceOnMonitorFromUIThread() const {
  Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
    assert_false(execute_ui_drawers && !is_in_ui_thread_paint_);
    assert_true(surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable);
@@ -517,3 +558,33 @@ index 7360ed9..3274208 100644
    switch (result) {
      case PaintResult::kPresented:
        surface_paint_connection_was_optimal_at_successful_paint_ = true;
+@@ -1577,6 +1703,21 @@ void Presenter::UpdateUITicksNeededFromUIThread() {
+ }
+ 
+ void Presenter::WaitForUITickFromUIThread() {
++  const bool forced = ui_tick_forced_.exchange(false, std::memory_order_relaxed);
++  WaitForDXGIUITickFromUIThread();
++  if (!AreUITicksNeededFromUIThread()) {
++    return;
++  }
++  // UIOnlyPaint limit: the DXGI ticks exist only on Windows and don't always wait (seen ~400 paints/s on an Intel
++  // laptop), so a dialog over an idle guest repainted as fast as presenting allowed, costing a whole core.
++  constexpr auto kUIOnlyPaintInterval = std::chrono::microseconds(1000000 / 120);
++  if (!forced) {
++    std::this_thread::sleep_until(last_ui_tick_ + kUIOnlyPaintInterval);
++  }
++  last_ui_tick_ = std::chrono::steady_clock::now();
++}
++
++void Presenter::WaitForDXGIUITickFromUIThread() {
+ #if REX_PLATFORM_WIN32
+   if (!AreUITicksNeededFromUIThread()) {
+     return;
+@@ -1606,6 +1747,7 @@ void Presenter::WaitForUITickFromUIThread() {
+ }
+ 
+ void Presenter::ForceUIThreadPaintTick() {
++  ui_tick_forced_.store(true, std::memory_order_relaxed);
+ #if REX_PLATFORM_WIN32
+   std::scoped_lock<std::mutex> dxgi_ui_tick_lock(dxgi_ui_tick_mutex_);
+   dxgi_ui_tick_force_requested_ = true;
