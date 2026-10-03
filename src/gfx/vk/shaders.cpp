@@ -2,8 +2,11 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 
 #include <xxhash.h>
+
+#include <rex/cvar.h>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -66,9 +69,15 @@ void LowerThreadPriority() {
 
 float RenderScale(const rex::ui::vulkan::VulkanDevice* device) {
   static const float scale = [device] {
-    const char* v = std::getenv("BOTS_GFX_RENDER_SCALE");
-    if (v && *v) {
-      const float s = float(std::atof(v));
+    // BOTS_GFX_RENDER_SCALE, then the render_scale setting (bots.toml / launcher; "auto" or a fraction).
+    std::string v;
+    if (const char* env = std::getenv("BOTS_GFX_RENDER_SCALE"); env && *env) {
+      v = env;
+    } else {
+      v = rex::cvar::GetFlagByName("render_scale");
+    }
+    if (!v.empty() && v != "auto") {
+      const float s = float(std::atof(v.c_str()));
       return s >= 0.25f && s < 1.0f ? s : 1.0f;
     }
     // Intel integrated GPUs are fill-bound at 720p (a UHD 620 draws a frame in ~50 ms at 1, ~28 ms at 2/3).

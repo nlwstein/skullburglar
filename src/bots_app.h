@@ -201,12 +201,16 @@ class BotsApp : public rex::ReXApp {
   // Per-game GPU defaults. Set as REX_* env vars (overwrite=0) because the GPU plugin's
   // cvars register after this hook and replay env values then; an explicit env var or
   // --flag still wins. (A bots.toml config value loses to these — use the flag instead.)
-  //  - gpu_plugin=xenos: only backend we ship; saves passing --gpu_plugin every run.
+  //  - gpu_plugin=native: our own Vulkan renderer (src/gfx). xenos, the SDK's emulated Xbox 360
+  //    GPU, stays selectable (launcher "Renderer", bots.toml or --gpu_plugin=xenos).
   //  - depth_float24_convert_in_pixel_shader: the game's D24FS8 shadow/light-environment
   //    depth compares need exact 24-bit float depth; without it the player renders black
   //    in level 1 (B-035, sweep 2026-10-01).
   void OnPreSetup(rex::RuntimeConfig& config) override {
-    if (config.gpu_plugin.empty()) config.gpu_plugin = "xenos";
+    if (config.gpu_plugin.empty()) {
+      config.gpu_plugin = "native";
+      rex::cvar::SetFlagByName("gpu_plugin", "native");  // so the launcher shows the choice in use
+    }
     SetCvarDefault("depth_float24_convert_in_pixel_shader", "REX_DEPTH_FLOAT24_CONVERT_IN_PIXEL_SHADER", "true");
     // MoltenVK: plain Metal binding instead of Metal3 argument buffers for descriptor sets —
     // gameplay 18.4 → 22.1 fps on M2 Pro (B-032, run 38). Read at VkInstance creation, which
