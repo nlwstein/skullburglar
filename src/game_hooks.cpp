@@ -24,6 +24,8 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
 
+#include "mnk_input.h"
+
 extern "C" void __imp__sub_82E1AC28(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_823598E0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_823501E0(PPCContext& __restrict ctx, uint8_t* base);
@@ -209,11 +211,12 @@ extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
   ctx.r3 = r3;
 }
 
-// B-104 spike: engine-level mouse look. sub_82BC86F0(FViewport* vp, float dt) = FXenonViewport::ProcessInput (per
+// B-104: engine-level mouse look. sub_82BC86F0(FViewport* vp, float dt) = FXenonViewport::ProcessInput (per
 // frame, game thread). Its client *(vp+0x34) is the UGameViewportClient: vtable +0x18 = InputAxis(vp, cid, FName key,
 // float delta, float dt, bool bGamepad), vtable +0x10 = InputKey(vp, cid, FName key, int event, float amount, bool
 // bGamepad). Key FNames are 8-byte globals built by sub_8253BA50 (KEY_MouseX at 0x8380DEC0).
-//   BOTS_MOUSE_TEST=<dx>[,<dy>[,<cid>]]   inject a constant mouse delta every frame (test only)
+// Real mouse motion comes from MouseKeyboardDriver (mnk_input.h), sent as controller 0's MouseX / MouseY.
+//   BOTS_MOUSE_TEST=<dx>[,<dy>[,<cid>]]   also inject a constant mouse delta every frame (test only)
 namespace {
 constexpr uint32_t kKeyMouseX = 0x8380DEC0, kKeyMouseY = 0x8380D5B8;
 
@@ -253,7 +256,12 @@ extern "C" void sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base) {
     }
     return t;
   }();
-  if (!test.on || !vp) return;
+  if (!vp) return;
+  float dx = 0, dy = 0;
+  if (auto* kbm = bots::MouseKeyboardDriver::instance()) kbm->TakeMouseDelta(dx, dy);
+  if (dx) InputAxis(ctx, base, vp, 0, kKeyMouseX, dx, dt, false);
+  if (dy) InputAxis(ctx, base, vp, 0, kKeyMouseY, dy, dt, false);
+  if (!test.on) return;
   if (test.dx) InputAxis(ctx, base, vp, test.cid, kKeyMouseX, test.dx, dt, false);
   if (test.dy) InputAxis(ctx, base, vp, test.cid, kKeyMouseY, test.dy, dt, false);
 }

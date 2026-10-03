@@ -37,6 +37,7 @@
 #include <rex/ui/keybinds.h>
 #include <rex/runtime.h>
 
+#include "mnk_input.h"
 #include "script_input.h"
 #include "setup/app_paths.h"
 #include "setup/settings.h"
@@ -265,14 +266,22 @@ class BotsApp : public rex::ReXApp {
     });
   }
 
-  // BOTS_INPUT=<script>: scripted controller as guest user 0 (see script_input.h).
+  // Keyboard and mouse (mnk_input.h), and BOTS_INPUT=<script>: scripted controller as guest user 0
+  // (script_input.h).
   void OnPostSetup() override {
     SetLaunchCommandLine();
     RegisterFullscreenBind();
+    if (!runtime() || !runtime()->input_system()) return;
+    auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system());
+    // Added after the SDK attached the window and its overlay callback to the drivers it had, so do
+    // both here. ImGui dialogs (settings/console/debug overlays, shader progress) exist only while
+    // shown: release the pointer while any is up.
+    auto kbm = std::make_unique<bots::MouseKeyboardDriver>();
+    kbm->set_is_active_callback([drawer = runtime()->imgui_drawer()] { return !drawer || !drawer->HasDialogs(); });
+    if (auto* window = runtime()->display_window()) kbm->OnWindowAvailable(window);
+    input->AddDriver(std::move(kbm));
     const char* script = std::getenv("BOTS_INPUT");
-    if (!script || !*script || !runtime() || !runtime()->input_system()) return;
-    static_cast<rex::input::InputSystem*>(runtime()->input_system())
-        ->AddDriver(std::make_unique<bots::ScriptInputDriver>(script));
+    if (script && *script) input->AddDriver(std::make_unique<bots::ScriptInputDriver>(script));
   }
 
   // BOTS_CAPTURE_DIR=<dir> [BOTS_CAPTURE_SECS=5]: periodically save the guest output

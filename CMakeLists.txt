@@ -26,6 +26,7 @@ include(generated/rexglue.cmake)
 set(BOTS_SOURCES
     src/main.cpp
     src/game_hooks.cpp
+    src/mnk_input.cpp
     src/gfx/d3d_hooks.cpp
     src/gfx/capture.cpp
     src/gfx/shadow.cpp
