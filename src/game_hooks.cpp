@@ -42,8 +42,10 @@ extern "C" void sub_828291E0(PPCContext& __restrict ctx, uint8_t* base);
 
 namespace {
 // Guest address → host pointer, as REX_RAW_ADDR in generated/default/bots_pch.h (Mac arm64 layout).
+// The offset is formed in 64 bits: with `base + address + ...` clang (Apple, arm64) hoisted a constant guest address
+// out of a loop as a sign-extended 32-bit offset, and InputKey(kKeyEnter) read base - 2 GiB (B-107).
 uint8_t* Raw(uint8_t* base, uint32_t address) {
-  return base + address + (address >= 0xE0000000u ? 0x1000u : 0u);
+  return base + (uint64_t(address) + (address >= 0xE0000000u ? 0x1000u : 0u));
 }
 
 uint32_t LoadU32(uint8_t* base, uint32_t address) {
@@ -240,7 +242,9 @@ namespace {
 constexpr uint32_t kKeyMouseX = 0x8380DEC0, kKeyMouseY = 0x8380D5B8, kKeyEnter = 0x8380E394;
 
 uint64_t LoadU64(uint8_t* base, uint32_t address) {
-  return (uint64_t(LoadU32(base, address)) << 32) | LoadU32(base, address + 4);
+  uint64_t v;
+  __builtin_memcpy(&v, Raw(base, address), 8);
+  return __builtin_bswap64(v);
 }
 
 void InputAxis(PPCContext& ctx, uint8_t* base, uint32_t vp, uint32_t cid, uint32_t key, float delta, float dt,
@@ -255,6 +259,26 @@ void InputAxis(PPCContext& ctx, uint8_t* base, uint32_t vp, uint32_t cid, uint32
   ctx.f2.f64 = dt;
   ctx.r9.u64 = gamepad;
   rex::runtime::ResolveIndirectFunction(LoadU32(base, LoadU32(base, client) + 0x18))(ctx, base);
+}
+
+// event: 0 pressed, 1 released (EInputEvent). `name` is the FName by value: {index, number} as one big-endian u64.
+void InputKeyName(PPCContext& ctx, uint8_t* base, uint32_t vp, uint32_t cid, uint64_t name, uint32_t event,
+                  float amount, bool gamepad) {
+  const uint32_t client = LoadU32(base, vp + 0x34);
+  if (!client) return;
+  ctx.r3.u64 = client;
+  ctx.r4.u64 = vp;
+  ctx.r5.u64 = cid;
+  ctx.r6.u64 = name;
+  ctx.r7.u64 = event;
+  ctx.f1.f64 = amount;
+  ctx.r9.u64 = gamepad;
+  rex::runtime::ResolveIndirectFunction(LoadU32(base, LoadU32(base, client) + 0x10))(ctx, base);
+}
+
+void InputKey(PPCContext& ctx, uint8_t* base, uint32_t vp, uint32_t cid, uint32_t key, uint32_t event, float amount,
+              bool gamepad) {
+  InputKeyName(ctx, base, vp, cid, LoadU64(base, key), event, amount, gamepad);
 }
 
 // BOTS_MEMDUMP=<secs>:<file>[;<secs>:<file>...] (research): at those times after the first ProcessInput, write every
@@ -428,19 +452,25 @@ void Tick(uint8_t* base, float dt) {
 }
 }  // namespace press_start
 
-// B-107 menu pointer: focus follows the free cursor over menu options. The UE3 UI's own mouse picking needs viewport
-// hit proxies, which the console build never renders, so we hit-test the menu options ourselves and call SetFocus on
-// the hovered one. A click is then the engine's Enter (MouseKeyboardDriver menu mode).
+// B-107 menu pointer: focus follows the free cursor over menu widgets. The UE3 UI's own mouse picking needs viewport
+// hit proxies, which the console build never renders, so we hit-test the widgets ourselves and call SetFocus on the
+// hovered one. A click on a menu option is the engine's Enter (MouseKeyboardDriver menu mode). Toggles and sliders
+// (Options pages) take the engine's Left/Right keys instead, which their WidgetInputAliases accept: a click on a
+// toggle's left arrow is Left, anywhere else on the row Right; pressing on a slider's bar drags its value.
 // Object layout (UE3 as built for this game, read from the live UClass/UProperty data):
 //   GEngine+0x2E4 GameViewport, +0x5C UIController, +0x78 SceneClient, +0x100 ActiveScenes (TArray)
 //   UObject: +0x00 vtable, +0x2C Name, +0x34 Class; UClass +0x3C SuperField; UProperty +0x64 Offset
 //   UIScreenObject: +0x5C bit 31 bHidden, +0x60 Children, +0x94 FocusControls[player] = {Focused, LastFocused}
 //   UIObject +0x204 RenderBounds[4] (left top right bottom, pixels of the 1280x720 UI)
+//   UISlider +0x444 SliderValue (UIRangeData {Current, Min, Max, Nudge}; the volume sliders are 0..1 by 0.05)
 namespace menu_pointer {
-constexpr uint32_t kGEngine = 0x8380D380, kMaxOptions = 32;
+constexpr uint32_t kGEngine = 0x8380D380, kMaxWidgets = 32;
 
-struct Option {
-  uint32_t widget;
+enum class Kind { kNone, kOption, kToggle, kSlider };
+
+struct Widget {
+  uint32_t object;
+  Kind kind;
   float left, top, right, bottom;
 };
 
@@ -453,8 +483,50 @@ float LoadF32(uint8_t* base, uint32_t address) {
 
 bool Readable(uint32_t address) { return address >= 0x40000000u && address < 0xA0000000u && !(address & 3); }
 
+// FName::Names (TArray<FNameEntry*>); an entry is {u32 index, FNameEntry* hash next, char name[]}.
+constexpr uint32_t kNames = 0x837F98A0;
+
+const char* NameOf(uint8_t* base, uint32_t index) {
+  const uint32_t names = LoadU32(base, kNames);
+  if (!Readable(names) || index >= LoadU32(base, kNames + 4)) return "?";
+  const uint32_t entry = LoadU32(base, names + 4 * index);
+  return Readable(entry) ? reinterpret_cast<const char*>(Raw(base, entry + 8)) : "?";
+}
+
+// Name indices this file needs, found once by scanning FName::Names (they all exist once the script packages load).
+struct Names {
+  uint32_t option = 0, toggle = 0, slider = 0, image = 0, left = 0, right = 0;
+};
+
+const Names* GetNames(uint8_t* base) {
+  static Names n;
+  static bool ready = false;
+  static int wait = 0;
+  if (ready) return &n;
+  if (wait-- > 0) return nullptr;
+  wait = 60;
+  const uint32_t names = LoadU32(base, kNames), count = LoadU32(base, kNames + 4);
+  if (!Readable(names) || count > 0x100000) return nullptr;
+  const std::pair<const char*, uint32_t*> wanted[] = {{"C1UI_MenuOption", &n.option}, {"C1UI_ToggleableOption", &n.toggle},
+                                                      {"C1UI_Slider", &n.slider},     {"HudWidget_Image", &n.image},
+                                                      {"Left", &n.left},              {"Right", &n.right}};
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint32_t entry = LoadU32(base, names + 4 * i);
+    if (!Readable(entry)) continue;
+    const char* name = reinterpret_cast<const char*>(Raw(base, entry + 8));
+    for (const auto& [text, index] : wanted)
+      if (!*index && !std::strcmp(name, text)) *index = i;
+  }
+  for (const auto& [text, index] : wanted)
+    if (!*index) return nullptr;
+  ready = true;
+  REXLOG_INFO("menu pointer: names option {:#x} toggle {:#x} slider {:#x} Left {:#x} Right {:#x}", n.option, n.toggle,
+              n.slider, n.left, n.right);
+  return &n;
+}
+
 // Whether the object's class is (or derives from) the class with this name index.
-bool IsMenuOption(uint8_t* base, uint32_t object, uint32_t name_index) {
+bool IsA(uint8_t* base, uint32_t object, uint32_t name_index) {
   uint32_t cls = LoadU32(base, object + 0x34);
   for (int depth = 0; depth < 8 && Readable(cls); ++depth) {
     if (LoadU32(base, cls + 0x2C) == name_index && !LoadU32(base, cls + 0x30)) return true;
@@ -463,41 +535,105 @@ bool IsMenuOption(uint8_t* base, uint32_t object, uint32_t name_index) {
   return false;
 }
 
-void Collect(uint8_t* base, uint32_t widget, uint32_t name_index, int depth, std::vector<Option>& out) {
-  if (depth > 5 || !Readable(widget) || out.size() >= kMaxOptions) return;
+Kind KindOf(uint8_t* base, const Names& n, uint32_t object) {
+  if (IsA(base, object, n.option)) return Kind::kOption;
+  if (IsA(base, object, n.toggle)) return Kind::kToggle;
+  if (IsA(base, object, n.slider)) return Kind::kSlider;
+  return Kind::kNone;
+}
+
+Widget Read(uint8_t* base, uint32_t object, Kind kind) {
+  return {object, kind, LoadF32(base, object + 0x204), LoadF32(base, object + 0x208), LoadF32(base, object + 0x20C),
+          LoadF32(base, object + 0x210)};
+}
+
+void Collect(uint8_t* base, const Names& n, uint32_t widget, int depth, std::vector<Widget>& out) {
+  if (depth > 5 || !Readable(widget) || out.size() >= kMaxWidgets) return;
   if (LoadU32(base, widget + 0x5C) & 0x80000000u) return;  // bHidden
-  if (depth > 0 && IsMenuOption(base, widget, name_index)) {
-    out.push_back({widget, LoadF32(base, widget + 0x204), LoadF32(base, widget + 0x208), LoadF32(base, widget + 0x20C),
-                   LoadF32(base, widget + 0x210)});
-    return;
+  if (depth > 0) {
+    if (const Kind kind = KindOf(base, n, widget); kind != Kind::kNone) {
+      out.push_back(Read(base, widget, kind));
+      return;
+    }
   }
   const uint32_t children = LoadU32(base, widget + 0x60);
   const int32_t count = int32_t(LoadU32(base, widget + 0x64));
   if (!Readable(children) || count <= 0 || count > 256) return;
-  for (int32_t i = 0; i < count; ++i) Collect(base, LoadU32(base, children + 4 * i), name_index, depth + 1, out);
+  for (int32_t i = 0; i < count; ++i) Collect(base, n, LoadU32(base, children + 4 * i), depth + 1, out);
 }
 
-// FName::Names (TArray<FNameEntry*>); an entry is {u32 index, FNameEntry* hash next, char name[]}.
-constexpr uint32_t kNames = 0x837F98A0;
-
-bool NameIs(uint8_t* base, uint32_t index, const char* name) {
-  const uint32_t names = LoadU32(base, kNames);
-  if (!Readable(names) || index >= LoadU32(base, kNames + 4)) return false;
-  const uint32_t entry = LoadU32(base, names + 4 * index);
-  return Readable(entry) && !std::strcmp(reinterpret_cast<const char*>(Raw(base, entry + 8)), name);
+// A toggle's left arrow: of its HudWidget_Image children, the two rightmost are the arrows (another sits by the
+// label). Returns false if they aren't there.
+bool LeftArrow(uint8_t* base, const Names& n, uint32_t toggle, float& left, float& right) {
+  float lefts[2] = {-1, -1}, rights[2] = {-1, -1};  // [0] rightmost, [1] next
+  const uint32_t children = LoadU32(base, toggle + 0x60);
+  const int32_t count = int32_t(LoadU32(base, toggle + 0x64));
+  for (int32_t i = 0; Readable(children) && i < count && i < 16; ++i) {
+    const uint32_t c = LoadU32(base, children + 4 * i);
+    if (!Readable(c) || !IsA(base, c, n.image)) continue;
+    const float l = LoadF32(base, c + 0x204), r = LoadF32(base, c + 0x20C);
+    if (l > lefts[0]) {
+      lefts[1] = lefts[0], rights[1] = rights[0];
+      lefts[0] = l, rights[0] = r;
+    } else if (l > lefts[1]) {
+      lefts[1] = l, rights[1] = r;
+    }
+  }
+  if (lefts[1] < 0) return false;
+  left = lefts[1], right = rights[1];
+  return true;
 }
 
-// BOTS_POINTER_TEST=<secs>:<x>,<y>[;...] (test only): put the pointer at UI pixel x,y (1280x720) from that time on.
-bool TestPointer(float dt, float& px, float& py, uint32_t& moves) {
+// Where the slider's marker sits at Min and at Max, in UI pixels: the right part of its bounds (the caption is on the
+// left). Measured on the Audio page (bounds ending at 1138): value 0.5 draws the marker at x 1040, 1.0 at 1121.
+// The drawn bar starts ~35 px left of the Min position; presses there count as Min.
+void SliderBar(const Widget& w, float& left, float& right) {
+  right = w.right - 17;
+  left = w.right - 179;
+}
+
+void Focus(PPCContext& ctx, uint8_t* base, uint32_t widget) {
+  // UUIScreenObject::SetFocus(Sender = None, PlayerIndex) is vtable +0x16C (execSetFocus 0x82508B78 calls it with
+  // GetBestPlayerIndex(), sub_828291E0). It refuses disabled widgets itself.
+  ctx.r3.u64 = widget;
+  sub_828291E0(ctx, base);
+  const uint32_t player = ctx.r3.u32;
+  ctx.r3.u64 = widget;
+  ctx.r4.u64 = 0;
+  ctx.r5.u64 = player;
+  rex::runtime::ResolveIndirectFunction(LoadU32(base, LoadU32(base, widget) + 0x16C))(ctx, base);
+}
+
+void Tap(PPCContext& ctx, uint8_t* base, uint32_t vp, uint32_t name_index) {
+  const uint64_t name = uint64_t(name_index) << 32;
+  InputKeyName(ctx, base, vp, 0, name, 0, 1.0f, false);
+  InputKeyName(ctx, base, vp, 0, name, 1, 1.0f, false);
+}
+
+std::string ClassChain(uint8_t* base, uint32_t object) {
+  std::string out;
+  uint32_t cls = LoadU32(base, object + 0x34);
+  for (int depth = 0; depth < 8 && Readable(cls); ++depth) {
+    if (!out.empty()) out += " < ";
+    out += NameOf(base, LoadU32(base, cls + 0x2C));
+    cls = LoadU32(base, cls + 0x3C);
+  }
+  return out;
+}
+
+// BOTS_POINTER_TEST=<secs>:<x>,<y>[,d|u][;...] (test only): put the pointer at UI pixel x,y (1280x720) from that
+// time on; `d` / `u` also press / release the left button there (a menu click, i.e. an Enter edge).
+bool TestPointer(float dt, float& px, float& py, uint32_t& moves, std::vector<bool>& clicks) {
   struct Move {
     float at, x, y;
+    char button;
   };
   static std::vector<Move> plan = [] {
     std::vector<Move> out;
     const char* v = std::getenv("BOTS_POINTER_TEST");
     for (const char* p = v ? v : ""; *p;) {
       Move m{};
-      if (std::sscanf(p, "%f:%f,%f", &m.at, &m.x, &m.y) != 3) break;
+      if (std::sscanf(p, "%f:%f,%f,%c", &m.at, &m.x, &m.y, &m.button) < 3) break;
       out.push_back(m);
       p = std::strchr(p, ';');
       if (!p) break;
@@ -511,7 +647,10 @@ bool TestPointer(float dt, float& px, float& py, uint32_t& moves) {
   if (plan.empty()) return false;
   clock += dt;
   while (current < plan.size() && clock >= plan[current].at) {
-    REXLOG_INFO("BOTS_POINTER_TEST: {:.0f},{:.0f} at {:.1f} s", plan[current].x, plan[current].y, clock);
+    const Move& m = plan[current];
+    REXLOG_INFO("BOTS_POINTER_TEST: {:.0f},{:.0f}{} at {:.1f} s", m.x, m.y,
+                m.button == 'd' ? " down" : m.button == 'u' ? " up" : "", clock);
+    if (m.button == 'd' || m.button == 'u') clicks.push_back(m.button == 'd');
     ++current;
   }
   if (!current) return false;
@@ -521,11 +660,19 @@ bool TestPointer(float dt, float& px, float& py, uint32_t& moves) {
   return true;
 }
 
-void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, float dt) {
+// Per frame. `enter` holds the click/confirm Enter edges for this frame; the ones that land on a toggle or slider are
+// taken out of it and become Left/Right taps.
+void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32_t vp, float dt, std::vector<bool>& enter) {
+  static uint32_t seen_moves = 0, dragging = 0;
+  static bool click_taken = false;  // the current click went to a toggle/slider: its release is ours too
   float px, py;
   uint32_t moves;
-  if (!TestPointer(dt, px, py, moves) && !kbm.Pointer(px, py, moves)) return;
-  static uint32_t seen_moves = 0;
+  if (!TestPointer(dt, px, py, moves, enter) && !kbm.Pointer(px, py, moves)) {
+    dragging = 0;
+    return;
+  }
+  const Names* n = GetNames(base);
+  if (!n) return;
   const uint32_t engine = LoadU32(base, kGEngine);
   if (!Readable(engine)) return;
   const uint32_t viewport = LoadU32(base, engine + 0x2E4);
@@ -537,67 +684,90 @@ void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, float 
   const uint32_t scenes = LoadU32(base, client + 0x100);
   const int32_t scene_count = int32_t(LoadU32(base, client + 0x104));
   if (!Readable(scenes) || scene_count <= 0 || scene_count > 64) return;
-  static uint32_t option_name = 0;
-  // Topmost scene with a focused control that is a menu option: its options are the ones to hover.
-  std::vector<Option> options;
+  // Topmost scene whose focused control is one of ours: its widgets are the ones to hover.
+  std::vector<Widget> widgets;
   uint32_t focused = 0;
-  for (int32_t i = scene_count - 1; i >= 0 && options.empty(); --i) {
+  for (int32_t i = scene_count - 1; i >= 0 && widgets.empty(); --i) {
     const uint32_t scene = LoadU32(base, scenes + 4 * i);
     if (!Readable(scene)) continue;
     const uint32_t focus = LoadU32(base, scene + 0x94);
     if (!Readable(focus) || !LoadU32(base, scene + 0x98)) continue;
     const uint32_t f = LoadU32(base, focus);
     if (!Readable(f)) continue;
-    if (!option_name) {
-      // Learn the class's name index from the first focused widget of class C1UI_MenuOption.
-      const uint32_t cls = LoadU32(base, f + 0x34);
-      if (!Readable(cls) || !NameIs(base, LoadU32(base, cls + 0x2C), "C1UI_MenuOption")) continue;
-      option_name = LoadU32(base, cls + 0x2C);
-      REXLOG_INFO("menu pointer: C1UI_MenuOption name index {:#x}", option_name);
+    if (KindOf(base, *n, f) == Kind::kNone) {
+      static uint32_t logged = 0;
+      if (f != logged) {
+        logged = f;
+        REXLOG_DEBUG("menu pointer: focus {:08X} is {}", f, ClassChain(base, f));
+      }
+      continue;
     }
-    if (!IsMenuOption(base, f, option_name)) continue;
-    Collect(base, scene, option_name, 0, options);
+    Collect(base, *n, scene, 0, widgets);
     focused = f;
   }
-  if (options.empty()) return;
+  if (widgets.empty()) {
+    dragging = 0;
+    return;
+  }
   // Window -> UI pixels (the UI is laid out at 1280x720 and scaled to the window).
   const float x = px * 1280.0f, y = py * 720.0f;
+  const Widget* hovered = nullptr;
+  for (const auto& w : widgets) {
+    // Rows: the label's box is narrow, so accept the whole row height left of the right edge plus a margin.
+    if (y >= w.top - 4 && y <= w.bottom + 4 && x >= w.left - 200 && x <= w.right + 200) hovered = &w;
+  }
   if (moves != seen_moves) {
     seen_moves = moves;
-    uint32_t hovered = 0;
-    for (const auto& o : options) {
-      // Rows: the label's box is narrow, so accept the whole row height left of the right edge plus a margin.
-      if (y >= o.top - 4 && y <= o.bottom + 4 && x >= o.left - 200 && x <= o.right + 200) hovered = o.widget;
+    if (hovered && hovered->object != focused && !dragging) Focus(ctx, base, hovered->object);
+  }
+
+  // Clicks on toggles and sliders.
+  std::vector<bool> rest;
+  for (const bool down : enter) {
+    if (!down) {
+      if (click_taken) {
+        click_taken = false;
+        dragging = 0;
+      } else {
+        rest.push_back(down);
+      }
+      continue;
     }
-    // Focus it directly: UUIScreenObject::SetFocus(Sender = None, PlayerIndex) is vtable +0x16C (execSetFocus
-    // 0x82508B78 calls it with GetBestPlayerIndex(), sub_828291E0). It refuses disabled options itself.
-    if (hovered && hovered != focused) {
-      ctx.r3.u64 = hovered;
-      sub_828291E0(ctx, base);
-      const uint32_t player = ctx.r3.u32;
-      ctx.r3.u64 = hovered;
-      ctx.r4.u64 = 0;
-      ctx.r5.u64 = player;
-      rex::runtime::ResolveIndirectFunction(LoadU32(base, LoadU32(base, hovered) + 0x16C))(ctx, base);
+    if (!hovered || hovered->kind == Kind::kOption) {
+      rest.push_back(down);
+      continue;
+    }
+    click_taken = true;
+    if (hovered->object != focused) Focus(ctx, base, hovered->object);
+    if (hovered->kind == Kind::kToggle) {
+      float l = 0, r = 0;
+      const bool left = LeftArrow(base, *n, hovered->object, l, r) && x >= l - 8 && x <= r + 8;
+      Tap(ctx, base, vp, left ? n->left : n->right);
+    } else {
+      float l, r;
+      SliderBar(*hovered, l, r);
+      if (x >= l - 40) dragging = hovered->object;
+    }
+  }
+  enter.swap(rest);
+
+  if (dragging) {
+    // Step toward the pointer, one nudge per frame, through the slider's own Left/Right handling.
+    const Widget w = Read(base, dragging, Kind::kSlider);
+    float l, r;
+    SliderBar(w, l, r);
+    const float t = std::clamp((x - l) / (r - l), 0.0f, 1.0f);
+    const float current = LoadF32(base, dragging + 0x444), lo = LoadF32(base, dragging + 0x448),
+                hi = LoadF32(base, dragging + 0x44C), nudge = LoadF32(base, dragging + 0x450);
+    const float target = lo + t * (hi - lo);
+    if (nudge > 0 && hi > lo) {
+      if (target > current + nudge / 2) Tap(ctx, base, vp, n->right);
+      else if (target < current - nudge / 2) Tap(ctx, base, vp, n->left);
     }
   }
 }
 }  // namespace menu_pointer
 
-// event: 0 pressed, 1 released (EInputEvent).
-void InputKey(PPCContext& ctx, uint8_t* base, uint32_t vp, uint32_t cid, uint32_t key, uint32_t event, float amount,
-              bool gamepad) {
-  const uint32_t client = LoadU32(base, vp + 0x34);
-  if (!client) return;
-  ctx.r3.u64 = client;
-  ctx.r4.u64 = vp;
-  ctx.r5.u64 = cid;
-  ctx.r6.u64 = LoadU64(base, key);
-  ctx.r7.u64 = event;
-  ctx.f1.f64 = amount;
-  ctx.r9.u64 = gamepad;
-  rex::runtime::ResolveIndirectFunction(LoadU32(base, LoadU32(base, client) + 0x10))(ctx, base);
-}
 }  // namespace
 
 // Menu mode for the keyboard/mouse driver (mnk_input.h): C1HUD natives. execNativePauseGame / execNativeUnpauseGame
@@ -645,9 +815,9 @@ extern "C" void sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base) {
   float dx = 0, dy = 0;
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) {
     kbm->TakeMouseDelta(dx, dy);
-    menu_pointer::Tick(ctx, base, *kbm, dt);
     static std::vector<bool> enter;
     kbm->TakeEnterEvents(enter);
+    menu_pointer::Tick(ctx, base, *kbm, vp, dt, enter);
     for (const bool down : enter) InputKey(ctx, base, vp, 0, kKeyEnter, down ? 0 : 1, 1.0f, false);
   }
   if (dx) InputAxis(ctx, base, vp, 0, kKeyMouseX, dx, dt, false);
