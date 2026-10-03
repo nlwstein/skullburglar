@@ -412,11 +412,7 @@ void TestSwitch(float dt) {
   plan.erase(plan.begin());
 }
 
-// ProcessInput also runs on a second guest thread during level loads: one caller at a time, the other skips.
 void Tick(uint8_t* base, float dt) {
-  static std::mutex mutex;
-  std::unique_lock lock(mutex, std::try_to_lock);
-  if (!lock) return;
   TestSwitch(dt);
   static const bots::PromptState* state = bots::FindPromptState();
   static uint32_t seen = 0;
@@ -639,6 +635,11 @@ extern "C" void sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base) {
     return t;
   }();
   if (!vp) return;
+  // ProcessInput also runs on a second guest thread during level loads (B-109). Everything below keeps statics or
+  // drains the keyboard/mouse driver, so one thread at a time; the other skips the extras for that frame.
+  static std::mutex mutex;
+  std::unique_lock lock(mutex, std::try_to_lock);
+  if (!lock) return;
   MemoryDumpTick(base, dt);
   press_start::Tick(base, dt);
   float dx = 0, dy = 0;
