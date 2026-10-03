@@ -446,9 +446,14 @@ VkPipeline Renderer::GetPipeline(const PipelineKey& key, bool sync, bool& pendin
   auto it = pipelines_.find(bytes);
   if (it == pipelines_.end()) it = pipelines_.emplace(std::string(bytes), std::make_unique<PipelineSlot>()).first;
   PipelineSlot& slot = *it->second;
+  // Recorded on first live use, so a pipeline the warm-up made from the master lands in this machine's manifest too
+  // once the game draws with it (the manifest is then everything this machine ran, e.g. a coverage playthrough).
+  if (!background && !slot.recorded) {
+    slot.recorded = true;
+    RecordPipeline(key);
+  }
   Async state = slot.state.load(std::memory_order_acquire);
   if (state == Async::kNone) {
-    if (!background) RecordPipeline(key);
     Workers* workers = shaders_->workers();
     if (sync || !workers) {
       slot.pipeline = CreateDrawPipeline(key);

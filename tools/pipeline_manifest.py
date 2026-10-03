@@ -2,6 +2,10 @@
 
     python3 tools/pipeline_manifest.py merge OUT IN [IN...]
     python3 tools/pipeline_manifest.py stats IN [IN...]
+    python3 tools/pipeline_manifest.py convert OUT IN --class N
+
+`convert` rewrites a manifest for a device class with fewer features (e.g. class 7 -> 3: no cull distance, as on
+MoltenVK), so one playthrough on any GPU can feed every class's master.
 
 A manifest is `<cache>/native/<title>.manifest.bin`, written by every native-renderer run. Format:
   header   8-byte magic ('BOTSPM02'), u32 record size, u32 device feature class
@@ -88,6 +92,50 @@ def merge(out, inputs):
     print(f"{out}: {len(pipelines)} pipelines, {len(written)} shaders ({describe(header)})")
 
 
+# Device feature class bits (manifest.cpp LoadManifest) and where they show up in a record (after the 'P' tag):
+# the vertex shader's translation modification (SpirvShaderTranslator::Modification::vertex: interpolator mask 0-15,
+# point parameters 16, dynamic registers 17-24, user clip plane count 25-27, user_clip_plane_cull 28,
+# vertex_kill_and 29) and PipelineKey::depth_clamp (the 6th state dword, after the 48-byte record header).
+DEPTH_CLAMP, CLIP_DISTANCE, CULL_DISTANCE = 1, 2, 4
+VS_MOD, DEPTH_CLAMP_AT = 1 + 8, 1 + 48 + 5 * 4
+
+
+def convert_record(record, target):
+    """A record of a class with more features as draw.cpp would have keyed it on a device of class `target`."""
+    r = bytearray(record)
+    mod = struct.unpack_from("<Q", r, VS_MOD)[0]
+    cull = (mod >> 28) & 1
+    if not target & CULL_DISTANCE:
+        cull = 0
+        mod &= ~((1 << 28) | (1 << 29))
+    if not cull and not target & CLIP_DISTANCE:
+        mod &= ~(0b111 << 25)
+    struct.pack_into("<Q", r, VS_MOD, mod)
+    if not target & DEPTH_CLAMP:
+        struct.pack_into("<I", r, DEPTH_CLAMP_AT, 0)
+    return bytes(r)
+
+
+def convert(out, path, target):
+    header, shaders, pipelines = read(path)
+    source = struct.unpack_from("<I", header, 12)[0]
+    if target & ~source:
+        sys.exit(f"{path}: class {source} lacks features of class {target}; only a superset converts down")
+    new_header = header[:12] + struct.pack("<I", target)
+    converted = list(dict.fromkeys(convert_record(p, target) for p in pipelines))
+    with open(out, "wb") as f:
+        f.write(new_header)
+        written = set()
+        for record in converted:
+            for h in shader_hashes(record):
+                if h in shaders and h not in written:
+                    f.write(shaders[h])
+                    written.add(h)
+            if all(h in written for h in shader_hashes(record)):
+                f.write(record)
+    print(f"{out}: {len(converted)} pipelines (from {len(pipelines)}), {len(written)} shaders, class {source} -> {target}")
+
+
 def stats(inputs):
     for path in inputs:
         h, s, p = read(path)
@@ -102,9 +150,15 @@ def main():
     m.add_argument("inputs", nargs="+")
     st = sub.add_parser("stats")
     st.add_argument("inputs", nargs="+")
+    c = sub.add_parser("convert")
+    c.add_argument("out")
+    c.add_argument("input")
+    c.add_argument("--class", dest="target", type=int, required=True)
     args = ap.parse_args()
     if args.cmd == "merge":
         merge(args.out, args.inputs)
+    elif args.cmd == "convert":
+        convert(args.out, args.input, args.target)
     else:
         stats(args.inputs)
 

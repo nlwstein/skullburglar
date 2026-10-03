@@ -510,6 +510,7 @@ class Renderer : public Pm4Sink {
     std::atomic<Async> state{Async::kNone};
     VkPipeline pipeline = VK_NULL_HANDLE;  // set by whoever creates it, before state becomes kReady
     bool counted = false;                  // in stats_.pipelines
+    bool recorded = false;                 // passed to RecordPipeline (first live use, however it was created)
   };
   std::unordered_map<std::string, std::unique_ptr<PipelineSlot>, BytesHash, std::equal_to<>> pipelines_;
   bool async_pipelines_ = false;
