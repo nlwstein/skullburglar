@@ -203,7 +203,7 @@ int Render(Capture& capture, const std::filesystem::path& out, int repeat) {
     return 0;
   }
   // A reduced render scale (BOTS_GFX_RENDER_SCALE): box-filter the reference down to the frame's size first.
-  if (const float scale = bots::gfx::vk::RenderScale(); scale != 1.0f) {
+  if (const float scale = renderer.render_scale(); scale != 1.0f) {
     const uint32_t sw = std::min(w, uint32_t(float(rw) * scale + 0.5f));
     const uint32_t sh = std::min(h, uint32_t(float(rh) * scale + 0.5f));
     std::vector<uint8_t> scaled(size_t(sw) * sh * 3);

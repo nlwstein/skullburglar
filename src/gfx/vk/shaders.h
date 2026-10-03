@@ -24,8 +24,9 @@ namespace bots::gfx::vk {
 enum class Async : uint8_t { kNone, kPending, kReady, kFailed };
 
 // Host pixels per guest pixel (BOTS_GFX_RENDER_SCALE, 0.25-1; 1 = native resolution): surfaces and resolve
-// destinations are allocated, drawn and copied at this fraction of the guest's size.
-float RenderScale();
+// destinations are allocated, drawn and copied at this fraction of the guest's size. Unset: 2/3 on Intel GPUs, else 1.
+// Decided on the first call (the renderer makes it before translating anything).
+float RenderScale(const rex::ui::vulkan::VulkanDevice* device);
 
 // Worker threads, each with its own translator (translators are not thread-safe). Jobs run in submission order.
 class Workers {

@@ -283,6 +283,7 @@ class Renderer : public Pm4Sink {
                                                     "indices", "constants", "descriptors", "pipeline", "pass",
                                                     "record"};
   bool draw_profile() const { return draw_profile_; }
+  float render_scale() const { return scale_; }
   enum GpuCat : uint8_t { kGpuDraw, kGpuResolve, kGpuUpload, kGpuTexture, kGpuTransfer, kGpuPresent, kGpuOther };
   static constexpr const char* kGpuCatNames[] = {"draw", "resolve", "upload", "texture", "transfer", "present",
                                                  "other"};

@@ -1,5 +1,6 @@
 // Renderer: native present. The front buffer goes through the guest's 256-entry gamma ramp into the presenter's
 // guest output image, as the emulated swap does for 8_8_8_8 front buffers.
+#include <cstdlib>
 #include <cstring>
 
 #include <glslang/Public/ShaderLang.h>
@@ -21,11 +22,33 @@ uint Ramp(float v) {
   return ramp[i >> 2][i & 3u];
 }
 
+vec3 Tap(vec2 texel, vec2 size) { return textureLod(source, vec3(texel / size, 0.0), 0.0).rgb; }
+
+// Catmull-Rom from 9 bilinear taps: the middle two weights of each axis share one tap.
+vec3 CatmullRom(vec2 position, vec2 size) {
+  vec2 t1 = floor(position - 0.5) + 0.5;
+  vec2 f = position - t1;
+  vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+  vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+  vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+  vec2 w3 = f * f * (-0.5 + 0.5 * f);
+  vec2 w12 = w1 + w2;
+  vec2 t0 = t1 - 1.0, t3 = t1 + 2.0, t12 = t1 + w2 / w12;
+  return (Tap(vec2(t0.x, t0.y), size) * w0.x + Tap(vec2(t12.x, t0.y), size) * w12.x +
+          Tap(vec2(t3.x, t0.y), size) * w3.x) * w0.y +
+         (Tap(vec2(t0.x, t12.y), size) * w0.x + Tap(vec2(t12.x, t12.y), size) * w12.x +
+          Tap(vec2(t3.x, t12.y), size) * w3.x) * w12.y +
+         (Tap(vec2(t0.x, t3.y), size) * w0.x + Tap(vec2(t12.x, t3.y), size) * w12.x +
+          Tap(vec2(t3.x, t3.y), size) * w3.x) * w3.y;
+}
+
 void main() {
-  // Output pixel centres -> source texels (the front buffer is render_scale.x of the output's size): at 1 that is
-  // each texel's centre, so the linear sampler returns it exactly; below 1 it upscales bilinearly.
-  vec2 uv = gl_FragCoord.xy * render_scale.x / vec2(textureSize(source, 0).xy);
-  vec3 c = textureLod(source, vec3(uv, 0.0), 0.0).rgb;
+  // Output pixel centres -> source texels (the front buffer is render_scale.x of the output's size). At 1 that is
+  // each texel's centre, read as is; below 1 it upscales with Catmull-Rom (render_scale.z 1) or bilinearly.
+  vec2 size = vec2(textureSize(source, 0).xy);
+  vec2 position = gl_FragCoord.xy * render_scale.x;
+  vec3 c = render_scale.z != 0.0 ? CatmullRom(position, size)
+                                 : textureLod(source, vec3(position / size, 0.0), 0.0).rgb;
   result = vec4(float((Ramp(c.r) >> 20) & 0x3FFu), float((Ramp(c.g) >> 10) & 0x3FFu), float(Ramp(c.b) & 0x3FFu),
                 1023.0) / 1023.0;
 }
@@ -95,7 +118,12 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
     if (!ramp) return false;
   }
   std::memcpy(ramp, gamma_ramp, 256 * 4);
-  const float params[4] = {scale_, scale_, 0.0f, 0.0f};
+  // BOTS_GFX_UPSCALE=bilinear: the plain linear sampler instead of Catmull-Rom below render scale 1.
+  static const bool bilinear = [] {
+    const char* v = std::getenv("BOTS_GFX_UPSCALE");
+    return v && std::strcmp(v, "bilinear") == 0;
+  }();
+  const float params[4] = {scale_, scale_, scale_ < 1.0f && !bilinear ? 1.0f : 0.0f, 0.0f};
   std::memcpy(ramp + 256 * 4, params, sizeof(params));
   const VkDescriptorSet set = AllocateSet(present_set_layout_);
   if (!set) {
