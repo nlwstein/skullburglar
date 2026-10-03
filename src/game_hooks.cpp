@@ -42,8 +42,6 @@ extern "C" void sub_828291E0(PPCContext& __restrict ctx, uint8_t* base);
 
 namespace {
 // Guest address → host pointer, as REX_RAW_ADDR in generated/default/bots_pch.h (Mac arm64 layout).
-// The offset is formed in 64 bits: with `base + address + ...` clang (Apple, arm64) hoisted a constant guest address
-// out of a loop as a sign-extended 32-bit offset, and InputKey(kKeyEnter) read base - 2 GiB (B-107).
 uint8_t* Raw(uint8_t* base, uint32_t address) {
   return base + (uint64_t(address) + (address >= 0xE0000000u ? 0x1000u : 0u));
 }
@@ -241,6 +239,8 @@ namespace {
 // tools/key_names.py lists them all.
 constexpr uint32_t kKeyMouseX = 0x8380DEC0, kKeyMouseY = 0x8380D5B8, kKeyEnter = 0x8380E394;
 
+// One 8-byte read. Two LoadU32 halves got merged by clang (arm64) into a 64-bit load whose constant offset
+// 0x8380E394 came out sign-extended: InputKey(kKeyEnter) read base - 2 GiB and every menu click faulted (B-107).
 uint64_t LoadU64(uint8_t* base, uint32_t address) {
   uint64_t v;
   __builtin_memcpy(&v, Raw(base, address), 8);
