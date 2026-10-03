@@ -1,8 +1,8 @@
 diff --git a/include/rex/system/interfaces/graphics.h b/include/rex/system/interfaces/graphics.h
-index d54df86..0addcc8 100644
+index d54df86..bcfaa1e 100644
 --- a/include/rex/system/interfaces/graphics.h
 +++ b/include/rex/system/interfaces/graphics.h
-@@ -79,6 +79,14 @@ class IGraphicsSystem {
+@@ -79,6 +79,17 @@ class IGraphicsSystem {
      (void)blocking;
    }
  
@@ -13,6 +13,9 @@ index d54df86..0addcc8 100644
 +    done = 0;
 +    total = 0;
 +  }
++  // The precompile progress is in the foreground (the player is waiting on it rather than playing):
++  // the backend may hold the guest at its next swap and give the compile the whole CPU.
++  virtual void SetShaderPrecompileForeground(bool foreground) { (void)foreground; }
 +
    // One-shot convenience for callers that don't care about the split.
    X_STATUS Setup(runtime::FunctionDispatcher* function_dispatcher, KernelState* kernel_state,
@@ -253,10 +256,10 @@ index 8e6b854..a79b98e 100644
  }
  
 diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
-index 8f2fcb0..a492399 100644
+index 8f2fcb0..486a43d 100644
 --- a/src/graphics/graphics_system.cpp
 +++ b/src/graphics/graphics_system.cpp
-@@ -364,6 +364,14 @@ void GraphicsSystem::InitializeShaderStorage(const std::filesystem::path& cache_
+@@ -364,6 +364,20 @@ void GraphicsSystem::InitializeShaderStorage(const std::filesystem::path& cache_
    }
  }
  
@@ -265,6 +268,12 @@ index 8f2fcb0..a492399 100644
 +  total = 0;
 +  if (command_processor_) {
 +    command_processor_->GetShaderPrecompileProgress(done, total);
++  }
++}
++
++void GraphicsSystem::SetShaderPrecompileForeground(bool foreground) {
++  if (command_processor_) {
++    command_processor_->shader_precompile_foreground_.store(foreground, std::memory_order_relaxed);
 +  }
 +}
 +

@@ -3,7 +3,9 @@
 // game runs; draws that need an unfinished pipeline are skipped, so effects can be missing for a
 // moment. This window says so:
 //   - a centered "Compiling shaders" panel with a progress bar, until the player sends it to the
-//     background (button, Enter/Space/Escape, or the pad's View/Back button),
+//     background (button, Enter/Space/Escape, or the pad's View/Back button). While it's up the
+//     native backend holds the game at its next frame so the compile gets the whole CPU (B-098),
+//     like a first-boot shader compile screen,
 //   - then a small progress bar in the bottom-right corner until it finishes.
 // Nothing is shown if compiling finishes within kShowAfter (warm driver cache). The dialog deletes
 // itself (Close) when done, so no imgui layer stays on top of the game afterwards.
@@ -33,6 +35,8 @@ class ShaderProgressDialog : public rex::ui::ImGuiDialog {
   ShaderProgressDialog(rex::ui::ImGuiDrawer* drawer, GraphicsGetter graphics, InputGetter input)
       : ImGuiDialog(drawer), graphics_(std::move(graphics)), input_(std::move(input)) {
     if (const char* v = std::getenv("BOTS_SHADER_PROGRESS_DEMO")) demo_secs_ = std::atof(v);
+    // BOTS_PRECOMPILE_HOLD=0 (scripted runs): start in the background, so the game is never held.
+    if (const char* v = std::getenv("BOTS_PRECOMPILE_HOLD"); v && *v == '0') backgrounded_ = true;
   }
 
  protected:
@@ -51,6 +55,7 @@ class ShaderProgressDialog : public rex::ui::ImGuiDialog {
     }
     // Done, or no stored pipelines at all: remove the dialog (and the imgui layer with it).
     if ((total && done >= total) || (!total && clk::now() - created_ > kNothingQueuedAfter)) {
+      SetForeground(graphics, false);
       Close();
       return;
     }
@@ -63,6 +68,8 @@ class ShaderProgressDialog : public rex::ui::ImGuiDialog {
     std::snprintf(overlay, sizeof(overlay), "%u / %u", done, total);
 
     if (!backgrounded_ && PadBackPressed()) backgrounded_ = true;
+    // The game waits while the panel is up (backends that support it hold the guest at its next frame).
+    SetForeground(graphics, !backgrounded_);
     if (!backgrounded_) {
       ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
                               ImGuiCond_Always, ImVec2(0.5f, 0.5f));
@@ -72,12 +79,13 @@ class ShaderProgressDialog : public rex::ui::ImGuiDialog {
                        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
         ImGui::TextWrapped(
-            "Building this GPU's shaders from the shader cache. You can play now: effects that "
-            "aren't compiled yet stay invisible until they are.");
+            "Building this GPU's shaders, once. The game starts when this finishes, or play now and let "
+            "it finish in the background: effects that aren't compiled yet stay invisible until they "
+            "are, and the game may run slower meanwhile.");
         ImGui::Spacing();
         ImGui::ProgressBar(fraction, ImVec2(-1, 0), overlay);
         ImGui::Spacing();
-        if (ImGui::Button("Continue in background", ImVec2(-1, 0)) ||
+        if (ImGui::Button("Play now", ImVec2(-1, 0)) ||
             ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_Space) ||
             ImGui::IsKeyPressed(ImGuiKey_Escape)) {
           backgrounded_ = true;
@@ -106,6 +114,12 @@ class ShaderProgressDialog : public rex::ui::ImGuiDialog {
   }
 
  private:
+  void SetForeground(rex::system::IGraphicsSystem* graphics, bool foreground) {
+    if (foreground == foreground_) return;
+    foreground_ = foreground;
+    graphics->SetShaderPrecompileForeground(foreground);
+  }
+
   static constexpr std::chrono::milliseconds kShowAfter{750};
   static constexpr std::chrono::seconds kNothingQueuedAfter{20};
 
@@ -133,5 +147,6 @@ class ShaderProgressDialog : public rex::ui::ImGuiDialog {
   std::chrono::steady_clock::time_point first_seen_{};
   double demo_secs_ = 0;
   bool backgrounded_ = false;
+  bool foreground_ = false;
   bool back_was_down_ = false;
 };

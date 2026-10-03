@@ -150,13 +150,20 @@ bool Renderer::InitDrawing() {
   uint32_t workers = std::clamp(std::thread::hardware_concurrency() / 3, 1u, 4u);
   if (const char* v = std::getenv("BOTS_GFX_PIPELINE_THREADS"); v && *v) workers = uint32_t(std::atoi(v));
   async_pipelines_ = workers != 0;
+  // Warm-up-only workers at low priority (BOTS_GFX_WARMUP_THREADS), else the hardware threads left over after the
+  // pipeline workers, the guest's main and GPU threads, up to 6.
+  const uint32_t hw = std::thread::hardware_concurrency();
+  uint32_t warmup = hw > workers + 2 ? std::min(hw - workers - 2, 6u) : 0;
+  if (const char* v = std::getenv("BOTS_GFX_WARMUP_THREADS"); v && *v) warmup = uint32_t(std::atoi(v));
+  if (!workers) warmup = 0;
+  REXLOG_INFO("gfx native: {} pipeline workers, {} warm-up workers", workers, warmup);
   draw_profile_ = std::getenv("BOTS_DRAW_PROFILE") && *std::getenv("BOTS_DRAW_PROFILE") == '1';
   if (const char* v = std::getenv("BOTS_GFX_PASS_MERGE"); v && *v) pass_merge_ = *v == '1';
   if (const char* v = std::getenv("BOTS_GFX_LAZY_RAW_DEPTH"); v && *v) lazy_raw_depth_ = *v == '1';
   if (const char* v = std::getenv("BOTS_GFX_MAX_ANISO"); v && *v) max_anisotropy_ = uint32_t(std::atoi(v));
   scale_ = RenderScale(device_);
   if (scale_ != 1.0f) REXLOG_INFO("gfx native: render scale {}", scale_);
-  shaders_ = std::make_unique<ShaderCache>(device_, workers);
+  shaders_ = std::make_unique<ShaderCache>(device_, workers, warmup);
   shared_memory_bindings_ = 1u << Translator::GetSharedMemoryStorageBufferCountLog2(props.maxStorageBufferRange);
 
   VkDescriptorSetLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};

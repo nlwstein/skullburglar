@@ -5,6 +5,22 @@
 
 #include <xxhash.h>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <pthread.h>
+#else
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+
 namespace bots::gfx::vk {
 
 namespace rg = rex::graphics;
@@ -32,6 +48,17 @@ rg::SpirvShaderTranslator::Features TranslatorFeatures(const rex::ui::vulkan::Vu
   return features;
 }
 
+// For background-only workers: below the game's threads, so they use idle cores only.
+void LowerThreadPriority() {
+#if defined(_WIN32)
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+#elif defined(__APPLE__)
+  pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#else
+  setpriority(PRIO_PROCESS, pid_t(syscall(SYS_gettid)), 10);  // Linux nice is per thread
+#endif
+}
+
 // Host render targets: no fragment shader interlock, no 2x MSAA tricks (the game renders without MSAA).
 #define BOTS_TRANSLATOR_ARGS(device) TranslatorFeatures(device), false, false, false
 
@@ -50,8 +77,9 @@ float RenderScale(const rex::ui::vulkan::VulkanDevice* device) {
   return scale;
 }
 
-Workers::Workers(const rex::ui::vulkan::VulkanDevice* device, uint32_t count) {
-  for (uint32_t i = 0; i < count; ++i) threads_.emplace_back([this, device] { Run(device); });
+Workers::Workers(const rex::ui::vulkan::VulkanDevice* device, uint32_t count, uint32_t background) {
+  for (uint32_t i = 0; i < count + background; ++i)
+    threads_.emplace_back([this, device, only = i >= count] { Run(device, only); });
 }
 
 Workers::~Workers() {
@@ -91,14 +119,22 @@ bool Workers::Take(Job& job) {
   return true;
 }
 
-void Workers::Run(const rex::ui::vulkan::VulkanDevice* device) {
+void Workers::Run(const rex::ui::vulkan::VulkanDevice* device, bool background_only) {
+  if (background_only) LowerThreadPriority();
   rg::SpirvShaderTranslator translator(BOTS_TRANSLATOR_ARGS(device));
   std::unique_lock lock(mutex_);
   for (;;) {
-    work_.wait(lock, [this] { return stop_ || !queue_.empty() || !background_.empty(); });
+    work_.wait(lock, [this, background_only] {
+      return stop_ || (!background_only && !queue_.empty()) || !background_.empty();
+    });
     if (stop_) return;
     Job job;
-    Take(job);
+    if (background_only) {
+      job = std::move(background_.front());
+      background_.pop_front();
+    } else {
+      Take(job);
+    }
     lock.unlock();
     job(translator);
     lock.lock();
@@ -121,9 +157,9 @@ void Workers::Wait(const std::atomic<Async>& state, rg::SpirvShaderTranslator& t
   }
 }
 
-ShaderCache::ShaderCache(const rex::ui::vulkan::VulkanDevice* device, uint32_t workers)
+ShaderCache::ShaderCache(const rex::ui::vulkan::VulkanDevice* device, uint32_t workers, uint32_t background_workers)
     : device_(device), translator_(BOTS_TRANSLATOR_ARGS(device)) {
-  if (workers) workers_ = std::make_unique<Workers>(device, workers);
+  if (workers) workers_ = std::make_unique<Workers>(device, workers, background_workers);
 }
 
 ShaderCache::~ShaderCache() { workers_.reset(); }

@@ -99,6 +99,9 @@ class Renderer : public Pm4Sink {
   // Warm-up progress: pipelines recorded in the manifest, and how many of them are created (ready or failed).
   size_t warmup_total() const { return warm_.size(); }
   size_t warmup_done() const { return warm_done_; }
+  // Feeds the warm-up queue and builds the pipelines whose translations finished (manifest.cpp). EndFrame does this
+  // every frame; a guest held for the warm-up calls it directly.
+  void PumpWarmup();
   // Occlusion queries (occlusion.cpp). The guest brackets a query's draws with EVENT_WRITE_ZPD; at the end D3D
   // leaves 0xFFFFFEED markers in the sample-count struct at `address` and waits for the GPU to replace them. Each
   // draw in between is counted by a Vulkan occlusion query, and a resolver thread writes the sum into the guest
@@ -360,9 +363,8 @@ class Renderer : public Pm4Sink {
   // The previous draw's pipeline is checked first (consecutive draws mostly share it). Not yet created: created now
   // (sync), or queued on a worker and null with `pending` set. `background`: queued behind live work (warm-up).
   VkPipeline GetPipeline(const PipelineKey& key, bool sync, bool& pending, bool background = false);
-  // Manifest (manifest.cpp): append a newly created live pipeline; feed the warm-up queue (from EndFrame).
+  // Manifest (manifest.cpp): append a newly created live pipeline.
   void RecordPipeline(const PipelineKey& key);
-  void PumpWarmup();
 
   // EDRAM ownership transfers (transfer.cpp).
   static constexpr uint32_t kTransferDepth = 100;       // Transfer source format for D24S8 depth/stencil

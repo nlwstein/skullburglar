@@ -29,10 +29,12 @@ enum class Async : uint8_t { kNone, kPending, kReady, kFailed };
 float RenderScale(const rex::ui::vulkan::VulkanDevice* device);
 
 // Worker threads, each with its own translator (translators are not thread-safe). Jobs run in submission order.
+// `count` workers take live work first, then background work; `background` more run background work only, at low OS
+// priority, so a cold warm-up can use the idle cores without taking CPU from the game.
 class Workers {
  public:
   using Job = std::function<void(rex::graphics::SpirvShaderTranslator&)>;
-  Workers(const rex::ui::vulkan::VulkanDevice* device, uint32_t count);
+  Workers(const rex::ui::vulkan::VulkanDevice* device, uint32_t count, uint32_t background = 0);
   ~Workers();  // finishes the queue's running jobs, drops the rest
   uint32_t count() const { return uint32_t(threads_.size()); }
   // Background jobs (pipeline warm-up) run only when no other job is queued.
@@ -44,7 +46,7 @@ class Workers {
   size_t background_queued() const;
 
  private:
-  void Run(const rex::ui::vulkan::VulkanDevice* device);
+  void Run(const rex::ui::vulkan::VulkanDevice* device, bool background_only);
   mutable std::mutex mutex_;
   std::condition_variable work_, done_;
   std::deque<Job> queue_, background_;
@@ -59,7 +61,7 @@ class ShaderCache {
   using Translation = Shader::VulkanTranslation;
 
   // workers: 0 translates on the calling thread only (Request's sync is then always true in effect).
-  ShaderCache(const rex::ui::vulkan::VulkanDevice* device, uint32_t workers);
+  ShaderCache(const rex::ui::vulkan::VulkanDevice* device, uint32_t workers, uint32_t background_workers = 0);
   ~ShaderCache();
 
   // The shader whose big-endian microcode is at `ucode`, analyzed. Cached by content hash.

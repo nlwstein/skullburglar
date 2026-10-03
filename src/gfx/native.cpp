@@ -11,6 +11,7 @@
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <rex/filesystem.h>
@@ -48,6 +49,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     if (!renderer_) return;
     renderer_->EndFrame();
     PublishWarmup();
+    HoldForWarmup();
     ++frames_;
     // BOTS_GFX_NO_PRESENT=1 (benchmarking): render everything but never hand the frame to the presenter. Under a
     // GPU-less X server (Xvfb) the Vulkan surface falls back to xcb_put_image and presenting costs more than the
@@ -246,6 +248,30 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   void PublishWarmup() {
     shader_precompile_total_.store(uint32_t(renderer_->warmup_total()), std::memory_order_relaxed);
     shader_precompile_done_.store(uint32_t(renderer_->warmup_done()), std::memory_order_relaxed);
+  }
+
+  // While the panel is in the foreground (the player is waiting on it, not playing) the guest stays at this swap
+  // and the warm-up gets the whole CPU: on a 4-core laptop the game and a background warm-up starve each other
+  // (B-098). Ends when the warm-up does or the player sends the panel to the background.
+  void HoldForWarmup() {
+    if (!shader_precompile_foreground_.load(std::memory_order_relaxed)) return;
+    const auto start = std::chrono::steady_clock::now();
+    auto report = start + std::chrono::seconds(5);
+    const size_t from = renderer_->warmup_done();
+    while (shader_precompile_foreground_.load(std::memory_order_relaxed) && worker_running_ &&
+           renderer_->warmup_done() < renderer_->warmup_total()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      renderer_->PumpWarmup();
+      PublishWarmup();
+      if (std::chrono::steady_clock::now() >= report) {
+        report += std::chrono::seconds(5);
+        REXLOG_INFO("gfx native: guest held for the pipeline warm-up: {}/{} done", renderer_->warmup_done(),
+                    renderer_->warmup_total());
+      }
+    }
+    REXLOG_INFO("gfx native: guest held {:.1f} s for the pipeline warm-up ({} pipelines, {}/{} done)",
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
+                renderer_->warmup_done() - from, renderer_->warmup_done(), renderer_->warmup_total());
   }
 
   void WriteRegister(uint32_t index, uint32_t value) override {
