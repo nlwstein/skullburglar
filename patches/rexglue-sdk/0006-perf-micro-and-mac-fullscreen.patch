@@ -1,8 +1,66 @@
 diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
-index 23645ef..81b1400 100644
+index 23645ef..ca32cde 100644
 --- a/src/ui/vulkan/vulkan_presenter.cpp
 +++ b/src/ui/vulkan/vulkan_presenter.cpp
-@@ -2038,6 +2038,22 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <chrono>
+ #include <cstddef>
+ #include <cstdint>
+ #include <cmath>
+@@ -62,6 +63,19 @@ namespace rex {
+ namespace ui {
+ namespace vulkan {
+ 
++// B-111: one Windows startup sat 5 min between device creation and the swapchain with nothing logged. Warn about any
++// surface / swapchain step that takes over half a second, so the next stall says where it was.
++struct SlowStepLog {
++  explicit SlowStepLog(const char* what) : what_(what), start_(std::chrono::steady_clock::now()) {}
++  ~SlowStepLog() {
++    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_)
++                        .count();
++    if (ms >= 500) REXLOG_WARN("VulkanPresenter: {} took {} ms", what_, ms);
++  }
++  const char* what_;
++  std::chrono::steady_clock::time_point start_;
++};
++
+ #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
+ namespace {
+ 
+@@ -842,6 +856,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+         surface_create_info.flags = 0;
+         surface_create_info.hinstance = win32_hwnd_surface.hinstance();
+         surface_create_info.hwnd = win32_hwnd_surface.hwnd();
++        SlowStepLog slow("vkCreateWin32SurfaceKHR");
+         vulkan_surface_create_result = ifn.vkCreateWin32SurfaceKHR(
+             instance, &surface_create_info, nullptr, &paint_context_.vulkan_surface);
+       } break;
+@@ -1111,6 +1126,7 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
+     VkSwapchainKHR old_swapchain, uint32_t& present_queue_family_out, VkFormat& image_format_out,
+     VkExtent2D& image_extent_out, bool& is_fifo_out, bool& ui_surface_unusable_out) {
+   ui_surface_unusable_out = false;
++  SlowStepLog slow_total("swapchain setup (surface queries + vkCreateSwapchainKHR)");
+ 
+   const VulkanInstance::Functions& ifn = vulkan_device->vulkan_instance()->functions();
+   const VkPhysicalDevice physical_device = vulkan_device->physical_device();
+@@ -1406,7 +1422,12 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
+   swapchain_create_info.clipped = VK_TRUE;
+   swapchain_create_info.oldSwapchain = old_swapchain;
+   VkSwapchainKHR swapchain;
+-  if (dfn.vkCreateSwapchainKHR(device, &swapchain_create_info, nullptr, &swapchain) != VK_SUCCESS) {
++  VkResult swapchain_create_result;
++  {
++    SlowStepLog slow("vkCreateSwapchainKHR");
++    swapchain_create_result = dfn.vkCreateSwapchainKHR(device, &swapchain_create_info, nullptr, &swapchain);
++  }
++  if (swapchain_create_result != VK_SUCCESS) {
+     REXLOG_ERROR("VulkanPresenter: Failed to create a swapchain");
+     return VK_NULL_HANDLE;
+   }
+@@ -2038,6 +2059,22 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
              case kGuestOutputPaintPipelineLayoutIndexBilinear: {
                effect_constants_size = sizeof(effect_constants.bilinear);
                effect_constants.bilinear.Initialize(guest_output_flow, i);
