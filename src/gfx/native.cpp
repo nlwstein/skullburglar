@@ -47,6 +47,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width, uint32_t frontbuffer_height) override {
     if (!renderer_) return;
     renderer_->EndFrame();
+    PublishWarmup();
     ++frames_;
     // BOTS_GFX_NO_PRESENT=1 (benchmarking): render everything but never hand the frame to the presenter. Under a
     // GPU-less X server (Xvfb) the Vulkan surface falls back to xcb_put_image and presenting costs more than the
@@ -170,6 +171,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
           return package->second->Read(offset, size, out);
         });
     if (!pipeline_cache_path_.empty()) renderer_->LoadPipelineCache(pipeline_cache_path_);
+    PublishWarmup();
     const char* occlusion = std::getenv("BOTS_GFX_OCCLUSION");
     if (occlusion && *occlusion ? *occlusion == '1' : renderer_->occlusion_queries_by_default()) {
       renderer_->EnableOcclusionQueries(1000);  // "visible": the SDK's fake count
@@ -182,7 +184,10 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   // Runs on the command processor thread, or before the context is set up while the processor is paused.
   void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id, bool blocking) override {
     pipeline_cache_path_ = cache_root / "native" / fmt::format("{:08X}.pipelines.bin", title_id);
-    if (renderer_) renderer_->LoadPipelineCache(pipeline_cache_path_);
+    if (renderer_) {
+      renderer_->LoadPipelineCache(pipeline_cache_path_);
+      PublishWarmup();
+    }
   }
 
   void ShutdownContext() override {
@@ -235,6 +240,12 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     }
     renderer_->OnDraw(*register_file_, vs_, ps_, draw);
     return true;
+  }
+
+  // The pipeline warm-up's progress, for the "Compiling shaders" panel (shader_progress.h; B-098).
+  void PublishWarmup() {
+    shader_precompile_total_.store(uint32_t(renderer_->warmup_total()), std::memory_order_relaxed);
+    shader_precompile_done_.store(uint32_t(renderer_->warmup_done()), std::memory_order_relaxed);
   }
 
   void WriteRegister(uint32_t index, uint32_t value) override {
