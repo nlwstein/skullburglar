@@ -8,6 +8,7 @@
 #   SDK=<dir>   rexglue-sdk checkout (default ~/repos/bots-recomp-ext/rexglue-sdk)
 #   GEN=<dir>   generated/ to use (default ./generated; a worktree has none, so point it at the main checkout's)
 #   CPUS=<n>    container CPU cap and build parallelism (default: all cores of the build machine)
+#   CMAKE_ARGS  extra -D settings for the build dir (e.g. "-DBOTS_PROFILING=ON" for Tracy + SDK perf counters)
 # The game itself is mounted read-only from ~/bots/game on the build machine (used by runs, not the build).
 set -eu
 cd "$(dirname "$0")/../.."
@@ -28,7 +29,7 @@ rsync -az --delete --exclude out/ --exclude .git/ --exclude .claude/ --exclude g
 rsync -az --delete "$GEN/" "$(dest bots/$N/game/generated/)"
 rsync -a docker/linux/Dockerfile "$(dest bots/$N/image/)"
 
-on_host "CPUS=${CPUS:-} N=$N C=$C"'
+on_host "CPUS=${CPUS:-} N=$N C=$C CMAKE_ARGS='${CMAKE_ARGS:-}'"'
 set -e
 c=${CPUS:-$(nproc)}
 cd ~/bots/$N
@@ -47,6 +48,8 @@ sed -i "s|    COMMAND \$<TARGET_FILE:rex::rexglue> codegen \${CMAKE_CURRENT_SOUR
 sed -i "/DEPFILE .*codegen.d/d" game/generated/rexglue.cmake
 docker exec -w /w/game $C sh -c "[ -f /w/build/build.ninja ] || cmake -G Ninja -B /w/build \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo -DREXSDK_DIR=/w/sdk -DCMAKE_C_FLAGS=-march=x86-64-v2 -DCMAKE_CXX_FLAGS=-march=x86-64-v2"
+# Extra cache settings (CMAKE_ARGS) are applied to the existing build dir too.
+[ -z "$CMAKE_ARGS" ] || docker exec -w /w/game $C cmake -B /w/build $CMAKE_ARGS >/dev/null
 docker exec $C cmake --build /w/build --parallel $c
 docker exec $C sh -c "ls -la /w/build/bots"
 '

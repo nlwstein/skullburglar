@@ -12,6 +12,14 @@ if(APPLE)
     enable_language(C OBJC OBJCXX)
 endif()
 
+# The SDK compiles Tracy zones and its perf counters into every non-Release build; the counters add an atomic
+# increment to every guest indirect call (~3% of the guest main thread on the Deck). Off unless asked for.
+option(BOTS_PROFILING "Build the SDK from source with Tracy and its perf counters" OFF)
+if(NOT BOTS_PROFILING)
+    set(REXGLUE_ENABLE_TRACY OFF CACHE BOOL "" FORCE)
+    set(REXGLUE_ENABLE_PERF_COUNTERS OFF CACHE BOOL "" FORCE)
+endif()
+
 include(generated/rexglue.cmake)
 
 # Sources
