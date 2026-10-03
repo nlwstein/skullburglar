@@ -40,9 +40,9 @@ if ! docker ps --format "{{.Names}}" | grep -qx $C; then
   docker run -d --name $C --cpus $c --memory 40g --shm-size 8g --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all \
     -v ~/bots/$N:/w -v ~/bots/game:/g:ro bots-linux sleep infinity
 fi
-# x86-64-v2 (SSSE3/SSE4) is the SDK minimum, as in its presets: reconfigure a build dir made without it
-# (build/ is written by root in the container, so clean it from there).
-grep -qs "march=x86-64-v2" build/CMakeCache.txt || docker exec $C rm -rf /w/build
+# x86-64-v2 (SSSE3/SSE4) is the SDK minimum, as in its presets: reconfigure a build dir made without it or a higher
+# level (build/ is written by root in the container, so clean it from there).
+grep -qs "march=x86-64-v[234]" build/CMakeCache.txt || docker exec $C rm -rf /w/build
 # Sources are pre-generated on the host that ran codegen (same as the Windows build): make the codegen step a no-op.
 sed -i "s|    COMMAND \$<TARGET_FILE:rex::rexglue> codegen \${CMAKE_CURRENT_SOURCE_DIR}/bots_manifest.toml|    COMMAND \${CMAKE_COMMAND} -E true|" game/generated/rexglue.cmake
 sed -i "/DEPFILE .*codegen.d/d" game/generated/rexglue.cmake
