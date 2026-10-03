@@ -865,6 +865,31 @@ extern "C" void sub_827CF678(PPCContext& __restrict ctx, uint8_t* base) {
     REXLOG_INFO("travel trace: SetClientTravel -> TravelURL '{}' type {}", FStr(base, engine + 0x46C), type);
 }
 
+// B-108: session-create failures are silent in the game (C1UIAction_CreateAndLaunchOnlineGame.OnGameCreated(false)
+// does nothing with a profile signed in, so New Story just hangs on the launch screen). Log every failure path of
+// UOnlineSubsystemLive's create completion, sub_82BF2AD8(this, ?, result, ?): a nonzero incoming result, the LAN
+// beacon start (sub_82BE76B0, only when GameSettings bShouldAdvertise) failing, or bIsListPlay (E_NOTIMPL).
+extern "C" void __imp__sub_82BF2AD8(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void __imp__sub_82BE76B0(PPCContext& __restrict ctx, uint8_t* base);
+
+extern "C" void sub_82BF2AD8(PPCContext& __restrict ctx, uint8_t* base) {
+  const uint32_t result = ctx.r5.u32;
+  const uint32_t settings = LoadU32(base, ctx.r3.u32 + 0xC0);
+  const uint32_t flags = settings ? LoadU32(base, settings + 0x8C) : 0;
+  if (result && result != 997)  // 997 ERROR_IO_PENDING: still running
+    REXLOG_ERROR("online: CreateOnlineGame failed, result {:08X} (New Story / co-op launch will not proceed)", result);
+  else if (!result && !(flags & 0x80000000u) && (flags & 0x00100000u))
+    REXLOG_ERROR("online: CreateOnlineGame failed, bIsListPlay is not implemented (E_NOTIMPL)");
+  else if (!result)
+    REXLOG_INFO("online: CreateOnlineGame completed (settings flags {:08X})", flags);
+  __imp__sub_82BF2AD8(ctx, base);
+}
+
+extern "C" void sub_82BE76B0(PPCContext& __restrict ctx, uint8_t* base) {
+  __imp__sub_82BE76B0(ctx, base);
+  if (ctx.r3.u32) REXLOG_ERROR("online: LAN beacon start failed, result {:08X} (session create fails)", ctx.r3.u32);
+}
+
 extern "C" void sub_827DA828(PPCContext& __restrict ctx, uint8_t* base) {
   const uint32_t engine = ctx.r3.u32;
   if (TravelTrace())
