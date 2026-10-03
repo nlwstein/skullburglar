@@ -104,6 +104,12 @@ SERIES.append(
     ("0015-spirv-contraction-features.patch",
      ["src/graphics/pipeline/shader/spirv_builder.cpp", "src/graphics/pipeline/shader/spirv_translator.cpp"],
      {}))
+SERIES.append(
+    # XSocket::SetOption passed the guest's Winsock SOL_SOCKET level/option numbers to the host as-is. BSD/macOS use
+    # the same numbers, Linux doesn't: UE3's LAN beacon SetBroadcast failed, so creating the (LAN) game session for
+    # New Story reported failure and the front end never launched the map (Steam Deck / Linux only).
+    ("0016-posix-socket-option-translation.patch",
+     ["src/system/xsocket.cpp"], {}))
 
 
 def git(sdk, *args, **kw):

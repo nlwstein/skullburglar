@@ -1,0 +1,40 @@
+diff --git a/src/system/xsocket.cpp b/src/system/xsocket.cpp
+index 2d13ac8..a71e43e 100644
+--- a/src/system/xsocket.cpp
++++ b/src/system/xsocket.cpp
+@@ -76,7 +76,34 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
+     return X_STATUS_SUCCESS;
+   }
+ 
+-  int ret = setsockopt(native_handle_, level, optname, (char*)optval_ptr, optlen);
++  int host_level = int(level), host_optname = int(optname);
++  const void* host_optval = optval_ptr;
++#if !REX_PLATFORM_WIN32
++  // The guest passes Winsock SOL_SOCKET numbers. BSD/macOS share them; Linux doesn't (SOL_SOCKET 1,
++  // SO_BROADCAST 6, ...), so e.g. UE3's LAN beacon SetBroadcast failed there. Guest ints are big-endian.
++  uint32_t host_value = 0;
++  if (level == 0xFFFF) {
++    bool int_option = true;
++    switch (optname) {
++      case 0x0004: host_optname = SO_REUSEADDR; break;
++      case 0x0008: host_optname = SO_KEEPALIVE; break;
++      case 0x0010: host_optname = SO_DONTROUTE; break;
++      case 0x0020: host_optname = SO_BROADCAST; break;
++      case 0x0100: host_optname = SO_OOBINLINE; break;
++      case 0x1001: host_optname = SO_SNDBUF; break;
++      case 0x1002: host_optname = SO_RCVBUF; break;
++      default: int_option = false; break;  // passed through untranslated, as before
++    }
++    if (int_option) host_level = SOL_SOCKET;
++    if (int_option && optlen == 4 && optval_ptr) {
++      std::memcpy(&host_value, optval_ptr, 4);
++      host_value = __builtin_bswap32(host_value);
++      host_optval = &host_value;
++    }
++  }
++#endif
++
++  int ret = setsockopt(native_handle_, host_level, host_optname, (const char*)host_optval, optlen);
+   if (ret < 0) {
+     // TODO: WSAGetLastError()
+     return X_STATUS_UNSUCCESSFUL;
