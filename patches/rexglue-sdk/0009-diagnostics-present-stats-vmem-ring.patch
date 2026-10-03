@@ -10,11 +10,34 @@ index 83d09f7..bbf1acc 100644
  
   private:
    struct GuestOutputPaintRectangleConstants {
+diff --git a/include/rex/ui/imgui_dialog.h b/include/rex/ui/imgui_dialog.h
+index a7ab6b3..7692ab0 100644
+--- a/include/rex/ui/imgui_dialog.h
++++ b/include/rex/ui/imgui_dialog.h
+@@ -39,6 +39,10 @@ class ImGuiDialog {
+ 
+   void Draw();
+ 
++  // False for passive overlays (toasts, progress bars) that take no input, so the app can keep
++  // game input and pointer capture while only those are up (ImGuiDrawer::HasInputDialogs).
++  virtual bool captures_input() const { return true; }
++
+  protected:
+   ImGuiDialog(ImGuiDrawer* imgui_drawer);
+ 
 diff --git a/include/rex/ui/imgui_drawer.h b/include/rex/ui/imgui_drawer.h
-index a570fa0..23356f7 100644
+index a570fa0..13c7ec6 100644
 --- a/include/rex/ui/imgui_drawer.h
 +++ b/include/rex/ui/imgui_drawer.h
-@@ -47,6 +47,7 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
+@@ -12,6 +12,7 @@
+ #ifndef REX_UI_IMGUI_DRAWER_H_
+ #define REX_UI_IMGUI_DRAWER_H_
+ 
++#include <atomic>
+ #include <cstddef>
+ #include <cstdint>
+ #include <functional>
+@@ -47,10 +48,14 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
  
    void AddDialog(ImGuiDialog* dialog);
    void RemoveDialog(ImGuiDialog* dialog);
@@ -22,8 +45,24 @@ index a570fa0..23356f7 100644
  
    // Whether Draw would render anything, so a caller that has to marshal to the
    // UI thread can skip the round trip entirely.
+   bool HasDialogs() const { return !dialogs_.empty(); }
++  // Whether any dialog that wants keyboard/mouse input is up (see ImGuiDialog::captures_input).
++  // Any thread: refreshed on the UI thread when dialogs are added/removed and every Draw.
++  bool HasInputDialogs() const { return has_input_dialogs_.load(std::memory_order_relaxed); }
+ 
+   // SetPresenter may be called from the destructor.
+   void SetPresenter(Presenter* new_presenter);
+@@ -101,6 +106,8 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
+ 
+   // All currently-attached dialogs that get drawn.
+   std::vector<ImGuiDialog*> dialogs_;
++  std::atomic<bool> has_input_dialogs_ = false;
++  void UpdateHasInputDialogs();
+   // Using an index, not an iterator, because after the erasure, the adjustment
+   // must be done for the vector element indices that would be in the iterator
+   // range that would be invalidated.
 diff --git a/include/rex/ui/overlay/achievement_toast.h b/include/rex/ui/overlay/achievement_toast.h
-index 7642601..dcd6c30 100644
+index 7642601..7af6b58 100644
 --- a/include/rex/ui/overlay/achievement_toast.h
 +++ b/include/rex/ui/overlay/achievement_toast.h
 @@ -13,6 +13,7 @@
@@ -34,7 +73,17 @@ index 7642601..dcd6c30 100644
  #include <mutex>
  #include <optional>
  #include <rex/ui/overlay/achievement_notification.h>
-@@ -49,6 +50,11 @@ class AchievementToastDialog : public AchievementNotificationDialog {
+@@ -35,6 +36,9 @@ class AchievementToastDialog : public AchievementNotificationDialog {
+   // Thread-safe: safe to call from any thread, including guest threads.
+   void Push(const rex::system::AchievementEvent& event) override;
+ 
++  // Drawn with ImGuiWindowFlags_NoInputs: never takes the game's input away.
++  bool captures_input() const override { return false; }
++
+  protected:
+   void OnDraw(ImGuiIO& io) override;
+ 
+@@ -49,6 +53,11 @@ class AchievementToastDialog : public AchievementNotificationDialog {
  
    std::mutex mutex_;
    std::deque<PendingToast> queue_;
@@ -337,6 +386,48 @@ index 306118e..bfc1b99 100644
 +}
 +
  }  // namespace rex::ui::d3d12
+diff --git a/src/ui/imgui_drawer.cpp b/src/ui/imgui_drawer.cpp
+index f270f3c..6b50110 100644
+--- a/src/ui/imgui_drawer.cpp
++++ b/src/ui/imgui_drawer.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <algorithm>
+ #include <cfloat>
+ #include <cstring>
+ #include <filesystem>
+@@ -132,6 +133,13 @@ void ImGuiDrawer::AddDialog(ImGuiDialog* dialog) {
+     }
+   }
+   dialogs_.push_back(dialog);
++  UpdateHasInputDialogs();
++}
++
++void ImGuiDrawer::UpdateHasInputDialogs() {
++  has_input_dialogs_.store(std::any_of(dialogs_.cbegin(), dialogs_.cend(),
++                                       [](const ImGuiDialog* dialog) { return dialog->captures_input(); }),
++                           std::memory_order_relaxed);
+ }
+ 
+ void ImGuiDrawer::RemoveDialog(ImGuiDialog* dialog) {
+@@ -148,6 +156,7 @@ void ImGuiDrawer::RemoveDialog(ImGuiDialog* dialog) {
+     }
+   }
+   dialogs_.erase(it);
++  UpdateHasInputDialogs();
+   DetachIfLastDialogRemoved();
+ }
+ 
+@@ -420,6 +429,7 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+     dialogs_[dialog_loop_next_index_++]->Draw();
+   }
+   dialog_loop_next_index_ = SIZE_MAX;
++  UpdateHasInputDialogs();
+ 
+   ImGui::Render();
+   ImDrawData* draw_data = ImGui::GetDrawData();
 diff --git a/src/ui/overlay/achievement_toast.cpp b/src/ui/overlay/achievement_toast.cpp
 index 53b8c0b..54e37a7 100644
 --- a/src/ui/overlay/achievement_toast.cpp

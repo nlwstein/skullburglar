@@ -61,9 +61,10 @@ SERIES.append(
     # VM-op ring + fault-page dump on unhandled guest access violations (REX_VMEM_LOG=1 live), and
     # the achievement toast registering its imgui dialog only while a toast shows (a permanent
     # dialog forced the presenter into UI-thread paint mode). The fps-log additions (frames
-    # >25 ms, guest memory gauge) ride in 0002's REX_FPS_LOG hunk.
+    # >25 ms, guest memory gauge) ride in 0002's REX_FPS_LOG hunk. Also ImGuiDialog::captures_input /
+    # ImGuiDrawer::HasInputDialogs, so a passive toast doesn't switch keyboard/mouse game input off.
     ("0009-diagnostics-present-stats-vmem-ring.patch",
-     ["include/rex/ui", "src/ui/d3d12", "src/ui/overlay", "src/system/xmemory.cpp"],
+     ["include/rex/ui", "src/ui/d3d12", "src/ui/overlay", "src/system/xmemory.cpp", "src/ui/imgui_drawer.cpp"],
      {"src/ui/presenter.cpp": r"PresentStat|PaintModeName|GetDisplayedFrameCounts|<chrono>|"
                               r"<cstdlib>|fmt/format|Presenter paint mode|UIOnlyPaint|ui_tick_forced_|<thread>"}))
 SERIES.append(

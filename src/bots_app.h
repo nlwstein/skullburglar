@@ -275,9 +275,10 @@ class BotsApp : public rex::ReXApp {
     auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system());
     // Added after the SDK attached the window and its overlay callback to the drivers it had, so do
     // both here. ImGui dialogs (settings/console/debug overlays, shader progress) exist only while
-    // shown: release the pointer while any is up.
+    // shown: release the pointer while any that takes input is up. Passive ones (achievement toast,
+    // backgrounded shader progress bar) don't count, or each toast froze keyboard/mouse play.
     auto kbm = std::make_unique<bots::MouseKeyboardDriver>();
-    kbm->set_is_active_callback([drawer = runtime()->imgui_drawer()] { return !drawer || !drawer->HasDialogs(); });
+    kbm->set_is_active_callback([drawer = runtime()->imgui_drawer()] { return !drawer || !drawer->HasInputDialogs(); });
     if (auto* window = runtime()->display_window()) kbm->OnWindowAvailable(window);
     input->AddDriver(std::move(kbm));
     const char* script = std::getenv("BOTS_INPUT");

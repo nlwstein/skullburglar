@@ -14,6 +14,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -38,6 +39,10 @@ class ShaderProgressDialog : public rex::ui::ImGuiDialog {
     // BOTS_PRECOMPILE_HOLD=0 (scripted runs): start in the background, so the game is never held.
     if (const char* v = std::getenv("BOTS_PRECOMPILE_HOLD"); v && *v == '0') backgrounded_ = true;
   }
+
+  // Read by the keyboard/mouse driver (bots_app.h): only the centered panel takes input; the
+  // backgrounded corner bar leaves the game its pointer.
+  bool captures_input() const override { return !backgrounded_; }
 
  protected:
   void OnDraw(ImGuiIO& io) override {
@@ -146,7 +151,7 @@ class ShaderProgressDialog : public rex::ui::ImGuiDialog {
   std::chrono::steady_clock::time_point created_{};
   std::chrono::steady_clock::time_point first_seen_{};
   double demo_secs_ = 0;
-  bool backgrounded_ = false;
+  std::atomic<bool> backgrounded_ = false;  // set on the UI thread, read from input
   bool foreground_ = false;
   bool back_was_down_ = false;
 };

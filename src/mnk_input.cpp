@@ -25,8 +25,10 @@ BOTS_KBM_BIND(move_left, "A", "Move left (left stick)");
 BOTS_KBM_BIND(move_right, "D", "Move right (left stick)");
 BOTS_KBM_BIND(right_trigger, "LMB", "Fire (RT)");
 BOTS_KBM_BIND(left_trigger, "RMB", "Aim (LT)");
-BOTS_KBM_BIND(a, "Space,E", "Cover / use / confirm (A)");
-BOTS_KBM_BIND(b, "Shift,F,Backspace", "Special move / counter-kill / back (B)");
+BOTS_KBM_BIND(a, "Space", "Cover / run / confirm (A)");
+// E is Gears' use/interact key; BotS's contextual actions (counter-kills, special moves) are B, and
+// the on-screen prompt shows the first key listed.
+BOTS_KBM_BIND(b, "E,F,Backspace", "Action: special move / counter-kill / back (B)");
 BOTS_KBM_BIND(x, "R", "Reload / pick up weapon (X)");
 BOTS_KBM_BIND(y, "Q", "Gangsta Fury / skip (Y)");
 BOTS_KBM_BIND(right_shoulder, "G,MMB", "Throw grenade (RB)");
