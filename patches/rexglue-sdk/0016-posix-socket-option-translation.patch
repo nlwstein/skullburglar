@@ -1,8 +1,200 @@
+diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
+index 58e36a4..a3cf886 100644
+--- a/src/kernel/xam/xam_net.cpp
++++ b/src/kernel/xam/xam_net.cpp
+@@ -12,6 +12,9 @@
+ // Disable warnings about unused parameters for kernel functions
+ #pragma GCC diagnostic ignored "-Wunused-parameter"
+ 
++#include <algorithm>
++#include <cerrno>
++#include <initializer_list>
+ #include <cstring>
+ 
+ #if REX_PLATFORM_MAC
+@@ -50,6 +53,51 @@ namespace xam {
+ using namespace rex::system;
+ using namespace rex::system::xam;
+ 
++// The guest reads Winsock codes back (WSAGetLastError). Windows hosts produce them; on POSIX map
++// errno, so e.g. a non-blocking recvfrom with nothing queued reports WSAEWOULDBLOCK instead of 0.
++static void SetLastSocketError() {
++#if REX_PLATFORM_WIN32
++  XThread::SetLastError(WSAGetLastError());
++#else
++  uint32_t code;
++  switch (errno) {
++    case EINTR: code = 10004; break;
++    case EBADF: code = 10009; break;
++    case EACCES: code = 10013; break;
++    case EFAULT: code = 10014; break;
++    case EINVAL: code = 10022; break;
++    case EMFILE: code = 10024; break;
++    case EAGAIN: code = 10035; break;  // == EWOULDBLOCK on Linux and macOS
++    case EINPROGRESS: code = 10036; break;
++    case EALREADY: code = 10037; break;
++    case ENOTSOCK: code = 10038; break;
++    case EDESTADDRREQ: code = 10039; break;
++    case EMSGSIZE: code = 10040; break;
++    case EPROTOTYPE: code = 10041; break;
++    case ENOPROTOOPT: code = 10042; break;
++    case EPROTONOSUPPORT: code = 10043; break;
++    case EOPNOTSUPP: code = 10045; break;
++    case EAFNOSUPPORT: code = 10047; break;
++    case EADDRINUSE: code = 10048; break;
++    case EADDRNOTAVAIL: code = 10049; break;
++    case ENETDOWN: code = 10050; break;
++    case ENETUNREACH: code = 10051; break;
++    case ENETRESET: code = 10052; break;
++    case ECONNABORTED: code = 10053; break;
++    case ECONNRESET: code = 10054; break;
++    case ENOBUFS: code = 10055; break;
++    case EISCONN: code = 10056; break;
++    case ENOTCONN: code = 10057; break;
++    case EPIPE: code = 10058; break;  // WSAESHUTDOWN
++    case ETIMEDOUT: code = 10060; break;
++    case ECONNREFUSED: code = 10061; break;
++    case EHOSTUNREACH: code = 10065; break;
++    default: code = 10022; break;
++  }
++  XThread::SetLastError(code);
++#endif
++}
++
+ // https://github.com/G91/TitanOffLine/blob/1e692d9bb9dfac386d08045ccdadf4ae3227bb5e/xkelib/xam/xamNet.h
+ enum {
+   XNCALLER_INVALID = 0x0,
+@@ -620,12 +668,7 @@ i32 NetDll_shutdown_entry(u32 caller, u32 socket_handle, i32 how) {
+ 
+   auto ret = socket->Shutdown(how);
+   if (ret == -1) {
+-#if REX_PLATFORM_WIN32
+-    uint32_t error_code = WSAGetLastError();
+-    XThread::SetLastError(error_code);
+-#else
+-    XThread::SetLastError(0x0);
+-#endif
++    SetLastSocketError();
+   }
+   return ret;
+ }
+@@ -653,7 +696,7 @@ u32 NetDll_ioctlsocket_entry(u32 caller, u32 socket_handle, u32 cmd, mapped_void
+ 
+   X_STATUS status = socket->IOControl(cmd, arg_ptr);
+   if (XFAILED(status)) {
+-    XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
++    SetLastSocketError();
+     return -1;
+   }
+ 
+@@ -672,7 +715,7 @@ u32 NetDll_bind_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> nam
+   N_XSOCKADDR_IN native_name(name);
+   X_STATUS status = socket->Bind(&native_name, namelen);
+   if (XFAILED(status)) {
+-    XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
++    SetLastSocketError();
+     return -1;
+   }
+ 
+@@ -690,7 +733,7 @@ u32 NetDll_connect_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR> nam
+   N_XSOCKADDR native_name(name);
+   X_STATUS status = socket->Connect(&native_name, namelen);
+   if (XFAILED(status)) {
+-    XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
++    SetLastSocketError();
+     return -1;
+   }
+ 
+@@ -707,7 +750,7 @@ u32 NetDll_listen_entry(u32 caller, u32 socket_handle, i32 backlog) {
+ 
+   X_STATUS status = socket->Listen(backlog);
+   if (XFAILED(status)) {
+-    XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
++    SetLastSocketError();
+     return -1;
+   }
+ 
+@@ -825,7 +868,19 @@ i32 NetDll_select_entry(i32 caller, i32 nfds, ppc_ptr_t<x_fd_set> readfds,
+                                              reinterpret_cast<int32_t*>(&timeout.tv_usec));
+     timeout_in = &timeout;
+   }
+-  int ret = select(nfds, readfds ? &native_readfds : nullptr, writefds ? &native_writefds : nullptr,
++#if !REX_PLATFORM_WIN32
++  // Winsock ignores nfds; POSIX scans only descriptors below it, so a guest passing 0 (usual) never
++  // saw a socket become ready.
++  int host_nfds = 0;
++  for (const host_set* set : {&host_readfds, &host_writefds, &host_exceptfds}) {
++    for (uint32_t i = 0; i < set->count; ++i) {
++      host_nfds = std::max(host_nfds, int(set->sockets[i]->native_handle()) + 1);
++    }
++  }
++#else
++  int host_nfds = int(nfds);
++#endif
++  int ret = select(host_nfds, readfds ? &native_readfds : nullptr, writefds ? &native_writefds : nullptr,
+                    exceptfds ? &native_exceptfds : nullptr, timeout_in);
+   if (readfds) {
+     host_readfds.UpdateFrom(&native_readfds);
+@@ -840,6 +895,7 @@ i32 NetDll_select_entry(i32 caller, i32 nfds, ppc_ptr_t<x_fd_set> readfds,
+     host_exceptfds.Store(exceptfds);
+   }
+ 
++  if (ret == -1) SetLastSocketError();
+   // TODO(gibbed): modify ret to be what's actually copied to the guest fd_sets?
+   return ret;
+ }
+@@ -852,7 +908,9 @@ u32 NetDll_recv_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 bu
+     return -1;
+   }
+ 
+-  return socket->Recv(buf_ptr, buf_len, flags);
++  int ret = socket->Recv(buf_ptr, buf_len, flags);
++  if (ret == -1) SetLastSocketError();
++  return ret;
+ }
+ 
+ u32 NetDll_recvfrom_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 buf_len,
+@@ -884,12 +942,7 @@ u32 NetDll_recvfrom_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u3
+ 
+   if (ret == -1) {
+ // TODO: Better way of getting the error code
+-#if REX_PLATFORM_WIN32
+-    uint32_t error_code = WSAGetLastError();
+-    XThread::SetLastError(error_code);
+-#else
+-    XThread::SetLastError(0x0);
+-#endif
++    SetLastSocketError();
+   }
+ 
+   return ret;
+@@ -903,7 +956,9 @@ u32 NetDll_send_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 bu
+     return -1;
+   }
+ 
+-  return socket->Send(buf_ptr, buf_len, flags);
++  int ret = socket->Send(buf_ptr, buf_len, flags);
++  if (ret == -1) SetLastSocketError();
++  return ret;
+ }
+ 
+ u32 NetDll_sendto_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 buf_len, u32 flags,
+@@ -916,7 +971,9 @@ u32 NetDll_sendto_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32
+   }
+ 
+   N_XSOCKADDR_IN native_to(to_ptr);
+-  return socket->SendTo(buf_ptr, buf_len, flags, &native_to, to_len);
++  int ret = socket->SendTo(buf_ptr, buf_len, flags, &native_to, to_len);
++  if (ret == -1) SetLastSocketError();
++  return ret;
+ }
+ 
+ u32 NetDll___WSAFDIsSet_entry(u32 socket_handle, ppc_ptr_t<x_fd_set> fd_set) {
 diff --git a/src/system/xsocket.cpp b/src/system/xsocket.cpp
-index 2d13ac8..83cb231 100644
+index 2d13ac8..23721f6 100644
 --- a/src/system/xsocket.cpp
 +++ b/src/system/xsocket.cpp
-@@ -28,6 +28,7 @@
+@@ -28,11 +28,34 @@
  #include <arpa/inet.h>
  #include <netinet/in.h>
  #include <netinet/ip.h>
@@ -10,7 +202,45 @@ index 2d13ac8..83cb231 100644
  #include <sys/socket.h>
  #endif
  
-@@ -76,7 +77,34 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
+ namespace rex::system {
+ 
++namespace {
++// Host sockaddr_in from the guest's (already host-endian family, network-order port/address). The
++// structs can't be cast: macOS sockaddr_in starts with sin_len, so family 2 read as sin_len=2,
++// sin_family=0, which only worked because macOS tolerates AF_UNSPEC.
++sockaddr_in HostSockaddr(uint16_t family, const void* port_and_addr) {
++  sockaddr_in out{};
++#if REX_PLATFORM_MAC
++  out.sin_len = sizeof(out);
++#endif
++  out.sin_family = decltype(out.sin_family)(family);
++  std::memcpy(&out.sin_port, port_and_addr, 2);
++  std::memcpy(&out.sin_addr, static_cast<const uint8_t*>(port_and_addr) + 2, 4);
++  return out;
++}
++
++#if REX_PLATFORM_LINUX
++constexpr int kNoSigPipe = MSG_NOSIGNAL;  // a send to a closed TCP peer must not kill the process
++#else
++constexpr int kNoSigPipe = 0;  // macOS: SO_NOSIGPIPE at creation; Windows has no SIGPIPE
++#endif
++}  // namespace
++
+ XSocket::XSocket(KernelState* kernel_state) : XObject(kernel_state, kObjectType) {}
+ 
+ XSocket::XSocket(KernelState* kernel_state, uint64_t native_handle)
+@@ -56,6 +79,10 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
+   if (native_handle_ == -1) {
+     return X_STATUS_UNSUCCESSFUL;
+   }
++#if REX_PLATFORM_MAC
++  int one = 1;
++  setsockopt(int(native_handle_), SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
++#endif
+ 
+   return X_STATUS_SUCCESS;
+ }
+@@ -76,7 +103,34 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
      return X_STATUS_SUCCESS;
    }
  
@@ -46,7 +276,7 @@ index 2d13ac8..83cb231 100644
    if (ret < 0) {
      // TODO: WSAGetLastError()
      return X_STATUS_UNSUCCESSFUL;
-@@ -91,6 +119,30 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
+@@ -91,6 +145,30 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
  }
  
  X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
@@ -77,3 +307,83 @@ index 2d13ac8..83cb231 100644
    int ret = rex::net::socket_ioctl(native_handle_, cmd, arg_ptr);
    if (ret < 0) {
      // TODO: Get last error
+@@ -101,7 +179,9 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
+ }
+ 
+ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
+-  int ret = connect(native_handle_, (sockaddr*)name, name_len);
++  sockaddr_in host = HostSockaddr(name->address_family, name->sa_data);
++  int ret = connect(native_handle_, (sockaddr*)&host,
++                    name_len >= int(sizeof(host)) ? socklen_t(sizeof(host)) : socklen_t(name_len));
+   if (ret < 0) {
+     return X_STATUS_UNSUCCESSFUL;
+   }
+@@ -110,7 +190,9 @@ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
+ }
+ 
+ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
+-  int ret = bind(native_handle_, (sockaddr*)name, name_len);
++  sockaddr_in host = HostSockaddr(name->sin_family, &name->sin_port);
++  int ret = bind(native_handle_, (sockaddr*)&host,
++                 name_len >= int(sizeof(host)) ? socklen_t(sizeof(host)) : socklen_t(name_len));
+   if (ret < 0) {
+     return X_STATUS_UNSUCCESSFUL;
+   }
+@@ -140,7 +222,9 @@ object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
+     return nullptr;
+   }
+ 
+-  std::memcpy(name, &n_sockaddr, n_name_len);
++  // Back to the guest layout: host-endian family, then the raw port/address bytes.
++  name->address_family = uint16_t(n_sockaddr.sa_family);
++  std::memcpy(name->sa_data, n_sockaddr.sa_data, sizeof(name->sa_data));
+   *name_len = n_name_len;
+ 
+   // Create a kernel object to represent the new socket, and copy parameters
+@@ -186,14 +270,14 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
+   }
+   */
+ 
+-  sockaddr_in nfrom;
++  sockaddr_in nfrom{};  // reported as-is when recvfrom fails
+   socklen_t nfromlen = sizeof(sockaddr_in);
+   int ret = recvfrom(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
+                      (sockaddr*)&nfrom, &nfromlen);
+   if (from) {
+     from->sin_family = nfrom.sin_family;
+     from->sin_addr = ntohl(nfrom.sin_addr.s_addr);  // BE <- BE
+-    from->sin_port = nfrom.sin_port;
++    from->sin_port = ntohs(nfrom.sin_port);  // be<> stores network order; was byte-swapped
+     std::memset(from->x_sin_zero, 0, sizeof(from->x_sin_zero));
+   }
+ 
+@@ -205,7 +289,7 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
+ }
+ 
+ int XSocket::Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags) {
+-  return send(native_handle_, reinterpret_cast<const char*>(buf), buf_len, flags);
++  return send(native_handle_, reinterpret_cast<const char*>(buf), buf_len, int(flags) | kNoSigPipe);
+ }
+ 
+ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* to,
+@@ -221,15 +305,14 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
+   }
+   */
+ 
+-  sockaddr_in nto;
++  sockaddr_in nto{};
+   if (to) {
+-    nto.sin_addr.s_addr = to->sin_addr;
+-    nto.sin_family = to->sin_family;
+-    nto.sin_port = to->sin_port;
++    nto = HostSockaddr(to->sin_family, &to->sin_port);
+   }
+ 
+-  return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
+-                to ? (sockaddr*)&nto : nullptr, to_len);
++  return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, int(flags) | kNoSigPipe,
++                to ? (sockaddr*)&nto : nullptr,
++                to ? socklen_t(sizeof(nto)) : socklen_t(to_len));
+ }
+ 
+ bool XSocket::QueuePacket(uint32_t src_ip, uint16_t src_port, const uint8_t* buf, size_t len) {

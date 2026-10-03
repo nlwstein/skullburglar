@@ -112,8 +112,11 @@ SERIES.append(
     # IOControl had the same problem with FIONBIO (Linux 0x5421 vs 0x8004667E): the beacon socket stayed blocking, so
     # the per-tick beacon poll's recvfrom blocked the game thread inside GameEngine::Tick right after the travel
     # request. FIONBIO/FIONREAD are translated, and their big-endian u_long argument swapped, on every platform.
+    # B-108 audit: errno -> Winsock error codes (a would-block read reported 0), select's nfds computed from the
+    # sets, real host sockaddr_in for bind/connect/sendto (macOS has sin_len; sendto byte-swapped port and address,
+    # recvfrom the source port), and no SIGPIPE on sends.
     ("0016-posix-socket-option-translation.patch",
-     ["src/system/xsocket.cpp"], {}))
+     ["src/system/xsocket.cpp", "src/kernel/xam/xam_net.cpp"], {}))
 
 
 def git(sdk, *args, **kw):
