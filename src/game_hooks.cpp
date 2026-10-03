@@ -7,6 +7,7 @@
 // is peeked from the bytecode before the original runs: EX_IntZero 0x25, EX_IntOne 0x26,
 // EX_IntConstByte 0x2C <byte>.
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 
 #include <algorithm>
@@ -26,6 +27,7 @@
 extern "C" void __imp__sub_82E1AC28(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_823598E0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_823501E0(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void __imp__sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base);
 
 namespace {
 // Guest address → host pointer, as REX_RAW_ADDR in generated/default/bots_pch.h (Mac arm64 layout).
@@ -205,4 +207,53 @@ extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
   const PPCRegister r3 = ctx.r3;  // keep the poll's return value
   for (auto& cmd : run) RunConsoleCommand(ctx, base, *st, cmd);
   ctx.r3 = r3;
+}
+
+// B-104 spike: engine-level mouse look. sub_82BC86F0(FViewport* vp, float dt) = FXenonViewport::ProcessInput (per
+// frame, game thread). Its client *(vp+0x34) is the UGameViewportClient: vtable +0x18 = InputAxis(vp, cid, FName key,
+// float delta, float dt, bool bGamepad), vtable +0x10 = InputKey(vp, cid, FName key, int event, float amount, bool
+// bGamepad). Key FNames are 8-byte globals built by sub_8253BA50 (KEY_MouseX at 0x8380DEC0).
+//   BOTS_MOUSE_TEST=<dx>[,<dy>[,<cid>]]   inject a constant mouse delta every frame (test only)
+namespace {
+constexpr uint32_t kKeyMouseX = 0x8380DEC0, kKeyMouseY = 0x8380D5B8;
+
+uint64_t LoadU64(uint8_t* base, uint32_t address) {
+  return (uint64_t(LoadU32(base, address)) << 32) | LoadU32(base, address + 4);
+}
+
+void InputAxis(PPCContext& ctx, uint8_t* base, uint32_t vp, uint32_t cid, uint32_t key, float delta, float dt,
+               bool gamepad) {
+  const uint32_t client = LoadU32(base, vp + 0x34);
+  if (!client) return;
+  ctx.r3.u64 = client;
+  ctx.r4.u64 = vp;
+  ctx.r5.u64 = cid;
+  ctx.r6.u64 = LoadU64(base, key);
+  ctx.f1.f64 = delta;
+  ctx.f2.f64 = dt;
+  ctx.r9.u64 = gamepad;
+  rex::runtime::ResolveIndirectFunction(LoadU32(base, LoadU32(base, client) + 0x18))(ctx, base);
+}
+}  // namespace
+
+extern "C" void sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base) {
+  const uint32_t vp = ctx.r3.u32;
+  const float dt = float(ctx.f1.f64);
+  __imp__sub_82BC86F0(ctx, base);
+  static const struct Test {
+    float dx = 0, dy = 0;
+    uint32_t cid = 0;
+    bool on = false;
+  } test = [] {
+    Test t;
+    if (const char* v = std::getenv("BOTS_MOUSE_TEST"); v && *v) {
+      t.on = true;
+      std::sscanf(v, "%f,%f,%u", &t.dx, &t.dy, &t.cid);
+      REXLOG_INFO("BOTS_MOUSE_TEST: dx {} dy {} controller {}", t.dx, t.dy, t.cid);
+    }
+    return t;
+  }();
+  if (!test.on || !vp) return;
+  if (test.dx) InputAxis(ctx, base, vp, test.cid, kKeyMouseX, test.dx, dt, false);
+  if (test.dy) InputAxis(ctx, base, vp, test.cid, kKeyMouseY, test.dy, dt, false);
 }
