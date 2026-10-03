@@ -142,6 +142,13 @@ bool MouseKeyboardDriver::MenuMode() const {
   return paused_.load(std::memory_order_relaxed) || Now() - hud_tick_.load(std::memory_order_relaxed) > kHudGapMs;
 }
 
+bool MouseKeyboardDriver::Pointer(float& x, float& y, uint32_t& moves) const {
+  x = pointer_x_.load(std::memory_order_relaxed);
+  y = pointer_y_.load(std::memory_order_relaxed);
+  moves = pointer_moves_.load(std::memory_order_relaxed);
+  return x >= 0 && y >= 0 && has_focus_ && Enabled() && MenuMode();
+}
+
 void MouseKeyboardDriver::TakeEnterEvents(std::vector<bool>& out) {
   std::lock_guard lock(mutex_);
   out.swap(enter_events_);
@@ -209,6 +216,14 @@ void MouseKeyboardDriver::OnMouseMove(rex::ui::MouseEvent& e) {
   }
   prev_x_ = x;
   prev_y_ = y;
+  if (!captured_ && window_) {
+    const float w = float(window_->GetActualPhysicalWidth()), h = float(window_->GetActualPhysicalHeight());
+    if (w > 0 && h > 0) {
+      pointer_x_.store(float(x) / w, std::memory_order_relaxed);
+      pointer_y_.store(float(y) / h, std::memory_order_relaxed);
+      pointer_moves_.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
   // No pointer lock on this platform: keep the cursor off the window edges.
   if (captured_ && !relative_ && window_) {
     const int32_t w = int32_t(window_->GetActualPhysicalWidth()), h = int32_t(window_->GetActualPhysicalHeight());

@@ -68,6 +68,10 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   // Engine Enter key edges (true = pressed) since the last call, oldest first. Game thread.
   void TakeEnterEvents(std::vector<bool>& out);
 
+  // Menu pointer (B-107): the free cursor in window-relative 0..1 coordinates, and a counter bumped by every mouse
+  // move (focus follows the pointer only after it moves). False while there's no position or not in menu mode.
+  bool Pointer(float& x, float& y, uint32_t& moves) const;
+
   X_STATUS Setup() override { return X_STATUS_SUCCESS; }
   void EnumerateDevices(std::vector<rex::input::DeviceInfo>& out) override;
   X_RESULT GetDeviceState(rex::input::DeviceId id, rex::input::X_INPUT_STATE* out) override;
@@ -121,6 +125,8 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   float mouse_dx_ = 0, mouse_dy_ = 0;
   rex::input::X_INPUT_STATE last_out_{};  // what GetDeviceState last returned
   float moved_ = 0;                        // mouse travel toward switching the prompts, pixels
+  std::atomic<float> pointer_x_{-1}, pointer_y_{-1};         // window-relative 0..1, -1 = unknown
+  std::atomic<uint32_t> pointer_moves_{0};
   std::vector<bool> enter_events_;         // engine Enter edges for the game thread
   bool click_is_enter_ = false;            // the left button went down in menu mode: its release is Enter's too
   std::atomic<bool> paused_{false};

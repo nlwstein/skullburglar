@@ -9,6 +9,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
+#include <cmath>
 
 #include <algorithm>
 #include <atomic>
@@ -33,6 +36,7 @@ extern "C" void __imp__sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82E2EB38(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82E2EBB8(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_828291E0(PPCContext& __restrict ctx, uint8_t* base);
 
 namespace {
 // Guest address → host pointer, as REX_RAW_ADDR in generated/default/bots_pch.h (Mac arm64 layout).
@@ -251,6 +255,214 @@ void InputAxis(PPCContext& ctx, uint8_t* base, uint32_t vp, uint32_t cid, uint32
   rex::runtime::ResolveIndirectFunction(LoadU32(base, LoadU32(base, client) + 0x18))(ctx, base);
 }
 
+// BOTS_MEMDUMP=<secs>:<file>[;<secs>:<file>...] (research): at those times after the first ProcessInput, write every
+// committed guest page below 0xC0000000 to <file> as records {u32 address, u32 size (little-endian), bytes}.
+void MemoryDumpTick(uint8_t* base, float dt) {
+  struct Dump {
+    float at;
+    std::string path;
+  };
+  static std::vector<Dump> dumps = [] {
+    std::vector<Dump> out;
+    const char* v = std::getenv("BOTS_MEMDUMP");
+    std::string s = v ? v : "";
+    size_t start = 0;
+    while (start < s.size()) {
+      size_t end = s.find(';', start);
+      if (end == std::string::npos) end = s.size();
+      const std::string item = s.substr(start, end - start);
+      if (const size_t colon = item.find(':'); colon != std::string::npos)
+        out.push_back({std::strtof(item.c_str(), nullptr), item.substr(colon + 1)});
+      start = end + 1;
+    }
+    return out;
+  }();
+  static float clock = 0;
+  if (dumps.empty()) return;
+  clock += dt;
+  if (clock < dumps.front().at) return;
+  const Dump d = dumps.front();
+  dumps.erase(dumps.begin());
+  FILE* f = std::fopen(d.path.c_str(), "wb");
+  if (!f) return;
+  auto* memory = rex::system::kernel_memory();
+  uint64_t total = 0;
+  for (uint64_t address = 0x10000; address < 0xC0000000ull;) {
+    auto* heap = memory->LookupHeap(uint32_t(address));
+    rex::memory::HeapAllocationInfo info{};
+    if (!heap || !heap->QueryRegionInfo(uint32_t(address), &info) || !info.region_size) {
+      address += 0x10000;
+      continue;
+    }
+    const uint64_t next = uint64_t(info.base_address) + info.region_size;
+    if ((info.state & rex::memory::kMemoryAllocationCommit) && info.protect) {
+      const uint32_t header[2] = {info.base_address, info.region_size};
+      std::fwrite(header, sizeof(header), 1, f);
+      std::fwrite(Raw(base, info.base_address), 1, info.region_size, f);
+      total += info.region_size;
+    }
+    address = next > address ? next : address + 0x1000;
+  }
+  std::fclose(f);
+  REXLOG_INFO("BOTS_MEMDUMP: {:.1f} s -> {} ({} MB)", clock, d.path, total >> 20);
+}
+
+// B-107 menu pointer: focus follows the free cursor over menu options. The UE3 UI's own mouse picking needs viewport
+// hit proxies, which the console build never renders, so we hit-test the menu options ourselves and call SetFocus on
+// the hovered one. A click is then the engine's Enter (MouseKeyboardDriver menu mode).
+// Object layout (UE3 as built for this game, read from the live UClass/UProperty data):
+//   GEngine+0x2E4 GameViewport, +0x5C UIController, +0x78 SceneClient, +0x100 ActiveScenes (TArray)
+//   UObject: +0x00 vtable, +0x2C Name, +0x34 Class; UClass +0x3C SuperField; UProperty +0x64 Offset
+//   UIScreenObject: +0x5C bit 31 bHidden, +0x60 Children, +0x94 FocusControls[player] = {Focused, LastFocused}
+//   UIObject +0x204 RenderBounds[4] (left top right bottom, pixels of the 1280x720 UI)
+namespace menu_pointer {
+constexpr uint32_t kGEngine = 0x8380D380, kMaxOptions = 32;
+
+struct Option {
+  uint32_t widget;
+  float left, top, right, bottom;
+};
+
+float LoadF32(uint8_t* base, uint32_t address) {
+  const uint32_t v = LoadU32(base, address);
+  float f;
+  std::memcpy(&f, &v, 4);
+  return f;
+}
+
+bool Readable(uint32_t address) { return address >= 0x40000000u && address < 0xA0000000u && !(address & 3); }
+
+// Whether the object's class is (or derives from) the class with this name index.
+bool IsMenuOption(uint8_t* base, uint32_t object, uint32_t name_index) {
+  uint32_t cls = LoadU32(base, object + 0x34);
+  for (int depth = 0; depth < 8 && Readable(cls); ++depth) {
+    if (LoadU32(base, cls + 0x2C) == name_index && !LoadU32(base, cls + 0x30)) return true;
+    cls = LoadU32(base, cls + 0x3C);
+  }
+  return false;
+}
+
+void Collect(uint8_t* base, uint32_t widget, uint32_t name_index, int depth, std::vector<Option>& out) {
+  if (depth > 5 || !Readable(widget) || out.size() >= kMaxOptions) return;
+  if (LoadU32(base, widget + 0x5C) & 0x80000000u) return;  // bHidden
+  if (depth > 0 && IsMenuOption(base, widget, name_index)) {
+    out.push_back({widget, LoadF32(base, widget + 0x204), LoadF32(base, widget + 0x208), LoadF32(base, widget + 0x20C),
+                   LoadF32(base, widget + 0x210)});
+    return;
+  }
+  const uint32_t children = LoadU32(base, widget + 0x60);
+  const int32_t count = int32_t(LoadU32(base, widget + 0x64));
+  if (!Readable(children) || count <= 0 || count > 256) return;
+  for (int32_t i = 0; i < count; ++i) Collect(base, LoadU32(base, children + 4 * i), name_index, depth + 1, out);
+}
+
+// FName::Names (TArray<FNameEntry*>); an entry is {u32 index, FNameEntry* hash next, char name[]}.
+constexpr uint32_t kNames = 0x837F98A0;
+
+bool NameIs(uint8_t* base, uint32_t index, const char* name) {
+  const uint32_t names = LoadU32(base, kNames);
+  if (!Readable(names) || index >= LoadU32(base, kNames + 4)) return false;
+  const uint32_t entry = LoadU32(base, names + 4 * index);
+  return Readable(entry) && !std::strcmp(reinterpret_cast<const char*>(Raw(base, entry + 8)), name);
+}
+
+// BOTS_POINTER_TEST=<secs>:<x>,<y>[;...] (test only): put the pointer at UI pixel x,y (1280x720) from that time on.
+bool TestPointer(float dt, float& px, float& py, uint32_t& moves) {
+  struct Move {
+    float at, x, y;
+  };
+  static std::vector<Move> plan = [] {
+    std::vector<Move> out;
+    const char* v = std::getenv("BOTS_POINTER_TEST");
+    for (const char* p = v ? v : ""; *p;) {
+      Move m{};
+      if (std::sscanf(p, "%f:%f,%f", &m.at, &m.x, &m.y) != 3) break;
+      out.push_back(m);
+      p = std::strchr(p, ';');
+      if (!p) break;
+      ++p;
+    }
+    if (!out.empty()) REXLOG_INFO("BOTS_POINTER_TEST: {} moves", out.size());
+    return out;
+  }();
+  static float clock = 0;
+  static size_t current = 0;
+  if (plan.empty()) return false;
+  clock += dt;
+  while (current < plan.size() && clock >= plan[current].at) {
+    REXLOG_INFO("BOTS_POINTER_TEST: {:.0f},{:.0f} at {:.1f} s", plan[current].x, plan[current].y, clock);
+    ++current;
+  }
+  if (!current) return false;
+  px = plan[current - 1].x / 1280.0f;
+  py = plan[current - 1].y / 720.0f;
+  moves = uint32_t(current);
+  return true;
+}
+
+void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, float dt) {
+  float px, py;
+  uint32_t moves;
+  if (!TestPointer(dt, px, py, moves) && !kbm.Pointer(px, py, moves)) return;
+  static uint32_t seen_moves = 0;
+  const uint32_t engine = LoadU32(base, kGEngine);
+  if (!Readable(engine)) return;
+  const uint32_t viewport = LoadU32(base, engine + 0x2E4);
+  if (!Readable(viewport)) return;
+  const uint32_t ui = LoadU32(base, viewport + 0x5C);
+  if (!Readable(ui)) return;
+  const uint32_t client = LoadU32(base, ui + 0x78);
+  if (!Readable(client)) return;
+  const uint32_t scenes = LoadU32(base, client + 0x100);
+  const int32_t scene_count = int32_t(LoadU32(base, client + 0x104));
+  if (!Readable(scenes) || scene_count <= 0 || scene_count > 64) return;
+  static uint32_t option_name = 0;
+  // Topmost scene with a focused control that is a menu option: its options are the ones to hover.
+  std::vector<Option> options;
+  uint32_t focused = 0;
+  for (int32_t i = scene_count - 1; i >= 0 && options.empty(); --i) {
+    const uint32_t scene = LoadU32(base, scenes + 4 * i);
+    if (!Readable(scene)) continue;
+    const uint32_t focus = LoadU32(base, scene + 0x94);
+    if (!Readable(focus) || !LoadU32(base, scene + 0x98)) continue;
+    const uint32_t f = LoadU32(base, focus);
+    if (!Readable(f)) continue;
+    if (!option_name) {
+      // Learn the class's name index from the first focused widget of class C1UI_MenuOption.
+      const uint32_t cls = LoadU32(base, f + 0x34);
+      if (!Readable(cls) || !NameIs(base, LoadU32(base, cls + 0x2C), "C1UI_MenuOption")) continue;
+      option_name = LoadU32(base, cls + 0x2C);
+      REXLOG_INFO("menu pointer: C1UI_MenuOption name index {:#x}", option_name);
+    }
+    if (!IsMenuOption(base, f, option_name)) continue;
+    Collect(base, scene, option_name, 0, options);
+    focused = f;
+  }
+  if (options.empty()) return;
+  // Window -> UI pixels (the UI is laid out at 1280x720 and scaled to the window).
+  const float x = px * 1280.0f, y = py * 720.0f;
+  if (moves != seen_moves) {
+    seen_moves = moves;
+    uint32_t hovered = 0;
+    for (const auto& o : options) {
+      // Rows: the label's box is narrow, so accept the whole row height left of the right edge plus a margin.
+      if (y >= o.top - 4 && y <= o.bottom + 4 && x >= o.left - 200 && x <= o.right + 200) hovered = o.widget;
+    }
+    // Focus it directly: UUIScreenObject::SetFocus(Sender = None, PlayerIndex) is vtable +0x16C (execSetFocus
+    // 0x82508B78 calls it with GetBestPlayerIndex(), sub_828291E0). It refuses disabled options itself.
+    if (hovered && hovered != focused) {
+      ctx.r3.u64 = hovered;
+      sub_828291E0(ctx, base);
+      const uint32_t player = ctx.r3.u32;
+      ctx.r3.u64 = hovered;
+      ctx.r4.u64 = 0;
+      ctx.r5.u64 = player;
+      rex::runtime::ResolveIndirectFunction(LoadU32(base, LoadU32(base, hovered) + 0x16C))(ctx, base);
+    }
+  }
+}
+}  // namespace menu_pointer
+
 // event: 0 pressed, 1 released (EInputEvent).
 void InputKey(PPCContext& ctx, uint8_t* base, uint32_t vp, uint32_t cid, uint32_t key, uint32_t event, float amount,
               bool gamepad) {
@@ -302,9 +514,11 @@ extern "C" void sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base) {
     return t;
   }();
   if (!vp) return;
+  MemoryDumpTick(base, dt);
   float dx = 0, dy = 0;
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) {
     kbm->TakeMouseDelta(dx, dy);
+    menu_pointer::Tick(ctx, base, *kbm, dt);
     static std::vector<bool> enter;
     kbm->TakeEnterEvents(enter);
     for (const bool down : enter) InputKey(ctx, base, vp, 0, kKeyEnter, down ? 0 : 1, 1.0f, false);
