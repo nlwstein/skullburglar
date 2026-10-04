@@ -37,8 +37,10 @@ class Workers {
   Workers(const rex::ui::vulkan::VulkanDevice* device, uint32_t count, uint32_t background = 0);
   ~Workers();  // finishes the queue's running jobs, drops the rest
   uint32_t count() const { return uint32_t(threads_.size()); }
-  // Background jobs (pipeline warm-up) run only when no other job is queued.
-  void Submit(Job job, bool background = false);
+  // Background jobs (pipeline warm-up) run only when no other job is queued. First jobs (live shader translations:
+  // short, CPU only) run before everything else, on any worker, so a draw never waits for its translation behind
+  // pipeline compiles (slow on a cold Metal cache).
+  void Submit(Job job, bool background = false, bool first = false);
   // Blocks until `state` is no longer kPending, running queued jobs on this thread (with `translator`) meanwhile, so
   // a waiting GPU thread is never stuck behind a long queue.
   void Wait(const std::atomic<Async>& state, rex::graphics::SpirvShaderTranslator& translator);
@@ -49,7 +51,7 @@ class Workers {
   void Run(const rex::ui::vulkan::VulkanDevice* device, bool background_only);
   mutable std::mutex mutex_;
   std::condition_variable work_, done_;
-  std::deque<Job> queue_, background_;
+  std::deque<Job> first_, queue_, background_;
   bool Take(Job& job);  // under mutex_: the next job, live work first
   bool stop_ = false;
   std::vector<std::thread> threads_;

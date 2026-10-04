@@ -95,6 +95,7 @@ Workers::~Workers() {
   {
     std::lock_guard lock(mutex_);
     stop_ = true;
+    first_.clear();
     queue_.clear();
     background_.clear();
   }
@@ -102,12 +103,17 @@ Workers::~Workers() {
   for (std::thread& thread : threads_) thread.join();
 }
 
-void Workers::Submit(Job job, bool background) {
+void Workers::Submit(Job job, bool background, bool first) {
   {
     std::lock_guard lock(mutex_);
-    (background ? background_ : queue_).push_back(std::move(job));
+    (first ? first_ : background ? background_ : queue_).push_back(std::move(job));
   }
-  work_.notify_one();
+  // Background-only workers can take first jobs too, so wake them all: notify_one could pick one that can't.
+  if (first) {
+    work_.notify_all();
+  } else {
+    work_.notify_one();
+  }
 }
 
 size_t Workers::queued() const {
@@ -121,7 +127,7 @@ size_t Workers::background_queued() const {
 }
 
 bool Workers::Take(Job& job) {
-  std::deque<Job>& from = !queue_.empty() ? queue_ : background_;
+  std::deque<Job>& from = !first_.empty() ? first_ : !queue_.empty() ? queue_ : background_;
   if (from.empty()) return false;
   job = std::move(from.front());
   from.pop_front();
@@ -134,13 +140,14 @@ void Workers::Run(const rex::ui::vulkan::VulkanDevice* device, bool background_o
   std::unique_lock lock(mutex_);
   for (;;) {
     work_.wait(lock, [this, background_only] {
-      return stop_ || (!background_only && !queue_.empty()) || !background_.empty();
+      return stop_ || !first_.empty() || (!background_only && !queue_.empty()) || !background_.empty();
     });
     if (stop_) return;
     Job job;
     if (background_only) {
-      job = std::move(background_.front());
-      background_.pop_front();
+      std::deque<Job>& from = !first_.empty() ? first_ : background_;
+      job = std::move(from.front());
+      from.pop_front();
     } else {
       Take(job);
     }
@@ -227,7 +234,7 @@ Async ShaderCache::Request(Shader& shader, uint64_t modification, Translation*& 
         [this, translation, done = state.get()](rg::SpirvShaderTranslator& translator) {
           done->store(Translate(translator, *translation) ? Async::kReady : Async::kFailed, std::memory_order_release);
         },
-        background);
+        background, !background);
     return Async::kPending;
   }
   if (now == Async::kPending && sync) {
