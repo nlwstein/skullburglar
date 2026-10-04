@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -46,6 +47,8 @@ class Workers {
   void Wait(const std::atomic<Async>& state, rex::graphics::SpirvShaderTranslator& translator);
   size_t queued() const;
   size_t background_queued() const;
+  // "first/live/background queued, running": for logs (a draw skipped for long: queued behind work, or a slow job?).
+  std::string Describe() const;
 
  private:
   void Run(const rex::ui::vulkan::VulkanDevice* device, bool background_only);
@@ -54,6 +57,7 @@ class Workers {
   std::deque<Job> first_, queue_, background_;
   bool Take(Job& job);  // under mutex_: the next job, live work first
   bool stop_ = false;
+  uint32_t running_ = 0;  // jobs in progress on the worker threads (under mutex_)
   std::vector<std::thread> threads_;
 };
 

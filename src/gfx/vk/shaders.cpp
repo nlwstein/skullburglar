@@ -7,6 +7,7 @@
 #include <xxhash.h>
 
 #include <rex/cvar.h>
+#include <rex/logging.h>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -108,11 +109,13 @@ void Workers::Submit(Job job, bool background, bool first) {
     std::lock_guard lock(mutex_);
     (first ? first_ : background ? background_ : queue_).push_back(std::move(job));
   }
-  // Background-only workers can take first jobs too, so wake them all: notify_one could pick one that can't.
-  if (first) {
-    work_.notify_all();
-  } else {
+  // Only a background job can go to any worker. notify_one for a live job can wake a background-only worker, which
+  // sleeps again, and the job then waits for the next unrelated Submit: up to 22 s on the Deck (2026-10-04, live
+  // pipelines queued with 0 running). Live and first jobs wake them all.
+  if (background && !first) {
     work_.notify_one();
+  } else {
+    work_.notify_all();
   }
 }
 
@@ -151,11 +154,18 @@ void Workers::Run(const rex::ui::vulkan::VulkanDevice* device, bool background_o
     } else {
       Take(job);
     }
+    ++running_;
     lock.unlock();
     job(translator);
     lock.lock();
+    --running_;
     done_.notify_all();
   }
+}
+
+std::string Workers::Describe() const {
+  std::lock_guard lock(mutex_);
+  return fmt::format("{}/{}/{} queued, {} running", first_.size(), queue_.size(), background_.size(), running_);
 }
 
 void Workers::Wait(const std::atomic<Async>& state, rg::SpirvShaderTranslator& translator) {

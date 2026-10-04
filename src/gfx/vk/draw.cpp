@@ -5,6 +5,7 @@
 // its own thing for render targets (renderer.h) and indices (built on the CPU, already byte-swapped).
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -433,9 +434,18 @@ VkPipeline Renderer::CreateDrawPipeline(const PipelineKey& key) const {
   info.layout = key.layout;
   VkPipeline pipeline = VK_NULL_HANDLE;
   const VkPipelineCache cache = create_with_cache_ ? pipeline_cache_ : VK_NULL_HANDLE;
+  const auto start = std::chrono::steady_clock::now();
   if (vk_.vkCreateGraphicsPipelines(device_->device(), cache, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
     std::fprintf(stderr, "native renderer: pipeline creation failed\n");
     return VK_NULL_HANDLE;
+  }
+  // A slow driver compile is a skipped (async) or stalled (sync) draw for as long; name the pair.
+  const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+  if (ms >= 250) {
+    auto hash = [](const void* t) {
+      return t ? static_cast<const ShaderCache::Translation*>(t)->shader().ucode_data_hash() : uint64_t(0);
+    };
+    REXLOG_WARN("gfx native: pipeline took {:.0f} ms: vs {:016X} ps {:016X}", ms, hash(key.vs), hash(key.ps));
   }
   return pipeline;
 }
@@ -532,8 +542,9 @@ void Renderer::LogSkip(const char* why, uint64_t vs, uint64_t ps, const Attachme
     }
     if (attachments->depth) targets += fmt::format(" depth {}x{}", attachments->depth->width, attachments->depth->height);
   }
-  REXLOG_INFO("gfx native: skipped draw ({}) frame {} draw {}: vs {:016X} ps {:016X}{}", why, stats_.presents,
-              stats_.draws, vs, ps, targets);
+  Workers* workers = shaders_ ? shaders_->workers() : nullptr;
+  REXLOG_INFO("gfx native: skipped draw ({}) frame {} draw {}: vs {:016X} ps {:016X}{}; workers {}", why,
+              stats_.presents, stats_.draws, vs, ps, targets, workers ? workers->Describe() : "none");
 }
 
 void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
