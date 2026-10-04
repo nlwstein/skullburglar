@@ -168,6 +168,13 @@ Renderer::Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory m
   if (const char* v = std::getenv("BOTS_GFX_LOG_SKIPS"); v && *v) log_skips_ = uint32_t(std::strtoul(v, nullptr, 10));
   const VkPipelineCacheCreateInfo cache_info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
   vk_.vkCreatePipelineCache(device_->device(), &cache_info, nullptr, &pipeline_cache_);
+  // MoltenVK (1.4.1) converts SPIR-V to MSL and compiles the MSL library under one mutex per VkPipelineCache
+  // (MVKPipelineCache::getShaderLibrary), so pipeline workers sharing the cache serialize on that step. Without a
+  // cache it locks per shader module instead. Its cache only holds MSL source anyway; Metal's own shader cache keeps
+  // the compiled pipelines. So MoltenVK creates without it: cold M2 Pro hold 135 s -> 35 s for 2,255 pipelines,
+  // warm warm-up 4.9 s -> 2.2 s. Other drivers keep it. BOTS_GFX_PIPELINE_CACHE=0/1 overrides.
+  create_with_cache_ = device_->properties().driverID != VK_DRIVER_ID_MOLTENVK;
+  if (const char* v = std::getenv("BOTS_GFX_PIPELINE_CACHE"); v && *v) create_with_cache_ = *v != '0';
   if (const char* v = std::getenv("BOTS_GPU_TIMING"); v && (*v == '1' || *v == '2')) {
     gpu_draw_labels_ = *v == '2';
     VkPhysicalDeviceProperties props;

@@ -432,7 +432,8 @@ VkPipeline Renderer::CreateDrawPipeline(const PipelineKey& key) const {
   info.pDynamicState = &dynamic;
   info.layout = key.layout;
   VkPipeline pipeline = VK_NULL_HANDLE;
-  if (vk_.vkCreateGraphicsPipelines(device_->device(), pipeline_cache_, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
+  const VkPipelineCache cache = create_with_cache_ ? pipeline_cache_ : VK_NULL_HANDLE;
+  if (vk_.vkCreateGraphicsPipelines(device_->device(), cache, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
     std::fprintf(stderr, "native renderer: pipeline creation failed\n");
     return VK_NULL_HANDLE;
   }

@@ -515,6 +515,7 @@ class Renderer : public Pm4Sink {
   std::unordered_map<std::string, std::unique_ptr<PipelineSlot>, BytesHash, std::equal_to<>> pipelines_;
   bool async_pipelines_ = false;
   VkPipelineCache pipeline_cache_ = VK_NULL_HANDLE;
+  bool create_with_cache_ = true;  // false on MoltenVK: pipelines are created without pipeline_cache_ (renderer.cpp)
   bool dummy_depth_ = false;  // every pass gets a depth attachment (driver workaround, renderer.cpp)
   uint32_t log_skips_ = 0;    // BOTS_GFX_LOG_SKIPS=N: log the first N draws skipped for shaders or pipelines
   void LogSkip(const char* why, uint64_t vs, uint64_t ps, const Attachments* attachments);
