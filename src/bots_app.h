@@ -19,11 +19,14 @@
 #include <signal.h>
 #if defined(__APPLE__)
 #include <execinfo.h>
+#include <limits.h>
 #include <mach-o/dyld.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #elif defined(__linux__)
 #include <dlfcn.h>
 #include <execinfo.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #endif
 
@@ -208,6 +211,22 @@ class BotsApp : public rex::ReXApp {
   //    depth compares need exact 24-bit float depth; without it the player renders black
   //    in level 1 (B-035, sweep 2026-10-01).
   void OnPreSetup(rex::RuntimeConfig& config) override {
+#if defined(__APPLE__) || defined(__linux__)
+    // Open files: package files stay open across level loads (~14 more per LoadChapter; whether the game or the SDK's
+    // handle closing keeps them is still open). At macOS's
+    // default soft limit of 256 (any app started from Finder or launchd) every open fails after ~60 loads, and the game
+    // shows its dirty-disc screen. Raise the soft limit to the hard one (macOS caps it at OPEN_MAX).
+    if (rlimit lim; getrlimit(RLIMIT_NOFILE, &lim) == 0 && lim.rlim_cur < lim.rlim_max) {
+      rlim_t want = lim.rlim_max;
+#if defined(__APPLE__)
+      want = std::min<rlim_t>(want, OPEN_MAX);
+#endif
+      if (want > lim.rlim_cur) {
+        lim.rlim_cur = want;
+        setrlimit(RLIMIT_NOFILE, &lim);
+      }
+    }
+#endif
     if (config.gpu_plugin.empty()) {
       config.gpu_plugin = "native";
       rex::cvar::SetFlagByName("gpu_plugin", "native");  // so the launcher shows the choice in use
