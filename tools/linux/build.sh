@@ -29,11 +29,15 @@ dest() { if [ -n "$H" ]; then echo "$H:$1"; else echo "$HOME/$1"; fi; }
 [ -f "$GEN/rexglue.cmake" ] || { echo "no codegen output in $GEN (run codegen, or set GEN)" >&2; exit 1; }
 
 on_host "mkdir -p ~/bots/$N/image"
-rsync -az --delete --exclude out/ --exclude .git/ "$SDK/" "$(dest bots/$N/sdk/)"
-rsync -az --delete --exclude out/ --exclude .git/ --exclude .claude/ --exclude game/ --exclude logs/ \
+# By content, without copying mtimes: a file that changed gets a new mtime, so ninja rebuilds what depends on it even
+# when the source copy's mtime is older than the objects (e.g. after switching SDK=, the old -a sync left objects built
+# against the other SDK's headers in place, with a different class layout than the rest of the build).
+SYNC="rsync -rlpz --checksum --delete"
+$SYNC --exclude out/ --exclude .git/ "$SDK/" "$(dest bots/$N/sdk/)"
+$SYNC --exclude out/ --exclude .git/ --exclude .claude/ --exclude game/ --exclude logs/ \
   --exclude run/ --exclude dumps/ --exclude docs/ --exclude ops/ --exclude shaders/ --exclude generated/ \
   ./ "$(dest bots/$N/game/)"
-rsync -az --delete "$GEN/" "$(dest bots/$N/game/generated/)"
+$SYNC "$GEN/" "$(dest bots/$N/game/generated/)"
 rsync -a $D/Dockerfile "$(dest bots/$N/image/)"
 
 on_host "CPUS=${CPUS:-} N=$N C=$C I=$I CMAKE_ARGS='${CMAKE_ARGS:-}'"'

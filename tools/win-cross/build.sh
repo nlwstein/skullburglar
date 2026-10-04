@@ -23,11 +23,13 @@ dest() { if [ -n "$H" ]; then echo "$H:$1"; else echo "$HOME/$1"; fi; }
 [ -f "$GEN/rexglue.cmake" ] || { echo "no codegen output in $GEN (run codegen, or set GEN)" >&2; exit 1; }
 
 on_host "mkdir -p ~/bots/$N"
-rsync -az --delete --exclude out/ --exclude .git/ "$SDK/" "$(dest bots/$N/sdk/)"
-rsync -az --delete --exclude out/ --exclude .git/ --exclude .claude/ --exclude game/ --exclude logs/ \
+# By content, without copying mtimes, so ninja sees every changed file as new (tools/linux/build.sh has the story).
+SYNC="rsync -rlpz --checksum --delete"
+$SYNC --exclude out/ --exclude .git/ "$SDK/" "$(dest bots/$N/sdk/)"
+$SYNC --exclude out/ --exclude .git/ --exclude .claude/ --exclude game/ --exclude logs/ \
   --exclude run/ --exclude dumps/ --exclude docs/ --exclude ops/ --exclude shaders/ --exclude generated/ \
   ./ "$(dest bots/$N/game/)"
-rsync -az --delete "$GEN/" "$(dest bots/$N/game/generated/)"
+$SYNC "$GEN/" "$(dest bots/$N/game/generated/)"
 rsync -a tools/win-cross/win-clang.cmake tools/win-cross/casefix.py "$(dest bots/$N/)"
 
 on_host "CPUS=${CPUS:-} N=$N CMAKE_ARGS='${CMAKE_ARGS:-}'"'
