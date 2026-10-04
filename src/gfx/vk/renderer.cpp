@@ -165,6 +165,7 @@ Renderer::Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory m
   // scratch depth image that is never loaded or stored. BOTS_GFX_DUMMY_DEPTH=0/1 overrides.
   dummy_depth_ = device_->properties().driverID == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS;
   if (const char* v = std::getenv("BOTS_GFX_DUMMY_DEPTH"); v && *v) dummy_depth_ = *v == '1';
+  if (const char* v = std::getenv("BOTS_GFX_LOG_SKIPS"); v && *v) log_skips_ = uint32_t(std::strtoul(v, nullptr, 10));
   const VkPipelineCacheCreateInfo cache_info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
   vk_.vkCreatePipelineCache(device_->device(), &cache_info, nullptr, &pipeline_cache_);
   if (const char* v = std::getenv("BOTS_GPU_TIMING"); v && (*v == '1' || *v == '2')) {

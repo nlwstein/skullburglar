@@ -520,6 +520,21 @@ bool Renderer::RectListBound(const rg::RegisterFile& regs, const ShaderCache::Sh
   return true;
 }
 
+// Which draws get skipped on a cold cache (B-119): one that runs once and feeds later frames (exposure, a LUT) would
+// stay wrong, not just show up late. Frame = presents so far.
+void Renderer::LogSkip(const char* why, uint64_t vs, uint64_t ps, const Attachments* attachments) {
+  --log_skips_;
+  std::string targets;
+  if (attachments) {
+    for (const Image* image : attachments->color) {
+      if (image) targets += fmt::format(" color {}x{} fmt {}", image->width, image->height, int(image->format));
+    }
+    if (attachments->depth) targets += fmt::format(" depth {}x{}", attachments->depth->width, attachments->depth->height);
+  }
+  REXLOG_INFO("gfx native: skipped draw ({}) frame {} draw {}: vs {:016X} ps {:016X}{}", why, stats_.presents,
+              stats_.draws, vs, ps, targets);
+}
+
 void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
                          const Draw& draw) {
   const auto& props = device_->properties();
@@ -673,6 +688,9 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   }
   if (vs_state != Async::kReady || ps_state != Async::kReady) {
     ++stats_.pending_draws;
+    if (log_skips_) {
+      LogSkip("shaders", vshader->ucode_data_hash(), pshader ? pshader->ucode_data_hash() : 0, nullptr);
+    }
     return;
   }
 
@@ -1237,6 +1255,9 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   const VkPipeline pipeline = GetPipeline(key, sync, pending);
   if (!pipeline) {
     ++(pending ? stats_.pending_draws : stats_.skipped_draws);
+    if (pending && log_skips_) {
+      LogSkip("pipeline", vshader->ucode_data_hash(), pshader ? pshader->ucode_data_hash() : 0, &attachments);
+    }
     return;
   }
 

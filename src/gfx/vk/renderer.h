@@ -516,6 +516,8 @@ class Renderer : public Pm4Sink {
   bool async_pipelines_ = false;
   VkPipelineCache pipeline_cache_ = VK_NULL_HANDLE;
   bool dummy_depth_ = false;  // every pass gets a depth attachment (driver workaround, renderer.cpp)
+  uint32_t log_skips_ = 0;    // BOTS_GFX_LOG_SKIPS=N: log the first N draws skipped for shaders or pipelines
+  void LogSkip(const char* why, uint64_t vs, uint64_t ps, const Attachments* attachments);
   std::vector<std::unique_ptr<Image>> dummy_depths_;
   std::filesystem::path pipeline_cache_path_;
   uint64_t pipelines_saved_ = 0;
