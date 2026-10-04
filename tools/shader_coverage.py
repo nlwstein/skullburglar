@@ -12,9 +12,7 @@ package (least covered first). A master's vertex shaders carry the vfetch block 
 declaration, so they are matched to a disc shader of the same length and head with the fewest differing dwords
 (tools/shader_refs.py `find`).
 
-Disc container (XDK, big-endian): magic 0x102A1100 (pixel) / 0x102A1101 (vertex), virtual (header) size, physical
-size; the header holds the constant table and the target string (vs_3_0 / ps_3_0); its dword 6 is the offset of
-(literal block size, microcode size). The physical section is the literal block, then the microcode.
+The disc's shader containers are parsed by tools/shader_refs.py `disc_shaders`.
 
 Prints counts and package names only, nothing copied from the disc.
 """
@@ -22,37 +20,13 @@ from __future__ import annotations
 
 import argparse
 import collections
-import re
 import struct
 import sys
 from pathlib import Path
 
-import xxhash
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_manifest import read  # noqa: E402
-from shader_refs import HEAD, Sources  # noqa: E402
-
-MAGIC = re.compile(rb"\x10\x2a\x11[\x00-\x03]")
-
-
-def disc_shaders(data):
-    """(hash, type, microcode) for every well-formed container in a decompressed package."""
-    for m in MAGIC.finditer(data):
-        at = m.start()
-        vsize, psize = struct.unpack_from(">II", data, at + 4)
-        if not (0x20 <= vsize < 0x10000 and 0 < psize < 0x40000 and psize % 4 == 0 and at + vsize + psize <= len(data)):
-            continue
-        head = data[at:at + vsize]
-        type_ = 0 if b"vs_3_0" in head else 1 if b"ps_3_0" in head else None
-        if type_ is None:
-            continue
-        info = struct.unpack_from(">I", data, at + 24)[0]
-        lit, size = struct.unpack_from(">II", data, at + info) if info + 8 <= vsize else (0, psize)
-        if lit + size != psize:
-            lit, size = 0, psize
-        code = data[at + vsize + lit:at + vsize + lit + size]
-        yield xxhash.xxh3_64_intdigest(code) ^ type_, type_, code
+from shader_refs import HEAD, Sources, disc_shaders  # noqa: E402
 
 
 def main():
@@ -75,7 +49,7 @@ def main():
     packages = {}  # package name -> set of hashes
     for name in sources.names():
         hashes = set()
-        for hash_, type_, code in disc_shaders(sources.get(name)):
+        for hash_, type_, _, code in disc_shaders(sources.get(name)):
             disc.setdefault(hash_, (type_, code))
             hashes.add(hash_)
         if hashes:

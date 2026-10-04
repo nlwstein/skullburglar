@@ -4,7 +4,7 @@
 # ///
 """Pipeline masters without shader microcode: describe each shader by where it is on the game disc.
 
-    uv run tools/shader_refs.py index MASTER OUT.refs --game game --image dumps/default_image.bin [--decompressed DIR]
+    uv run tools/shader_refs.py index MASTER OUT.refs --game game --image dumps/default_image.bin [--decompressed DIR] [--disc]
     uv run tools/shader_refs.py rebuild IN.refs OUT.master.bin --game game --image dumps/default_image.bin
     uv run tools/shader_refs.py stats IN.refs
 
@@ -23,12 +23,21 @@ vertex shader's vfetch block from the bound vertex declaration, so 2-35 dwords o
 usually patched. Shaders found nowhere are left out, and `rebuild` drops pipelines whose shaders it
 cannot rebuild. Every rebuilt shader is checked against its hash (XXH3-64 of the microcode ^ type).
 
+`--disc` also references every other compiled shader on the disc (each cooked package and
+GlobalShaders-Xbox360.bin), with no pipeline: the shaders the master hasn't seen, for a renderer that can compile them
+without knowing their pairs (pipeline libraries, B-116). Each is referenced at its first location, exact, unpatched.
+
+Disc container (XDK, big-endian): magic 0x102A1100 (pixel) / 0x102A1101 (vertex), virtual (header) size, physical
+size; the header holds the constant table and the target string (vs_3_0 / ps_3_0); its dword 6 is the offset of
+(literal block size, microcode size). The physical section is the literal block, then the microcode.
+
 Patch dwords are a few instruction words of the game's microcode: `--no-patches` leaves out every shader
 that needs them, for a refs file with nothing copied from the disc.
 """
 from __future__ import annotations
 
 import argparse
+import re
 import struct
 import sys
 from pathlib import Path
@@ -41,10 +50,31 @@ from upk_decompress import decompress_package  # noqa: E402
 MAGIC = b"BOTSPR01"
 MASTER_HEADER = 16
 HEAD = 32  # bytes of a shader's start that a near match must share (control-flow header)
+CONTAINER = re.compile(rb"\x10\x2a\x11[\x00-\x03]")
 
 
 def shader_hash(code: bytes, type_: int) -> int:
     return xxhash.xxh3_64_intdigest(code) ^ type_
+
+
+def disc_shaders(data):
+    """(hash, type, offset, microcode) for every well-formed shader container in a decompressed package."""
+    for m in CONTAINER.finditer(data):
+        at = m.start()
+        vsize, psize = struct.unpack_from(">II", data, at + 4)
+        if not (0x20 <= vsize < 0x10000 and 0 < psize < 0x40000 and psize % 4 == 0 and at + vsize + psize <= len(data)):
+            continue
+        head = data[at:at + vsize]
+        type_ = 0 if b"vs_3_0" in head else 1 if b"ps_3_0" in head else None
+        if type_ is None:
+            continue
+        info = struct.unpack_from(">I", data, at + 24)[0]
+        lit, size = struct.unpack_from(">II", data, at + info) if info + 8 <= vsize else (0, psize)
+        if lit + size != psize:
+            lit, size = 0, psize
+        offset = at + vsize + lit
+        code = data[offset:offset + size]
+        yield shader_hash(code, type_), type_, offset, code
 
 
 def read_master(path):
@@ -129,8 +159,31 @@ def index(args):
     header, shaders, pipelines = read_master(args.master)
     sources = Sources(args.game, args.image, args.decompressed)
     found = {}  # hash -> (source, offset, patches); exact matches replace near ones
+    extra = {}  # --disc: hash -> (type, dwords, source, offset) of disc shaders the master doesn't have
+    if args.disc:
+        # One pass over the parsed containers: exact matches by hash, patched vertex shaders against the disc vertex
+        # shaders of the same length and head. Only what's left gets the byte search below.
+        vertex = {}  # (length, head) -> {hash: (source, offset, microcode)}, first location of each
+        for name in sources.names():
+            if name == "image":
+                continue
+            for h, type_, offset, code in disc_shaders(sources.get(name)):
+                if h in shaders:
+                    found.setdefault(h, (name, offset, []))
+                elif h not in extra:
+                    extra[h] = (type_, len(code) // 4, name, offset)
+                if type_ == 0:
+                    vertex.setdefault((len(code), code[:HEAD]), {}).setdefault(h, (name, offset, code))
+        for h, (type_, code) in shaders.items():
+            if h in found or type_ != 0:
+                continue
+            n = len(code) // 4
+            for name, offset, other in vertex.get((len(code), code[:HEAD]), {}).values():
+                diff = [i for i in range(n) if other[i * 4:i * 4 + 4] != code[i * 4:i * 4 + 4]]
+                if len(diff) <= n // 3 and (h not in found or len(diff) < len(found[h][2])):
+                    found[h] = (name, offset, [(i, code[i * 4:i * 4 + 4]) for i in diff])
     for name in sources.names():
-        todo = [h for h in shaders if h not in found or found[h][2]]
+        todo = [h for h in shaders if h not in found or (found[h][2] and not args.disc)]
         if not todo:
             break
         data = sources.get(name)
@@ -151,12 +204,16 @@ def index(args):
             for i, dword in patches:
                 f.write(struct.pack("<H", i) + dword)
             kept += 1
+        for h, (type_, dwords, name, offset) in extra.items():
+            src = name.encode()
+            f.write(b"R" + struct.pack("<QIIH", h, type_, dwords, len(src)) + src + struct.pack("<IH", offset, 0))
         for record in pipelines:
             f.write(record)
     near = sum(1 for v in found.values() if v[2])
     missing = [f"{h:016X}" for h in shaders if h not in found]
     print(f"{args.out}: {kept}/{len(shaders)} shaders referenced ({len(found) - near} exact, {near} patched"
-          f"{', patched left out' if args.no_patches else ''}), {len(pipelines)} pipelines")
+          f"{', patched left out' if args.no_patches else ''}), {len(pipelines)} pipelines"
+          f"{f', + {len(extra)} more disc shaders' if args.disc else ''}")
     if missing:
         print("not found:", " ".join(missing))
 
@@ -248,6 +305,7 @@ def main():
         p.add_argument("--decompressed", help="directory of already-decompressed packages (same names)")
         if name == "index":
             p.add_argument("--no-patches", action="store_true", help="leave out shaders that need patch dwords")
+            p.add_argument("--disc", action="store_true", help="also reference every other shader on the disc")
         p.set_defaults(fn=fn)
     p = sub.add_parser("stats")
     p.add_argument("refs", nargs="+")
