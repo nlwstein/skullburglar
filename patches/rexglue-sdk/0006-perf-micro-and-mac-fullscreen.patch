@@ -1,5 +1,5 @@
 diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
-index 23645ef..ca32cde 100644
+index 23645ef..f673819 100644
 --- a/src/ui/vulkan/vulkan_presenter.cpp
 +++ b/src/ui/vulkan/vulkan_presenter.cpp
 @@ -11,6 +11,7 @@
@@ -60,7 +60,18 @@ index 23645ef..ca32cde 100644
      REXLOG_ERROR("VulkanPresenter: Failed to create a swapchain");
      return VK_NULL_HANDLE;
    }
-@@ -2038,6 +2059,22 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -1840,6 +1861,10 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+                 swapchain_effect, paint_context_.swapchain_render_pass);
+             if (swapchain_effect_pipeline.swapchain_pipeline == VK_NULL_HANDLE) {
+               guest_output_flow.effect_count = 0;
++            } else {
++              // Without this the format check above always failed: every paint awaited the previous one, then
++              // destroyed and recreated this pipeline (on Metal a ~300 ms compile whenever its cache missed).
++              swapchain_effect_pipeline.swapchain_format = paint_context_.swapchain_render_pass_format;
+             }
+           }
+         }
+@@ -2038,6 +2063,22 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
              case kGuestOutputPaintPipelineLayoutIndexBilinear: {
                effect_constants_size = sizeof(effect_constants.bilinear);
                effect_constants.bilinear.Initialize(guest_output_flow, i);
