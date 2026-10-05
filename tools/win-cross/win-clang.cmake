@@ -13,6 +13,8 @@ set(CMAKE_MT llvm-mt)
 set(CMAKE_AR llvm-ar)
 set(CMAKE_RANLIB llvm-ranlib)
 set(CMAKE_LINKER_TYPE LLD)
+# Compiler checks build in Debug by default, which links the debug CRT (msvcrtd); xwin only splats the release one.
+set(CMAKE_TRY_COMPILE_CONFIGURATION Release)
 set(_inc "-march=x86-64-v2 -idirafter ${XWIN}/crt/include -idirafter ${XWIN}/sdk/include/ucrt -idirafter ${XWIN}/sdk/include/um -idirafter ${XWIN}/sdk/include/shared -idirafter ${XWIN}/sdk/include/winrt")
 set(CMAKE_C_FLAGS_INIT "${_inc}")
 set(CMAKE_CXX_FLAGS_INIT "${_inc}")
