@@ -44,7 +44,10 @@ step() { echo "== $* ($(date -u +%H:%M:%S))"; }
 # build's codegen step runs `true` instead of the recompiler. The recompiler's own up-to-date check can't be trusted
 # for this: it misses on some builds and regenerates identical output for half an hour.
 NOGEN=
-[ ! -f generated/default/sources.cmake ] || NOGEN=$(command -v true)
+if [ -f generated/default/sources.cmake ]; then
+  # A path: `command -v true` names the shell builtin.
+  for NOGEN in /usr/bin/true /bin/true; do [ ! -x "$NOGEN" ] || break; done
+fi
 
 case $PLATFORM in
 linux)
