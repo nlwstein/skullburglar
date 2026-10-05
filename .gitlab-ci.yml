@@ -1,4 +1,4 @@
-# Checks on every push. On main: release builds (Linux AppImage + tarball, Windows zip) when there are releasable
+# Checks on every push. On main: release builds (Linux AppImage + tarball, Windows zip, macOS zip) when there are releasable
 # commits (feat/fix/perf; tools/ci/semantic-release.toml), published as a GitLab release whose packages stay in this
 # project's package registry. Nothing is public.
 #
@@ -9,8 +9,9 @@
 # Only the newest commit builds: build jobs are interruptible, so a newer pipeline on the branch cancels them
 # (workflow:auto_cancel). The release job isn't, and releases run one at a time.
 #
-# The runner's executor is Docker with the host's Docker socket: build jobs build their image there (cached) and run
-# it next to the job container, sharing its build directory.
+# Linux and Windows run on a runner whose executor is Docker with the host's Docker socket: build jobs build their image
+# there (cached) and run it next to the job container, sharing its build directory. macOS needs an Apple silicon Mac:
+# a shell-executor runner tagged `macos` with the Xcode command line tools, cmake and ninja on its PATH.
 #
 # Run a pipeline on main with BUILD=1 to build (and upload as skullburglar/<last>-dev.<sha>) without releasing.
 
@@ -107,10 +108,25 @@ build:windows:
     PLATFORM: windows
     IMAGE: win-cross
 
+build:macos:
+  stage: build
+  extends: .main
+  needs: [plan]
+  tags: [macos]
+  interruptible: true
+  timeout: 4h
+  script:
+    - |
+      if [ "$RELEASE" != true ] && [ "${BUILD:-}" != 1 ]; then
+        echo "Nothing to release: not building."
+        exit 0
+      fi
+    - tools/ci/gitlab_build.sh macos
+
 release:
   stage: release
   extends: [.main, .psr]
-  needs: [plan, build:linux, build:windows]
+  needs: [plan, build:linux, build:windows, build:macos]
   resource_group: release
   script:
     - |

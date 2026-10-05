@@ -4,7 +4,7 @@
 # Runs inside the platform's build environment (the release workflow sets these up):
 #   linux    docker/linux-steamrt (Steam Runtime 3: glibc 2.31, static libstdc++; runs on the Deck and most distros)
 #   windows  docker/win-cross (clang + lld cross-compiling to x86_64 MSVC; Windows SDK from xwin in $XWIN)
-#   macos    an Apple silicon Mac with Xcode, cmake and ninja
+#   macos    an Apple silicon Mac with Xcode or its command line tools, cmake and ninja
 # Needs game/default.xex (checked against default.xex.sha1) and an SDK from tools/ci/sdk.sh. Codegen output already in
 # generated/ (tools/ci/codegen_publish.sh) is reused when its stamp matches; otherwise codegen runs here.
 # Optional: REFS=<file> ships it as pipelines/5451083B.refs (shader refs for the first-boot warm-up, B-098);

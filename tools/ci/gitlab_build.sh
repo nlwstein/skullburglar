@@ -1,12 +1,12 @@
 #!/bin/sh
-# One platform's release build in GitLab CI, inside its build image (.gitlab-ci.yml):
-#   tools/ci/gitlab_build.sh <linux|windows>
+# One platform's release build in GitLab CI, inside its build image or on the macOS runner (.gitlab-ci.yml):
+#   tools/ci/gitlab_build.sh <linux|windows|macos>
 # Gets the game executable and shader refs from the private assets project, restores stored codegen output when there
 # is some for this tree (tools/ci/codegen_publish.sh), builds and packages, and uploads the packages to this project's
 # package registry as skullburglar/<VERSION>.
 # Env: the job's CI_* variables, VERSION, ASSETS_PROJECT (the assets project path).
 set -eu
-PLATFORM=${1:?usage: tools/ci/gitlab_build.sh <linux|windows>}
+PLATFORM=${1:?usage: tools/ci/gitlab_build.sh <linux|windows|macos>}
 cd "$(dirname "$0")/../.."
 : "${CI_JOB_TOKEN:?}" "${CI_SERVER_HOST:?}" "${CI_API_V4_URL:?}" "${CI_PROJECT_ID:?}" "${VERSION:?}" "${ASSETS_PROJECT:?}"
 step() { echo "== $* ($(date -u +%H:%M:%S))"; }

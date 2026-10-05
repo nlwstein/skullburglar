@@ -80,7 +80,7 @@ Running the Linux build needs a Vulkan GPU passed into the container (`--gpus al
 
 ## Release builds
 
-`tools/ci/` builds release packages from a clean checkout (CI does Linux and Windows; macOS runs locally): `sdk.sh` clones the pinned SDK and
+`tools/ci/` builds release packages from a clean checkout (CI does all three): `sdk.sh` clones the pinned SDK and
 applies `patches/`, `build.sh` runs codegen, compiles with the native renderer and stages the files to ship (debug
 info split off), and `package.sh` packs them:
 
@@ -88,7 +88,7 @@ info split off), and `package.sh` packs them:
 |---|---|---|
 | Linux x86_64 | `docker/linux-steamrt` (glibc 2.31: runs on the Steam Deck and most distros) | `.tar.xz`, `.AppImage` |
 | Windows x86_64 | `docker/win-cross` (clang + lld, Windows SDK from xwin) | `.zip` |
-| macOS arm64 | Xcode, cmake, ninja | `.zip` |
+| macOS arm64 | Xcode or its command line tools, cmake, ninja | `.zip` |
 
 Each also has a `-symbols` archive. To make one yourself, with `game/default.xex` in place:
 
@@ -100,7 +100,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:$PWD" -w "$PWD"
 VERSION=dev tools/ci/package.sh linux out/ci     # -> out/ci/release/
 ```
 
-In this repository's GitLab CI (`.gitlab-ci.yml`), `main` builds Linux and Windows when it has releasable commits
+In this repository's GitLab CI (`.gitlab-ci.yml`), `main` builds Linux, Windows and macOS when it has releasable commits
 (`feat`, `fix`, `perf`; versions from [python-semantic-release](https://python-semantic-release.readthedocs.io/)) and
 makes a GitLab release whose packages stay in the project's private package registry. The game executable comes from
 a private assets project that only this project's CI jobs can read. The other jobs run on every push and need no game
