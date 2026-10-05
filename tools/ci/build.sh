@@ -40,6 +40,12 @@ fi
 
 step() { echo "== $* ($(date -u +%H:%M:%S))"; }
 
+# Codegen output already in generated/ (restored by the caller for an unchanged codegen key) is used as it is: the
+# build's codegen step runs `true` instead of the recompiler. The recompiler's own up-to-date check can't be trusted
+# for this: it misses on some builds and regenerates identical output for half an hour.
+NOGEN=
+[ ! -f generated/default/sources.cmake ] || NOGEN=$(command -v true)
+
 case $PLATFORM in
 linux)
   # x86-64-v2 (SSSE3/SSE4) is the SDK's own x86 minimum.
@@ -48,15 +54,17 @@ linux)
   ;;
 windows)
   # The build can't run the rexglue.exe it would build, so codegen runs a recompiler built for Linux first.
-  step "recompiler (host)"
-  cmake -G Ninja -S "$SDK" -B "$OUT/host" -DCMAKE_BUILD_TYPE=Release \
-    ${CCACHE:+-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache} \
-    -DCMAKE_C_FLAGS=-march=x86-64-v2 -DCMAKE_CXX_FLAGS=-march=x86-64-v2 >/dev/null
-  cmake --build "$OUT/host" --target rexglue --parallel "$JOBS"
+  if [ -z "$NOGEN" ]; then
+    step "recompiler (host)"
+    cmake -G Ninja -S "$SDK" -B "$OUT/host" -DCMAKE_BUILD_TYPE=Release \
+      ${CCACHE:+-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache} \
+      -DCMAKE_C_FLAGS=-march=x86-64-v2 -DCMAKE_CXX_FLAGS=-march=x86-64-v2 >/dev/null
+    cmake --build "$OUT/host" --target rexglue --parallel "$JOBS"
+  fi
   # MSVC header names are matched case-insensitively on Windows; add the spellings the sources use.
   python3 tools/win-cross/casefix.py "$SDK" src
   set -- -G Ninja -DCMAKE_TOOLCHAIN_FILE="$PWD/tools/win-cross/win-clang.cmake" -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-    -DREXSDK_DIR="$SDK" -DREXGLUE_HOST_CLI="$SDK/out/linux-amd64/rexglue" -DREXGLUE_USE_VULKAN=ON -DBOTS_NATIVE_GFX=ON
+    -DREXSDK_DIR="$SDK" -DREXGLUE_HOST_CLI="${NOGEN:-$SDK/out/linux-amd64/rexglue}" -DREXGLUE_USE_VULKAN=ON -DBOTS_NATIVE_GFX=ON
   ;;
 macos)
   set -- --preset mac-arm64-relwithdebinfo -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 -DREXSDK_DIR="$SDK" -DBOTS_NATIVE_GFX=ON
@@ -65,6 +73,7 @@ macos)
 esac
 
 step configure
+[ -z "$NOGEN" ] || [ "$PLATFORM" = windows ] || set -- "$@" -DREXGLUE_HOST_CLI="$NOGEN"
 cmake -S . -B "$B" "$@" -DBOTS_CCACHE=$([ -n "$CCACHE" ] && echo ON || echo OFF) >/dev/null
 if [ ! -f generated/default/sources.cmake ]; then
   # The generated sources are listed at configure time, so configure again once codegen has written them.
