@@ -115,8 +115,9 @@ class BotsApp : public rex::ReXApp {
         [defaults, resume, intro_before](const std::filesystem::path& dir) {
           // The UE3 command line was set in OnPreSetup; follow a changed intro-movies choice.
           bool intro = rex::cvar::Query<bool>("intro_movies");
-          if (intro != intro_before &&
-              rex::cvar::GetFlagSource("cl") != rex::cvar::Source::kCommandLine) {
+          const auto cl_source = rex::cvar::GetFlagSource("cl");
+          if (intro != intro_before && cl_source != rex::cvar::Source::kCommandLine &&
+              cl_source != rex::cvar::Source::kEnvironment) {
             rex::cvar::SetFlagByName("cl", intro ? "" : "-nostartupmovies");
           }
           ApplyVsync();  // the game's swapchain doesn't exist yet
@@ -272,10 +273,14 @@ class BotsApp : public rex::ReXApp {
     SetCvarDefault("vulkan_async_skip_incomplete_frames", "REX_VULKAN_ASYNC_SKIP_INCOMPLETE_FRAMES", "false");
     // Skip the Legal / THQ / Swordfish logo movies: UE3's own -nostartupmovies switch, passed on the
     // guest command line (SDK cvar `cl` -> ExLoadedCommandLine). The intro_movies setting (bots.toml,
-    // setup window) or BOTS_INTRO_MOVIES=1 plays them.
+    // setup window) or BOTS_INTRO_MOVIES=1 plays them. Set on the cvar itself: `cl` is a static cvar whose REX_CL was
+    // read before this hook, so an env default here would be ignored. A --cl or REX_CL given by hand wins.
+    // The shader precompile (OnCreateDialogs) doesn't depend on this; it runs either way.
     const char* v = std::getenv("BOTS_INTRO_MOVIES");
-    if (!rex::cvar::Query<bool>("intro_movies") && !(v && std::string_view(v) == "1")) {
-      SetEnvDefault("REX_CL", "-nostartupmovies");
+    const auto cl_source = rex::cvar::GetFlagSource("cl");
+    if (!rex::cvar::Query<bool>("intro_movies") && !(v && std::string_view(v) == "1") &&
+        cl_source != rex::cvar::Source::kCommandLine && cl_source != rex::cvar::Source::kEnvironment) {
+      rex::cvar::SetFlagByName("cl", "-nostartupmovies");
     }
   }
 
