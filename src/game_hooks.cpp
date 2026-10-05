@@ -742,10 +742,19 @@ void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32
     // Rows: the label's box is narrow, so accept the whole row height left of the right edge plus a margin.
     if (y >= w.top - 4 && y <= w.bottom + 4 && x >= w.left - 200 && x <= w.right + 200) hovered = &w;
   }
+  // SetFocus can refuse (seen once while the main menu was opening), so keep asking for up to a second after a move
+  // while the pointer stays on that widget. Not longer: pad/keyboard navigation must be able to move focus away.
+  static uint32_t want = 0;
+  static float want_age = 0;
   if (moves != seen_moves) {
     seen_moves = moves;
-    if (hovered && hovered->object != focused && !dragging) Focus(ctx, base, hovered->object);
+    want = hovered ? hovered->object : 0;
+    want_age = 0;
+  } else if (want) {
+    want_age += dt;
   }
+  if (want && (focused == want || want_age > 1.0f || !hovered || hovered->object != want)) want = 0;
+  if (want && !dragging) Focus(ctx, base, want);
 
   // Clicks on toggles and sliders.
   std::vector<bool> rest;
