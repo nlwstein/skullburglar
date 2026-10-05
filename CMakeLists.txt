@@ -22,6 +22,13 @@ endif()
 
 include(generated/rexglue.cmake)
 
+# SDK built from source (REXSDK_DIR): its macOS helper stages MoltenVK's ICD file from paths that only the installed
+# package's config defines. Without them the post-build copy reads "/cmake/MoltenVK_icd.json" and fails.
+if(APPLE AND REXSDK_DIR)
+    set(REXGLUE_ROOT ${REXSDK_DIR})
+    set(REXGLUE_MOLTENVK_ICD ${REXSDK_DIR}/cmake/MoltenVK_icd.json)
+endif()
+
 # Sources
 set(BOTS_SOURCES
     src/main.cpp
