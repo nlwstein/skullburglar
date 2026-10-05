@@ -1,0 +1,15 @@
+# python-semantic-release: the next version from conventional commits (.gitlab-ci.yml's plan job; only `version --print`
+# and `--print-last-released` are used, tools/ci/gitlab_release.py makes the tag and the release).
+# feat -> minor, fix/perf -> patch, breaking -> minor while at 0.x.
+[semantic_release]
+tag_format = "v{version}"
+allow_zero_version = true
+major_on_zero = false
+commit_parser = "conventional"
+
+[semantic_release.branches.main]
+match = "^main$"
+prerelease = false
+
+[semantic_release.remote]
+type = "gitlab"

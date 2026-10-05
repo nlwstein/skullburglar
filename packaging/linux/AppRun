@@ -1,0 +1,8 @@
+#!/bin/sh
+# AppImage entry point. The game is the same build as the tarball, laid out flat in the AppImage.
+# The AppImage is mounted read-only and the game logs next to its executable by default, so logs go to the
+# per-user state directory instead (a --log_file given on the command line still wins).
+HERE=$(dirname "$(readlink -f "$0")")
+LOGS=${XDG_STATE_HOME:-$HOME/.local/state}/bots-recomp/logs
+mkdir -p "$LOGS"
+exec "$HERE/bots" --log_file="$LOGS/bots.log" "$@"

@@ -9,10 +9,11 @@ FROM registry.gitlab.steamos.cloud/steamrt/sniper/sdk:latest
 ENV DEBIAN_FRONTEND=noninteractive
 
 # The SDK image already has the dev packages (gtk3, X11/xcb, Xss, Vulkan, Wayland + scanner, xkbcommon, libdecor,
-# ALSA, Pulse, PipeWire) and wget/gnupg; only the compiler is added.
+# ALSA, Pulse, PipeWire) and wget/gnupg; added are the compiler and what the release scripts use (tools/ci/).
 RUN wget -qO /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key \
  && echo "deb http://apt.llvm.org/bullseye/ llvm-toolchain-bullseye-21 main" > /etc/apt/sources.list.d/llvm.list \
  && apt-get update && apt-get install -y --no-install-recommends clang-21 lld-21 llvm-21 \
+    ca-certificates curl git xz-utils \
  && rm -rf /var/lib/apt/lists/*
 
 # clang/clang++ wrappers: gcc-14's headers and static libstdc++ first, then gcc-10's dir for libgcc_s/libgcc_eh.

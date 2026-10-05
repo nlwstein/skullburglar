@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Skullburglar
+Comment=Native port of 50 Cent: Blood on the Sand (needs your own copy of the game)
+Exec=bots
+Icon=skullburglar
+Terminal=false
+Categories=Game;ActionGame;

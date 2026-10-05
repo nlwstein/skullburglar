@@ -77,3 +77,36 @@ tools/win-cross/build.sh   # D3D12, clang + xwin -> ~/bots/win/dist/bots-win64.z
 
 Running the Linux build needs a Vulkan GPU passed into the container (`--gpus all` and
 `NVIDIA_DRIVER_CAPABILITIES=all` for NVIDIA) and a display.
+
+## Release builds
+
+`tools/ci/` builds release packages from a clean checkout (CI does Linux and Windows; macOS runs locally): `sdk.sh` clones the pinned SDK and
+applies `patches/`, `build.sh` runs codegen, compiles with the native renderer and stages the files to ship (debug
+info split off), and `package.sh` packs them:
+
+| Platform | Build environment | Packages |
+|---|---|---|
+| Linux x86_64 | `docker/linux-steamrt` (glibc 2.31: runs on the Steam Deck and most distros) | `.tar.xz`, `.AppImage` |
+| Windows x86_64 | `docker/win-cross` (clang + lld, Windows SDK from xwin) | `.zip` |
+| macOS arm64 | Xcode, cmake, ninja | `.zip` |
+
+Each also has a `-symbols` archive. To make one yourself, with `game/default.xex` in place:
+
+```bash
+tools/ci/sdk.sh out/sdk
+docker build -t skullburglar-linux docker/linux-steamrt
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:$PWD" -w "$PWD" skullburglar-linux \
+  tools/ci/build.sh linux out/sdk out/ci
+VERSION=dev tools/ci/package.sh linux out/ci     # -> out/ci/release/
+```
+
+In this repository's GitLab CI (`.gitlab-ci.yml`), `main` builds Linux and Windows when it has releasable commits
+(`feat`, `fix`, `perf`; versions from [python-semantic-release](https://python-semantic-release.readthedocs.io/)) and
+makes a GitLab release whose packages stay in the project's private package registry. The game executable comes from
+a private assets project that only this project's CI jobs can read. The other jobs run on every push and need no game
+data.
+
+Codegen takes over half an hour on an x86 CI runner, and its output is the same on every platform and only changes
+with its inputs (`tools/ci/codegen_key.sh`: the manifest, `config/`, the recompiler's SDK sources). After changing one
+of those, store the new output for the release builds with `GITLAB_TOKEN=... tools/ci/codegen_publish.sh` (on a Mac
+it takes a few minutes); until then they run codegen themselves.

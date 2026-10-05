@@ -1,0 +1,106 @@
+#!/bin/sh
+# Release build for one platform: codegen, compile, then stage the files to ship with debug info split off.
+#   tools/ci/build.sh <linux|windows|macos> <sdk dir> <out dir>
+# Runs inside the platform's build environment (the release workflow sets these up):
+#   linux    docker/linux-steamrt (Steam Runtime 3: glibc 2.31, static libstdc++; runs on the Deck and most distros)
+#   windows  docker/win-cross (clang + lld cross-compiling to x86_64 MSVC; Windows SDK from xwin in $XWIN)
+#   macos    an Apple silicon Mac with Xcode, cmake and ninja
+# Needs game/default.xex (checked against default.xex.sha1) and an SDK from tools/ci/sdk.sh. Codegen output already in
+# generated/ (tools/ci/codegen_publish.sh) is reused when its stamp matches; otherwise codegen runs here.
+# Optional: REFS=<file> ships it as pipelines/5451083B.refs (shader refs for the first-boot warm-up, B-098);
+# JOBS=<n> caps compile parallelism (default: all cores); CODEGEN_ONLY=1 stops after codegen.
+# Output: <out>/dist (what ships), <out>/symbols (debug info for crash reports).
+set -eu
+PLATFORM=${1:?usage: tools/ci/build.sh <linux|windows|macos> <sdk dir> <out dir>}
+SDK=$(cd "${2:?sdk dir}" && pwd)
+mkdir -p "${3:?out dir}"
+OUT=$(cd "$3" && pwd)
+cd "$(dirname "$0")/../.."
+B=$OUT/build
+DIST=$OUT/dist
+SYM=$OUT/symbols
+case $PLATFORM in macos) JOBS=${JOBS:-$(sysctl -n hw.ncpu)} ;; *) JOBS=${JOBS:-$(nproc)} ;; esac
+
+if command -v sha1sum >/dev/null; then sha1sum -c default.xex.sha1; else shasum -c default.xex.sha1; fi
+
+step() { echo "== $* ($(date -u +%H:%M:%S))"; }
+
+case $PLATFORM in
+linux)
+  # x86-64-v2 (SSSE3/SSE4) is the SDK's own x86 minimum.
+  set -- -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DREXSDK_DIR="$SDK" \
+    -DCMAKE_C_FLAGS=-march=x86-64-v2 -DCMAKE_CXX_FLAGS=-march=x86-64-v2 -DBOTS_NATIVE_GFX=ON
+  ;;
+windows)
+  # The build can't run the rexglue.exe it would build, so codegen runs a recompiler built for Linux first.
+  step "recompiler (host)"
+  cmake -G Ninja -S "$SDK" -B "$OUT/host" -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_FLAGS=-march=x86-64-v2 -DCMAKE_CXX_FLAGS=-march=x86-64-v2 >/dev/null
+  cmake --build "$OUT/host" --target rexglue --parallel "$JOBS"
+  # MSVC header names are matched case-insensitively on Windows; add the spellings the sources use.
+  python3 tools/win-cross/casefix.py "$SDK" src
+  set -- -G Ninja -DCMAKE_TOOLCHAIN_FILE="$PWD/tools/win-cross/win-clang.cmake" -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DREXSDK_DIR="$SDK" -DREXGLUE_HOST_CLI="$SDK/out/linux-amd64/rexglue" -DREXGLUE_USE_VULKAN=ON -DBOTS_NATIVE_GFX=ON
+  ;;
+macos)
+  set -- --preset mac-arm64-relwithdebinfo -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 -DREXSDK_DIR="$SDK" -DBOTS_NATIVE_GFX=ON
+  ;;
+*) echo "unknown platform $PLATFORM" >&2; exit 1 ;;
+esac
+
+step configure
+cmake -S . -B "$B" "$@" >/dev/null
+if [ ! -f generated/default/sources.cmake ]; then
+  # The generated sources are listed at configure time, so configure again once codegen has written them.
+  step codegen
+  cmake --build "$B" --target bots_codegen --parallel "$JOBS"
+  cmake -S . -B "$B" >/dev/null
+fi
+[ -z "${CODEGEN_ONLY:-}" ] || exit 0
+step build
+cmake --build "$B" --target bots --parallel "$JOBS"
+
+step stage
+rm -rf "$DIST" "$SYM"
+mkdir -p "$DIST" "$SYM"
+# The game, the SDK runtime and both GPU plugins (native, and the emulated Xenos one the launcher can switch to).
+# Library names carry the build type's postfix ("rd" for RelWithDebInfo).
+case $PLATFORM in
+linux)
+  cp "$B/bots" "$B"/librexgpu-native*.so "$DIST/"
+  cp "$SDK"/out/linux-amd64/librexruntime*.so "$SDK"/out/linux-amd64/librexgpu-xenos*.so "$DIST/"
+  for f in "$DIST"/*; do
+    n=$(basename "$f")
+    llvm-objcopy --only-keep-debug "$f" "$SYM/$n.debug"
+    llvm-objcopy --strip-debug --add-gnu-debuglink="$SYM/$n.debug" "$f"
+  done
+  # bots has RUNPATH $ORIGIN: every library it needs from the build has to be next to it.
+  if LD_LIBRARY_PATH= ldd "$DIST/bots" | grep "not found"; then exit 1; fi
+  ;;
+windows)
+  cp "$B/bots.exe" "$B"/rexgpu-native*.dll "$DIST/"
+  cp "$SDK"/out/win-amd64/rexruntime*.dll "$SDK"/out/win-amd64/rexgpu-xenos*.dll "$DIST/"
+  for f in "$DIST"/*.exe "$DIST"/*.dll; do
+    n=$(basename "${f%.*}")
+    for pdb in "$B/$n.pdb" "$SDK/out/win-amd64/$n.pdb"; do [ ! -f "$pdb" ] || cp "$pdb" "$SYM/"; done
+  done
+  ;;
+macos)
+  # The build copies the SDK libraries and the Vulkan loader + MoltenVK (vulkan/) next to the game.
+  cp "$B/bots" "$B"/librexruntime*.dylib "$B"/librexgpu-*.dylib "$DIST/"
+  cp -R "$B/vulkan" "$DIST/"
+  for f in "$DIST"/bots "$DIST"/*.dylib; do
+    dsymutil "$f" -o "$SYM/$(basename "$f").dSYM"
+    strip -S "$f"
+    codesign --force --sign - "$f" 2>/dev/null  # stripping voids the linker's ad-hoc signature
+  done
+  if otool -L "$DIST/bots" | grep -E "^\s+/(opt|usr/local)/"; then echo "links a Homebrew library" >&2; exit 1; fi
+  ;;
+esac
+if [ -n "${REFS:-}" ]; then
+  mkdir -p "$DIST/pipelines"
+  cp "$REFS" "$DIST/pipelines/5451083B.refs"
+fi
+cp packaging/README.txt "$DIST/"
+ls -la "$DIST"
+du -sh "$DIST" "$SYM"

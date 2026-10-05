@@ -1,0 +1,127 @@
+# Checks on every push. On main: release builds (Linux AppImage + tarball, Windows zip) when there are releasable
+# commits (feat/fix/perf; tools/ci/semantic-release.toml), published as a GitLab release whose packages stay in this
+# project's package registry. Nothing is public.
+#
+# The build needs the game executable, which is never in this repo: tools/ci/gitlab_build.sh reads it from the private
+# assets project (ASSETS_PROJECT) with the job token, which only this project's jobs may use there (its job token
+# allowlist). Codegen output stored there (tools/ci/codegen_publish.sh) saves the half-hour codegen run.
+#
+# Only the newest commit builds: build jobs are interruptible, so a newer pipeline on the branch cancels them
+# (workflow:auto_cancel). The release job isn't, and releases run one at a time.
+#
+# The runner's executor is Docker with the host's Docker socket: build jobs build their image there (cached) and run
+# it next to the job container, sharing its build directory.
+#
+# Run a pipeline on main with BUILD=1 to build (and upload as skullburglar/<last>-dev.<sha>) without releasing.
+
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+stages: [check, plan, build, release]
+
+variables:
+  ASSETS_PROJECT: $CI_PROJECT_NAMESPACE/skullburglar-assets
+  PSR: semantic-release -c tools/ci/semantic-release.toml
+
+checks:
+  stage: check
+  image: python:3.12
+  interruptible: true
+  script:
+    - python3 tools/leak_scan.py tree
+    - for f in tools/ci/*.sh packaging/linux/AppRun; do sh -n "$f"; done
+    - python3 -m py_compile tools/ci/gitlab_release.py
+    - SUBMODULES=0 tools/ci/sdk.sh "$(mktemp -d)/sdk"
+
+.main:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+.psr:
+  image: python:3.12
+  variables:
+    GIT_DEPTH: 0
+  before_script:
+    - pip install -q --root-user-action=ignore python-semantic-release==10.6.2
+    # semantic-release reads the branch name; CI checks out a detached HEAD.
+    - git checkout -q -B "$CI_COMMIT_BRANCH"
+
+plan:
+  stage: plan
+  extends: [.main, .psr]
+  interruptible: true
+  script:
+    - next=$($PSR version --print)
+    - last=$($PSR version --print-last-released 2>/dev/null || true)
+    - |
+      if [ "$next" != "$last" ]; then
+        echo "Next release: v$next"
+        printf 'VERSION=%s\nLAST=%s\nRELEASE=true\n' "$next" "$last" > plan.env
+      else
+        echo "No releasable commits since ${last:+v}${last:-the start}."
+        printf 'VERSION=%s\nLAST=%s\nRELEASE=false\n' "${last:-0.0.0}-dev.$CI_COMMIT_SHORT_SHA" "$last" > plan.env
+      fi
+  artifacts:
+    reports:
+      dotenv: plan.env
+
+.build:
+  stage: build
+  extends: .main
+  needs: [plan]
+  image: docker:29-cli
+  interruptible: true
+  timeout: 4h
+  script:
+    - |
+      if [ "$RELEASE" != true ] && [ "${BUILD:-}" != 1 ]; then
+        echo "Nothing to release: not building."
+        exit 0
+      fi
+    - docker build -q -t "skullburglar-ci-$PLATFORM" "docker/$IMAGE"
+    # This job's container, whose volumes (the checkout) the build container shares.
+    - JOB=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.job.id=$CI_JOB_ID" --filter "label=com.gitlab.gitlab-runner.type=build")
+    - test -n "$JOB"
+    - >-
+      docker run --rm --name "skullburglar-ci-$CI_JOB_ID" --volumes-from "$JOB" -w "$CI_PROJECT_DIR"
+      -e CI_JOB_TOKEN -e CI_SERVER_HOST -e CI_API_V4_URL -e CI_PROJECT_ID -e VERSION -e ASSETS_PROJECT
+      "skullburglar-ci-$PLATFORM" tools/ci/gitlab_build.sh "$PLATFORM"
+  after_script:
+    # A cancelled job leaves its build container running otherwise.
+    - docker rm -f "skullburglar-ci-$CI_JOB_ID" >/dev/null 2>&1 || true
+
+build:linux:
+  extends: .build
+  variables:
+    PLATFORM: linux
+    IMAGE: linux-steamrt
+
+build:windows:
+  extends: .build
+  variables:
+    PLATFORM: windows
+    IMAGE: win-cross
+
+release:
+  stage: release
+  extends: [.main, .psr]
+  needs: [plan, build:linux, build:windows]
+  resource_group: release
+  script:
+    - |
+      if [ "$RELEASE" != true ]; then
+        echo "Nothing to release."
+        exit 0
+      fi
+    - next=$($PSR version --print)
+    - |
+      if [ "$next" != "$VERSION" ]; then
+        echo "Built as $VERSION, but the next release is now $next (a release was made meanwhile)."
+        exit 1
+      fi
+    - python3 tools/ci/gitlab_release.py
