@@ -34,7 +34,10 @@ else
   echo "codegen: nothing stored for $KEY, so codegen runs here (store it with tools/ci/codegen_publish.sh)"
 fi
 
-REFS=out/assets/pipelines/class7.refs tools/ci/build.sh "$PLATFORM" out/sdk out/ci
+# Shader refs are per device class: class 3 is MoltenVK; Windows and Linux GPUs (the Deck included) are class 7. Refs
+# for another class are ignored at run time, which leaves the first boot with no shader warm-up.
+case $PLATFORM in macos) CLASS=3 ;; *) CLASS=7 ;; esac
+REFS=out/assets/pipelines/class$CLASS.refs tools/ci/build.sh "$PLATFORM" out/sdk out/ci
 step package
 tools/ci/package.sh "$PLATFORM" out/ci
 
