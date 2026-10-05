@@ -35,6 +35,9 @@ Every start opens the launcher. The first time it asks for your disc image or ex
 game files (a few minutes). After that it holds the settings: resolution, VSync, frame cap, fullscreen, intro
 movies, renderer, mouse sensitivity and key bindings. Play saves them and starts the game.
 
+When a newer version is out, the launcher says so and its Download button opens the download page (turn
+"Check for new versions" off to stop it looking).
+
 To skip the launcher and go straight into the game, start it with --launcher=false (on the Deck: put that in the
 Steam shortcut's Launch Options).
 

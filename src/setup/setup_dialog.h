@@ -4,6 +4,7 @@
 // the player settings (settings.h). Play saves them and starts the game.
 // Test hooks: BOTS_SETUP_ISO=<path> prefills the image path; BOTS_SETUP_AUTO=1 installs (when a
 // path is set and nothing is installed) and presses Play, so the flow runs unattended.
+// Release builds also check for a newer version when the window opens (update_check.h).
 #pragma once
 
 #include <algorithm>
@@ -27,6 +28,7 @@
 #include "file_picker.h"
 #include "iso_extract.h"
 #include "settings.h"
+#include "update_check.h"
 
 namespace bots::setup {
 
@@ -47,8 +49,9 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     if (const char* iso = std::getenv("BOTS_SETUP_ISO"); iso && *iso) SetIsoPath(iso);
     const char* autorun = std::getenv("BOTS_SETUP_AUTO");
     auto_ = autorun && std::strcmp(autorun, "1") == 0;
-    REXLOG_INFO("setup: window open (game files {} at {}, settings file {})",
+    REXLOG_INFO("setup: window open (version {}, game files {} at {}, settings file {})", AppVersion(),
                 installed_ ? "installed" : "missing", game_dir_.string(), config_path_.string());
+    if (UpdateCheckAvailable() && Value("check_updates") == "true") StartUpdateCheck();
   }
 
   ~SetupDialog() override {
@@ -71,6 +74,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     if (ImGui::Begin("50 Cent - Blood on the Sand##bots_setup", nullptr,
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                          ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
+      DrawUpdate();
       DrawGameFiles();
       ImGui::Spacing();
       ImGui::Separator();
@@ -90,6 +94,41 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   }
 
   bool Extracting() const { return worker_.joinable(); }
+
+  // The check runs on its own thread with its own state, so closing the window never waits for it.
+  struct UpdateState {
+    std::atomic<bool> done{false};
+    UpdateInfo info;
+  };
+
+  void StartUpdateCheck() {
+    update_ = std::make_shared<UpdateState>();
+    std::thread([state = update_] {
+      state->info = FetchUpdateInfo();
+      state->done.store(true);
+    }).detach();
+  }
+
+  void DrawUpdate() {
+    if (!update_ || !update_->done.load()) return;
+    const UpdateInfo& info = update_->info;
+    if (!update_logged_) {
+      update_logged_ = true;
+      if (!info.error.empty()) REXLOG_INFO("setup: update check failed: {}", info.error);
+      else REXLOG_INFO("setup: newest release {}, this is {}", info.latest, AppVersion());
+    }
+    if (info.latest.empty() || !IsNewerVersion(info.latest, AppVersion())) return;
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+    ImGui::TextWrapped("Skullburglar %s is out (you have %s).", info.latest.c_str(), AppVersion());
+    ImGui::PopStyleColor();
+    if (!info.page.empty()) {
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Download it")) OpenInBrowser(info.page);
+    }
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+  }
 
   void DrawGameFiles() {
     ImGui::TextUnformatted("Game files");
@@ -322,6 +361,10 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       ImGui::SameLine();
       ImGui::TextDisabled("Install the game files to play.");
     }
+    char version[64];
+    std::snprintf(version, sizeof(version), "Version %s", AppVersion());
+    ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - ImGui::CalcTextSize(version).x);
+    ImGui::TextDisabled("%s", version);
   }
 
   void StartExtract() {
@@ -390,6 +433,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   std::shared_ptr<ExtractProgress> progress_;
   std::shared_ptr<ExtractResult> result_;
   std::shared_ptr<std::atomic<bool>> done_;
+  std::shared_ptr<UpdateState> update_;
+  bool update_logged_ = false;
 };
 
 }  // namespace bots::setup

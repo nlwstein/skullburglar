@@ -1,6 +1,8 @@
 // See settings.h.
 #include "settings.h"
 
+#include "update_check.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -16,6 +18,8 @@
 REXCVAR_DEFINE_BOOL(intro_movies, false, "bots", "Play the Legal / THQ / Swordfish logo movies at launch");
 REXCVAR_DEFINE_BOOL(launcher, true, "bots",
                     "Show the launcher before starting the game (default: unless --game_data_root is given)");
+REXCVAR_DEFINE_BOOL(check_updates, true, "bots",
+                    "Release builds: the launcher checks online for a newer version and offers its download page");
 REXCVAR_DEFINE_STRING(render_scale, "auto", "bots",
                       "Native renderer: render resolution as a multiple of 720p (auto, 3, 2, 1.5, 1, 0.75, 0.667, "
                       "0.5); auto is 2/3 on Intel GPUs, else 1");
@@ -53,6 +57,8 @@ std::vector<Setting> Catalog() {
   s.push_back({"framerate_limit", "", "Frame rate limit", "",
                {{"30", "30 fps"}, {"60", "60 fps (recommended)"}, {"0", "Unlimited"}}});
   s.push_back({"present_vsync", "", "VSync", "Off has the lowest latency but can tear.", {}});
+  s.push_back({"check_updates", "", "Check for new versions",
+               "When the launcher opens, look online for a newer Skullburglar and offer its download page.", {}});
   s.push_back({"kbm", "", "Keyboard and mouse", "Play with keyboard and mouse. A controller always works too.", {}});
   s.back().section = "Keyboard and mouse";
   s.push_back({"kbm_sensitivity", "", "Mouse sensitivity", "",
@@ -110,7 +116,8 @@ std::vector<Setting> LoadSettings() {
   // Settings of the renderer not in use, or whose cvar its plugin didn't register, aren't shown.
   const bool native = rex::cvar::GetFlagByName("gpu_plugin") == "native";
   std::erase_if(settings, [native](const Setting& s) {
-    return (native && s.emulated_only) || !rex::cvar::GetFlagInfo(s.cvar);
+    return (native && s.emulated_only) || !rex::cvar::GetFlagInfo(s.cvar) ||
+           (s.cvar == "check_updates" && !UpdateCheckAvailable());
   });
   for (auto& s : settings) {
     s.value = rex::cvar::GetFlagByName(s.cvar);

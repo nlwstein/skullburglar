@@ -50,7 +50,15 @@ set(BOTS_SOURCES
     src/gfx/shadow.cpp
     src/setup/iso_extract.cpp
     src/setup/settings.cpp
+    src/setup/update_check.cpp
 )
+# Release builds carry their version and where to check for a newer one (src/setup/update_check.h); the release CI
+# sets both. Only that file sees them, so a new version recompiles one file.
+set(BOTS_VERSION "dev" CACHE STRING "Version shown in the launcher")
+set(BOTS_UPDATE_URL "" CACHE STRING "Address of the releases JSON the launcher checks (empty: no check)")
+set_source_files_properties(src/setup/update_check.cpp PROPERTIES
+    COMPILE_DEFINITIONS "BOTS_VERSION=\"${BOTS_VERSION}\";BOTS_UPDATE_URL=\"${BOTS_UPDATE_URL}\""
+    SKIP_PRECOMPILE_HEADERS ON)
 # First-run setup window's native file picker (B-061).
 if(WIN32)
     list(APPEND BOTS_SOURCES src/setup/file_picker_win.cpp)
@@ -74,7 +82,7 @@ if(APPLE)
     # The precompiled header is C++ only.
     set_source_files_properties(src/setup/file_picker_mac.mm PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 elseif(WIN32)
-    target_link_libraries(bots PRIVATE ole32 shell32)
+    target_link_libraries(bots PRIVATE ole32 shell32 winhttp)
 endif()
 
 # SDK built from source (REXSDK_DIR, the Windows cross build): rex_app.cpp includes imgui.h, which

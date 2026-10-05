@@ -4,7 +4,7 @@
 # Gets the game executable and shader refs from the private assets project, restores stored codegen output when there
 # is some for this tree (tools/ci/codegen_publish.sh), builds and packages, and uploads the packages to this project's
 # package registry as skullburglar/<VERSION>.
-# Env: the job's CI_* variables, VERSION, ASSETS_PROJECT (the assets project path).
+# Env: the job's CI_* variables, VERSION, ASSETS_PROJECT (the assets project path); UPDATE_URL (optional, see build.sh).
 set -eu
 PLATFORM=${1:?usage: tools/ci/gitlab_build.sh <linux|windows|macos>}
 cd "$(dirname "$0")/../.."

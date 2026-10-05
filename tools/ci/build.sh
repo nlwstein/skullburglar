@@ -10,7 +10,8 @@
 # Optional: REFS=<file> ships it as pipelines/5451083B.refs (shader refs for the first-boot warm-up, B-098);
 # JOBS=<n> caps compile parallelism (default: all cores); CODEGEN_ONLY=1 stops after codegen;
 # CCACHE_DIR=<dir> compiles through ccache with its cache there (CI keeps one per runner and platform, CCACHE_MAXSIZE
-# default 10G): an unchanged codegen key then reuses the compiled generated code.
+# default 10G): an unchanged codegen key then reuses the compiled generated code; VERSION=<x.y.z> and UPDATE_URL=<url>
+# give the launcher its version and the releases JSON it checks for a newer one (src/setup/update_check.h).
 # Output: <out>/dist (what ships), <out>/symbols (debug info for crash reports).
 set -eu
 PLATFORM=${1:?usage: tools/ci/build.sh <linux|windows|macos> <sdk dir> <out dir>}
@@ -77,6 +78,7 @@ esac
 
 step configure
 [ -z "$NOGEN" ] || [ "$PLATFORM" = windows ] || set -- "$@" -DREXGLUE_HOST_CLI="$NOGEN"
+set -- "$@" -DBOTS_VERSION="${VERSION:-dev}" -DBOTS_UPDATE_URL="${UPDATE_URL:-}"
 cmake -S . -B "$B" "$@" -DBOTS_CCACHE=$([ -n "$CCACHE" ] && echo ON || echo OFF) >/dev/null
 if [ ! -f generated/default/sources.cmake ]; then
   # The generated sources are listed at configure time, so configure again once codegen has written them.

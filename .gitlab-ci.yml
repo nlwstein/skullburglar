@@ -1,6 +1,7 @@
-# Checks on every push. On main: release builds (Linux AppImage + tarball, Windows zip, macOS zip) when there are releasable
-# commits (feat/fix/perf; tools/ci/semantic-release.toml), published as a GitLab release whose packages stay in this
-# project's package registry. Nothing is public.
+# Checks on every push. On main: release builds (Linux AppImage + tarball, Windows setup, macOS DMG) when there are
+# releasable commits (feat/fix/perf; tools/ci/semantic-release.toml), published as a GitLab release whose packages stay in
+# this project's package registry. With DOWNLOADS_BUCKET set, the player packages also go to the private download site
+# (tools/ci/publish_downloads.py), which only invited players can open; nothing is public apart from its releases JSON.
 #
 # The build needs the game executable, which is never in this repo: tools/ci/gitlab_build.sh reads it from the private
 # assets project (ASSETS_PROJECT) with the job token, which only this project's jobs may use there (its job token
@@ -39,7 +40,7 @@ checks:
   script:
     - python3 tools/leak_scan.py tree
     - for f in tools/ci/*.sh packaging/linux/AppRun; do sh -n "$f"; done
-    - python3 -m py_compile tools/ci/gitlab_release.py
+    - python3 -m py_compile tools/ci/gitlab_release.py tools/ci/publish_downloads.py
     - SUBMODULES=0 tools/ci/sdk.sh "$(mktemp -d)/sdk"
 
 .main:
@@ -93,7 +94,7 @@ plan:
     - test -n "$JOB"
     - >-
       docker run --rm --name "skullburglar-ci-$CI_JOB_ID" --volumes-from "$JOB" -w "$CI_PROJECT_DIR"
-      -e CI_JOB_TOKEN -e CI_SERVER_HOST -e CI_API_V4_URL -e CI_PROJECT_ID -e VERSION -e ASSETS_PROJECT
+      -e CI_JOB_TOKEN -e CI_SERVER_HOST -e CI_API_V4_URL -e CI_PROJECT_ID -e VERSION -e ASSETS_PROJECT -e UPDATE_URL
       -e CCACHE_DIR=/ccache -v "skullburglar-ccache-$PLATFORM:/ccache"
       "skullburglar-ci-$PLATFORM" tools/ci/gitlab_build.sh "$PLATFORM"
   after_script:
@@ -145,3 +146,8 @@ release:
         exit 1
       fi
     - python3 tools/ci/gitlab_release.py
+    - |
+      if [ -n "${DOWNLOADS_BUCKET:-}" ]; then
+        pip install -q --root-user-action=ignore "boto3>=1.35"
+        python3 tools/ci/publish_downloads.py
+      fi
