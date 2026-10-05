@@ -43,8 +43,9 @@ vec3 CatmullRom(vec2 position, vec2 size) {
 }
 
 void main() {
-  // Output pixel centres -> source texels (the front buffer is render_scale.x of the output's size). At 1 that is
-  // each texel's centre, read as is; below 1 it upscales with Catmull-Rom (render_scale.z 1) or bilinearly.
+  // Output pixel centres -> source texels (the front buffer is render_scale.x of the output's size; 1 above render
+  // scale 1, where the output is the rendered size). At 1 that is each texel's centre, read as is; below 1 it
+  // upscales with Catmull-Rom (render_scale.z 1) or bilinearly.
   vec2 size = vec2(textureSize(source, 0).xy);
   vec2 position = gl_FragCoord.xy * render_scale.x;
   vec3 c = render_scale.z != 0.0 ? CatmullRom(position, size)
@@ -123,7 +124,8 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
     const char* v = std::getenv("BOTS_GFX_UPSCALE");
     return v && std::strcmp(v, "bilinear") == 0;
   }();
-  const float params[4] = {scale_, scale_, scale_ < 1.0f && !bilinear ? 1.0f : 0.0f, 0.0f};
+  const float ratio = scale_ / output_scale();  // front buffer texels per output pixel
+  const float params[4] = {ratio, ratio, ratio < 1.0f && !bilinear ? 1.0f : 0.0f, 0.0f};
   std::memcpy(ramp + 256 * 4, params, sizeof(params));
   const VkDescriptorSet set = AllocateSet(present_set_layout_);
   if (!set) {

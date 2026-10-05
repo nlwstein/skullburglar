@@ -79,7 +79,7 @@ float RenderScale(const rex::ui::vulkan::VulkanDevice* device) {
     }
     if (!v.empty() && v != "auto") {
       const float s = float(std::atof(v.c_str()));
-      return s >= 0.25f && s < 1.0f ? s : 1.0f;
+      return s >= 0.25f && s <= 3.0f ? s : 1.0f;
     }
     // Intel integrated GPUs are fill-bound at 720p (a UHD 620 draws a frame in ~50 ms at 1, ~28 ms at 2/3).
     return device && device->properties().vendorID == 0x8086 ? 2.0f / 3.0f : 1.0f;

@@ -63,16 +63,21 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
       rex::kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
       const uint32_t width = frontbuffer_width ? frontbuffer_width : uint32_t(video_mode.display_width);
       const uint32_t height = frontbuffer_height ? frontbuffer_height : uint32_t(video_mode.display_height);
+      // Above render scale 1 the guest output is the rendered size (e.g. 2560x1440 at 2); the presenter scales it to
+      // the window with the display's aspect ratio either way.
+      const float output_scale = renderer_->output_scale();
+      const uint32_t out_width = uint32_t(float(width) * output_scale + 0.5f);
+      const uint32_t out_height = uint32_t(float(height) * output_scale + 0.5f);
       const auto* ramp = reinterpret_cast<const uint32_t*>(gamma_ramp_256_entry_table());
       presenter->RefreshGuestOutput(
-          width, height, std::max(1u, uint32_t(video_mode.display_width)),
+          out_width, out_height, std::max(1u, uint32_t(video_mode.display_width)),
           std::max(1u, uint32_t(video_mode.display_height)),
           [&](rex::ui::Presenter::GuestOutputRefreshContext& context) -> bool {
             auto& vulkan_context =
                 static_cast<rex::ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext&>(context);
             context.SetIs8bpc(true);
             return renderer_->Present(frontbuffer_ptr & 0x1FFFFFFF, vulkan_context.image(),
-                                      vulkan_context.image_view(), width, height, ramp);
+                                      vulkan_context.image_view(), out_width, out_height, ramp);
           });
     }
     // Present submits the frame. When it didn't run - no presenter, or the presenter skipped the refresh (window

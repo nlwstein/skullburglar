@@ -292,6 +292,9 @@ class Renderer : public Pm4Sink {
                                                     "record"};
   bool draw_profile() const { return draw_profile_; }
   float render_scale() const { return scale_; }
+  // The guest output image's size relative to the frame buffer: above render scale 1 the presenter gets the
+  // rendered size (as the emulated renderer's resolution scale does); below 1 the present pass upscales to 1.
+  float output_scale() const { return std::max(scale_, 1.0f); }
   enum GpuCat : uint8_t { kGpuDraw, kGpuResolve, kGpuUpload, kGpuTexture, kGpuTransfer, kGpuPresent, kGpuOther };
   static constexpr const char* kGpuCatNames[] = {"draw", "resolve", "upload", "texture", "transfer", "present",
                                                  "other"};
