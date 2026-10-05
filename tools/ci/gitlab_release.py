@@ -26,7 +26,7 @@ FILES = [
     ("Linux x86_64 (AppImage)", f"skullburglar-{VERSION}-linux-x86_64.AppImage"),
     ("Linux x86_64 (tar.xz)", f"skullburglar-{VERSION}-linux-x86_64.tar.xz"),
     ("Linux x86_64 debug symbols", f"skullburglar-{VERSION}-linux-x86_64-symbols.tar.xz"),
-    ("Windows x86_64", f"skullburglar-{VERSION}-windows-x86_64.zip"),
+    ("Windows x86_64 (setup)", f"skullburglar-{VERSION}-windows-x86_64-setup.exe"),
     ("Windows x86_64 debug symbols", f"skullburglar-{VERSION}-windows-x86_64-symbols.zip"),
     ("macOS arm64", f"skullburglar-{VERSION}-macos-arm64.dmg"),
     ("macOS arm64 debug symbols", f"skullburglar-{VERSION}-macos-arm64-symbols.zip"),

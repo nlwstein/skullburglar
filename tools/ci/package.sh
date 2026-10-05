@@ -3,7 +3,7 @@
 #   VERSION=0.1.0 tools/ci/package.sh <linux|windows|macos> <out dir>
 # Writes <out>/release/:
 #   linux    .tar.xz (the game folder) and .AppImage (the same files, one executable), symbols .tar.xz
-#   windows  .zip, symbols .zip (PDBs)
+#   windows  -setup.exe (NSIS, packaging/windows/installer.nsi; installs and updates), symbols .zip (PDBs)
 #   macos    .dmg (Skullburglar.app, an Applications link and the README), symbols .zip (dSYMs)
 # The AppImage is built with appimagetool and the type 2 runtime, both pinned by checksum.
 set -eu
@@ -43,7 +43,9 @@ linux)
   ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool --no-appstream --runtime-file runtime "$A" "$REL/$NAME.AppImage"
   ;;
 windows)
-  zip -qr "$REL/$NAME.zip" "$NAME"
+  # NSIS wants a numeric x.y.z version (a dev build's -dev.<sha> suffix is dropped there; the file name keeps it).
+  makensis -V2 -DVERSION="${VERSION%%-*}" -DSRC="$PKG/$NAME" -DOUT="$REL/$NAME-setup.exe" \
+    "$REPO/packaging/windows/installer.nsi"
   zip -qr "$REL/$NAME-symbols.zip" "$NAME-symbols"
   ;;
 macos)

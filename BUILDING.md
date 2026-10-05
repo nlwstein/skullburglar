@@ -88,7 +88,7 @@ info split off), and `package.sh` packs them:
 | Platform | Build environment | Packages |
 |---|---|---|
 | Linux x86_64 | `docker/linux-steamrt` (glibc 2.31: runs on the Steam Deck and most distros) | `.tar.xz`, `.AppImage` |
-| Windows x86_64 | `docker/win-cross` (clang + lld, Windows SDK from xwin) | `.zip` |
+| Windows x86_64 | `docker/win-cross` (clang + lld, Windows SDK from xwin, NSIS) | `-setup.exe` |
 | macOS arm64 | Xcode or its command line tools, cmake, ninja | `.dmg` (`Skullburglar.app`) |
 
 Each also has a `-symbols` archive. To make one yourself, with `game/default.xex` in place:

@@ -11,8 +11,9 @@ is included here.
 Installing
 ----------
 
-Windows  Unzip the folder anywhere and run bots.exe. If SmartScreen says it "protected your PC", choose
-         More info, then Run anyway.
+Windows  Run the -setup.exe. It installs to C:\Games\Skullburglar (you can pick another folder) with a Start
+         menu entry, and needs no administrator rights. If SmartScreen says it "protected your PC", choose
+         More info, then Run anyway. Uninstall from Settings > Apps.
 
 macOS    Open the .dmg and drag Skullburglar into Applications. The app is not notarized, so the first time
          macOS refuses to open it: open System Settings > Privacy & Security, scroll down to the message about
@@ -72,11 +73,12 @@ Saves, settings (bots.toml) and the shader cache
   Linux    ~/.local/share/bots
 
 Logs
-  Windows  logs\ next to bots.exe (and a crash-<number>.dmp if it crashes)
+  Windows  logs\ in the install folder (and a crash-<number>.dmp if it crashes)
   macOS    ~/Library/Logs/Skullburglar
   Linux    logs/ next to bots; the AppImage writes ~/.local/state/bots-recomp/logs
 
-Updating: replace the folder, AppImage or app with the new version. Game files, saves and settings stay.
+Updating: on Windows run the new setup (it finds your install and updates it); elsewhere replace the AppImage,
+folder or app with the new version. Game files, saves and settings stay.
 
 
 Reporting a problem
