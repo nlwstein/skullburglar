@@ -18,6 +18,9 @@ REXCVAR_DEFINE_BOOL(launcher, false, "bots", "Show the setup / launcher window b
 REXCVAR_DEFINE_STRING(render_scale, "auto", "bots",
                       "Native renderer: render resolution as a fraction of 720p (auto, 1, 0.75, 0.667, 0.5); "
                       "auto is 2/3 on Intel GPUs, else 1");
+REXCVAR_DEFINE_BOOL(present_vsync, true, "bots",
+                    "Wait for the display's refresh to show each frame (Vulkan presentation): no tearing. Off presents "
+                    "immediately, with the lowest latency, and can tear. (Not `vsync`, the emulated console's vblank.)");
 
 namespace bots::setup {
 namespace fs = std::filesystem;
@@ -47,6 +50,7 @@ std::vector<Setting> Catalog() {
   s.back().emulated_only = true;
   s.push_back({"framerate_limit", "", "Frame rate limit", "",
                {{"30", "30 fps"}, {"60", "60 fps (recommended)"}, {"0", "Unlimited"}}});
+  s.push_back({"present_vsync", "", "VSync", "Off has the lowest latency but can tear.", {}});
   s.push_back({"kbm", "", "Keyboard and mouse", "Play with keyboard and mouse. A controller always works too.", {}});
   s.back().section = "Keyboard and mouse";
   s.push_back({"kbm_sensitivity", "", "Mouse sensitivity", "",
@@ -74,7 +78,8 @@ std::vector<Setting> Catalog() {
     s.back().binding = true;
   }
 #if defined(_WIN32)
-  s.push_back({"d3d12_present_sync_interval", "", "VSync", "Off has the lowest latency but can tear.",
+  s.push_back({"d3d12_present_sync_interval", "", "VSync (emulated, Direct3D 12)",
+               "Off has the lowest latency but can tear.",
                {{"0", "Off"}, {"1", "On"}}});
   s.back().emulated_only = true;
 #endif

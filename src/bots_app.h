@@ -119,6 +119,7 @@ class BotsApp : public rex::ReXApp {
               rex::cvar::GetFlagSource("cl") != rex::cvar::Source::kCommandLine) {
             rex::cvar::SetFlagByName("cl", intro ? "" : "-nostartupmovies");
           }
+          ApplyVsync();  // the game's swapchain doesn't exist yet
           rex::PathConfig paths = defaults;
           paths.game_data_root = dir;
           resume(paths);
@@ -192,6 +193,21 @@ class BotsApp : public rex::ReXApp {
     bots::setup::MarkAppDefault(cvar);
   }
 
+  // The present_vsync setting (bots.toml / launcher, default on) picks the Vulkan present mode through the SDK's
+  // vulkan_allow_present_mode_* cvars, read when the swapchain is created: on = FIFO (the SDK then paints on the UI
+  // thread at each vblank, so the guest thread never waits for the display), off = IMMEDIATE (can tear). A present
+  // mode cvar given on the command line or as REX_* wins. Not the SDK's `vsync`, which paces the guest's vblank.
+  static void ApplyVsync() {
+    const bool on = rex::cvar::Query<bool>("present_vsync");
+    for (const char* cvar : {"vulkan_allow_present_mode_immediate", "vulkan_allow_present_mode_mailbox",
+                             "vulkan_allow_present_mode_fifo_relaxed"}) {
+      const auto source = rex::cvar::GetFlagSource(cvar);
+      if (source == rex::cvar::Source::kEnvironment || source == rex::cvar::Source::kCommandLine) continue;
+      rex::cvar::SetFlagByName(cvar, on ? "false" : "true");
+    }
+    REXLOG_INFO("vsync {}", on ? "on (FIFO)" : "off (immediate)");
+  }
+
   // setenv(name, value, 0): set only if not already set.
   static void SetEnvDefault(const char* name, const char* value) {
     if (std::getenv(name)) return;
@@ -239,6 +255,7 @@ class BotsApp : public rex::ReXApp {
     // The front end never waits for vblank (130-250 swaps/s, B-038) and gameplay runs 32-52 fps
     // since upload hoisting. Cap at 60 (SDK patch 0004 cvar; same default as xenia-canary).
     SetCvarDefault("framerate_limit", "REX_FRAMERATE_LIMIT", "60");
+    ApplyVsync();
     // D3D12 (Windows): the ROV render-target path does exact 24-bit float depth in the shader, the
     // D3D12 counterpart of the float24 fix above. The default host-RTV path renders characters black
     // like B-035. RTX 3090: locked 60 fps either way (2026-10-01).
