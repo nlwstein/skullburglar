@@ -186,7 +186,16 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       // The rest of the keyboard and mouse section only matters with it on.
       const bool kbm_off = s.cvar.starts_with("kbm_") && Value("kbm") == "false";
       ImGui::BeginDisabled(s.locked || Extracting() || kbm_off);
-      if (s.choices.empty()) {
+      if (s.slider_max > 0) {
+        float v = float(std::strtod(s.value.c_str(), nullptr));
+        ImGui::SetNextItemWidth(260.0f);
+        if (ImGui::SliderFloat(s.label.c_str(), &v, float(s.slider_min), float(s.slider_max), "%.2f",
+                               ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp)) {
+          char text[32];
+          std::snprintf(text, sizeof(text), "%.2f", v);
+          s.value = text;
+        }
+      } else if (s.choices.empty()) {
         bool on = s.value == "true";
         if (ImGui::Checkbox(s.label.c_str(), &on)) s.value = on ? "true" : "false";
       } else {

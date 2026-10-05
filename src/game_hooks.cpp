@@ -505,6 +505,7 @@ const char* NameOf(uint8_t* base, uint32_t index) {
 // Name indices this file needs, found once by scanning FName::Names (they all exist once the script packages load).
 struct Names {
   uint32_t option = 0, toggle = 0, slider = 0, image = 0, left = 0, right = 0, main_menu = 0, quit = 0, title = 0, label = 0, online_message = 0;
+  uint32_t easel = 0, music_player = 0;
 };
 
 const Names* GetNames(uint8_t* base) {
@@ -521,7 +522,8 @@ const Names* GetNames(uint8_t* base) {
                                                       {"Left", &n.left},              {"Right", &n.right},
                                                       {"C1UIScene_MainMenu", &n.main_menu}, {"Quit", &n.quit},
                                                       {"C1TitleScreen", &n.title}, {"HudWidget_Label", &n.label},
-                                                      {"OnlinePlayMessage", &n.online_message}};
+                                                      {"OnlinePlayMessage", &n.online_message}, {"SfUI_Easel", &n.easel},
+                                                      {"C1UI_MusicPlayer", &n.music_player}};
   for (uint32_t i = 0; i < count; ++i) {
     const uint32_t entry = LoadU32(base, names + 4 * i);
     if (!Readable(entry)) continue;
@@ -695,6 +697,11 @@ uint32_t MenuScene(uint8_t* base, const Names& n, uint32_t& focused) {
     const uint32_t f = LoadU32(base, focus);
     if (!Readable(f)) continue;
     if (KindOf(base, n, f) == Kind::kNone) {
+      // A screen that draws itself (the music player): it covers the menu below, which must not follow the pointer.
+      if (IsA(base, f, n.easel)) {
+        focused = f;
+        return scene;
+      }
       static uint32_t logged = 0;
       if (f != logged) {
         logged = f;
@@ -707,6 +714,110 @@ uint32_t MenuScene(uint8_t* base, const Names& n, uint32_t& focused) {
   }
   return 0;
 }
+
+// The music player (front end and pause menu) is one C1UI_MusicPlayer easel that draws its two lists itself and takes
+// pad buttons only: Tracks (left) and Playlist (right), D-pad to move, A adds / removes, X plays, Y shuffles, B goes
+// back. With the pointer, hovering a row selects it, clicking a row is A and clicking a button-bar entry presses that
+// button. A row in the other list is reached with the game's own D-pad Left/Right first (that also relabels the button
+// bar: A is Add Track on Tracks, Remove Track on Playlist), then selected once the list has focus. Layout (live UProperty data; 1280x720 UI pixels):
+//   +0x430 ViewStates[2], 0x2C each: +0x18 count, +0x1C first row shown, +0x20 rows shown, +0x24 selected
+//   +0x8A0 ViewInFocus (0 Tracks, 1 Playlist), +0x8E4 MusicPlayerTopLeft, +0x90C TrackList X/Y/W/H,
+//   +0x91C PlayList X/Y/W/H, +0x944 TrackListLineSpacing (both lists)
+namespace music_player {
+constexpr uint32_t kViewStates = 0x430, kViewSize = 0x2C, kCount = 0x18, kFirst = 0x1C, kShown = 0x20, kSelected = 0x24;
+constexpr uint32_t kViewInFocus = 0x8A0, kTopLeft = 0x8E4, kTrackList = 0x90C, kPlayList = 0x91C, kLineSpacing = 0x944;
+constexpr uint16_t kLeft = 0x0004, kRight = 0x0008, kA = 0x1000, kB = 0x2000, kX = 0x4000, kY = 0x8000;  // XINPUT_*
+
+void StoreU32(uint8_t* base, uint32_t address, uint32_t v) {
+  v = __builtin_bswap32(v);
+  std::memcpy(Raw(base, address), &v, 4);
+}
+
+// The list row under (x, y): its view (0 Tracks, 1 Playlist) and item index.
+bool RowAt(uint8_t* base, uint32_t w, float x, float y, uint32_t& view, uint32_t& index) {
+  const float ox = LoadF32(base, w + kTopLeft), oy = LoadF32(base, w + kTopLeft + 4);
+  const float h = LoadF32(base, w + kLineSpacing);
+  if (!(h > 1 && h < 100)) return false;
+  for (uint32_t v = 0; v < 2; ++v) {
+    const uint32_t list = w + (v ? kPlayList : kTrackList), state = w + kViewStates + v * kViewSize;
+    const float left = ox + LoadF32(base, list), top = oy + LoadF32(base, list + 4);
+    const float right = left + LoadF32(base, list + 8);
+    const int32_t count = int32_t(LoadU32(base, state + kCount)), first = int32_t(LoadU32(base, state + kFirst));
+    const int32_t shown = int32_t(LoadU32(base, state + kShown));
+    if (x < left - 12 || x > right || y < top || y >= top + h * float(shown)) continue;
+    const int32_t i = first + int32_t((y - top) / h);
+    if (count <= 0 || count > 1000 || i < 0 || i >= count) return false;
+    view = v, index = uint32_t(i);
+    return true;
+  }
+  return false;
+}
+
+// The button bar along the bottom: Y, X, A, B from left to right (measured on the front end's music player).
+uint16_t ButtonAt(float x, float y) {
+  if (y < 620 || y > 672) return 0;
+  if (x >= 195 && x < 400) return kY;
+  if (x >= 470 && x < 690) return kX;
+  if (x >= 730 && x < 960) return kA;
+  if (x >= 1000 && x < 1110) return kB;
+  return 0;
+}
+
+// Per frame while the music player has focus. `enter` as for menu_pointer::Tick: click edges on a row or a button
+// become pad taps; the rest pass through.
+void Tick(uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32_t w, float x, float y, float dt, bool moved,
+          std::vector<bool>& enter) {
+  static bool click_taken = false;  // the current click became a pad tap: its release is ours too
+  // A selection waiting for its list to get focus (after a Left/Right tap), and whether a click (A) follows it.
+  static struct {
+    bool on = false, click = false;
+    uint32_t view = 0, index = 0;
+    float age = 0;
+  } pending;
+  const auto focus = [&] { return LoadU32(base, w + kViewInFocus); };
+  const auto apply = [&] {
+    if (!pending.on) return;
+    pending.age += dt;
+    if (focus() == pending.view) {
+      StoreU32(base, w + kViewStates + pending.view * kViewSize + kSelected, pending.index);
+      if (pending.click) kbm.TapButtons(kA);
+      pending.on = false;
+    } else if (pending.age > 0.5f) {
+      pending.on = false;  // the game didn't switch lists
+    }
+  };
+  uint32_t view = 0, index = 0;
+  const bool row = RowAt(base, w, x, y, view, index);
+  const auto select = [&](bool click) {
+    if (pending.on && pending.view == view) {  // already switching there: just update the target
+      pending.index = index, pending.click = pending.click || click;
+      return;
+    }
+    if (focus() != view) kbm.TapButtons(view ? kRight : kLeft);
+    pending = {true, click, view, index, 0};
+  };
+  apply();
+  if (moved && row) select(false);
+  std::vector<bool> rest;
+  for (const bool down : enter) {
+    if (!down) {
+      if (click_taken) click_taken = false;
+      else rest.push_back(down);
+      continue;
+    }
+    const uint16_t button = row ? kA : ButtonAt(x, y);
+    if (!button) {
+      rest.push_back(down);
+      continue;
+    }
+    if (row) select(true);
+    else kbm.TapButtons(button);
+    click_taken = true;
+  }
+  enter.swap(rest);
+  apply();  // same list: select (and click) now
+}
+}  // namespace music_player
 
 bool extra_menu = false;            // another screen wants the free pointer (quit_option's press-start Quit)
 bool pointer_valid = false;         // this frame's pointer, UI pixels (for quit_option)
@@ -729,6 +840,12 @@ void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32
   pointer_valid = true;
   pointer_x = px * 1280.0f, pointer_y = py * 720.0f;
   if (!n) return;
+  if (focused && IsA(base, focused, n->music_player)) {
+    dragging = 0;
+    music_player::Tick(base, kbm, focused, pointer_x, pointer_y, dt, moves != seen_moves, enter);
+    seen_moves = moves;
+    return;
+  }
   std::vector<Widget> widgets;
   if (scene) Collect(base, *n, scene, 0, widgets);
   if (widgets.empty()) {

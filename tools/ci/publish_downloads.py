@@ -110,11 +110,11 @@ def notes(ref):
         m = re.match(r"(\w+)(?:\(([^)]*)\))?!?:\s*(.*)", subject)
         if not m or m.group(1) not in TYPES:
             continue
-        trailer = trailer.strip()
-        if trailer.lower() == "none" or (not trailer and m.group(2) == "ci"):
+        trailers = [t.strip() for t in trailer.splitlines() if t.strip()]  # one note per Release-note: trailer
+        if [t.lower() for t in trailers] == ["none"] or (not trailers and m.group(2) == "ci"):
             continue
-        text = trailer or m.group(3)
-        out.append(text[0].upper() + text[1:])
+        for text in trailers or [m.group(3)]:
+            out.append(text[0].upper() + text[1:])
     return out
 
 

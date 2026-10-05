@@ -10,7 +10,11 @@
 #include <rex/input/input.h>
 
 REXCVAR_DEFINE_BOOL(kbm, true, "bots/Input", "Keyboard and mouse controls (mouse look locks the pointer)");
-REXCVAR_DEFINE_DOUBLE(kbm_sensitivity, 1.0, "bots/Input", "Mouse look sensitivity").range(0.05, 10.0);
+REXCVAR_DEFINE_DOUBLE(kbm_sensitivity, 1.0, "bots/Input", "Mouse look sensitivity (not aiming)").range(0.05, 10.0);
+REXCVAR_DEFINE_DOUBLE(kbm_aim_sensitivity, 1.0, "bots/Input",
+                      "Mouse look sensitivity while the Aim key (kbm_left_trigger) is held; the game also scales look "
+                      "speed by the field of view, so zooming in already slows it")
+    .range(0.05, 10.0);
 REXCVAR_DEFINE_BOOL(kbm_invert_y, false, "bots/Input", "Invert mouse look up/down");
 REXCVAR_DEFINE_BOOL(kbm_prompts, true, "bots/Input",
                     "Show keyboard/mouse button prompts while keyboard/mouse is the last device used");
@@ -111,7 +115,8 @@ void MouseKeyboardDriver::OnWindowAvailable(rex::ui::Window* window) {
   }
   window->AddInputListener(this, window_z_order());
   window->AddListener(this);
-  REXLOG_INFO("keyboard/mouse: attached (kbm={}, sensitivity {})", Enabled(), REXCVAR_GET(kbm_sensitivity));
+  REXLOG_INFO("keyboard/mouse: attached (kbm={}, sensitivity {}, aiming {})", Enabled(), REXCVAR_GET(kbm_sensitivity),
+              REXCVAR_GET(kbm_aim_sensitivity));
 }
 
 void MouseKeyboardDriver::Detach() {
@@ -268,11 +273,19 @@ void MouseKeyboardDriver::OnLostFocus(rex::ui::UISetupEvent&) {
 
 void MouseKeyboardDriver::TakeMouseDelta(float& dx, float& dy) {
   std::lock_guard lock(mutex_);
-  const float s = float(REXCVAR_GET(kbm_sensitivity));
+  const float s = float(Pressed(REXCVAR_GET(kbm_left_trigger)) ? REXCVAR_GET(kbm_aim_sensitivity)
+                                                                : REXCVAR_GET(kbm_sensitivity));
   dx = mouse_dx_ * s;
   // Window y grows downward; the engine's MouseY is positive for "look up".
   dy = (REXCVAR_GET(kbm_invert_y) ? mouse_dy_ : -mouse_dy_) * s;
   mouse_dx_ = mouse_dy_ = 0;
+}
+
+void MouseKeyboardDriver::TapButtons(uint16_t mask) {
+  std::lock_guard lock(mutex_);
+  const auto until = std::chrono::steady_clock::now() + kWheelTap;
+  for (int bit = 0; bit < 16; ++bit)
+    if (mask & (1u << bit)) tap_until_[bit] = until;
 }
 
 // Must be called with mutex_ held.
@@ -344,6 +357,9 @@ X_RESULT MouseKeyboardDriver::GetDeviceState(rex::input::DeviceId id, rex::input
     uint16_t buttons = 0;
     for (const auto& b : kButtons)
       if (Pressed(b.keys())) buttons |= b.mask;
+    const auto now = std::chrono::steady_clock::now();
+    for (int bit = 0; bit < 16; ++bit)
+      if (now < tap_until_[bit]) buttons |= uint16_t(1u << bit);
     out->gamepad.buttons = buttons;
     out->gamepad.left_trigger = Pressed(REXCVAR_GET(kbm_left_trigger)) ? 0xFF : 0;
     out->gamepad.right_trigger = Pressed(REXCVAR_GET(kbm_right_trigger)) ? 0xFF : 0;

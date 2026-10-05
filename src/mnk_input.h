@@ -33,6 +33,7 @@
 
 REXCVAR_DECLARE(bool, kbm);
 REXCVAR_DECLARE(double, kbm_sensitivity);
+REXCVAR_DECLARE(double, kbm_aim_sensitivity);
 REXCVAR_DECLARE(bool, kbm_invert_y);
 REXCVAR_DECLARE(bool, kbm_prompts);
 
@@ -54,8 +55,8 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   // Which device the button prompts show (prompt_state.h). Normally the last device used; public for BOTS_PROMPT_TEST.
   static void SetPromptMode(bool keyboard_mouse);
 
-  // Mouse motion since the last call, in pixels (+x right, +y up), scaled by kbm_sensitivity and
-  // kbm_invert_y. Zero while the pointer isn't captured.
+  // Mouse motion since the last call, in pixels (+x right, +y up), scaled by kbm_sensitivity (kbm_aim_sensitivity
+  // while the Aim key is held) and kbm_invert_y. Zero while the pointer isn't captured.
   void TakeMouseDelta(float& dx, float& dy);
 
   // The merged controller state the game read for user 0 (guest XInputGetState). Input beyond what this driver
@@ -77,6 +78,10 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   // Menu pointer (B-107): the free cursor in window-relative 0..1 coordinates, and a counter bumped by every mouse
   // move (focus follows the pointer only after it moves). False while there's no position or not in menu mode.
   bool Pointer(float& x, float& y, uint32_t& moves) const;
+
+  // Briefly press these pad buttons (X_INPUT_GAMEPAD_* mask) on the synthetic controller, as a wheel notch does.
+  // Screens that only take pad buttons (the music player) get mouse clicks this way.
+  void TapButtons(uint16_t mask);
 
   X_STATUS Setup() override { return X_STATUS_SUCCESS; }
   void EnumerateDevices(std::vector<rex::input::DeviceInfo>& out) override;
@@ -127,6 +132,7 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   bool enter_down_[kKeyCount] = {};  // keys currently holding the engine's Enter down
   // Wheel notches are taps: the pad button stays down until this time.
   std::chrono::steady_clock::time_point wheel_until_[2] = {};
+  std::chrono::steady_clock::time_point tap_until_[16] = {};  // TapButtons, per button bit
   float mouse_dx_ = 0, mouse_dy_ = 0;
   rex::input::X_INPUT_STATE last_out_{};  // what GetDeviceState last returned
   float moved_ = 0;                        // mouse travel toward switching the prompts, pixels

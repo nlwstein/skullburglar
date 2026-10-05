@@ -21,7 +21,8 @@ struct Setting {
   std::string also_cvar;          // second cvar kept equal (resolution scale y)
   std::string label;
   std::string help;
-  std::vector<Choice> choices;    // empty = checkbox (bool cvar)
+  std::vector<Choice> choices;    // empty = checkbox (bool cvar), unless slider_max is set
+  double slider_min = 0, slider_max = 0;  // slider_max > 0: a slider for a double cvar
   std::string section;            // starts a new heading in the window
   bool binding = false;           // a key binding (kbm_*: comma-separated key names), shown in the bindings table
   std::string default_value;      // the cvar's built-in value (Reset)

@@ -61,9 +61,15 @@ std::vector<Setting> Catalog() {
                "When the launcher opens, look online for a newer Skullburglar and offer its download page.", {}});
   s.push_back({"kbm", "", "Keyboard and mouse", "Play with keyboard and mouse. A controller always works too.", {}});
   s.back().section = "Keyboard and mouse";
-  s.push_back({"kbm_sensitivity", "", "Mouse sensitivity", "",
-               {{"0.25", "0.25"}, {"0.5", "0.5"}, {"0.75", "0.75"}, {"1", "1 (default)"}, {"1.5", "1.5"},
-                {"2", "2"}, {"3", "3"}, {"4", "4"}}});
+  s.push_back({"kbm_sensitivity", "", "Mouse sensitivity",
+               "How fast the camera turns, when not aiming. 1 is the game's own speed. Ctrl-click to type a value.",
+               {}});
+  s.back().slider_min = 0.1, s.back().slider_max = 4;
+  s.push_back({"kbm_aim_sensitivity", "", "Aiming sensitivity",
+               "How fast the camera turns while you hold Aim (the game already slows it as it zooms in). Ctrl-click "
+               "to type a value.",
+               {}});
+  s.back().slider_min = 0.1, s.back().slider_max = 4;
   s.push_back({"kbm_invert_y", "", "Invert mouse up/down", "", {}});
   s.push_back({"kbm_prompts", "", "Keyboard and mouse button prompts",
                "Show keys instead of controller buttons in prompts while you play with keyboard and mouse.", {}});
