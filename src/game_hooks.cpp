@@ -505,7 +505,7 @@ const char* NameOf(uint8_t* base, uint32_t index) {
 // Name indices this file needs, found once by scanning FName::Names (they all exist once the script packages load).
 struct Names {
   uint32_t option = 0, toggle = 0, slider = 0, image = 0, left = 0, right = 0, main_menu = 0, quit = 0, title = 0, label = 0, online_message = 0;
-  uint32_t easel = 0, music_player = 0;
+  uint32_t easel = 0, music_player = 0, conveyer = 0, loadout = 0;
 };
 
 const Names* GetNames(uint8_t* base) {
@@ -523,7 +523,9 @@ const Names* GetNames(uint8_t* base) {
                                                       {"C1UIScene_MainMenu", &n.main_menu}, {"Quit", &n.quit},
                                                       {"C1TitleScreen", &n.title}, {"HudWidget_Label", &n.label},
                                                       {"OnlinePlayMessage", &n.online_message}, {"SfUI_Easel", &n.easel},
-                                                      {"C1UI_MusicPlayer", &n.music_player}};
+                                                      {"C1UI_MusicPlayer", &n.music_player},
+                                                      {"C1UI_DataConveyer", &n.conveyer},
+                                                      {"C1UI_WeaponLoadout", &n.loadout}};
   for (uint32_t i = 0; i < count; ++i) {
     const uint32_t entry = LoadU32(base, names + 4 * i);
     if (!Readable(entry)) continue;
@@ -674,8 +676,19 @@ bool TestPointer(float dt, float& px, float& py, uint32_t& moves, std::vector<bo
   return true;
 }
 
-// Per frame. `enter` holds the click/confirm Enter edges for this frame; the ones that land on a toggle or slider are
-// taken out of it and become Left/Right taps.
+// A visible item carousel (C1UI_DataConveyer: Unlockables, the shop's weapons / taunts / counter-kills) or weapon
+// loadout (the pay phone's) in this widget tree. Neither takes focus: the scene hands them its input.
+uint32_t PadWidget(uint8_t* base, const Names& n, uint32_t widget, int depth) {
+  if (depth > 3 || !Readable(widget) || (LoadU32(base, widget + 0x5C) & 0x80000000u)) return 0;  // bHidden
+  if (depth > 0 && (IsA(base, widget, n.conveyer) || IsA(base, widget, n.loadout))) return widget;
+  const uint32_t children = LoadU32(base, widget + 0x60);
+  const int32_t count = int32_t(LoadU32(base, widget + 0x64));
+  if (!Readable(children) || count <= 0 || count > 256) return 0;
+  for (int32_t i = 0; i < count; ++i)
+    if (const uint32_t found = PadWidget(base, n, LoadU32(base, children + 4 * i), depth + 1)) return found;
+  return 0;
+}
+
 // The topmost active UI scene whose focused control is one of ours (its widgets are the ones to hover), or 0.
 uint32_t MenuScene(uint8_t* base, const Names& n, uint32_t& focused) {
   const uint32_t engine = LoadU32(base, kGEngine);
@@ -693,8 +706,13 @@ uint32_t MenuScene(uint8_t* base, const Names& n, uint32_t& focused) {
     const uint32_t scene = LoadU32(base, scenes + 4 * i);
     if (!Readable(scene)) continue;
     const uint32_t focus = LoadU32(base, scene + 0x94);
-    if (!Readable(focus) || !LoadU32(base, scene + 0x98)) continue;
-    const uint32_t f = LoadU32(base, focus);
+    const uint32_t f = Readable(focus) && LoadU32(base, scene + 0x98) ? LoadU32(base, focus) : 0;
+    if (!Readable(f) || KindOf(base, n, f) == Kind::kNone) {
+      if (const uint32_t pad = PadWidget(base, n, scene, 0)) {
+        focused = pad;
+        return scene;
+      }
+    }
     if (!Readable(f)) continue;
     if (KindOf(base, n, f) == Kind::kNone) {
       // A screen that draws itself (the music player): it covers the menu below, which must not follow the pointer.
@@ -819,6 +837,165 @@ void Tick(uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32_t w, float x, fl
 }
 }  // namespace music_player
 
+// Clicks as pad taps, spaced out so a carousel finishes each step before the next.
+class TapQueue {
+ public:
+  void Reset() { mask_ = 0, count_ = 0; }
+  void Add(uint16_t mask, int count) { mask_ = mask, count_ = std::min(count, 8), wait_ = 0; }
+  void Tick(bots::MouseKeyboardDriver& kbm, float dt, float spacing) {
+    if (!count_ || (wait_ -= dt) > 0) return;
+    kbm.TapButtons(mask_);
+    --count_;
+    wait_ = spacing;
+  }
+
+ private:
+  uint16_t mask_ = 0;
+  int count_ = 0;
+  float wait_ = 0;
+};
+
+// Takes the click edges `handle` turns into taps (it returns true) and passes the rest through.
+template <typename F>
+void Clicks(std::vector<bool>& enter, bool& taken, F handle) {
+  std::vector<bool> rest;
+  for (const bool down : enter) {
+    if (!down) {
+      if (taken) taken = false;
+      else rest.push_back(down);
+    } else if (handle()) {
+      taken = true;
+    } else {
+      rest.push_back(down);
+    }
+  }
+  enter.swap(rest);
+}
+
+// An item carousel (C1UI_DataConveyer): Unlockables' Video / Stills / Cheats, the shop's weapons, taunts and
+// counter-kills. It cycles on Left/Right and Enter / A buys or plays the middle item. Clicking an item beside the middle
+// one cycles to it, clicking the « » arrows cycles one step, clicking the middle item is its Enter. Layout (live
+// UProperty data): +0x468 ConveyerBelt (the item widgets, a ring that moves round as it cycles; 7 on Unlockables, the
+// outer two half hidden under the arrows), +0x474 CurrentSelection (data index), +0x478 CentralWidgetIndex (the middle
+// widget; Right moves it +1).
+namespace conveyer {
+constexpr uint32_t kBelt = 0x468, kCentral = 0x478;
+
+void Tick(uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32_t w, float x, float y, float dt, std::vector<bool>& enter) {
+  static TapQueue taps;
+  static uint32_t seen = 0;
+  static bool taken = false;
+  if (w != seen) {
+    seen = w;
+    taps.Reset();
+    REXLOG_INFO("menu pointer: conveyer {:08X} ({}), {} items, middle {}", w, ClassChain(base, w),
+                LoadU32(base, w + kBelt + 4), LoadU32(base, w + kCentral));
+  }
+  taps.Tick(kbm, dt, 0.3f);
+  Clicks(enter, taken, [&] {
+    const uint32_t items = LoadU32(base, w + kBelt);
+    const int32_t count = int32_t(LoadU32(base, w + kBelt + 4)), central = int32_t(LoadU32(base, w + kCentral));
+    if (!Readable(items) || count <= 0 || count > 32 || central < 0 || central >= count) return false;
+    // The widgets themselves go round (CentralWidgetIndex follows the middle one), so an item's step is its distance
+    // from the middle, around the ring. The fully shown ones are within `span`; with more than 3, the outer two sit
+    // under the arrows.
+    const int32_t span = count > 3 ? (count - 1) / 2 - 1 : (count - 1) / 2;
+    float top = 1e9f, bottom = -1e9f, left = 1e9f, right = -1e9f;
+    int32_t hit = 0;
+    bool any = false;
+    float best = 1e9f;
+    for (int32_t d = -span; d <= span; ++d) {
+      const uint32_t item = LoadU32(base, items + 4 * ((central + d + count) % count));
+      if (!Readable(item)) return false;
+      const float l = LoadF32(base, item + 0x204), t = LoadF32(base, item + 0x208), r = LoadF32(base, item + 0x20C),
+                  b = LoadF32(base, item + 0x210);
+      top = std::min(top, t), bottom = std::max(bottom, b), left = std::min(left, l), right = std::max(right, r);
+      // Neighbours overlap: the item whose centre is nearest wins.
+      if (x >= l && x <= r && y >= t && y <= b && std::abs(x - (l + r) / 2) < best)
+        best = std::abs(x - (l + r) / 2), hit = d, any = true;
+    }
+    if (any && !hit) return false;  // the middle item: the engine's Enter (Select)
+    int32_t steps = hit;
+    if (!any) {
+      if (y < top || y > bottom) return false;
+      if (x < left && x > left - 120) steps = -1;
+      else if (x > right && x < right + 120) steps = 1;
+      else return false;
+    }
+    taps.Add(steps < 0 ? music_player::kLeft : music_player::kRight, std::abs(steps));
+    return true;
+  });
+}
+}  // namespace conveyer
+
+// The pay phone's weapon loadout (C1UI_WeaponLoadout): four slots picked with the D-pad (Pistols Up, CloseCombat Left,
+// Assault Right, Special Down), X cycles the slot's weapon, A confirms, Y opens the shop, B goes back. Hovering a slot
+// focuses it, clicking the focused slot cycles its weapon. Layout (UProperty data): +0x418 SlotInFocus, +0x460
+// WeaponSlots, 0x48-byte WeaponLoadOutSlotInfo {+0 WeaponGroup name, +0x10 Image, +0x14 Label}.
+namespace loadout {
+constexpr uint32_t kSlotInFocus = 0x418, kSlots = 0x460, kSlotSize = 0x48;
+
+uint16_t Direction(const char* group) {
+  if (!std::strcmp(group, "Pistols")) return 0x0001;  // XINPUT_GAMEPAD_DPAD_UP
+  if (!std::strcmp(group, "Special")) return 0x0002;  // DOWN
+  if (!std::strcmp(group, "CloseCombat")) return music_player::kLeft;
+  if (!std::strcmp(group, "Assault")) return music_player::kRight;
+  return 0;
+}
+
+bool Inside(uint8_t* base, uint32_t widget, float x, float y) {
+  if (!Readable(widget)) return false;
+  return x >= LoadF32(base, widget + 0x204) - 8 && x <= LoadF32(base, widget + 0x20C) + 8 &&
+         y >= LoadF32(base, widget + 0x208) - 8 && y <= LoadF32(base, widget + 0x210) + 8;
+}
+
+// The slot under (x, y) (its image or label), or -1.
+int32_t SlotAt(uint8_t* base, uint32_t w, float x, float y) {
+  const uint32_t slots = LoadU32(base, w + kSlots);
+  const int32_t count = int32_t(LoadU32(base, w + kSlots + 4));
+  if (!Readable(slots) || count <= 0 || count > 8) return -1;
+  for (int32_t i = 0; i < count; ++i) {
+    const uint32_t s = slots + kSlotSize * i;
+    if (Inside(base, LoadU32(base, s + 0x10), x, y) || Inside(base, LoadU32(base, s + 0x14), x, y)) return i;
+  }
+  return -1;
+}
+
+void Tick(uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32_t w, float x, float y, bool moved,
+          std::vector<bool>& enter) {
+  static uint32_t seen = 0;
+  static int32_t hovered = -1;
+  static bool taken = false;
+  const uint32_t slots = LoadU32(base, w + kSlots);
+  if (w != seen) {
+    seen = w;
+    hovered = -1;
+    const int32_t count = int32_t(LoadU32(base, w + kSlots + 4));
+    REXLOG_INFO("menu pointer: weapon loadout {:08X}, {} slots, slot {} in focus", w, count,
+                LoadU32(base, w + kSlotInFocus));
+    for (int32_t i = 0; Readable(slots) && i < count && i < 8; ++i) {
+      const uint32_t s = slots + kSlotSize * i, image = LoadU32(base, s + 0x10);
+      if (Readable(image))
+        REXLOG_INFO("menu pointer:   slot {} {} image [{:.0f} {:.0f} {:.0f} {:.0f}]", i, NameOf(base, LoadU32(base, s)),
+                    LoadF32(base, image + 0x204), LoadF32(base, image + 0x208), LoadF32(base, image + 0x20C),
+                    LoadF32(base, image + 0x210));
+    }
+  }
+  const int32_t slot = SlotAt(base, w, x, y);
+  const auto direction = [&] { return Direction(NameOf(base, LoadU32(base, slots + kSlotSize * slot))); };
+  if (moved && slot != hovered) {
+    hovered = slot;
+    if (slot >= 0 && int32_t(LoadU32(base, w + kSlotInFocus)) != slot) kbm.TapButtons(direction());
+  }
+  Clicks(enter, taken, [&] {
+    if (slot < 0) return false;  // elsewhere: the engine's Enter (A, confirm)
+    const uint16_t d = direction();
+    kbm.TapButtons(int32_t(LoadU32(base, w + kSlotInFocus)) == slot || !d ? music_player::kX : d);
+    return true;
+  });
+}
+}  // namespace loadout
+
 bool extra_menu = false;            // another screen wants the free pointer (quit_option's press-start Quit)
 bool pointer_valid = false;         // this frame's pointer, UI pixels (for quit_option)
 float pointer_x = 0, pointer_y = 0;
@@ -843,6 +1020,13 @@ void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32
   if (focused && IsA(base, focused, n->music_player)) {
     dragging = 0;
     music_player::Tick(base, kbm, focused, pointer_x, pointer_y, dt, moves != seen_moves, enter);
+    seen_moves = moves;
+    return;
+  }
+  if (focused && (IsA(base, focused, n->conveyer) || IsA(base, focused, n->loadout))) {
+    dragging = 0;
+    if (IsA(base, focused, n->conveyer)) conveyer::Tick(base, kbm, focused, pointer_x, pointer_y, dt, enter);
+    else loadout::Tick(base, kbm, focused, pointer_x, pointer_y, moves != seen_moves, enter);
     seen_moves = moves;
     return;
   }
