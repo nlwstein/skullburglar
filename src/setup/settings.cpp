@@ -14,7 +14,8 @@
 
 // The app's own cvar (intro movies are a UE3 command-line switch, see BotsApp::OnPreSetup).
 REXCVAR_DEFINE_BOOL(intro_movies, false, "bots", "Play the Legal / THQ / Swordfish logo movies at launch");
-REXCVAR_DEFINE_BOOL(launcher, false, "bots", "Show the setup / launcher window before starting the game");
+REXCVAR_DEFINE_BOOL(launcher, true, "bots",
+                    "Show the launcher before starting the game (default: unless --game_data_root is given)");
 REXCVAR_DEFINE_STRING(render_scale, "auto", "bots",
                       "Native renderer: render resolution as a multiple of 720p (auto, 3, 2, 1.5, 1, 0.75, 0.667, "
                       "0.5); auto is 2/3 on Intel GPUs, else 1");
@@ -161,7 +162,7 @@ std::string SaveSettings(const std::vector<Setting>& settings, const fs::path& c
   fs::create_directories(config_path.parent_path(), ec);
   std::ofstream out(config_path, std::ios::trunc);
   if (!out) return "Can't write " + config_path.string();
-  out << "# bots settings (also editable in the launcher: bots --launcher)\n" << table << "\n";
+  out << "# bots settings (also editable in the launcher, which opens on start)\n" << table << "\n";
   REXLOG_INFO("setup: settings saved to {}", config_path.string());
   return {};
 }

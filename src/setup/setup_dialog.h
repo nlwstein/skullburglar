@@ -1,7 +1,7 @@
-// First-run setup / launcher window (B-061). Shown before the game starts when no game files are
-// installed, or on request (--launcher). The player points it at their own disc image once. The
-// files are copied to a per-user folder (app_paths.h), so later launches go straight to the game.
-// The window also edits the player settings (settings.h). Play saves them and starts the game.
+// Setup / launcher window (B-061). Shown before the game starts on every launch (BotsApp::
+// OnFinalizePaths has the exceptions). Without game files, the player points it at their own disc
+// image once and the files are copied to a per-user folder (app_paths.h). The window also edits
+// the player settings (settings.h). Play saves them and starts the game.
 // Test hooks: BOTS_SETUP_ISO=<path> prefills the image path; BOTS_SETUP_AUTO=1 installs (when a
 // path is set and nothing is installed) and presses Play, so the flow runs unattended.
 #pragma once

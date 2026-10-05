@@ -10,11 +10,13 @@
 #include <cstdlib>
 #include <string_view>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <optional>
 #include <thread>
+#include <vector>
 
 #include <signal.h>
 #if defined(__APPLE__)
@@ -30,6 +32,7 @@
 #include <unistd.h>
 #endif
 
+#include <rex/filesystem.h>
 #include <rex/logging.h>
 #include <rex/rex_app.h>
 #include <rex/system/xmemory.h>
@@ -58,6 +61,7 @@ class BotsApp : public rex::ReXApp {
 
  private:
   std::filesystem::path config_path_;  // bots.toml (OnConfigurePaths)
+  bool game_root_given_ = false;       // --game_data_root on the command line: skip the launcher
 
  public:
 
@@ -93,6 +97,8 @@ class BotsApp : public rex::ReXApp {
     std::error_code ec;
     if (!fs::exists(paths.config_path, ec)) paths.config_path = paths.user_data_root / "bots.toml";
     config_path_ = paths.config_path;
+    UseBundleLogDir();
+    game_root_given_ = !paths.game_data_root.empty();
     if (paths.game_data_root.empty()) {
       std::string configured = bots::setup::ConfigString(config_path_, "game_data_root");
       paths.game_data_root =
@@ -100,12 +106,38 @@ class BotsApp : public rex::ReXApp {
     }
   }
 
-  // Missing game files, or --launcher / BOTS_LAUNCHER=1: show the setup window and start the
-  // runtime when the player presses Play. Otherwise start straight away.
+  // In the macOS app bundle, log to ~/Library/Logs/Skullburglar/bots-<time>.log (newest 10 kept) unless --log_file
+  // is given. Runs before the SDK opens the log file.
+  static void UseBundleLogDir() {
+    namespace fs = std::filesystem;
+    const fs::path dir = bots::setup::BundleLogDir(rex::filesystem::GetExecutableFolder());
+    if (dir.empty() || !rex::cvar::Query<std::string>("log_file").empty()) return;
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    std::vector<fs::path> old;
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+      const auto name = entry.path().filename().string();
+      if (name.starts_with("bots-") && entry.path().extension() == ".log") old.push_back(entry.path());
+    }
+    std::sort(old.begin(), old.end());  // the names sort by time
+    for (size_t i = 0; i + 9 < old.size(); ++i) fs::remove(old[i], ec);
+    char stamp[32];
+    const std::time_t now = std::time(nullptr);
+    std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", std::localtime(&now));
+    rex::cvar::SetFlagByName("log_file", (dir / ("bots-" + std::string(stamp) + ".log")).string());
+  }
+
+  // The launcher opens on every start and starts the runtime when the player presses Play. Skipped
+  // with --launcher=false (or bots.toml / REX_LAUNCHER) or BOTS_LAUNCHER=0, and by default when the
+  // game files are given on the command line (dev and test launches). Missing game files always
+  // open it.
   std::optional<rex::PathConfig> OnFinalizePaths(
       const rex::PathConfig& defaults, std::function<void(rex::PathConfig)> resume) override {
-    const char* env = std::getenv("BOTS_LAUNCHER");
-    bool requested = rex::cvar::Query<bool>("launcher") || (env && std::string_view(env) == "1");
+    bool requested = !game_root_given_;
+    if (rex::cvar::GetFlagSource("launcher") != rex::cvar::Source::kDefault)
+      requested = rex::cvar::Query<bool>("launcher");
+    if (const char* env = std::getenv("BOTS_LAUNCHER"); env && *env)
+      requested = std::string_view(env) != "0";
     if (!requested && bots::setup::IsGameDir(defaults.game_data_root)) return defaults;
     if (!imgui_drawer()) return defaults;  // no UI: fail the usual way (missing game files)
     REXLOG_INFO("setup: showing the setup window ({})",

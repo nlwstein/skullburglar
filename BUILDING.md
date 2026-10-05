@@ -61,7 +61,8 @@ Each generated file is about 1 MB of C++; `--parallel 6` keeps memory use reason
 ```
 
 `tools/run.sh [seconds] [extra args]` runs with a timeout and prints the exit status, first errors and the
-log tail. F11 toggles fullscreen; F3 shows the debug overlay. Debug environment variables (`BOTS_*` for scripted
+log tail. Giving `--game_data_root` skips the launcher (players get it on every start); `--launcher` opens it
+anyway. F11 toggles fullscreen; F3 shows the debug overlay. Debug environment variables (`BOTS_*` for scripted
 input, frame capture and console commands; `REX_*` for SDK settings) are read in `src/bots_app.h` and
 `src/game_hooks.cpp`.
 
@@ -88,7 +89,7 @@ info split off), and `package.sh` packs them:
 |---|---|---|
 | Linux x86_64 | `docker/linux-steamrt` (glibc 2.31: runs on the Steam Deck and most distros) | `.tar.xz`, `.AppImage` |
 | Windows x86_64 | `docker/win-cross` (clang + lld, Windows SDK from xwin) | `.zip` |
-| macOS arm64 | Xcode or its command line tools, cmake, ninja | `.zip` |
+| macOS arm64 | Xcode or its command line tools, cmake, ninja | `.dmg` (`Skullburglar.app`) |
 
 Each also has a `-symbols` archive. To make one yourself, with `game/default.xex` in place:
 

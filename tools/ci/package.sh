@@ -4,7 +4,7 @@
 # Writes <out>/release/:
 #   linux    .tar.xz (the game folder) and .AppImage (the same files, one executable), symbols .tar.xz
 #   windows  .zip, symbols .zip (PDBs)
-#   macos    .zip, symbols .zip (dSYMs)
+#   macos    .dmg (Skullburglar.app, an Applications link and the README), symbols .zip (dSYMs)
 # The AppImage is built with appimagetool and the type 2 runtime, both pinned by checksum.
 set -eu
 PLATFORM=${1:?usage: tools/ci/package.sh <linux|windows|macos> <out dir>}
@@ -47,8 +47,26 @@ windows)
   zip -qr "$REL/$NAME-symbols.zip" "$NAME-symbols"
   ;;
 macos)
-  # ditto keeps the code signatures and symlinks intact.
-  ditto -c -k --keepParent "$NAME" "$REL/$NAME.zip"
+  # Skullburglar.app: the game and its libraries in Contents/MacOS, the Vulkan loader + MoltenVK (the SDK looks in
+  # Contents/Resources/vulkan), shader refs and the icon in Contents/Resources. Skullburglar.icns is
+  # packaging/linux/skullburglar.svg at 824 px on a 1024 px transparent canvas, through iconutil.
+  APP=$PKG/dmg/Skullburglar.app
+  mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+  ditto "$NAME/bots" "$APP/Contents/MacOS/bots"
+  for f in "$NAME"/*.dylib; do ditto "$f" "$APP/Contents/MacOS/$(basename "$f")"; done
+  ditto "$NAME/vulkan" "$APP/Contents/Resources/vulkan"
+  [ ! -d "$NAME/pipelines" ] || ditto "$NAME/pipelines" "$APP/Contents/Resources/pipelines"
+  cp "$REPO/packaging/macos/Skullburglar.icns" "$APP/Contents/Resources/"
+  sed "s/@VERSION@/$VERSION/g" "$REPO/packaging/macos/Info.plist" > "$APP/Contents/Info.plist"
+  plutil -lint "$APP/Contents/Info.plist"
+  # Ad-hoc signature over the whole bundle (it seals Info.plist and Resources); not notarized.
+  codesign --force --deep --sign - "$APP"
+  codesign --verify --deep --strict "$APP"
+  cp "$NAME/README.txt" "$PKG/dmg/"
+  ln -s /Applications "$PKG/dmg/Applications"
+  hdiutil create -quiet -volname "Skullburglar $VERSION" -srcfolder "$PKG/dmg" -fs HFS+ -format UDZO -ov \
+    "$REL/$NAME.dmg"
+  # ditto keeps the symlinks inside the dSYMs intact.
   ditto -c -k --keepParent "$NAME-symbols" "$REL/$NAME-symbols.zip"
   ;;
 esac

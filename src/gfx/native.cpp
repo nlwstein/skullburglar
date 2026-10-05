@@ -166,10 +166,14 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     }
     sync_ = std::make_unique<vk::MemorySync>(*memory_, *renderer_);
     renderer_->SetMemoryTracker(sync_.get());
-    // Shipped shader refs (B-098): next to the executable in pipelines/, read from the player's disc and XEX image.
+    // Shipped shader refs (B-098): next to the executable in pipelines/ (Contents/Resources/pipelines in the macOS
+    // app bundle), read from the player's disc and XEX image.
     auto package = std::make_shared<std::pair<std::string, std::unique_ptr<upk::Package>>>();
+    const auto exe_dir = rex::filesystem::GetExecutableFolder();
+    std::vector<std::filesystem::path> refs_dirs{exe_dir / "pipelines"};
+    if (exe_dir.filename() == "MacOS") refs_dirs.push_back(exe_dir.parent_path() / "Resources" / "pipelines");
     renderer_->SetShaderRefs(
-        {rex::filesystem::GetExecutableFolder() / "pipelines"},
+        std::move(refs_dirs),
         [this, package](const std::string& source, uint32_t offset, uint32_t size, std::vector<uint8_t>& out) {
           if (source == "image") {
             auto module = kernel_state_->GetExecutableModule();

@@ -36,6 +36,21 @@ inline std::filesystem::path AppDataDir() {
 
 inline std::filesystem::path DefaultGameDir() { return AppDataDir() / "game"; }
 
+// Running from a macOS app bundle (Skullburglar.app/Contents/MacOS/bots): the bundle is read-only
+// to the game, so logs go to ~/Library/Logs/Skullburglar instead of logs/ next to the executable.
+// Empty when not in a bundle.
+inline std::filesystem::path BundleLogDir(const std::filesystem::path& exe_dir) {
+#if defined(__APPLE__)
+  if (exe_dir.filename() == "MacOS" && exe_dir.parent_path().filename() == "Contents") {
+    if (const char* home = std::getenv("HOME"); home && *home) {
+      return std::filesystem::path(home) / "Library" / "Logs" / "Skullburglar";
+    }
+  }
+#endif
+  (void)exe_dir;
+  return {};
+}
+
 // A usable game data root has the entry XEX and the game's package folder.
 inline bool IsGameDir(const std::filesystem::path& dir) {
   std::error_code ec;
