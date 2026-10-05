@@ -662,39 +662,27 @@ bool TestPointer(float dt, float& px, float& py, uint32_t& moves, std::vector<bo
 
 // Per frame. `enter` holds the click/confirm Enter edges for this frame; the ones that land on a toggle or slider are
 // taken out of it and become Left/Right taps.
-void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32_t vp, float dt, std::vector<bool>& enter) {
-  static uint32_t seen_moves = 0, dragging = 0;
-  static bool click_taken = false;  // the current click went to a toggle/slider: its release is ours too
-  float px, py;
-  uint32_t moves;
-  if (!TestPointer(dt, px, py, moves, enter) && !kbm.Pointer(px, py, moves)) {
-    dragging = 0;
-    return;
-  }
-  const Names* n = GetNames(base);
-  if (!n) return;
+// The topmost active UI scene whose focused control is one of ours (its widgets are the ones to hover), or 0.
+uint32_t MenuScene(uint8_t* base, const Names& n, uint32_t& focused) {
   const uint32_t engine = LoadU32(base, kGEngine);
-  if (!Readable(engine)) return;
+  if (!Readable(engine)) return 0;
   const uint32_t viewport = LoadU32(base, engine + 0x2E4);
-  if (!Readable(viewport)) return;
+  if (!Readable(viewport)) return 0;
   const uint32_t ui = LoadU32(base, viewport + 0x5C);
-  if (!Readable(ui)) return;
+  if (!Readable(ui)) return 0;
   const uint32_t client = LoadU32(base, ui + 0x78);
-  if (!Readable(client)) return;
+  if (!Readable(client)) return 0;
   const uint32_t scenes = LoadU32(base, client + 0x100);
   const int32_t scene_count = int32_t(LoadU32(base, client + 0x104));
-  if (!Readable(scenes) || scene_count <= 0 || scene_count > 64) return;
-  // Topmost scene whose focused control is one of ours: its widgets are the ones to hover.
-  std::vector<Widget> widgets;
-  uint32_t focused = 0;
-  for (int32_t i = scene_count - 1; i >= 0 && widgets.empty(); --i) {
+  if (!Readable(scenes) || scene_count <= 0 || scene_count > 64) return 0;
+  for (int32_t i = scene_count - 1; i >= 0; --i) {
     const uint32_t scene = LoadU32(base, scenes + 4 * i);
     if (!Readable(scene)) continue;
     const uint32_t focus = LoadU32(base, scene + 0x94);
     if (!Readable(focus) || !LoadU32(base, scene + 0x98)) continue;
     const uint32_t f = LoadU32(base, focus);
     if (!Readable(f)) continue;
-    if (KindOf(base, *n, f) == Kind::kNone) {
+    if (KindOf(base, n, f) == Kind::kNone) {
       static uint32_t logged = 0;
       if (f != logged) {
         logged = f;
@@ -702,9 +690,28 @@ void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32
       }
       continue;
     }
-    Collect(base, *n, scene, 0, widgets);
     focused = f;
+    return scene;
   }
+  return 0;
+}
+
+void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32_t vp, float dt, std::vector<bool>& enter) {
+  static uint32_t seen_moves = 0, dragging = 0;
+  static bool click_taken = false;  // the current click went to a toggle/slider: its release is ours too
+  const Names* n = GetNames(base);
+  uint32_t focused = 0;
+  const uint32_t scene = n ? MenuScene(base, *n, focused) : 0;
+  kbm.SetMenuScene(scene != 0);
+  float px, py;
+  uint32_t moves;
+  if (!TestPointer(dt, px, py, moves, enter) && !kbm.Pointer(px, py, moves)) {
+    dragging = 0;
+    return;
+  }
+  if (!n) return;
+  std::vector<Widget> widgets;
+  if (scene) Collect(base, *n, scene, 0, widgets);
   if (widgets.empty()) {
     dragging = 0;
     return;

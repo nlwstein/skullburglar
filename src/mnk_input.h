@@ -7,7 +7,7 @@
 // own PC MouseX / MouseY axes (linear, after the stick curve), as UE3 does on PC.
 //
 // The pointer is locked while the window has focus, no settings overlay is open (is_active()) and the game isn't
-// in a menu (MenuMode()). The mouse wheel taps D-pad up/down (weapon select). Keys bound to kbm_confirm (and a left
+// in a menu (MenuMode(): paused, a menu scene focused, or no gameplay HUD). The mouse wheel taps D-pad up/down (weapon select). Keys bound to kbm_confirm (and a left
 // click in menus) send the engine's own Enter key instead of a pad button.
 //
 // Button prompts (B-105): the last device used wins. Keyboard/mouse input switches the prompts to keyboard/mouse
@@ -66,6 +66,9 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   // (title, front end, loading, cutscenes). The pointer is free and a left click is the engine's Enter key, which
   // the game's UI input aliases accept as confirm / "Press START" (Xe-C1Input.ini WidgetInputAliases).
   void SetPaused(bool paused) { paused_.store(paused, std::memory_order_relaxed); }
+  // A UI scene has a menu option focused (game_hooks.cpp menu_pointer). The front end is a level with a ticking
+  // gameplay HUD, so the HUD tick alone would lock the pointer on the title and main menus.
+  void SetMenuScene(bool menu) { menu_scene_.store(menu, std::memory_order_relaxed); }
   void NoteHudTick() { hud_tick_.store(Now(), std::memory_order_relaxed); }
   bool MenuMode() const;
   // Engine Enter key edges (true = pressed) since the last call, oldest first. Game thread.
@@ -131,7 +134,7 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   std::atomic<uint32_t> pointer_moves_{0};
   std::vector<bool> enter_events_;         // engine Enter edges for the game thread
   bool click_is_enter_ = false;            // the left button went down in menu mode: its release is Enter's too
-  std::atomic<bool> paused_{false};
+  std::atomic<bool> paused_{false}, menu_scene_{false};
   std::atomic<int64_t> hud_tick_{0};       // Now() of the last gameplay HUD tick
   bool last_menu_ = false;                 // GetDeviceState (guest thread), for the log
   uint32_t packet_ = 0;

@@ -141,7 +141,8 @@ uint16_t MouseKeyboardDriver::ButtonKey(rex::ui::MouseEvent& e) {
 bool MouseKeyboardDriver::MenuMode() const {
   // The HUD ticks every gameplay frame; a short gap (a hitch, a level stream) mustn't drop the pointer lock.
   constexpr int64_t kHudGapMs = 500;
-  return paused_.load(std::memory_order_relaxed) || Now() - hud_tick_.load(std::memory_order_relaxed) > kHudGapMs;
+  return paused_.load(std::memory_order_relaxed) || menu_scene_.load(std::memory_order_relaxed) ||
+         Now() - hud_tick_.load(std::memory_order_relaxed) > kHudGapMs;
 }
 
 bool MouseKeyboardDriver::Pointer(float& x, float& y, uint32_t& moves) const {
