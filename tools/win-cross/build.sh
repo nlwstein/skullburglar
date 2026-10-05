@@ -48,12 +48,14 @@ docker exec $C sh -c "command -v xwin >/dev/null || (cd /tmp && curl -sL \
   | tar xz && cp xwin-*/xwin /usr/local/bin/)"
 docker exec $C sh -c "[ -d /w/xwin/sdk ] || xwin --accept-license splat --output /w/xwin"
 docker exec $C python3 /w/casefix.py /w/sdk /w/game/src
-# Sources are pre-generated on the host that ran codegen; the Windows rexglue.exe cannot run here.
+# Sources are pre-generated on the host that ran codegen; the Windows rexglue.exe cannot run here. The sed covers a
+# rexglue.cmake rendered without SDK patch 0017; with it, REXGLUE_HOST_CLI=/bin/true (below) makes codegen a no-op.
 cd ~/bots/$N/game
 sed -i "s|    COMMAND \$<TARGET_FILE:rex::rexglue> codegen \${CMAKE_CURRENT_SOURCE_DIR}/bots_manifest.toml|    COMMAND \${CMAKE_COMMAND} -E true|" generated/rexglue.cmake
 sed -i "/DEPFILE .*codegen.d/d" generated/rexglue.cmake
 docker exec -w /w/game $C sh -c "[ -f /w/build/build.ninja ] && [ -z \"$CMAKE_ARGS\" ] || cmake -G Ninja -B /w/build \
-  -DCMAKE_TOOLCHAIN_FILE=/w/win-clang.cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DREXSDK_DIR=/w/sdk $CMAKE_ARGS"
+  -DCMAKE_TOOLCHAIN_FILE=/w/win-clang.cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DREXSDK_DIR=/w/sdk \
+  -DREXGLUE_HOST_CLI=/bin/true $CMAKE_ARGS"
 docker exec $C cmake --build /w/build --parallel $c
 docker exec $C sh -c "rm -rf /w/dist && mkdir -p /w/dist/bots && cp /w/build/bots.exe /w/dist/bots/ \
   && cp /w/sdk/out/win-amd64/*.dll /w/dist/bots/ 2>/dev/null; cp /w/build/rexgpu-native*.dll /w/dist/bots/ 2>/dev/null; cd /w/dist && zip -qr bots-win64.zip bots && ls -la /w/dist/bots"
