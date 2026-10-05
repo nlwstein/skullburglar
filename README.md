@@ -51,6 +51,12 @@ the T480, which gives 34.5 fps; the table uses full scale so the columns match.
 Also on the RTX 3090, at the normal 60 fps cap: a 36-minute run through all nine missions held a median of 60 fps in
 every mission, with 3 frames over 100 ms.
 
+### First launch
+
+The first launch compiles the game's shaders for the local GPU before play starts; later launches reuse the cache.
+Longest wait before the title screen on a first launch: RTX 3090 7.7 s, Steam Deck 13.4 s, Mac mini M4 30.6 s,
+Apple M2 Pro 34 s. Shaders the shipped list doesn't cover compile in the background during play.
+
 ### Load at 60 fps
 
 RTX 3090 / i7-12700K (20 logical CPUs), Windows, 4K output, 30 s in gameplay at the 60 fps cap. CPU is process CPU
@@ -59,13 +65,14 @@ time over wall time, in cores. GPU is the whole-GPU utilisation median.
 | Scene | Renderer | CPU (cores) | Busiest threads | GPU | Memory (working set) |
 |---|---|---|---|---|---|
 | Mission 6, helicopter | Emulated GPU | 2.45 | 99% / 98% / 21% | 61% | 1.9 GB |
-| Mission 6, helicopter | Native renderer | 2.42 | 99% / 98% / 17% | **23%** | 2.5 GB |
+| Mission 6, helicopter | Native renderer | 2.39 | 99% / 98% / 16% | **27%** | **1.4 GB** |
 | Mission 2, Humvee | Emulated GPU | 2.53 | 99% / 98% / 33% | 74% | 1.5 GB |
-| Mission 2, Humvee | Native renderer | 2.38 | 99% / 99% / 16% | **22%** | 2.0 GB |
+| Mission 2, Humvee | Native renderer | 2.33 | 99% / 98% / 15% | **40%** | **1.2 GB** |
 
 The CPU load is the same with either renderer. Two game threads spin at a full core each whatever the frame rate.
-That is the game's own busy-waiting, which a recompiled port keeps. The native renderer needs about a third of
-the GPU time that GPU emulation does at the same frame rate.
+That is the game's own busy-waiting, which a recompiled port keeps. At the same frame rate the native renderer keeps
+the GPU a third to a half as busy as GPU emulation does (at this light load the GPU's clocks vary between runs, so
+treat the GPU column as approximate), with a smaller working set.
 
 Xenia-canary could not be held to 60 fps on this machine: neither its `vsync` nor its `framerate_limit` setting
 capped presentation (it kept presenting at its uncapped rate). Uncapped, in the same scenes, it used 3.0-3.1 cores
