@@ -28,6 +28,7 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
 
+#include "app_quit.h"
 #include "mnk_input.h"
 #include "prompt_state.h"
 
@@ -39,6 +40,7 @@ extern "C" void __imp__sub_82E2EB38(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82E2EBB8(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_828291E0(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_82853F50(PPCContext& __restrict ctx, uint8_t* base);
 
 namespace {
 // Guest address → host pointer, as REX_RAW_ADDR in generated/default/bots_pch.h (Mac arm64 layout).
@@ -192,6 +194,12 @@ void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std:
 }
 }  // namespace
 
+namespace {
+namespace quit_option {
+void FilterPad(uint8_t* base, uint32_t state);
+}
+}  // namespace
+
 extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
   const uint32_t user = ctx.r3.u32, state = ctx.r4.u32;  // XInputGetState(user, XINPUT_STATE*)
   __imp__sub_823598E0(ctx, base);
@@ -203,6 +211,7 @@ extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
       kbm->NoteGuestPad(uint16_t(i16(4)), s[6], s[7], i16(8), i16(10), i16(12), i16(14));
     }
   }
+  if (state && ctx.r3.u32 == 0) quit_option::FilterPad(base, state);
   ExecState* st = Exec();
   if (!st) return;
   auto now = std::chrono::steady_clock::now();
@@ -495,7 +504,7 @@ const char* NameOf(uint8_t* base, uint32_t index) {
 
 // Name indices this file needs, found once by scanning FName::Names (they all exist once the script packages load).
 struct Names {
-  uint32_t option = 0, toggle = 0, slider = 0, image = 0, left = 0, right = 0;
+  uint32_t option = 0, toggle = 0, slider = 0, image = 0, left = 0, right = 0, main_menu = 0, quit = 0, title = 0, label = 0, online_message = 0;
 };
 
 const Names* GetNames(uint8_t* base) {
@@ -509,7 +518,10 @@ const Names* GetNames(uint8_t* base) {
   if (!Readable(names) || count > 0x100000) return nullptr;
   const std::pair<const char*, uint32_t*> wanted[] = {{"C1UI_MenuOption", &n.option}, {"C1UI_ToggleableOption", &n.toggle},
                                                       {"C1UI_Slider", &n.slider},     {"HudWidget_Image", &n.image},
-                                                      {"Left", &n.left},              {"Right", &n.right}};
+                                                      {"Left", &n.left},              {"Right", &n.right},
+                                                      {"C1UIScene_MainMenu", &n.main_menu}, {"Quit", &n.quit},
+                                                      {"C1TitleScreen", &n.title}, {"HudWidget_Label", &n.label},
+                                                      {"OnlinePlayMessage", &n.online_message}};
   for (uint32_t i = 0; i < count; ++i) {
     const uint32_t entry = LoadU32(base, names + 4 * i);
     if (!Readable(entry)) continue;
@@ -696,19 +708,26 @@ uint32_t MenuScene(uint8_t* base, const Names& n, uint32_t& focused) {
   return 0;
 }
 
+bool extra_menu = false;            // another screen wants the free pointer (quit_option's press-start Quit)
+bool pointer_valid = false;         // this frame's pointer, UI pixels (for quit_option)
+float pointer_x = 0, pointer_y = 0;
+
 void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32_t vp, float dt, std::vector<bool>& enter) {
   static uint32_t seen_moves = 0, dragging = 0;
   static bool click_taken = false;  // the current click went to a toggle/slider: its release is ours too
   const Names* n = GetNames(base);
   uint32_t focused = 0;
   const uint32_t scene = n ? MenuScene(base, *n, focused) : 0;
-  kbm.SetMenuScene(scene != 0);
+  kbm.SetMenuScene(scene != 0 || extra_menu);
   float px, py;
   uint32_t moves;
+  pointer_valid = false;
   if (!TestPointer(dt, px, py, moves, enter) && !kbm.Pointer(px, py, moves)) {
     dragging = 0;
     return;
   }
+  pointer_valid = true;
+  pointer_x = px * 1280.0f, pointer_y = py * 720.0f;
   if (!n) return;
   std::vector<Widget> widgets;
   if (scene) Collect(base, *n, scene, 0, widgets);
@@ -775,6 +794,249 @@ void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32
 }
 }  // namespace menu_pointer
 
+// Quit on the main menu (PC convention; on the console you quit from the dashboard). The menu is authored in the
+// front-end package, so the option is added to the live scene: a copy of its last option (UUIScreenObject::CreateWidget
+// with that option as the archetype, so it looks and animates the same) one row lower, linked into the menu's up/down
+// wrap-around, labelled "Quit". Choosing it (A / START, Enter, a click) quits the app; those presses are kept from the
+// game, since the copy also carries its archetype's actions.
+// Layout (live UProperty data, see menu_pointer): UIScreenObject +0x3C Position (UIScreenValue_Bounds: Value[4], the
+// left and top then extents whose meaning follows ScaleType[4] after them), UIObject +0x1A4 NavigationTargets {Targets[4], ForcedTargets[4]} (left, up,
+// right, down), C1UIScene_Menu +0x2EC MenuOptions (TArray), C1UI_MenuOption +0x450 MyJitter (its label, a
+// HudWidget_JitterLabel: vtable +0x2C8 is SetText(const FString&), what execSetText calls).
+namespace quit_option {
+using menu_pointer::LoadF32;
+using menu_pointer::Readable;
+
+constexpr uint32_t kPosition = 0x3C, kNavigation = 0x1A4, kMenuOptions = 0x2EC, kMyJitter = 0x450, kFlags = 0x4E8;
+constexpr uint32_t kAutoLocalise = 0x80000000;  // C1UI_MenuOption: localise the label from the widget tag
+constexpr uint32_t kUp = 1, kDown = 3;
+constexpr uint16_t kStart = 0x0010, kA = 0x1000, kB = 0x2000;  // XINPUT_GAMEPAD_*
+
+std::atomic<uint32_t> option{0};    // the Quit widget on the live main menu, or 0
+std::atomic<bool> focused{false};  // it has focus (updated per frame)
+
+void StoreU32(uint8_t* base, uint32_t address, uint32_t v) {
+  v = __builtin_bswap32(v);
+  __builtin_memcpy(Raw(base, address), &v, 4);
+}
+
+void StoreF32(uint8_t* base, uint32_t address, float f) {
+  uint32_t v;
+  std::memcpy(&v, &f, 4);
+  StoreU32(base, address, v);
+}
+
+bool IsChild(uint8_t* base, uint32_t parent, uint32_t widget) {
+  const uint32_t children = LoadU32(base, parent + 0x60);
+  const int32_t count = int32_t(LoadU32(base, parent + 0x64));
+  for (int32_t i = 0; widget && Readable(children) && i < count && i < 256; ++i)
+    if (LoadU32(base, children + 4 * i) == widget) return true;
+  return false;
+}
+
+void SetLabel(PPCContext& ctx, uint8_t* base, uint32_t label, const char* text) {
+  static uint32_t buffer = 0;  // FString {data, count, max}, then its UTF-16BE text; SetText copies it
+  if (!buffer) buffer = rex::system::kernel_memory()->SystemHeapAlloc(0x80);
+  const uint32_t count = uint32_t(std::strlen(text)) + 1;
+  if (!buffer || count > 0x30 || !Readable(label)) return;
+  uint8_t* data = Raw(base, buffer + 0x10);
+  for (uint32_t i = 0; i < count; ++i) data[2 * i] = 0, data[2 * i + 1] = uint8_t(text[i]);
+  StoreU32(base, buffer, buffer + 0x10);
+  StoreU32(base, buffer + 4, count);
+  StoreU32(base, buffer + 8, count);
+  ctx.r3.u64 = label;
+  ctx.r4.u64 = buffer;
+  rex::runtime::ResolveIndirectFunction(LoadU32(base, LoadU32(base, label) + 0x2C8))(ctx, base);
+}
+
+uint32_t Add(PPCContext& ctx, uint8_t* base, const menu_pointer::Names& n, uint32_t scene) {
+  const uint32_t options = LoadU32(base, scene + kMenuOptions);
+  const int32_t count = int32_t(LoadU32(base, scene + kMenuOptions + 4));
+  if (!Readable(options) || count < 2 || count > 16) return 0;
+  const uint32_t first = LoadU32(base, options), prev = LoadU32(base, options + 4 * (count - 2)),
+                 last = LoadU32(base, options + 4 * (count - 1));
+  if (!Readable(first) || !Readable(prev) || !Readable(last)) return 0;
+  // CreateWidget(Owner = the scene, the last option's class, Archetype = the last option, Name = Quit). With name None
+  // it is named after the class, and inserting it renamed the archetype option instead.
+  ctx.r3.u64 = scene;
+  ctx.r4.u64 = scene;
+  ctx.r5.u64 = LoadU32(base, last + 0x34);
+  ctx.r6.u64 = last;
+  ctx.r7.u64 = uint64_t(n.quit) << 32;
+  sub_82853F50(ctx, base);
+  const uint32_t widget = ctx.r3.u32;
+  if (!Readable(widget)) return 0;
+  StoreU32(base, widget + 0x174, n.quit);  // WidgetTag
+  StoreU32(base, widget + 0x178, 0);
+  StoreU32(base, widget + kFlags, LoadU32(base, widget + kFlags) & ~kAutoLocalise);
+  const float top = LoadF32(base, last + kPosition + 4);
+  StoreF32(base, widget + kPosition + 4, top + (top - LoadF32(base, prev + kPosition + 4)));
+  for (const uint32_t set : {kNavigation, kNavigation + 0x10}) {  // targets, forced targets
+    StoreU32(base, widget + set + 4 * kUp, last);
+    StoreU32(base, widget + set + 4 * kDown, first);
+    StoreU32(base, last + set + 4 * kDown, widget);
+    StoreU32(base, first + set + 4 * kUp, widget);
+  }
+  // InsertChild(widget, INDEX_NONE, bRenameOnDuplicateName = false): vtable +0x130 (execInsertChild).
+  ctx.r3.u64 = scene;
+  ctx.r4.u64 = widget;
+  ctx.r5.s64 = -1;
+  ctx.r6.u64 = 0;
+  rex::runtime::ResolveIndirectFunction(LoadU32(base, LoadU32(base, scene) + 0x130))(ctx, base);
+  SetLabel(ctx, base, LoadU32(base, widget + kMyJitter), "Quit");
+  REXLOG_INFO("main menu: added Quit ({:08X}, below {:08X})", widget, last);
+  return widget;
+}
+
+// Whether the Quit option has focus now.
+bool Focused(uint8_t* base) {
+  const menu_pointer::Names* n = menu_pointer::GetNames(base);
+  uint32_t focus = 0;
+  return n && option && menu_pointer::MenuScene(base, *n, focus) && focus == option;
+}
+
+// The press-start screen (C1TitleScreen) has no menu, so it gets a "Quit" label in the bottom-right corner: a copy of
+// the screen's own ESRB-notice label (OnlinePlayMessage, a HudWidget_Label, whose SetText is also vtable +0x2C8). It
+// reads "Quit" with keyboard and mouse, where clicking it quits (the pointer is free there), and "Press B to quit" with a
+// pad. B quits on either (on the keyboard, the keys bound to B). Off while the attract movie plays over the screen
+// (C1TitleScreen +0x260 bInMovie), where B stops the movie as before.
+namespace title {
+constexpr uint32_t kInMovie = 0x80000000;
+constexpr float kBounds[4] = {0.78f, 0.9f, 0.98f, 0.97f};  // left top right bottom, fraction of the viewport
+
+std::atomic<bool> active{false};  // the screen is up with its Quit label
+uint32_t label = 0;
+
+uint32_t FindScene(uint8_t* base, uint32_t cls) {
+  const uint32_t engine = LoadU32(base, menu_pointer::kGEngine);
+  if (!Readable(engine)) return 0;
+  const uint32_t viewport = LoadU32(base, engine + 0x2E4);
+  if (!Readable(viewport)) return 0;
+  const uint32_t ui = LoadU32(base, viewport + 0x5C);
+  if (!Readable(ui)) return 0;
+  const uint32_t client = LoadU32(base, ui + 0x78);
+  if (!Readable(client)) return 0;
+  const uint32_t scenes = LoadU32(base, client + 0x100);
+  const int32_t count = int32_t(LoadU32(base, client + 0x104));
+  for (int32_t i = 0; Readable(scenes) && i < count && i < 64; ++i) {
+    const uint32_t scene = LoadU32(base, scenes + 4 * i);
+    if (Readable(scene) && menu_pointer::IsA(base, scene, cls)) return scene;
+  }
+  return 0;
+}
+
+uint32_t Add(PPCContext& ctx, uint8_t* base, const menu_pointer::Names& n, uint32_t screen) {
+  uint32_t archetype = 0;
+  const uint32_t children = LoadU32(base, screen + 0x60);
+  const int32_t count = int32_t(LoadU32(base, screen + 0x64));
+  for (int32_t i = 0; Readable(children) && i < count && i < 64 && !archetype; ++i) {
+    const uint32_t c = LoadU32(base, children + 4 * i);
+    if (Readable(c) && LoadU32(base, c + 0x2C) == n.online_message && menu_pointer::IsA(base, c, n.label)) archetype = c;
+  }
+  if (!archetype) return 0;
+  ctx.r3.u64 = screen;
+  ctx.r4.u64 = screen;
+  ctx.r5.u64 = LoadU32(base, archetype + 0x34);
+  ctx.r6.u64 = archetype;
+  ctx.r7.u64 = uint64_t(n.quit) << 32;
+  sub_82853F50(ctx, base);
+  const uint32_t widget = ctx.r3.u32;
+  if (!Readable(widget)) return 0;
+  StoreU32(base, widget + 0x174, n.quit);  // WidgetTag
+  StoreU32(base, widget + 0x178, 0);
+  for (int i = 0; i < 4; ++i) StoreF32(base, widget + kPosition + 4 * i, kBounds[i]);  // keeps the scale types
+  ctx.r3.u64 = screen;
+  ctx.r4.u64 = widget;
+  ctx.r5.s64 = -1;
+  ctx.r6.u64 = 0;
+  rex::runtime::ResolveIndirectFunction(LoadU32(base, LoadU32(base, screen) + 0x130))(ctx, base);
+  REXLOG_INFO("press start: added Quit ({:08X})", widget);
+  return widget;
+}
+
+void Tick(PPCContext& ctx, uint8_t* base, const menu_pointer::Names& n, bool menu) {
+  static uint32_t done = 0;  // the screen it was added to
+  static int shown = -1;     // the text it shows: 1 keyboard/mouse, 0 pad
+  static const bots::PromptState* prompts = bots::FindPromptState();
+  uint32_t screen = menu ? 0 : FindScene(base, n.title);
+  if (screen && LoadU32(base, screen + 0x260) & kInMovie) screen = 0;
+  if (screen && (screen != done || !IsChild(base, screen, label))) {
+    label = Add(ctx, base, n, screen);
+    done = label ? screen : 0;
+    shown = -1;
+  }
+  active = screen && label;
+  menu_pointer::extra_menu = active;
+  if (!active) return;
+  const int keyboard = prompts && prompts->keyboard_mouse.load(std::memory_order_relaxed) ? 1 : 0;
+  if (keyboard != shown) {
+    shown = keyboard;
+    SetLabel(ctx, base, label, keyboard ? "Quit" : "Press B to quit");
+  }
+}
+
+// Whether the pointer is over the label (its RenderBounds, UI pixels), with some slack.
+bool Hovered(uint8_t* base) {
+  if (!active || !menu_pointer::pointer_valid) return false;
+  const float x = menu_pointer::pointer_x, y = menu_pointer::pointer_y;
+  return x >= LoadF32(base, label + 0x204) - 8 && x <= LoadF32(base, label + 0x20C) + 8 &&
+         y >= LoadF32(base, label + 0x208) - 8 && y <= LoadF32(base, label + 0x210) + 8;
+}
+}  // namespace title
+
+// Per frame (game thread): add the option to a main menu that lacks it, and track whether it has focus; the same for
+// the press-start screen's label.
+void Tick(PPCContext& ctx, uint8_t* base) {
+  static uint32_t done = 0;  // the scene it was added to
+  const menu_pointer::Names* n = menu_pointer::GetNames(base);
+  uint32_t focus = 0;
+  const uint32_t scene = n ? menu_pointer::MenuScene(base, *n, focus) : 0;
+  if (n) title::Tick(ctx, base, *n, scene != 0);
+  if (!scene || !menu_pointer::IsA(base, scene, n->main_menu)) {
+    focused = false;
+    return;
+  }
+  if (scene != done || !IsChild(base, scene, option)) {
+    option = Add(ctx, base, *n, scene);
+    done = option ? scene : 0;
+  }
+  focused = option && focus == option;
+}
+
+// Enter / click edges from the keyboard/mouse driver (after menu_pointer, which may just have moved the focus): while
+// the main menu's Quit has focus, or on a click on the press-start screen's label, a press quits and none of them
+// reach the game.
+void TakeEnter(uint8_t* base, std::vector<bool>& enter) {
+  if (enter.empty() || !(Focused(base) || title::Hovered(base))) return;
+  if (std::find(enter.begin(), enter.end(), true) != enter.end()) {
+    REXLOG_INFO("{}: Quit chosen", title::active ? "press start" : "main menu");
+    bots::RequestQuit();
+  }
+  enter.clear();
+}
+
+// An XInputGetState result (big-endian buttons at +4): A / START while the main menu's Quit has focus, or B on the
+// press-start screen, quit; those buttons are hidden from the game meanwhile.
+void FilterPad(uint8_t* base, uint32_t state) {
+  static std::atomic<bool> held{true};  // a press that began before Quit was there doesn't count
+  const uint16_t mask = focused ? (kA | kStart) : title::active ? kB : 0;
+  if (!mask) {
+    held = true;
+    return;
+  }
+  uint8_t* s = Raw(base, state);
+  const uint16_t buttons = uint16_t(s[4] << 8 | s[5]);
+  const bool pressed = buttons & mask;
+  if (pressed && !held) {
+    REXLOG_INFO("{}: Quit chosen (controller)", focused ? "main menu" : "press start");
+    bots::RequestQuit();
+  }
+  held = pressed;
+  const uint16_t rest = buttons & ~mask;
+  s[4] = uint8_t(rest >> 8), s[5] = uint8_t(rest);
+}
+}  // namespace quit_option
+
 }  // namespace
 
 // Menu mode for the keyboard/mouse driver (mnk_input.h): C1HUD natives. execNativePauseGame / execNativeUnpauseGame
@@ -819,12 +1081,14 @@ extern "C" void sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base) {
   if (!lock) return;
   MemoryDumpTick(base, dt);
   press_start::Tick(base, dt);
+  quit_option::Tick(ctx, base);
   float dx = 0, dy = 0;
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) {
     kbm->TakeMouseDelta(dx, dy);
     static std::vector<bool> enter;
     kbm->TakeEnterEvents(enter);
     menu_pointer::Tick(ctx, base, *kbm, vp, dt, enter);
+    quit_option::TakeEnter(base, enter);
     for (const bool down : enter) InputKey(ctx, base, vp, 0, kKeyEnter, down ? 0 : 1, 1.0f, false);
   }
   if (dx) InputAxis(ctx, base, vp, 0, kKeyMouseX, dx, dt, false);

@@ -40,6 +40,7 @@
 #include <rex/ui/keybinds.h>
 #include <rex/runtime.h>
 
+#include "app_quit.h"
 #include "mnk_input.h"
 #include "script_input.h"
 #include "setup/app_paths.h"
@@ -228,6 +229,14 @@ class BotsApp : public rex::ReXApp {
   //    depth compares need exact 24-bit float depth; without it the player renders black
   //    in level 1 (B-035, sweep 2026-10-01).
   void OnPreSetup(rex::RuntimeConfig& config) override {
+    // The menus' Quit option (game_hooks.cpp) runs on a guest thread. Quit the way closing the window does
+    // (ReXApp::OnClosing terminates the title and exits); QuitFromUIThread alone leaves the guest threads running.
+    bots::SetQuitHandler([this] {
+      app_context().CallInUIThreadDeferred([this] {
+        if (window()) window()->RequestClose();
+        else app_context().QuitFromUIThread();
+      });
+    });
 #if defined(__APPLE__) || defined(__linux__)
     // Open files: package files stay open across level loads (~14 more per LoadChapter; whether the game or the SDK's
     // handle closing keeps them is still open). At macOS's
