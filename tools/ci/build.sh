@@ -8,7 +8,9 @@
 # Needs game/default.xex (checked against default.xex.sha1) and an SDK from tools/ci/sdk.sh. Codegen output already in
 # generated/ (tools/ci/codegen_publish.sh) is reused when its stamp matches; otherwise codegen runs here.
 # Optional: REFS=<file> ships it as pipelines/5451083B.refs (shader refs for the first-boot warm-up, B-098);
-# JOBS=<n> caps compile parallelism (default: all cores); CODEGEN_ONLY=1 stops after codegen.
+# JOBS=<n> caps compile parallelism (default: all cores); CODEGEN_ONLY=1 stops after codegen;
+# CCACHE_DIR=<dir> compiles through ccache with its cache there (CI keeps one per runner and platform, CCACHE_MAXSIZE
+# default 10G): an unchanged codegen key then reuses the compiled generated code.
 # Output: <out>/dist (what ships), <out>/symbols (debug info for crash reports).
 set -eu
 PLATFORM=${1:?usage: tools/ci/build.sh <linux|windows|macos> <sdk dir> <out dir>}
@@ -23,6 +25,19 @@ case $PLATFORM in macos) JOBS=${JOBS:-$(sysctl -n hw.ncpu)} ;; *) JOBS=${JOBS:-$
 
 if command -v sha1sum >/dev/null; then sha1sum -c default.xex.sha1; else shasum -c default.xex.sha1; fi
 
+CCACHE=
+if [ -n "${CCACHE_DIR:-}" ]; then
+  # The precompiled headers are rebuilt every time; this sloppiness lets ccache reuse them and the objects built
+  # with them (CMakeLists.txt adds -fno-pch-timestamp under BOTS_CCACHE).
+  export CCACHE_DIR CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime
+  export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-10G}"
+  # By version, not the mtime of the compiler (a wrapper script in the Linux image, new with every image rebuild).
+  export CCACHE_COMPILERCHECK="%compiler% --version"
+  mkdir -p "$CCACHE_DIR"
+  ccache -z >/dev/null
+  CCACHE=1
+fi
+
 step() { echo "== $* ($(date -u +%H:%M:%S))"; }
 
 case $PLATFORM in
@@ -35,6 +50,7 @@ windows)
   # The build can't run the rexglue.exe it would build, so codegen runs a recompiler built for Linux first.
   step "recompiler (host)"
   cmake -G Ninja -S "$SDK" -B "$OUT/host" -DCMAKE_BUILD_TYPE=Release \
+    ${CCACHE:+-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache} \
     -DCMAKE_C_FLAGS=-march=x86-64-v2 -DCMAKE_CXX_FLAGS=-march=x86-64-v2 >/dev/null
   cmake --build "$OUT/host" --target rexglue --parallel "$JOBS"
   # MSVC header names are matched case-insensitively on Windows; add the spellings the sources use.
@@ -49,7 +65,7 @@ macos)
 esac
 
 step configure
-cmake -S . -B "$B" "$@" >/dev/null
+cmake -S . -B "$B" "$@" -DBOTS_CCACHE=$([ -n "$CCACHE" ] && echo ON || echo OFF) >/dev/null
 if [ ! -f generated/default/sources.cmake ]; then
   # The generated sources are listed at configure time, so configure again once codegen has written them.
   step codegen
@@ -59,6 +75,7 @@ fi
 [ -z "${CODEGEN_ONLY:-}" ] || exit 0
 step build
 cmake --build "$B" --target bots --parallel "$JOBS"
+[ -z "$CCACHE" ] || ccache -s
 
 step stage
 rm -rf "$DIST" "$SYM"

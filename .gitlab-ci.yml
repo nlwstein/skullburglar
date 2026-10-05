@@ -4,14 +4,17 @@
 #
 # The build needs the game executable, which is never in this repo: tools/ci/gitlab_build.sh reads it from the private
 # assets project (ASSETS_PROJECT) with the job token, which only this project's jobs may use there (its job token
-# allowlist). Codegen output stored there (tools/ci/codegen_publish.sh) saves the half-hour codegen run.
+# allowlist). Codegen output stored there (tools/ci/codegen_publish.sh) saves the half-hour codegen run, and each
+# runner keeps a ccache per platform (CCACHE_DIR, tools/ci/build.sh), so an unchanged codegen key also skips compiling
+# the generated code. Both hold game-derived objects: they stay on this instance's runners.
 #
 # Only the newest commit builds: build jobs are interruptible, so a newer pipeline on the branch cancels them
 # (workflow:auto_cancel). The release job isn't, and releases run one at a time.
 #
 # Linux and Windows run on a runner whose executor is Docker with the host's Docker socket: build jobs build their image
 # there (cached) and run it next to the job container, sharing its build directory. macOS needs an Apple silicon Mac:
-# a shell-executor runner tagged `macos` with the Xcode command line tools, cmake and ninja on its PATH.
+# a shell-executor runner tagged `macos` with the Xcode command line tools, cmake, ninja and ccache on its PATH, and
+# CCACHE_DIR set in its job environment.
 #
 # Run a pipeline on main with BUILD=1 to build (and upload as skullburglar/<last>-dev.<sha>) without releasing.
 
@@ -91,6 +94,7 @@ plan:
     - >-
       docker run --rm --name "skullburglar-ci-$CI_JOB_ID" --volumes-from "$JOB" -w "$CI_PROJECT_DIR"
       -e CI_JOB_TOKEN -e CI_SERVER_HOST -e CI_API_V4_URL -e CI_PROJECT_ID -e VERSION -e ASSETS_PROJECT
+      -e CCACHE_DIR=/ccache -v "skullburglar-ccache-$PLATFORM:/ccache"
       "skullburglar-ci-$PLATFORM" tools/ci/gitlab_build.sh "$PLATFORM"
   after_script:
     # A cancelled job leaves its build container running otherwise.

@@ -20,6 +20,17 @@ if(NOT BOTS_PROFILING)
     set(REXGLUE_ENABLE_PERF_COUNTERS OFF CACHE BOOL "" FORCE)
 endif()
 
+# Release builds compile through ccache (tools/ci/build.sh). Precompiled headers then must not record header mtimes,
+# or ccache can't reuse them; it also needs the sloppiness build.sh sets.
+option(BOTS_CCACHE "Compile through ccache" OFF)
+if(BOTS_CCACHE)
+    find_program(CCACHE_PROGRAM ccache REQUIRED)
+    foreach(lang C CXX OBJC OBJCXX)
+        set(CMAKE_${lang}_COMPILER_LAUNCHER ${CCACHE_PROGRAM})
+    endforeach()
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-Xclang=-fno-pch-timestamp>)
+endif()
+
 include(generated/rexglue.cmake)
 
 # SDK built from source (REXSDK_DIR): its macOS helper stages MoltenVK's ICD file from paths that only the installed

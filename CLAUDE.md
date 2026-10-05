@@ -31,7 +31,8 @@ Build steps are in `BUILDING.md`; contribution rules in `CONTRIBUTING.md`.
 - `tools/ci/`, `packaging/`, `.gitlab-ci.yml` — release builds (BUILDING.md "Release builds"). Pushing `main` releases
   it when there are `feat`/`fix`/`perf` commits (python-semantic-release computes the version; the CI makes the tag and
   a GitLab release, nothing is committed back). The commit type is the version bump, so pick it with care; don't create
-  `v*` tags by hand. CI reads the game executable from a private assets project: never cache, log or upload anything
-  derived from it anywhere but this project's and the assets project's private package registries. After changing
+  `v*` tags by hand. CI reads the game executable from a private assets project: anything derived from it (codegen
+  output, compiled objects, packages) stays on the private GitLab instance: its package registries and its own
+  runners' build caches (ccache). Never upload or log it anywhere else. After changing
   codegen's inputs (manifest, `config/`, recompiler patches), run `tools/ci/codegen_publish.sh`.
 - Not in git: `game/`, `generated/`, `out/`, `run/`, `logs/`, `dumps/`, `shaders/`.

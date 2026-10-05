@@ -13,7 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN wget -qO /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key \
  && echo "deb http://apt.llvm.org/bullseye/ llvm-toolchain-bullseye-21 main" > /etc/apt/sources.list.d/llvm.list \
  && apt-get update && apt-get install -y --no-install-recommends clang-21 lld-21 llvm-21 \
-    curl git xz-utils \
+    curl git xz-utils ccache \
  && rm -rf /var/lib/apt/lists/*
 
 # clang/clang++ wrappers: gcc-14's headers and static libstdc++ first, then gcc-10's dir for libgcc_s/libgcc_eh.

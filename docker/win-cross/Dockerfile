@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # The second line: the SDK's Linux dependencies (as docker/linux), because the recompiler that runs codegen is built
 # for this machine first, and configuring the SDK for Linux needs them even for that one target.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git python3 xz-utils zip clang lld llvm cmake ninja-build pkg-config \
+      ca-certificates curl git python3 xz-utils zip clang lld llvm cmake ninja-build pkg-config ccache \
       libgtk-3-dev libx11-xcb-dev libxss-dev libvulkan-dev libwayland-dev libwayland-bin wayland-protocols \
       libxkbcommon-dev libdecor-0-dev libasound2-dev libpulse-dev libpipewire-0.3-dev \
  && rm -rf /var/lib/apt/lists/*

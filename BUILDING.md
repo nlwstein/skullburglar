@@ -109,4 +109,6 @@ data.
 Codegen takes over half an hour on an x86 CI runner, and its output is the same on every platform and only changes
 with its inputs (`tools/ci/codegen_key.sh`: the manifest, `config/`, the recompiler's SDK sources). After changing one
 of those, store the new output for the release builds with `GITLAB_TOKEN=... tools/ci/codegen_publish.sh` (on a Mac
-it takes a few minutes); until then they run codegen themselves.
+it takes a few minutes); until then they run codegen themselves. Compiling the generated code is the other long step
+(over half an hour for Windows); the builds go through ccache (`CCACHE_DIR`, kept on each runner per platform), so
+while the codegen key stays the same, only changed sources are compiled again.
