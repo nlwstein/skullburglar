@@ -117,6 +117,11 @@ SERIES.append(
     # recvfrom the source port), and no SIGPIPE on sends.
     ("0016-posix-socket-option-translation.patch",
      ["src/system/xsocket.cpp", "src/kernel/xam/xam_net.cpp"], {}))
+SERIES.append(
+    # Cross builds (Windows from Linux) can't run the rexglue.exe they build, so the generated rexglue.cmake's codegen
+    # rule takes REXGLUE_HOST_CLI: a rexglue built for the build machine. Unset, nothing changes.
+    ("0017-codegen-rule-host-cli-for-cross-builds.patch",
+     ["resources/templates/init/rexglue_cmake.inja"], {}))
 
 
 def git(sdk, *args, **kw):

@@ -114,10 +114,18 @@ endmacro()
 # codegen, including one a project assembles itself rather than taking the
 # library rexglue_setup_target() builds. The stamp comes first: the DEPFILE
 # names it.
+# A cross build can't run the rexglue it builds: point REXGLUE_HOST_CLI at one
+# built for this machine.
+set(REXGLUE_HOST_CLI "" CACHE FILEPATH "rexglue CLI to run codegen with (cross builds)")
+if(REXGLUE_HOST_CLI)
+    set(REXGLUE_CODEGEN_CLI "${REXGLUE_HOST_CLI}")
+else()
+    set(REXGLUE_CODEGEN_CLI "$<TARGET_FILE:rex::rexglue>")
+endif()
 add_custom_command(
     OUTPUT "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/codegen.build.stamp"
            ${REXGLUE_ENTRYPOINT_GENERATED_SOURCES}
-    COMMAND $<TARGET_FILE:rex::rexglue> codegen ${CMAKE_CURRENT_SOURCE_DIR}/bots_manifest.toml
+    COMMAND ${REXGLUE_CODEGEN_CLI} codegen ${CMAKE_CURRENT_SOURCE_DIR}/bots_manifest.toml
     DEPFILE "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/codegen.d"
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     COMMENT "Generating recompiled code for bots"
