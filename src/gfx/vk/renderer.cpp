@@ -530,6 +530,40 @@ std::string Renderer::TakeGpuLabelReport(double frames, size_t top) {
   return out;
 }
 
+std::string Renderer::TakeMemoryReport() {
+  auto mb = [](uint64_t bytes) { return double(bytes) / 1048576.0; };
+  auto bytes = [&](const Image& image) {
+    if (!image.allocation) return uint64_t(0);
+    VmaAllocationInfo info;
+    vmaGetAllocationInfo(allocator_, image.allocation, &info);
+    return uint64_t(info.size);
+  };
+  uint64_t surfaces = 0, resolves = 0, textures = 0;
+  for (const auto& [key, image] : surfaces_) surfaces += bytes(*image);
+  for (const auto& [key, image] : textures_) resolves += bytes(*image);
+  for (const auto& [key, texture] : guest_textures_) textures += bytes(texture->image);
+  char line[256];
+  std::snprintf(line, sizeof(line),
+                "surfaces %zu %.0f MB, resolve targets %zu %.0f MB, textures %zu %.0f MB; ring peak %.1f MB of %.0f, "
+                "largest upload %.1f MB, %llu full; heaps (ours/process/budget MB):",
+                surfaces_.size(), mb(surfaces), textures_.size(), mb(resolves), guest_textures_.size(), mb(textures),
+                mb(ring_peak_), mb(ring_.size), mb(upload_max_), static_cast<unsigned long long>(ring_full_));
+  std::string out = line;
+  ring_peak_ = 0, upload_max_ = 0, ring_full_ = 0;
+  const VkPhysicalDeviceMemoryProperties* props = nullptr;
+  vmaGetMemoryProperties(allocator_, &props);
+  std::vector<VmaBudget> budgets(props->memoryHeapCount);
+  vmaGetHeapBudgets(allocator_, budgets.data());
+  for (uint32_t i = 0; i < props->memoryHeapCount; ++i) {
+    if (!budgets[i].statistics.blockBytes && !budgets[i].usage) continue;
+    std::snprintf(line, sizeof(line), " %u%s %.0f/%.0f/%.0f", i,
+                  (props->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) ? "(device)" : "(host)",
+                  mb(budgets[i].statistics.blockBytes), mb(budgets[i].usage), mb(budgets[i].budget));
+    out += line;
+  }
+  return out;
+}
+
 // Everything stays in GENERAL layout and every operation is separated by a full barrier. Simple and correct;
 // finer barriers are P5 work.
 bool Renderer::Conflicts(std::span<Image* const> reads, std::span<Image* const> writes) const {
@@ -581,6 +615,7 @@ void Renderer::Flush() {
   EndRendering("flush");
   GpuMark(kGpuOther, true);  // closes the last span
   if (ring_used_) vmaFlushAllocation(allocator_, ring_.allocation, 0, ring_used_);
+  ring_peak_ = std::max(ring_peak_, ring_used_);
   vk_.vkEndCommandBuffer(cmd_);
   recording_ = false;
   VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};

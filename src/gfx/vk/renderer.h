@@ -269,7 +269,8 @@ class Renderer : public Pm4Sink {
   bool CreateImage(Image& image, VkFormat format, uint32_t width, uint32_t height, bool depth,
                    VkImageViewType view_type = VK_IMAGE_VIEW_TYPE_2D, bool attachment = true,
                    uint32_t depth_or_layers = 1, uint32_t levels = 1);
-  bool CreateBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage);
+  // host: mapped for CPU writes (sequential); otherwise GPU-only, filled by copies.
+  bool CreateBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage, bool host = true);
   void Resolve(const rex::graphics::RegisterFile& regs);
   void Barrier();
   // Barriers only on a hazard: images written / read by GPU work recorded since the last Barrier(). Access()
@@ -297,6 +298,9 @@ class Renderer : public Pm4Sink {
   bool gpu_timing() const { return gpu_timing_; }
   // The labelled spans with the most GPU time since the last call ("label ms/frame xcount", one per line).
   std::string TakeGpuLabelReport(double frames, size_t top);
+  // Memory per Vulkan heap (ours via VMA, and the process's where the driver reports a budget), the textures held,
+  // and the most of a submission's upload ring used since the last call (B-113).
+  std::string TakeMemoryReport();
 
  private:
   void GpuMark(GpuCat cat, bool force = false);
@@ -468,6 +472,8 @@ class Renderer : public Pm4Sink {
   std::unique_ptr<ShaderCache> shaders_;
   Buffer shared_memory_, ring_;
   VkDeviceSize ring_used_ = 0;
+  VkDeviceSize ring_peak_ = 0, upload_max_ = 0;  // TakeMemoryReport: most used in a submission, largest upload
+  uint64_t ring_full_ = 0;  // uploads that found the ring full and flushed for room
   uint64_t ring_epoch_ = 1;  // bumped whenever ring_ is reset: earlier uploads can no longer be reused
   // The last upload of each constant buffer (B-085). A draw reuses it while the ring is the same and nothing it
   // holds has changed: the same shader (float constants) and no write to its register groups since

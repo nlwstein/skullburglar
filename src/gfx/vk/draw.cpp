@@ -29,7 +29,9 @@ namespace du = rex::graphics::draw_util;
 using Translator = rg::SpirvShaderTranslator;
 
 constexpr VkDeviceSize kSharedMemorySize = VkDeviceSize(512) << 20;
-constexpr VkDeviceSize kRingSize = VkDeviceSize(128) << 20;
+// Per submission (kSubmissions of them, host-visible). Gameplay uses at most ~14 MB of one; loads fill it and flush
+// early, which costs nothing measurable (B-113: was 128 MB, 768 MB in all).
+constexpr VkDeviceSize kRingSize = VkDeviceSize(32) << 20;
 // Constant buffers are dynamic uniform buffers over the ring with a fixed range each (one set per ring, only the
 // offsets change per draw). Float constants are packed to what the shader uses, at most 256 registers; the ring
 // has this much slack past kRingSize so a range starting near its end stays inside the buffer.
@@ -127,20 +129,26 @@ bool ConvertIndices(const uint8_t* src, T* dst, uint32_t count, xe::Endian endia
 
 }  // namespace
 
-bool Renderer::CreateBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage) {
+bool Renderer::CreateBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage, bool host) {
   VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   info.size = size;
   info.usage = usage;
   VmaAllocationCreateInfo alloc{};
-  alloc.usage = VMA_MEMORY_USAGE_AUTO;
-  alloc.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+  // Host buffers on a discrete GPU stay in system memory: left to VMA they go to the small BAR heap (256 MB without
+  // resizable BAR) once they fit, past its budget (B-113). Unified-memory devices keep VMA's choice.
+  const VkPhysicalDeviceProperties* physical = nullptr;
+  vmaGetPhysicalDeviceProperties(allocator_, &physical);
+  const bool discrete = physical && physical->deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+  alloc.usage = !host ? VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE
+                      : discrete ? VMA_MEMORY_USAGE_AUTO_PREFER_HOST : VMA_MEMORY_USAGE_AUTO;
+  if (host) alloc.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
   VmaAllocationInfo mapped;
   if (vmaCreateBuffer(allocator_, &info, &alloc, &buffer.buffer, &buffer.allocation, &mapped) != VK_SUCCESS) {
     return false;
   }
   buffer.mapping = static_cast<uint8_t*>(mapped.pMappedData);
   buffer.size = size;
-  return buffer.mapping != nullptr;
+  return !host || buffer.mapping != nullptr;
 }
 
 bool Renderer::InitDrawing() {
@@ -208,9 +216,10 @@ bool Renderer::InitDrawing() {
                                           &set_layout_shared_};
   if (vk_.vkAllocateDescriptorSets(dev, &alloc, &shared_set_) != VK_SUCCESS) return false;
 
-  // Guest physical memory, as the translated shaders address it (vertex fetch, index loads).
+  // Guest physical memory, as the translated shaders address it (vertex fetch, index loads). GPU-only: it is filled
+  // through the ring (UploadGuestMemory), so on a discrete GPU it lives in VRAM, not pinned system memory (B-113).
   bool buffers = CreateBuffer(shared_memory_, kSharedMemorySize,
-                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
   for (Buffer& ring : rings_) {
     buffers = buffers && CreateBuffer(ring, kRingSize + kRingSlack, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
                                                                         VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
@@ -293,16 +302,17 @@ void Renderer::DestroyDrawing() {
 
 // Snapshot (no tracker): all of physical memory, once. With a tracker, draws request what they read instead.
 bool Renderer::UploadSharedMemory() {
-  const uint8_t* source = memory_(0);
-  if (!source) return false;
-  std::memcpy(shared_memory_.mapping, source, kSharedMemorySize);
-  vmaFlushAllocation(allocator_, shared_memory_.allocation, 0, VK_WHOLE_SIZE);
-  return true;
+  if (!memory_(0)) return false;
+  return UploadGuestMemory(0, uint32_t(kSharedMemorySize));
 }
 
 uint8_t* Renderer::Upload(VkDeviceSize size, VkDeviceSize alignment, VkDeviceSize& offset) {
   const VkDeviceSize start = (ring_used_ + alignment - 1) / alignment * alignment;
-  if (start + size > ring_.size) return nullptr;  // IssueDraw reserves enough up front
+  upload_max_ = std::max(upload_max_, size);
+  if (start + size > ring_.size) {  // IssueDraw reserves enough up front
+    ++ring_full_;
+    return nullptr;
+  }
   offset = start;
   ring_used_ = start + size;
   return ring_.mapping + start;
@@ -812,6 +822,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     return;
   }
   if (ring_used_ + upload_need > ring_.size || transient_sets_ + 12 > kTransientSetCount) {
+    if (ring_used_ + upload_need > ring_.size) ++ring_full_;
     Flush();
     BeginCommands(kGpuDraw);
   }

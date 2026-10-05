@@ -124,6 +124,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
                     double(idle_us_ - last_idle_us_) / 1000.0 / n,
                     double(query_idle_us_ - last_query_idle_us_) / 1000.0 / n);
       }
+      REXLOG_INFO("gfx native: memory: {}", renderer_->TakeMemoryReport());
       last_idle_us_ = idle_us_, last_query_idle_us_ = query_idle_us_;
       last_ = {frames_, now, st.draw_us, st.texture_us, st.wait_us, st.flushes, st.draws, st.resolves};
       last_.render_passes = st.render_passes, last_.transfers = st.transfers, last_.barriers = st.barriers;
