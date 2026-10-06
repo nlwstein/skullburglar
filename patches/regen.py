@@ -105,23 +105,34 @@ SERIES.append(
     ("0015-spirv-contraction-features.patch",
      ["src/graphics/pipeline/shader/spirv_builder.cpp", "src/graphics/pipeline/shader/spirv_translator.cpp"],
      {}))
-SERIES.append(
-    # XSocket::SetOption passed the guest's Winsock SOL_SOCKET level/option numbers to the host as-is. BSD/macOS use
-    # the same numbers, Linux doesn't: UE3's LAN beacon SetBroadcast failed, so creating the (LAN) game session for
-    # New Story reported failure and the front end never launched the map (Steam Deck / Linux only).
-    # IOControl had the same problem with FIONBIO (Linux 0x5421 vs 0x8004667E): the beacon socket stayed blocking, so
-    # the per-tick beacon poll's recvfrom blocked the game thread inside GameEngine::Tick right after the travel
-    # request. FIONBIO/FIONREAD are translated, and their big-endian u_long argument swapped, on every platform.
-    # B-108 audit: errno -> Winsock error codes (a would-block read reported 0), select's nfds computed from the
-    # sets, real host sockaddr_in for bind/connect/sendto (macOS has sin_len; sendto byte-swapped port and address,
-    # recvfrom the source port), and no SIGPIPE on sends.
-    ("0016-posix-socket-option-translation.patch",
-     ["src/system/xsocket.cpp", "src/kernel/xam/xam_net.cpp"], {}))
+# 0016 (POSIX socket option translation) was folded into 0018, which rewrites the same two files.
 SERIES.append(
     # Cross builds (Windows from Linux) can't run the rexglue.exe they build, so the generated rexglue.cmake's codegen
     # rule takes REXGLUE_HOST_CLI: a rexglue built for the build machine. Unset, nothing changes.
     ("0017-codegen-rule-host-cli-for-cross-builds.patch",
      ["resources/templates/init/rexglue_cmake.inja"], {}))
+SERIES.append(
+    # System link between instances (B-057), on one machine or across a network. Each process takes a slot 0-7
+    # (UDP lock port 9984 + slot); guest port P is host port P + 10000 + 16 * slot, and every datagram carries a
+    # 4-byte 'X' 'N' version/slot prefix. XNADDR encodes (ip, slot); XNetXnAddrToInAddr hands out synthetic
+    # 169.254.250.x addresses that map back to (ip, slot). Broadcasts go to the LAN, to this machine's other slots
+    # over loopback, and to netplay_peers. XNet keys / connect / overlapped WSA calls / getsockopt / getsockname are
+    # implemented; XNetRandom is random; XSessionCreate fills the host's session info; user_xuid / user_gamertag
+    # cvars give a second instance its own profile.
+    # Also the POSIX socket fixes (formerly 0016): Winsock SOL_SOCKET option numbers translated for Linux (UE3's LAN
+    # beacon SetBroadcast failed there, so New Story never launched the map on the Deck), FIONBIO/FIONREAD with their
+    # big-endian argument, errno -> Winsock error codes, select's nfds from the sets, real host sockaddr_in (macOS
+    # sin_len; ports and addresses in network order), SO_LINGER's struct, and no SIGPIPE on sends.
+    ("0018-netplay-system-link.patch",
+     ["src/system/xsocket.cpp", "src/kernel/xam/xam_net.cpp", "include/rex/system/xsocket.h",
+      "include/rex/kernel/xam/apps/xgi_app.h", "include/rex/system/xam/user_profile.h",
+      "src/system/xam/user_profile.cpp", "src/kernel/xam/xam_user.cpp"],
+     {"src/kernel/xam/apps/xgi_app.cpp": r"netplay"}))
+SERIES.append(
+    # --window_tile=left|right: place the window on the left / right half of the display (split-screen co-op runs
+    # two instances side by side).
+    ("0019-window-tile.patch",
+     ["src/ui/window_sdl.cpp"], {}))
 
 
 def git(sdk, *args, **kw):

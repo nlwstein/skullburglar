@@ -43,6 +43,7 @@ endif()
 # Sources
 set(BOTS_SOURCES
     src/main.cpp
+    src/coop.cpp
     src/game_hooks.cpp
     src/mnk_input.cpp
     src/gfx/d3d_hooks.cpp

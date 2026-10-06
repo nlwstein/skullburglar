@@ -45,6 +45,7 @@
 
 #include "app_quit.h"
 #include "mnk_input.h"
+#include "coop.h"
 #include "script_input.h"
 #include "setup/app_paths.h"
 #include "setup/settings.h"
@@ -154,6 +155,7 @@ class BotsApp : public rex::ReXApp {
             rex::cvar::SetFlagByName("cl", intro ? "" : "-nostartupmovies");
           }
           ApplyVsync();  // the game's swapchain doesn't exist yet
+          bots::ApplyCoopDefaults();  // co-op may have been switched on in the launcher
           rex::PathConfig paths = defaults;
           paths.game_data_root = dir;
           resume(paths);
@@ -261,6 +263,7 @@ class BotsApp : public rex::ReXApp {
   //    depth compares need exact 24-bit float depth; without it the player renders black
   //    in level 1 (B-035, sweep 2026-10-01).
   void OnPreSetup(rex::RuntimeConfig& config) override {
+    bots::ApplyCoopDefaults();  // --coop: before the window, input and profile read their cvars
     // The menus' Quit option (game_hooks.cpp) runs on a guest thread. Quit the way closing the window does
     // (ReXApp::OnClosing terminates the title and exits); QuitFromUIThread alone leaves the guest threads running.
     bots::SetQuitHandler([this] {
@@ -323,6 +326,10 @@ class BotsApp : public rex::ReXApp {
         cl_source != rex::cvar::Source::kCommandLine && cl_source != rex::cvar::Source::kEnvironment) {
       rex::cvar::SetFlagByName("cl", "-nostartupmovies");
     }
+    // Co-op on one PC (B-057): with --pad, this instance's pad must keep working while the other
+    // instance's window has focus (--coop sets it in ApplyCoopDefaults). SDL reads the hint when it
+    // opens the joystick subsystem.
+    if (bots::CoopPad() > 0) SetEnvDefault("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
   }
 
   // BOTS_CMDLINE="<args>": UE3 command line. The game reads XAM launch data as an ANSI string
@@ -349,12 +356,18 @@ class BotsApp : public rex::ReXApp {
   }
 
   // Keyboard and mouse (mnk_input.h), and BOTS_INPUT=<script>: scripted controller as guest user 0
-  // (script_input.h).
+  // (script_input.h). --pad=N: only pad N drives this instance; --coop: player 1 starts player 2 here,
+  // once the launcher (if any) has settled the game files and before the shader cache opens (coop.h).
   void OnPostSetup() override {
     SetLaunchCommandLine();
     RegisterFullscreenBind();
+    bots::SpawnPlayerTwo(game_data_root(), user_data_root(), cache_root());
     if (!runtime() || !runtime()->input_system()) return;
     auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system());
+    if (auto assignment = bots::MakePadAssignment()) {
+      REXLOG_INFO("input: pad {} drives player one", bots::CoopPad());
+      input->SetDeviceAssignment(std::move(assignment));
+    }
     // Added after the SDK attached the window and its overlay callback to the drivers it had, so do
     // both here. ImGui dialogs (settings/console/debug overlays, shader progress) exist only while
     // shown: release the pointer while any that takes input is up. Passive ones (achievement toast,

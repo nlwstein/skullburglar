@@ -54,6 +54,11 @@ uint32_t LoadU32(uint8_t* base, uint32_t address) {
   return __builtin_bswap32(v);
 }
 
+void StoreU32(uint8_t* base, uint32_t address, uint32_t value) {
+  value = __builtin_bswap32(value);
+  __builtin_memcpy(Raw(base, address), &value, 4);
+}
+
 int PeekConstInt(uint8_t* base, uint32_t code) {
   switch (*Raw(base, code)) {
     case 0x25: return 0;
@@ -129,6 +134,69 @@ bool BotsGuardNullEntryList(PPCRegister& r10, PPCRegister& r11) {
   return true;
 }
 
+// BOTS_UELOG=1: mirror the engine's own log (debugf / warnf: net driver, travel, ...) into ours.
+// The shipped game opens D:\C1Game\Logs\Launch.log, which fails on the read-only game drive.
+// sub_825EF750 = FOutputDeviceRedirector::Serialize(const TCHAR* Data, EName Event), vtbl[1] of
+// *GLog (vtable 0x82063BAC). Event is an FName index (number in the log line).
+extern "C" void __imp__sub_825EF750(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_825EF750(PPCContext& __restrict ctx, uint8_t* base) {
+  static const bool on = [] {
+    const char* v = std::getenv("BOTS_UELOG");
+    return v && *v == '1';
+  }();
+  if (on && ctx.r4.u32) {
+    std::string line;
+    const uint8_t* p = Raw(base, ctx.r4.u32);
+    for (size_t i = 0; i < 1024; ++i, p += 2) {
+      uint16_t c = static_cast<uint16_t>(p[0] << 8 | p[1]);
+      if (!c) break;
+      line.push_back(c < 0x80 ? static_cast<char>(c) : '?');
+    }
+    REXLOG_INFO("UE3 [{}] {}", ctx.r5.u32, line);
+  }
+  __imp__sub_825EF750(ctx, base);
+}
+
+// Co-op over system link (B-057). The game's co-op is Live-only (Join COOP needs a Live sign-in:
+// --user_signin_live) and no Live service exists, so every session it creates or searches for is
+// turned into a LAN one; UOnlineSubsystemLive already has the system-link path (XSession flags
+// HOST|USES_PEER_NETWORK, LAN beacon discovery).
+// sub_82BF2970 = CreateOnlineGame(this, byte HostingPlayerNum, UOnlineGameSettings* r5), vtbl[108];
+//   its flag builder sub_82BE75F8 returns 0x21 (system link) when bit 30 of Settings+140
+//   (bIsLanMatch) is set.
+// sub_82BF31D8 = FindOnlineGames(this, byte ControllerId, UOnlineGameSearch* r5), vtbl[111]; bit 31
+//   of Search+124 (bIsLanQuery) picks FindLanGames (sub_82BF0CD8) over FindLiveGames, which
+//   broadcasts the query and polls for answers for LanQueryTimeout seconds.
+extern "C" void __imp__sub_82BF2970(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_82BF2970(PPCContext& __restrict ctx, uint8_t* base) {
+  if (const uint32_t settings = ctx.r5.u32) {
+    StoreU32(base, settings + 140, LoadU32(base, settings + 140) | 0x40000000u);
+    // The LAN beacon (sub_82BF5248) only answers queries while NumOpenPublicConnections (+116,
+    // copied from NumPublicConnections +108 here) > 0; invite-only co-op has private slots only.
+    uint32_t pub = LoadU32(base, settings + 108), priv = LoadU32(base, settings + 112);
+    REXLOG_INFO("B-057: CreateOnlineGame -> system link (flags {:08X}, public {}, private {})",
+                LoadU32(base, settings + 140), pub, priv);
+    if (pub == 0 && priv > 0) {
+      StoreU32(base, settings + 108, priv);
+      StoreU32(base, settings + 112, 0);
+    }
+  }
+  __imp__sub_82BF2970(ctx, base);
+}
+
+extern "C" void __imp__sub_82BF31D8(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_82BF31D8(PPCContext& __restrict ctx, uint8_t* base) {
+  if (const uint32_t search = ctx.r5.u32) {
+    StoreU32(base, search + 124, LoadU32(base, search + 124) | 0x80000000u);
+    // LanQueryTimeout (this+744, float) is 0 in this Live-only build, so the LAN tick
+    // (sub_82BEB1A0) ended every search on its first frame, before any answer could arrive.
+    const uint32_t timeout = ctx.r3.u32 + 744;
+    if (LoadU32(base, timeout) == 0) StoreU32(base, timeout, 0x40000000u);  // 2.0f
+    REXLOG_INFO("B-057: FindOnlineGames -> LAN query");
+  }
+  __imp__sub_82BF31D8(ctx, base);
+}
+
 // BOTS_EXEC: run UE3 console commands in game, the way the engine runs its own -EXEC= file at startup
 // (sub_82358A38 @0x82358E90): GamePlayers(0) of Cast<UGameEngine>(GEngine), FExec subobject at
 // +60, vtbl[0] = Exec(const TCHAR* Cmd, FOutputDevice& Ar), Ar = *GLog. The shipped story game
@@ -170,6 +238,14 @@ ExecState* Exec() {
 }
 
 void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std::string& cmd) {
+  // "peek <hex addr> [count]": log guest words (pointers the game fills in at runtime).
+  if (cmd.rfind("peek ", 0) == 0) {
+    char* end = nullptr;
+    uint32_t addr = static_cast<uint32_t>(std::strtoul(cmd.c_str() + 5, &end, 16)) & ~3u;
+    int count = std::max(1, std::min(64, static_cast<int>(std::strtol(end, nullptr, 10))));
+    for (int i = 0; i < count; ++i, addr += 4) REXLOG_INFO("BOTS_EXEC peek {:08X} = {:08X}", addr, LoadU32(base, addr));
+    return;
+  }
   if (!st.buffer) st.buffer = rex::system::kernel_memory()->SystemHeapAlloc(0x400);
   ctx.r3.u64 = LoadU32(base, kGEngine);
   sub_823501E0(ctx, base);  // Cast<UGameEngine>

@@ -1,5 +1,5 @@
 diff --git a/src/kernel/xam/apps/xgi_app.cpp b/src/kernel/xam/apps/xgi_app.cpp
-index 2b222da..77eb2db 100644
+index 2b222da..5e48621 100644
 --- a/src/kernel/xam/apps/xgi_app.cpp
 +++ b/src/kernel/xam/apps/xgi_app.cpp
 @@ -9,6 +9,9 @@
@@ -12,7 +12,7 @@ index 2b222da..77eb2db 100644
  #include <rex/kernel/xam/apps/xgi_app.h>
  #include <rex/logging.h>
  #include <rex/thread.h>
-@@ -324,12 +327,35 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -324,12 +346,35 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        uint32_t xuids_ptr = memory::load_and_swap<uint32_t>(buffer + 8);
        uint32_t specs_count = memory::load_and_swap<uint32_t>(buffer + 12);
        uint32_t specs_ptr = memory::load_and_swap<uint32_t>(buffer + 16);

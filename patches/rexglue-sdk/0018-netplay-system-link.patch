@@ -1,0 +1,1737 @@
+diff --git a/include/rex/kernel/xam/apps/xgi_app.h b/include/rex/kernel/xam/apps/xgi_app.h
+index 3a5ff93..c78b415 100644
+--- a/include/rex/kernel/xam/apps/xgi_app.h
++++ b/include/rex/kernel/xam/apps/xgi_app.h
+@@ -12,6 +12,7 @@
+ 
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/xam/app_manager.h>
++#include <rex/system/xsocket.h>  // netplay:: (XSessionCreate host info)
+ 
+ namespace rex {
+ namespace kernel {
+diff --git a/include/rex/system/xam/user_profile.h b/include/rex/system/xam/user_profile.h
+index ec37017..0fcd22c 100644
+--- a/include/rex/system/xam/user_profile.h
++++ b/include/rex/system/xam/user_profile.h
+@@ -218,7 +218,9 @@ class UserProfile {
+ 
+   uint64_t xuid() const { return xuid_; }
+   std::string name() const { return name_; }
+-  uint32_t signin_state() const { return 1; }
++  // 1 = signed in locally, 2 = signed in to Live (user_signin_live: lets Live-only co-op menus
++  // through; the sessions themselves run over system link).
++  uint32_t signin_state() const;
+   uint32_t type() const { return 1 | 2; /* local | online profile? */ }
+ 
+   void set_kernel_state(KernelState* ks) { kernel_state_ = ks; }
+diff --git a/include/rex/system/xsocket.h b/include/rex/system/xsocket.h
+index a1b4443..f42a28d 100644
+--- a/include/rex/system/xsocket.h
++++ b/include/rex/system/xsocket.h
+@@ -127,6 +127,13 @@ class XSocket : public XObject {
+   // Queue a packet into our internal buffer.
+   bool QueuePacket(uint32_t src_ip, uint16_t src_port, const uint8_t* buf, size_t len);
+ 
++  // Netplay (system link emulation): guest-visible local address, guest-order values.
++  X_STATUS GetSockName(N_XSOCKADDR_IN* name);
++  X_STATUS GetPeerName(N_XSOCKADDR_IN* name);
++  X_STATUS GetOption(uint32_t level, uint32_t optname, uint8_t* optval_be, uint32_t* optlen);
++  // Last host socket error as a WinSock (WSAE*) code, for XThread::SetLastError.
++  static uint32_t LastWsaError();
++
+  private:
+   XSocket(KernelState* kernel_state, uint64_t native_handle);
+   uint64_t native_handle_ = -1;
+@@ -140,10 +147,38 @@ class XSocket : public XObject {
+   uint16_t bound_port_ = 0;
+ 
+   bool broadcast_socket_ = false;
++  bool nonblocking_ = false;
++  // connect()ed datagram peer, guest view (Send/Recv go through SendTo/RecvFrom).
++  bool connected_ = false;
++  N_XSOCKADDR_IN peer_ = {};
++  uint64_t trace_count_ = 0;
+ 
+   std::unique_ptr<rex::thread::Event> event_;
+   std::mutex incoming_packet_mutex_;
+   std::queue<uint8_t*> incoming_packets_;
+ };
+ 
++// System link over UDP (bots-recomp SDK patch 0010). Every instance has a slot (0..kMaxSlots-1,
++// one per process on a machine) and maps guest port P to host port P + PortOffset(slot), so
++// several instances can share one machine and the game's fixed ports (VDP 1000, listen 7777,
++// system link 14000, LAN beacon 14001) never need privileges. Datagrams carry a 4-byte prefix
++// naming the sender's slot, which lets the receiver translate the source back into the guest
++// view. Peers are addressed by synthetic "secure" IN_ADDRs (XNetXnAddrToInAddr) that stand for
++// (host IP, slot); a guest broadcast goes to that port in every slot.
++namespace netplay {
++constexpr uint32_t kMaxSlots = 8;
++// Values are host order. LocalIp() is the address peers reach this instance at.
++uint32_t Slot();
++uint32_t LocalIp();
++uint16_t PortOffset(uint32_t slot);
++bool Trace();
++// XNADDR (36 bytes, guest layout) of the instance at (ip, slot), and back.
++void BuildXnAddr(uint32_t ip, uint32_t slot, uint8_t* xnaddr);
++void ParseXnAddr(const uint8_t* xnaddr, uint32_t* ip, uint32_t* slot);
++// Synthetic peer address for (ip, slot), created on first use; and the reverse lookup.
++uint32_t SecureAddr(uint32_t ip, uint32_t slot);
++bool LookupSecureAddr(uint32_t secure, uint32_t* ip, uint32_t* slot);
++void RandomBytes(void* out, size_t len);
++}  // namespace netplay
++
+ }  // namespace rex::system
+diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
+index 58e36a4..7feaa88 100644
+--- a/src/kernel/xam/xam_net.cpp
++++ b/src/kernel/xam/xam_net.cpp
+@@ -12,7 +12,10 @@
+ // Disable warnings about unused parameters for kernel functions
+ #pragma GCC diagnostic ignored "-Wunused-parameter"
+ 
++#include <algorithm>
+ #include <cstring>
++#include <mutex>
++#include <vector>
+ 
+ #if REX_PLATFORM_MAC
+ #include <sys/select.h>
+@@ -231,9 +234,9 @@ u32 NetDll_XNetGetOpt_entry(u32 one, u32 option_id, mapped_void buffer_ptr,
+ }
+ 
+ u32 NetDll_XNetRandom_entry(u32 caller, mapped_void buffer_ptr, u32 length) {
+-  // For now, constant values.
+-  // This makes replicating things easier.
+-  std::memset(buffer_ptr, 0xBB, length);
++  // Real randomness: session nonces and XNKIDs come from here, and two instances on one
++  // machine must not generate the same ones.
++  netplay::RandomBytes(buffer_ptr, length);
+ 
+   return 0;
+ }
+@@ -295,23 +298,93 @@ u32 NetDll_WSAGetLastError_entry() {
+   return XThread::GetLastError();
+ }
+ 
+-u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_ptr,
+-                             u32 buffer_count, mapped_u32 num_bytes_recv, mapped_u32 flags_ptr,
+-                             ppc_ptr_t<XSOCKADDR_IN> from_addr,
+-                             ppc_ptr_t<XWSAOVERLAPPED> overlapped_ptr,
+-                             mapped_void completion_routine_ptr) {
+-  if (overlapped_ptr) {
+-    // auto evt = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(
+-    //    overlapped_ptr->event_handle);
++// Completes an overlapped operation immediately: Internal = status, InternalHigh = bytes.
++void CompleteOverlapped(XWSAOVERLAPPED* overlapped, uint32_t bytes) {
++  overlapped->internal = 0;
++  overlapped->internal_high = bytes;
++  if (overlapped->event_handle) {
++    auto ev = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(overlapped->event_handle);
++    if (ev) ev->Set(0, false);
++  }
++}
++
++void ScatterBuffers(XWSABUF* buffers, uint32_t num_buffers, const uint8_t* data, uint32_t len) {
++  for (uint32_t i = 0; i < num_buffers && len; i++) {
++    uint32_t n = std::min<uint32_t>(len, buffers[i].len);
++    std::memcpy(REX_KERNEL_MEMORY()->TranslateVirtual(buffers[i].buf_ptr), data, n);
++    data += n;
++    len -= n;
++  }
++}
++
++int RecvFlags(bool overlapped) {
++#if REX_PLATFORM_WIN32
++  return 0;
++#else
++  // Overlapped receives complete immediately or fail with WOULDBLOCK; never park the thread.
++  return overlapped ? MSG_DONTWAIT : 0;
++#endif
++}
++
++u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buffers,
++                             u32 num_buffers, mapped_u32 num_bytes_recv, mapped_u32 flags_ptr,
++                             ppc_ptr_t<XSOCKADDR_IN> from_ptr, mapped_u32 fromlen_ptr,
++                             ppc_ptr_t<XWSAOVERLAPPED> overlapped, mapped_void completion_routine) {
++  auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
++  if (!socket) {
++    // WSAENOTSOCK
++    XThread::SetLastError(0x2736);
++    return -1;
++  }
++
++  uint32_t capacity = 0;
++  for (uint32_t i = 0; i < num_buffers; i++) capacity += buffers[i].len;
++  std::vector<uint8_t> data(capacity);
++  N_XSOCKADDR_IN native_from;
++  uint32_t native_fromlen = sizeof(XSOCKADDR_IN);
++  int ret = socket->RecvFrom(data.data(), capacity, RecvFlags(bool(overlapped)), &native_from,
++                             &native_fromlen);
++  if (ret < 0) {
++    XThread::SetLastError(XSocket::LastWsaError());
++    return -1;
++  }
++  ScatterBuffers(buffers, num_buffers, data.data(), uint32_t(ret));
++  if (from_ptr) {
++    from_ptr->sin_family = native_from.sin_family;
++    from_ptr->sin_port = native_from.sin_port;
++    from_ptr->sin_addr = native_from.sin_addr;
++    std::memset(from_ptr->x_sin_zero, 0, sizeof(from_ptr->x_sin_zero));
++  }
++  if (fromlen_ptr) *fromlen_ptr = native_fromlen;
++  if (flags_ptr) *flags_ptr = 0;
++  if (num_bytes_recv) *num_bytes_recv = uint32_t(ret);
++  if (overlapped) CompleteOverlapped(overlapped, uint32_t(ret));
++  return 0;
++}
++
++u32 NetDll_WSARecv_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buffers,
++                         u32 num_buffers, mapped_u32 num_bytes_recv, mapped_u32 flags_ptr,
++                         ppc_ptr_t<XWSAOVERLAPPED> overlapped, mapped_void completion_routine) {
++  return NetDll_WSARecvFrom_entry(caller, socket_handle, buffers, num_buffers, num_bytes_recv,
++                                  flags_ptr, ppc_ptr_t<XSOCKADDR_IN>(), mapped_u32(), overlapped,
++                                  completion_routine);
++}
+ 
+-    // if (evt) {
+-    //  //evt->Set(0, false);
+-    //}
++u32 NetDll_WSAGetOverlappedResult_entry(u32 caller, u32 socket_handle,
++                                        ppc_ptr_t<XWSAOVERLAPPED> overlapped,
++                                        mapped_u32 bytes_ptr, u32 wait, mapped_u32 flags_ptr) {
++  // Every overlapped operation completes before it returns (see CompleteOverlapped).
++  if (!overlapped) {
++    XThread::SetLastError(0x271E);  // WSAEFAULT
++    return 0;
+   }
++  if (bytes_ptr) *bytes_ptr = overlapped->internal_high;
++  if (flags_ptr) *flags_ptr = 0;
++  return 1;
++}
+ 
+-  // we're not going to be receiving packets any time soon
+-  // return error so we don't wait on that - Cancerous
+-  return -1;
++u32 NetDll_WSACancelOverlappedIO_entry(u32 caller, u32 socket_handle) {
++  return 0;
+ }
+ 
+ // If the socket is a VDP socket, buffer 0 is the game data length, and buffer 1
+@@ -320,9 +393,6 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
+                            u32 num_buffers, mapped_u32 num_bytes_sent, u32 flags,
+                            ppc_ptr_t<XSOCKADDR_IN> to_ptr, u32 to_len,
+                            ppc_ptr_t<XWSAOVERLAPPED> overlapped, mapped_void completion_routine) {
+-  assert(!overlapped);
+-  assert(!completion_routine);
+-
+   auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
+   if (!socket) {
+     // WSAENOTSOCK
+@@ -345,11 +415,47 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
+     combined_buffer_offset += buffers[i].len;
+   }
+ 
+-  N_XSOCKADDR_IN native_to(to_ptr);
+-  socket->SendTo(combined_buffer_mem.data(), combined_buffer_size, flags, &native_to, to_len);
++  int ret;
++  if (to_ptr) {
++    N_XSOCKADDR_IN native_to(to_ptr);
++    ret = socket->SendTo(combined_buffer_mem.data(), combined_buffer_size, flags, &native_to,
++                         to_len);
++  } else {
++    ret = socket->Send(combined_buffer_mem.data(), combined_buffer_size, flags);
++  }
++  if (ret < 0) {
++    XThread::SetLastError(XSocket::LastWsaError());
++    return -1;
++  }
++  if (num_bytes_sent) *num_bytes_sent = uint32_t(ret);
++  if (overlapped) CompleteOverlapped(overlapped, uint32_t(ret));
++  return 0;
++}
+ 
+-  // TODO: Instantly complete overlapped
++u32 NetDll_WSASend_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buffers,
++                         u32 num_buffers, mapped_u32 num_bytes_sent, u32 flags,
++                         ppc_ptr_t<XWSAOVERLAPPED> overlapped, mapped_void completion_routine) {
++  return NetDll_WSASendTo_entry(caller, socket_handle, buffers, num_buffers, num_bytes_sent, flags,
++                                ppc_ptr_t<XSOCKADDR_IN>(), 0, overlapped, completion_routine);
++}
+ 
++// Network events are not tracked; signal the event so a waiter polls the (non-blocking) socket.
++u32 NetDll_WSAEventSelect_entry(u32 caller, u32 socket_handle, u32 event_handle, u32 events) {
++  auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
++  if (!socket) {
++    XThread::SetLastError(0x2736);
++    return -1;
++  }
++  uint32_t nonblocking = rex::byte_swap(uint32_t(events ? 1 : 0));
++  socket->IOControl(0x8004667E, reinterpret_cast<uint8_t*>(&nonblocking));
++  if (netplay::Trace()) {
++    REXLOG_INFO("netplay: socket {:X} WSAEventSelect event {:X} mask {:X}", uint32_t(socket_handle),
++                uint32_t(event_handle), uint32_t(events));
++  }
++  if (event_handle && events) {
++    auto ev = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(event_handle);
++    if (ev) ev->Set(0, false);
++  }
+   return 0;
+ }
+ 
+@@ -436,27 +542,11 @@ struct XnAddrStatus {
+ };
+ 
+ u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
+-  // Just return a loopback address atm.
+-  addr_ptr->ina.s_addr = htonl(INADDR_LOOPBACK);
+-  addr_ptr->inaOnline.s_addr = 0;
+-  addr_ptr->wPortOnline = 0;
+-
+-  // TODO(gibbed): A proper mac address.
+-  // RakNet's 360 version appears to depend on abEnet to create "random" 64-bit
+-  // numbers. A zero value will cause RakPeer::Startup to fail. This causes
+-  // 58411436 to crash on startup.
+-  // The 360-specific code is scrubbed from the RakNet repo, but there's still
+-  // traces of what it's doing which match the game code.
+-  // https://github.com/facebookarchive/RakNet/blob/master/Source/RakPeer.cpp#L382
+-  // https://github.com/facebookarchive/RakNet/blob/master/Source/RakPeer.cpp#L4527
+-  // https://github.com/facebookarchive/RakNet/blob/master/Source/RakPeer.cpp#L4467
+-  // "Mac address is a poor solution because you can't have multiple connections
+-  // from the same system"
+-  std::memset(addr_ptr->abEnet, 0xCC, 6);
+-
+-  std::memset(addr_ptr->abOnline, 0, 20);
+-
+-  return XnAddrStatus::XNET_GET_XNADDR_STATIC;
++  // ina is this instance's LAN address; abEnet / abOnline encode the netplay slot so peers
++  // (and RakNet-style code that hashes abEnet) can tell instances on one machine apart.
++  netplay::BuildXnAddr(netplay::LocalIp(), netplay::Slot(),
++                       reinterpret_cast<uint8_t*>(addr_ptr.host_address()));
++  return XnAddrStatus::XNET_GET_XNADDR_STATIC | XnAddrStatus::XNET_GET_XNADDR_ETHERNET;
+ }
+ 
+ u32 NetDll_XNetGetDebugXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
+@@ -473,27 +563,102 @@ u32 NetDll_XNetXnAddrToMachineId_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr, m
+ 
+ void NetDll_XNetInAddrToString_entry(u32 caller, u32 in_addr, mapped_string string_out,
+                                      u32 string_size) {
+-  rex::string::copy_truncating(string_out, "666.666.666.666", string_size);
++  uint32_t ip = in_addr, slot = 0;
++  netplay::LookupSecureAddr(in_addr, &ip, &slot);
++  std::string text = std::to_string(ip >> 24) + "." + std::to_string((ip >> 16) & 0xFF) + "." +
++                     std::to_string((ip >> 8) & 0xFF) + "." + std::to_string(ip & 0xFF);
++  rex::string::copy_truncating(string_out, text.c_str(), string_size);
++}
++
++// System link keys. Real XNet negotiates a security association per key; here the key only
++// needs to round-trip (XSessionCreate hands it out, the joining title registers it).
++std::mutex xnet_keys_mutex;
++std::vector<std::vector<uint8_t>> xnet_keys;
++
++// XNKID first byte: high nibble 0 = system link, 0x8 = online peer, 0xC = online server.
++u32 NetDll_XNetCreateKey_entry(u32 caller, mapped_void xnkid, mapped_void xnkey) {
++  netplay::RandomBytes(xnkid, 8);
++  static_cast<uint8_t*>(xnkid.host_address())[0] &= 0x0F;
++  netplay::RandomBytes(xnkey, 16);
++  return 0;
++}
++
++u32 NetDll_XNetRegisterKey_entry(u32 caller, mapped_void xnkid, mapped_void xnkey) {
++  auto* id = static_cast<const uint8_t*>(xnkid.host_address());
++  std::lock_guard<std::mutex> lock(xnet_keys_mutex);
++  for (auto& k : xnet_keys) {
++    if (std::memcmp(k.data(), id, 8) == 0) return 0;
++  }
++  xnet_keys.emplace_back(id, id + 8);
++  return 0;
++}
++
++u32 NetDll_XNetUnregisterKey_entry(u32 caller, mapped_void xnkid) {
++  auto* id = static_cast<const uint8_t*>(xnkid.host_address());
++  std::lock_guard<std::mutex> lock(xnet_keys_mutex);
++  xnet_keys.erase(std::remove_if(xnet_keys.begin(), xnet_keys.end(),
++                                 [&](auto& k) { return std::memcmp(k.data(), id, 8) == 0; }),
++                  xnet_keys.end());
++  return 0;
+ }
+ 
+ // This converts a XNet address to an IN_ADDR. The IN_ADDR is used for
+-// subsequent socket calls (like a handle to a XNet address)
++// subsequent socket calls (like a handle to a XNet address): here a synthetic
++// 169.254.250.x address that stands for (host IP, netplay slot).
+ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mapped_void xid,
+-                                    mapped_void in_addr) {
+-  return 1;
++                                    mapped_u32 in_addr) {
++  if (!xn_addr || !in_addr) return 0x2726;  // WSAEINVAL
++  uint32_t ip, slot;
++  netplay::ParseXnAddr(reinterpret_cast<const uint8_t*>(xn_addr.host_address()), &ip, &slot);
++  if (!ip) return 0x2726;
++  *in_addr = netplay::SecureAddr(ip, slot);
++  return 0;
+ }
+ 
+-// Does the reverse of the above.
+-// FIXME: Arguments may not be correct.
+-u32 NetDll_XNetInAddrToXnAddr_entry(u32 caller, mapped_void in_addr, ppc_ptr_t<XNADDR> xn_addr,
++// Does the reverse of the above. The IN_ADDR is passed by value.
++u32 NetDll_XNetInAddrToXnAddr_entry(u32 caller, u32 in_addr, ppc_ptr_t<XNADDR> xn_addr,
+                                     mapped_void xid) {
+-  return 1;
++  uint32_t ip = in_addr, slot = 0;
++  if (!netplay::LookupSecureAddr(in_addr, &ip, &slot)) slot = 0;
++  if (xn_addr) netplay::BuildXnAddr(ip, slot, reinterpret_cast<uint8_t*>(xn_addr.host_address()));
++  if (xid) {
++    std::lock_guard<std::mutex> lock(xnet_keys_mutex);
++    if (!xnet_keys.empty()) {
++      std::memcpy(xid, xnet_keys.back().data(), 8);
++    } else {
++      std::memset(xid, 0, 8);
++    }
++  }
++  return 0;
++}
++
++u32 NetDll_XNetUnregisterInAddr_entry(u32 caller, u32 in_addr) {
++  return 0;
++}
++
++// There is no security handshake to wait for.
++u32 NetDll_XNetConnect_entry(u32 caller, u32 in_addr) {
++  return 0;
++}
++
++// XNET_CONNECT_STATUS_CONNECTED
++u32 NetDll_XNetGetConnectStatus_entry(u32 caller, u32 in_addr) {
++  return 2;
++}
++
++// No "newer title version on the network" broadcasts are ever seen.
++u32 NetDll_XNetGetBroadcastVersionStatus_entry(u32 caller, u32 reset) {
++  return 0;
++}
++
++u32 NetDll_XNetSetOpt_entry(u32 caller, u32 option_id, mapped_void buffer_ptr, u32 buffer_size) {
++  return 0;
+ }
+ 
+ // https://www.google.com/patents/WO2008112448A1?cl=en
+ // Reserves a port for use by system link
+ u32 NetDll_XNetSetSystemLinkPort_entry(u32 caller, u32 port) {
+-  return 1;
++  return 0;
+ }
+ 
+ // https://github.com/ILOVEPIE/Cxbx-Reloaded/blob/master/src/CxbxKrnl/EmuXOnline.h#L39
+@@ -506,7 +671,9 @@ struct XEthernetStatus {
+ };
+ 
+ u32 NetDll_XNetGetEthernetLinkStatus_entry(u32 caller) {
+-  return 0;
++  // Titles refuse to offer system link without a cable.
++  return XEthernetStatus::XNET_ETHERNET_LINK_ACTIVE | XEthernetStatus::XNET_ETHERNET_LINK_100MBPS |
++         XEthernetStatus::XNET_ETHERNET_LINK_FULL_DUPLEX;
+ }
+ 
+ u32 NetDll_XNetDnsLookup_entry(u32 caller, mapped_string host, u32 event_handle, mapped_u32 pdns) {
+@@ -620,12 +787,7 @@ i32 NetDll_shutdown_entry(u32 caller, u32 socket_handle, i32 how) {
+ 
+   auto ret = socket->Shutdown(how);
+   if (ret == -1) {
+-#if REX_PLATFORM_WIN32
+-    uint32_t error_code = WSAGetLastError();
+-    XThread::SetLastError(error_code);
+-#else
+-    XThread::SetLastError(0x0);
+-#endif
++    XThread::SetLastError(XSocket::LastWsaError());
+   }
+   return ret;
+ }
+@@ -640,7 +802,76 @@ u32 NetDll_setsockopt_entry(u32 caller, u32 socket_handle, u32 level, u32 optnam
+   }
+ 
+   X_STATUS status = socket->SetOption(level, optname, optval_ptr, optlen);
+-  return XSUCCEEDED(status) ? 0 : -1;
++  if (XFAILED(status)) {
++    XThread::SetLastError(XSocket::LastWsaError());
++    return -1;
++  }
++  return 0;
++}
++
++u32 NetDll_getsockopt_entry(u32 caller, u32 socket_handle, u32 level, u32 optname,
++                            mapped_void optval_ptr, mapped_u32 optlen_ptr) {
++  auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
++  if (!socket) {
++    // WSAENOTSOCK
++    XThread::SetLastError(0x2736);
++    return -1;
++  }
++  if (!optval_ptr || !optlen_ptr) {
++    XThread::SetLastError(0x271E);  // WSAEFAULT
++    return -1;
++  }
++  uint32_t len = *optlen_ptr;
++  if (XFAILED(socket->GetOption(level, optname, optval_ptr, &len))) {
++    XThread::SetLastError(0x271E);
++    return -1;
++  }
++  *optlen_ptr = len;
++  return 0;
++}
++
++u32 StoreSockName(const N_XSOCKADDR_IN& name, ppc_ptr_t<XSOCKADDR_IN> name_ptr,
++                  mapped_u32 namelen_ptr) {
++  if (!name_ptr || !namelen_ptr || *namelen_ptr < sizeof(XSOCKADDR_IN)) {
++    XThread::SetLastError(0x271E);  // WSAEFAULT
++    return -1;
++  }
++  name_ptr->sin_family = name.sin_family;
++  name_ptr->sin_port = name.sin_port;
++  name_ptr->sin_addr = name.sin_addr;
++  std::memset(name_ptr->x_sin_zero, 0, sizeof(name_ptr->x_sin_zero));
++  *namelen_ptr = sizeof(XSOCKADDR_IN);
++  return 0;
++}
++
++u32 NetDll_getsockname_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> name_ptr,
++                             mapped_u32 namelen_ptr) {
++  auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
++  if (!socket) {
++    XThread::SetLastError(0x2736);
++    return -1;
++  }
++  N_XSOCKADDR_IN name;
++  if (XFAILED(socket->GetSockName(&name))) {
++    XThread::SetLastError(XSocket::LastWsaError());
++    return -1;
++  }
++  return StoreSockName(name, name_ptr, namelen_ptr);
++}
++
++u32 NetDll_getpeername_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> name_ptr,
++                             mapped_u32 namelen_ptr) {
++  auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
++  if (!socket) {
++    XThread::SetLastError(0x2736);
++    return -1;
++  }
++  N_XSOCKADDR_IN name;
++  if (XFAILED(socket->GetPeerName(&name))) {
++    XThread::SetLastError(0x2749);  // WSAENOTCONN
++    return -1;
++  }
++  return StoreSockName(name, name_ptr, namelen_ptr);
+ }
+ 
+ u32 NetDll_ioctlsocket_entry(u32 caller, u32 socket_handle, u32 cmd, mapped_void arg_ptr) {
+@@ -653,11 +884,10 @@ u32 NetDll_ioctlsocket_entry(u32 caller, u32 socket_handle, u32 cmd, mapped_void
+ 
+   X_STATUS status = socket->IOControl(cmd, arg_ptr);
+   if (XFAILED(status)) {
+-    XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
++    XThread::SetLastError(XSocket::LastWsaError());
+     return -1;
+   }
+ 
+-  // TODO
+   return 0;
+ }
+ 
+@@ -672,7 +902,7 @@ u32 NetDll_bind_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> nam
+   N_XSOCKADDR_IN native_name(name);
+   X_STATUS status = socket->Bind(&native_name, namelen);
+   if (XFAILED(status)) {
+-    XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
++    XThread::SetLastError(XSocket::LastWsaError());
+     return -1;
+   }
+ 
+@@ -690,7 +920,7 @@ u32 NetDll_connect_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR> nam
+   N_XSOCKADDR native_name(name);
+   X_STATUS status = socket->Connect(&native_name, namelen);
+   if (XFAILED(status)) {
+-    XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
++    XThread::SetLastError(XSocket::LastWsaError());
+     return -1;
+   }
+ 
+@@ -707,7 +937,7 @@ u32 NetDll_listen_entry(u32 caller, u32 socket_handle, i32 backlog) {
+ 
+   X_STATUS status = socket->Listen(backlog);
+   if (XFAILED(status)) {
+-    XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
++    XThread::SetLastError(XSocket::LastWsaError());
+     return -1;
+   }
+ 
+@@ -739,6 +969,7 @@ u32 NetDll_accept_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR> addr
+ 
+     return new_socket->handle();
+   } else {
++    XThread::SetLastError(XSocket::LastWsaError());
+     return -1;
+   }
+ }
+@@ -798,6 +1029,7 @@ struct host_set {
+ i32 NetDll_select_entry(i32 caller, i32 nfds, ppc_ptr_t<x_fd_set> readfds,
+                         ppc_ptr_t<x_fd_set> writefds, ppc_ptr_t<x_fd_set> exceptfds,
+                         mapped_void timeout_ptr) {
++  // The guest nfds is ignored (as on Windows): native fds are unrelated to guest handles.
+   host_set host_readfds = {};
+   fd_set native_readfds = {};
+   if (readfds) {
+@@ -816,31 +1048,48 @@ i32 NetDll_select_entry(i32 caller, i32 nfds, ppc_ptr_t<x_fd_set> readfds,
+     host_exceptfds.Load(exceptfds);
+     host_exceptfds.Store(&native_exceptfds);
+   }
++  int native_nfds = 0;
++  for (const host_set* set : {&host_readfds, &host_writefds, &host_exceptfds}) {
++    for (uint32_t i = 0; i < set->count; ++i) {
++      native_nfds = std::max(native_nfds, int(set->sockets[i]->native_handle()) + 1);
++    }
++  }
+   timeval* timeout_in = nullptr;
+   timeval timeout;
+   if (timeout_ptr) {
+-    timeout = {static_cast<int32_t>(timeout_ptr.as_array<int32_t>()[0]),
+-               static_cast<int32_t>(timeout_ptr.as_array<int32_t>()[1])};
+-    chrono::Clock::ScaleGuestDurationTimeval(reinterpret_cast<int32_t*>(&timeout.tv_sec),
+-                                             reinterpret_cast<int32_t*>(&timeout.tv_usec));
++    // Guest timeval: two big-endian 32-bit longs.
++    auto* t = static_cast<uint8_t*>(timeout_ptr.host_address());
++    int32_t sec = memory::load_and_swap<int32_t>(t + 0);
++    int32_t usec = memory::load_and_swap<int32_t>(t + 4);
++    chrono::Clock::ScaleGuestDurationTimeval(&sec, &usec);
++    timeout.tv_sec = sec;
++    timeout.tv_usec = usec;
+     timeout_in = &timeout;
+   }
+-  int ret = select(nfds, readfds ? &native_readfds : nullptr, writefds ? &native_writefds : nullptr,
+-                   exceptfds ? &native_exceptfds : nullptr, timeout_in);
++  int ret = select(native_nfds, readfds ? &native_readfds : nullptr,
++                   writefds ? &native_writefds : nullptr, exceptfds ? &native_exceptfds : nullptr,
++                   timeout_in);
++  if (ret < 0) {
++    XThread::SetLastError(XSocket::LastWsaError());
++    return -1;
++  }
++  // Report what is actually copied back to the guest sets.
++  ret = 0;
+   if (readfds) {
+     host_readfds.UpdateFrom(&native_readfds);
+     host_readfds.Store(readfds);
++    ret += host_readfds.count;
+   }
+   if (writefds) {
+     host_writefds.UpdateFrom(&native_writefds);
+     host_writefds.Store(writefds);
++    ret += host_writefds.count;
+   }
+   if (exceptfds) {
+     host_exceptfds.UpdateFrom(&native_exceptfds);
+     host_exceptfds.Store(exceptfds);
++    ret += host_exceptfds.count;
+   }
+-
+-  // TODO(gibbed): modify ret to be what's actually copied to the guest fd_sets?
+   return ret;
+ }
+ 
+@@ -852,7 +1101,11 @@ u32 NetDll_recv_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 bu
+     return -1;
+   }
+ 
+-  return socket->Recv(buf_ptr, buf_len, flags);
++  int ret = socket->Recv(buf_ptr, buf_len, flags);
++  if (ret < 0) {
++    XThread::SetLastError(XSocket::LastWsaError());
++  }
++  return ret;
+ }
+ 
+ u32 NetDll_recvfrom_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 buf_len,
+@@ -883,13 +1136,7 @@ u32 NetDll_recvfrom_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u3
+   }
+ 
+   if (ret == -1) {
+-// TODO: Better way of getting the error code
+-#if REX_PLATFORM_WIN32
+-    uint32_t error_code = WSAGetLastError();
+-    XThread::SetLastError(error_code);
+-#else
+-    XThread::SetLastError(0x0);
+-#endif
++    XThread::SetLastError(XSocket::LastWsaError());
+   }
+ 
+   return ret;
+@@ -903,7 +1150,11 @@ u32 NetDll_send_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 bu
+     return -1;
+   }
+ 
+-  return socket->Send(buf_ptr, buf_len, flags);
++  int ret = socket->Send(buf_ptr, buf_len, flags);
++  if (ret < 0) {
++    XThread::SetLastError(XSocket::LastWsaError());
++  }
++  return ret;
+ }
+ 
+ u32 NetDll_sendto_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 buf_len, u32 flags,
+@@ -915,8 +1166,17 @@ u32 NetDll_sendto_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32
+     return -1;
+   }
+ 
+-  N_XSOCKADDR_IN native_to(to_ptr);
+-  return socket->SendTo(buf_ptr, buf_len, flags, &native_to, to_len);
++  int ret;
++  if (to_ptr) {
++    N_XSOCKADDR_IN native_to(to_ptr);
++    ret = socket->SendTo(buf_ptr, buf_len, flags, &native_to, to_len);
++  } else {
++    ret = socket->Send(buf_ptr, buf_len, flags);
++  }
++  if (ret < 0) {
++    XThread::SetLastError(XSocket::LastWsaError());
++  }
++  return ret;
+ }
+ 
+ u32 NetDll___WSAFDIsSet_entry(u32 socket_handle, ppc_ptr_t<x_fd_set> fd_set) {
+@@ -985,6 +1245,22 @@ REX_EXPORT(__imp__NetDll_send, rex::kernel::xam::NetDll_send_entry)
+ REX_EXPORT(__imp__NetDll_sendto, rex::kernel::xam::NetDll_sendto_entry)
+ REX_EXPORT(__imp__NetDll___WSAFDIsSet, rex::kernel::xam::NetDll___WSAFDIsSet_entry)
+ REX_EXPORT(__imp__NetDll_WSASetLastError, rex::kernel::xam::NetDll_WSASetLastError_entry)
++REX_EXPORT(__imp__NetDll_WSACancelOverlappedIO, rex::kernel::xam::NetDll_WSACancelOverlappedIO_entry)
++REX_EXPORT(__imp__NetDll_WSAEventSelect, rex::kernel::xam::NetDll_WSAEventSelect_entry)
++REX_EXPORT(__imp__NetDll_WSAGetOverlappedResult, rex::kernel::xam::NetDll_WSAGetOverlappedResult_entry)
++REX_EXPORT(__imp__NetDll_WSARecv, rex::kernel::xam::NetDll_WSARecv_entry)
++REX_EXPORT(__imp__NetDll_WSASend, rex::kernel::xam::NetDll_WSASend_entry)
++REX_EXPORT(__imp__NetDll_XNetConnect, rex::kernel::xam::NetDll_XNetConnect_entry)
++REX_EXPORT(__imp__NetDll_XNetCreateKey, rex::kernel::xam::NetDll_XNetCreateKey_entry)
++REX_EXPORT(__imp__NetDll_XNetGetBroadcastVersionStatus, rex::kernel::xam::NetDll_XNetGetBroadcastVersionStatus_entry)
++REX_EXPORT(__imp__NetDll_XNetGetConnectStatus, rex::kernel::xam::NetDll_XNetGetConnectStatus_entry)
++REX_EXPORT(__imp__NetDll_XNetRegisterKey, rex::kernel::xam::NetDll_XNetRegisterKey_entry)
++REX_EXPORT(__imp__NetDll_XNetSetOpt, rex::kernel::xam::NetDll_XNetSetOpt_entry)
++REX_EXPORT(__imp__NetDll_XNetUnregisterInAddr, rex::kernel::xam::NetDll_XNetUnregisterInAddr_entry)
++REX_EXPORT(__imp__NetDll_XNetUnregisterKey, rex::kernel::xam::NetDll_XNetUnregisterKey_entry)
++REX_EXPORT(__imp__NetDll_getpeername, rex::kernel::xam::NetDll_getpeername_entry)
++REX_EXPORT(__imp__NetDll_getsockname, rex::kernel::xam::NetDll_getsockname_entry)
++REX_EXPORT(__imp__NetDll_getsockopt, rex::kernel::xam::NetDll_getsockopt_entry)
+ 
+ REX_EXPORT_STUB(__imp__NetDll_UpnpActionCalculateWorkBufferSize);
+ REX_EXPORT_STUB(__imp__NetDll_UpnpActionCreate);
+@@ -1000,11 +1276,6 @@ REX_EXPORT_STUB(__imp__NetDll_UpnpEventUnsubscribe);
+ REX_EXPORT_STUB(__imp__NetDll_UpnpSearchCreate);
+ REX_EXPORT_STUB(__imp__NetDll_UpnpSearchGetDevices);
+ REX_EXPORT_STUB(__imp__NetDll_UpnpStartup);
+-REX_EXPORT_STUB(__imp__NetDll_WSACancelOverlappedIO);
+-REX_EXPORT_STUB(__imp__NetDll_WSAEventSelect);
+-REX_EXPORT_STUB(__imp__NetDll_WSAGetOverlappedResult);
+-REX_EXPORT_STUB(__imp__NetDll_WSARecv);
+-REX_EXPORT_STUB(__imp__NetDll_WSASend);
+ REX_EXPORT_STUB(__imp__NetDll_WSAStartupEx);
+ REX_EXPORT_STUB(__imp__NetDll_XHttpCloseHandle);
+ REX_EXPORT_STUB(__imp__NetDll_XHttpConnect);
+@@ -1030,25 +1301,17 @@ REX_EXPORT_STUB(__imp__NetDll_XHttpSetStatusCallback);
+ REX_EXPORT_STUB(__imp__NetDll_XHttpShutdown);
+ REX_EXPORT_STUB(__imp__NetDll_XHttpStartup);
+ REX_EXPORT_STUB(__imp__NetDll_XHttpWriteData);
+-REX_EXPORT_STUB(__imp__NetDll_XNetConnect);
+-REX_EXPORT_STUB(__imp__NetDll_XNetCreateKey);
+ REX_EXPORT_STUB(__imp__NetDll_XNetDnsReverseLookup);
+ REX_EXPORT_STUB(__imp__NetDll_XNetDnsReverseRelease);
+-REX_EXPORT_STUB(__imp__NetDll_XNetGetBroadcastVersionStatus);
+-REX_EXPORT_STUB(__imp__NetDll_XNetGetConnectStatus);
+ REX_EXPORT_STUB(__imp__NetDll_XNetGetSystemLinkPort);
+ REX_EXPORT_STUB(__imp__NetDll_XNetGetXnAddrPlatform);
+ REX_EXPORT_STUB(__imp__NetDll_XNetInAddrToServer);
+ REX_EXPORT_STUB(__imp__NetDll_XNetQosGetListenStats);
+ REX_EXPORT_STUB(__imp__NetDll_XNetQosLookup);
+-REX_EXPORT_STUB(__imp__NetDll_XNetRegisterKey);
+ REX_EXPORT_STUB(__imp__NetDll_XNetReplaceKey);
+ REX_EXPORT_STUB(__imp__NetDll_XNetServerToInAddr);
+-REX_EXPORT_STUB(__imp__NetDll_XNetSetOpt);
+ REX_EXPORT_STUB(__imp__NetDll_XNetStartupEx);
+ REX_EXPORT_STUB(__imp__NetDll_XNetTsAddrToInAddr);
+-REX_EXPORT_STUB(__imp__NetDll_XNetUnregisterInAddr);
+-REX_EXPORT_STUB(__imp__NetDll_XNetUnregisterKey);
+ REX_EXPORT_STUB(__imp__NetDll_XmlDownloadContinue);
+ REX_EXPORT_STUB(__imp__NetDll_XmlDownloadGetParseTime);
+ REX_EXPORT_STUB(__imp__NetDll_XmlDownloadGetReceivedDataSize);
+@@ -1097,6 +1360,3 @@ REX_EXPORT_STUB(__imp__NetDll_XnpToolIpProxyInject);
+ REX_EXPORT_STUB(__imp__NetDll_XnpToolSetCallbacks);
+ REX_EXPORT_STUB(__imp__NetDll_XnpUnregisterKeyForCallerType);
+ REX_EXPORT_STUB(__imp__NetDll_XnpUpdateConfigParams);
+-REX_EXPORT_STUB(__imp__NetDll_getpeername);
+-REX_EXPORT_STUB(__imp__NetDll_getsockname);
+-REX_EXPORT_STUB(__imp__NetDll_getsockopt);
+diff --git a/src/kernel/xam/xam_user.cpp b/src/kernel/xam/xam_user.cpp
+index 8778066..8631fda 100644
+--- a/src/kernel/xam/xam_user.cpp
++++ b/src/kernel/xam/xam_user.cpp
+@@ -382,8 +382,10 @@ u32 XamUserCheckPrivilege_entry(u32 user_index, u32 mask, mapped_u32 out_value)
+     }
+   }
+ 
+-  // If we deny everything, games should hopefully not try to do stuff.
+-  *out_value = 0;
++  // If we deny everything, games should hopefully not try to do stuff. A Live sign-in
++  // (user_signin_live) gets the multiplayer / communications privileges (252..254).
++  bool live = REX_KERNEL_STATE()->user_profile()->signin_state() == 2;
++  *out_value = live && mask >= 252 && mask <= 254 ? 1 : 0;
+   return X_ERROR_SUCCESS;
+ }
+ 
+diff --git a/src/system/xam/user_profile.cpp b/src/system/xam/user_profile.cpp
+index a77f5e6..dd04fae 100644
+--- a/src/system/xam/user_profile.cpp
++++ b/src/system/xam/user_profile.cpp
+@@ -9,24 +9,48 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <cstdlib>
+ #include <sstream>
++#include <string>
+ 
+ #include <fmt/format.h>
+ 
++#include <rex/cvar.h>
+ #include <rex/logging.h>
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/xam/user_profile.h>
+ 
++REXCVAR_DEFINE_STRING(user_xuid, "", "Profile",
++                      "Profile XUID in hex (empty: default). Give a second co-op instance its own");
++REXCVAR_DEFINE_STRING(user_gamertag, "", "Profile", "Profile gamertag (empty: \"User\")");
++REXCVAR_DEFINE_BOOL(user_signin_live, false, "Profile",
++                    "Report the profile as signed in to Xbox LIVE with multiplayer privileges");
++
+ namespace rex {
+ namespace system {
+ namespace xam {
+ 
++uint32_t UserProfile::signin_state() const { return REXCVAR_GET(user_signin_live) ? 2 : 1; }
++
+ UserProfile::UserProfile() {
+   // 58410A1F checks the user XUID against a mask of 0x00C0000000000000 (3<<54),
+   // if non-zero, it prevents the user from playing the game.
+   // "You do not have permissions to perform this operation."
+   xuid_ = 0xB13EBABEBABEBABE;
+   name_ = "User";
++  // Netplay: two instances in one session need distinct players. The XUID also names the
++  // profile's content folder, so only override it for a second identity.
++  std::string xuid = REXCVAR_GET(user_xuid);
++  if (!xuid.empty()) {
++    uint64_t v = std::strtoull(xuid.c_str(), nullptr, 16);
++    if (v && !(v & 0x00C0000000000000ull)) {
++      xuid_ = v;
++    } else {
++      REXLOG_WARN("user_xuid {} is invalid, keeping the default", xuid);
++    }
++  }
++  std::string gamertag = REXCVAR_GET(user_gamertag);
++  if (!gamertag.empty()) name_ = gamertag.substr(0, 15);
+ 
+   // https://cs.rin.ru/forum/viewtopic.php?f=38&t=60668&hilit=gfwl+live&start=195
+   // https://github.com/arkem/py360/blob/master/py360/constants.py
+diff --git a/src/system/xsocket.cpp b/src/system/xsocket.cpp
+index 2d13ac8..8a26a36 100644
+--- a/src/system/xsocket.cpp
++++ b/src/system/xsocket.cpp
+@@ -9,9 +9,18 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <algorithm>
++#include <atomic>
++#include <chrono>
+ #include <cstring>
++#include <mutex>
++#include <random>
++#include <string>
++#include <vector>
+ 
++#include <rex/cvar.h>
+ #include <rex/kernel/xam/module.h>
++#include <rex/logging.h>
+ #include <rex/platform.h>
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/xsocket.h>
+@@ -26,13 +35,359 @@
+ #include <WS2tcpip.h>
+ #else
+ #include <arpa/inet.h>
++#include <errno.h>
++#include <fcntl.h>
+ #include <netinet/in.h>
+ #include <netinet/ip.h>
++#include <netinet/tcp.h>
++#include <sys/ioctl.h>
+ #include <sys/socket.h>
++#include <unistd.h>
+ #endif
+ 
++REXCVAR_DEFINE_INT32(netplay_slot, -1, "Netplay",
++                     "Instance slot 0-7 for system link (-1: first free slot on this machine). "
++                     "Guest port P is host port P + 10000 + 16 * slot");
++REXCVAR_DEFINE_STRING(netplay_address, "", "Netplay",
++                      "IPv4 address other instances reach this one at (empty: primary interface)");
++REXCVAR_DEFINE_STRING(netplay_peers, "", "Netplay",
++                      "Comma-separated hosts that also get system link broadcasts (for networks "
++                      "that drop broadcast, e.g. a VPN)");
++REXCVAR_DEFINE_BOOL(netplay_trace, false, "Netplay", "Log XNet / socket activity");
++
+ namespace rex::system {
+ 
++namespace netplay {
++namespace {
++
++constexpr uint16_t kPortBase = 10000;
++constexpr uint16_t kSlotStride = 16;
++// Slot locks: a process holds UDP kSlotLockPort + slot for its lifetime.
++constexpr uint16_t kSlotLockPort = 9984;
++// Datagram prefix: 'X' 'N', version, sender slot.
++constexpr uint8_t kMagic0 = 0x58, kMagic1 = 0x4E, kVersion = 1;
++// Version-byte flag on the network copy of a broadcast. This machine's own instances get a
++// loopback copy instead (it doesn't depend on the host stack looping broadcasts back, or on a
++// network being up), so they drop flagged packets from a local address.
++constexpr uint8_t kViaBroadcast = 0x80;
++constexpr size_t kHeader = 4;
++// Synthetic peer addresses: 169.254.250.0/24 + n.
++constexpr uint32_t kSecureBase = 0xA9FEFA00;
++
++std::once_flag init_once;
++uint32_t slot_ = 0;
++uint32_t local_ip_ = 0x7F000001;
++std::vector<uint32_t> extra_peers_;
++
++std::mutex peers_mutex;
++struct Peer {
++  uint32_t ip, slot;
++};
++std::vector<Peer> peers_;  // index n <-> kSecureBase + 1 + n
++// Slot-0 peers the guest addressed by plain IP: (canonical ip, ip the guest used).
++std::vector<std::pair<uint32_t, uint32_t>> plain_peers_;
++
++// This machine is one peer whether a packet came over loopback or the LAN address.
++uint32_t Canonical(uint32_t ip) {
++  return ip == 0x7F000001 ? local_ip_ : ip;
++}
++
++uint32_t ParseIp(const std::string& s) {
++  in_addr a{};
++  if (inet_pton(AF_INET, s.c_str(), &a) != 1) return 0;
++  return ntohl(a.s_addr);
++}
++
++uint32_t DetectLocalIp() {
++  // A connected UDP socket sends nothing; getsockname reports the interface the route uses.
++  uint32_t ip = 0;
++  auto fd = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++  if (fd < 0) return 0x7F000001;
++  sockaddr_in to{};
++  to.sin_family = AF_INET;
++  to.sin_port = htons(9);
++  to.sin_addr.s_addr = htonl(0x0AFFFFFF);  // 10.255.255.255
++  if (::connect(fd, reinterpret_cast<sockaddr*>(&to), sizeof(to)) == 0) {
++    sockaddr_in me{};
++    socklen_t len = sizeof(me);
++    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&me), &len) == 0) ip = ntohl(me.sin_addr.s_addr);
++  }
++  rex::net::socket_close(fd);
++  return ip ? ip : 0x7F000001;
++}
++
++void Init() {
++  std::call_once(init_once, [] {
++#if REX_PLATFORM_WIN32
++    WSADATA wsa;
++    WSAStartup(MAKEWORD(2, 2), &wsa);
++#endif
++    int want = REXCVAR_GET(netplay_slot);
++    slot_ = want >= 0 ? std::min<uint32_t>(want, kMaxSlots - 1) : kMaxSlots;
++    // Hold a lock port so the next instance on this machine picks another slot.
++    for (uint32_t s = want >= 0 ? slot_ : 0; s < kMaxSlots; ++s) {
++      auto fd = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++      sockaddr_in a{};
++      a.sin_family = AF_INET;
++      a.sin_port = htons(kSlotLockPort + s);
++      a.sin_addr.s_addr = htonl(INADDR_ANY);
++      if (::bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0) {
++        if (want < 0) slot_ = s;
++        break;  // keep fd open for the life of the process
++      }
++      rex::net::socket_close(fd);
++      if (want >= 0) {
++        REXLOG_WARN("netplay: slot {} is already used by another instance on this machine", s);
++        break;
++      }
++    }
++    if (slot_ >= kMaxSlots) {
++      REXLOG_WARN("netplay: no free slot (8 instances running?), using 7");
++      slot_ = kMaxSlots - 1;
++    }
++    std::string addr = REXCVAR_GET(netplay_address);
++    local_ip_ = addr.empty() ? DetectLocalIp() : ParseIp(addr);
++    if (!local_ip_) local_ip_ = 0x7F000001;
++    std::string list = REXCVAR_GET(netplay_peers);
++    for (size_t pos = 0; pos < list.size();) {
++      size_t end = list.find(',', pos);
++      std::string item = list.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
++      item.erase(0, item.find_first_not_of(' '));
++      item.erase(item.find_last_not_of(' ') + 1);
++      if (uint32_t ip = ParseIp(item)) extra_peers_.push_back(ip);
++      pos = end == std::string::npos ? list.size() : end + 1;
++    }
++    REXLOG_INFO("netplay: slot {} at {}.{}.{}.{}, guest port P = host port P+{}", slot_,
++                local_ip_ >> 24, (local_ip_ >> 16) & 0xFF, (local_ip_ >> 8) & 0xFF,
++                local_ip_ & 0xFF, PortOffset(slot_));
++  });
++}
++
++std::string IpString(uint32_t ip) {
++  return std::to_string(ip >> 24) + "." + std::to_string((ip >> 16) & 0xFF) + "." +
++         std::to_string((ip >> 8) & 0xFF) + "." + std::to_string(ip & 0xFF);
++}
++
++uint16_t HostPort(uint16_t guest, uint32_t slot) {
++  if (!guest) return 0;
++  uint32_t p = uint32_t(guest) + PortOffset(slot);
++  return p <= 0xFFFF ? uint16_t(p) : guest;
++}
++
++uint16_t GuestPort(uint16_t host, uint32_t slot) {
++  uint16_t off = PortOffset(slot);
++  return host > off ? uint16_t(host - off) : host;
++}
++
++bool IsBroadcast(uint32_t ip) {
++  return ip == 0xFFFFFFFF;
++}
++
++sockaddr_in HostAddr(uint32_t ip, uint16_t port) {
++  sockaddr_in a{};
++#if REX_PLATFORM_MAC
++  a.sin_len = sizeof(a);
++#endif
++  a.sin_family = AF_INET;
++  a.sin_port = htons(port);
++  a.sin_addr.s_addr = htonl(ip);
++  return a;
++}
++
++}  // namespace
++
++uint32_t Slot() {
++  Init();
++  return slot_;
++}
++uint32_t LocalIp() {
++  Init();
++  return local_ip_;
++}
++uint16_t PortOffset(uint32_t slot) {
++  return uint16_t(kPortBase + kSlotStride * std::min(slot, kMaxSlots - 1));
++}
++bool Trace() {
++  return REXCVAR_GET(netplay_trace);
++}
++
++// XNADDR: ina(4) inaOnline(4) wPortOnline(2) abEnet(6) abOnline(20). abEnet is a locally
++// administered MAC that encodes (ip, slot); abOnline starts with "RXNP" + slot so ParseXnAddr
++// can tell our addresses from a zeroed one.
++void BuildXnAddr(uint32_t ip, uint32_t slot, uint8_t* x) {
++  std::memset(x, 0, 36);
++  uint32_t be_ip = htonl(ip);
++  std::memcpy(x + 0, &be_ip, 4);
++  x[8] = 0;
++  x[9] = uint8_t(slot);
++  x[10] = 0x02;
++  x[11] = uint8_t(0x50 | slot);
++  std::memcpy(x + 12, &be_ip, 4);
++  std::memcpy(x + 16, "RXNP", 4);
++  x[20] = uint8_t(slot);
++}
++
++void ParseXnAddr(const uint8_t* x, uint32_t* ip, uint32_t* slot) {
++  uint32_t be_ip;
++  std::memcpy(&be_ip, x + 0, 4);
++  *ip = ntohl(be_ip);
++  *slot = std::memcmp(x + 16, "RXNP", 4) == 0 ? std::min<uint32_t>(x[20], kMaxSlots - 1) : 0;
++}
++
++uint32_t SecureAddr(uint32_t ip, uint32_t slot) {
++  ip = Canonical(ip);
++  std::lock_guard<std::mutex> lock(peers_mutex);
++  for (size_t i = 0; i < peers_.size(); ++i) {
++    if (peers_[i].ip == ip && peers_[i].slot == slot) return kSecureBase + 1 + uint32_t(i);
++  }
++  if (peers_.size() >= 0xFE) return ip;  // table full: fall back to the plain address
++  peers_.push_back({ip, slot});
++  uint32_t secure = kSecureBase + uint32_t(peers_.size());
++  if (Trace()) {
++    REXLOG_INFO("netplay: peer {} slot {} is {}", IpString(ip), slot, IpString(secure));
++  }
++  return secure;
++}
++
++bool LookupSecureAddr(uint32_t secure, uint32_t* ip, uint32_t* slot) {
++  if ((secure & 0xFFFFFF00) != kSecureBase) return false;
++  uint32_t n = (secure & 0xFF) - 1;
++  std::lock_guard<std::mutex> lock(peers_mutex);
++  if (n >= peers_.size()) return false;
++  *ip = peers_[n].ip;
++  *slot = peers_[n].slot;
++  return true;
++}
++
++// A peer the guest addressed by a plain IP (console "open <ip>") must see replies from that same
++// IP, not a synthetic one: UE3 drops packets whose source is not the connection's address.
++void NotePlainPeer(uint32_t ip) {
++  uint32_t canonical = Canonical(ip);
++  std::lock_guard<std::mutex> lock(peers_mutex);
++  for (auto& p : plain_peers_) {
++    if (p.first == canonical) {
++      p.second = ip;
++      return;
++    }
++  }
++  plain_peers_.push_back({canonical, ip});
++}
++
++bool PlainPeer(uint32_t canonical, uint32_t* ip) {
++  std::lock_guard<std::mutex> lock(peers_mutex);
++  for (auto& p : plain_peers_) {
++    if (p.first == canonical) {
++      *ip = p.second;
++      return true;
++    }
++  }
++  return false;
++}
++
++void RandomBytes(void* out, size_t len) {
++  static std::mutex m;
++  static std::mt19937_64 rng{std::random_device{}() ^
++                             uint64_t(std::chrono::steady_clock::now().time_since_epoch().count())};
++  std::lock_guard<std::mutex> lock(m);
++  auto* p = static_cast<uint8_t*>(out);
++  for (size_t i = 0; i < len; ++i) p[i] = uint8_t(rng() >> 24);
++}
++
++}  // namespace netplay
++
++namespace {
++
++using netplay::HostAddr;
++using netplay::HostPort;
++using netplay::GuestPort;
++
++#if REX_PLATFORM_LINUX
++constexpr int kNoSigPipe = MSG_NOSIGNAL;  // a send to a closed TCP peer must not kill the process
++#else
++constexpr int kNoSigPipe = 0;  // macOS: SO_NOSIGPIPE at creation; Windows has no SIGPIPE
++#endif
++
++// Last host error -> WinSock code. UDP "port unreachable" (ECONNREFUSED on POSIX) is
++// WSAECONNRESET on Windows, which UE3's net driver expects and ignores.
++uint32_t MapErrno(int e) {
++#if REX_PLATFORM_WIN32
++  return uint32_t(e);
++#else
++  switch (e) {
++    case EINTR: return 10004;
++    case EBADF: return 10009;
++    case EMFILE: return 10024;
++    case EWOULDBLOCK: return 10035;   // WSAEWOULDBLOCK (== EAGAIN on Linux and macOS)
++    case EINPROGRESS: return 10035;   // non-blocking connect: WinSock reports WOULDBLOCK
++    case EALREADY: return 10037;
++    case ENOTSOCK: return 10038;
++    case EDESTADDRREQ: return 10039;
++    case EMSGSIZE: return 10040;
++    case EPROTOTYPE: return 10041;
++    case ENOPROTOOPT: return 10042;
++    case EPROTONOSUPPORT: return 10043;
++    case EOPNOTSUPP: return 10045;
++    case EAFNOSUPPORT: return 10047;
++    case EADDRINUSE: return 10048;
++    case EADDRNOTAVAIL: return 10049;
++    case ENETDOWN: return 10050;
++    case ENETUNREACH: return 10051;
++    case ENETRESET: return 10052;
++    case ECONNABORTED: return 10053;
++    case EPIPE: return 10058;         // WSAESHUTDOWN
++    case ECONNRESET: return 10054;
++    case ECONNREFUSED: return 10054;
++    case ENOBUFS: return 10055;
++    case EISCONN: return 10056;
++    case ENOTCONN: return 10057;
++    case ETIMEDOUT: return 10060;
++    case EHOSTUNREACH: return 10065;
++    case EINVAL: return 10022;
++    case EACCES: return 10013;
++    case EFAULT: return 10014;
++    default: return 10022;
++  }
++#endif
++}
++
++int LastError() {
++#if REX_PLATFORM_WIN32
++  return WSAGetLastError();
++#else
++  return errno;
++#endif
++}
++
++// Keeps the socket error across logging, for the caller's WSAGetLastError.
++struct KeepError {
++  int e = LastError();
++  ~KeepError() {
++#if REX_PLATFORM_WIN32
++    WSASetLastError(e);
++#else
++    errno = e;
++#endif
++  }
++};
++
++std::string Fmt(uint32_t ip, uint16_t port) {
++  return std::to_string(ip >> 24) + "." + std::to_string((ip >> 16) & 0xFF) + "." +
++         std::to_string((ip >> 8) & 0xFF) + "." + std::to_string(ip & 0xFF) + ":" +
++         std::to_string(port);
++}
++
++// Traces the first 40 packets of each socket, then every 500th.
++bool TracePacket(uint64_t& count) {
++  ++count;
++  return netplay::Trace() && (count <= 40 || count % 500 == 0);
++}
++
++}  // namespace
++
++uint32_t XSocket::LastWsaError() {
++  return MapErrno(LastError());
++}
++
+ XSocket::XSocket(KernelState* kernel_state) : XObject(kernel_state, kObjectType) {}
+ 
+ XSocket::XSocket(KernelState* kernel_state, uint64_t native_handle)
+@@ -46,6 +401,7 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
+   af_ = af;
+   type_ = type;
+   proto_ = proto;
++  netplay::Slot();  // pick a slot before the first port is used
+ 
+   if (proto == Protocol::X_IPPROTO_VDP) {
+     // VDP is a layer on top of UDP.
+@@ -53,15 +409,24 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
+   }
+ 
+   native_handle_ = socket(af, type, proto);
+-  if (native_handle_ == -1) {
++  if (native_handle_ == uint64_t(-1)) {
+     return X_STATUS_UNSUCCESSFUL;
+   }
++#if REX_PLATFORM_MAC
++  int one = 1;
++  setsockopt(int(native_handle_), SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
++#endif
++  if (netplay::Trace()) {
++    REXLOG_INFO("netplay: socket {:X} type {} proto {}", handle(), uint32_t(type), uint32_t(proto_));
++  }
+ 
+   return X_STATUS_SUCCESS;
+ }
+ 
+ X_STATUS XSocket::Close() {
++  if (native_handle_ == uint64_t(-1)) return X_STATUS_SUCCESS;
+   int ret = rex::net::socket_close(native_handle_);
++  native_handle_ = uint64_t(-1);
+   if (ret != 0) {
+     return X_STATUS_UNSUCCESSFUL;
+   }
+@@ -69,6 +434,8 @@ X_STATUS XSocket::Close() {
+   return X_STATUS_SUCCESS;
+ }
+ 
++// Guest options use WinSock values (SOL_SOCKET 0xFFFF, SO_BROADCAST 0x20, ...) and big-endian
++// option values. Translate the ones that matter; accept the rest.
+ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, uint32_t optlen) {
+   if (level == 0xFFFF && (optname == 0x5801 || optname == 0x5802)) {
+     // Disable socket encryption
+@@ -76,32 +443,155 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
+     return X_STATUS_SUCCESS;
+   }
+ 
+-  int ret = setsockopt(native_handle_, level, optname, (char*)optval_ptr, optlen);
++  if (level == 0xFFFF && optname == 0x0080 && optval_ptr && optlen >= 4) {
++    // SO_LINGER: Winsock linger is two big-endian u_shorts; POSIX's is two ints.
++    uint16_t guest[2];
++    std::memcpy(guest, optval_ptr, 4);
++    linger host_linger{};
++    host_linger.l_onoff = decltype(host_linger.l_onoff)(rex::byte_swap(guest[0]));
++    host_linger.l_linger = decltype(host_linger.l_linger)(rex::byte_swap(guest[1]));
++    int ret = setsockopt(native_handle_, SOL_SOCKET, SO_LINGER,
++                         reinterpret_cast<const char*>(&host_linger), sizeof(host_linger));
++    return ret < 0 ? X_STATUS_UNSUCCESSFUL : X_STATUS_SUCCESS;
++  }
++
++  uint32_t value = 0;
++  if (optval_ptr && optlen >= 4) {
++    std::memcpy(&value, optval_ptr, 4);
++    value = rex::byte_swap(value);
++  } else if (optval_ptr && optlen >= 1) {
++    value = *static_cast<uint8_t*>(optval_ptr);
++  }
++
++  // Winsock numbers: BSD/macOS share them, Linux doesn't (SOL_SOCKET 1, SO_BROADCAST 6, ...).
++  int host_level = -1, host_name = -1;
++  if (level == 0xFFFF) {
++    host_level = SOL_SOCKET;
++    switch (optname) {
++      case 0x0004: host_name = SO_REUSEADDR; break;
++      case 0x0008: host_name = SO_KEEPALIVE; break;
++      case 0x0010: host_name = SO_DONTROUTE; break;
++      case 0x0020: host_name = SO_BROADCAST; broadcast_socket_ = value != 0; break;
++      case 0x0100: host_name = SO_OOBINLINE; break;
++      case 0x1001: host_name = SO_SNDBUF; break;
++      case 0x1002: host_name = SO_RCVBUF; break;
++      default: break;
++    }
++  } else if (level == 6 && optname == 1) {
++    host_level = IPPROTO_TCP;
++    host_name = TCP_NODELAY;
++  }
++  if (host_name < 0) {
++    if (netplay::Trace()) {
++      REXLOG_INFO("netplay: socket {:X} setsockopt({:X}, {:X}) = {} ignored", handle(), level,
++                  optname, value);
++    }
++    return X_STATUS_SUCCESS;
++  }
++  int v = int(value);
++  int ret = setsockopt(native_handle_, host_level, host_name, reinterpret_cast<char*>(&v), sizeof(v));
++  if (netplay::Trace()) {
++    REXLOG_INFO("netplay: socket {:X} setsockopt({:X}, {:X}) = {} -> {}", handle(), level, optname,
++                value, ret);
++  }
+   if (ret < 0) {
+-    // TODO: WSAGetLastError()
+     return X_STATUS_UNSUCCESSFUL;
+   }
++  return X_STATUS_SUCCESS;
++}
+ 
+-  // SO_BROADCAST
+-  if (level == 0xFFFF && optname == 0x0020) {
+-    broadcast_socket_ = true;
++X_STATUS XSocket::GetOption(uint32_t level, uint32_t optname, uint8_t* optval_be,
++                            uint32_t* optlen) {
++  int host_level = SOL_SOCKET, host_name = -1;
++  if (level == 0xFFFF) {
++    switch (optname) {
++      case 0x0004: host_name = SO_REUSEADDR; break;
++      case 0x0020: host_name = SO_BROADCAST; break;
++      case 0x1001: host_name = SO_SNDBUF; break;
++      case 0x1002: host_name = SO_RCVBUF; break;
++      case 0x1007: host_name = SO_ERROR; break;
++      case 0x1008: host_name = SO_TYPE; break;
++      default: break;
++    }
+   }
+-
++  uint32_t value = 0;
++  if (host_name >= 0) {
++    int v = 0;
++    socklen_t len = sizeof(v);
++    if (getsockopt(native_handle_, host_level, host_name, reinterpret_cast<char*>(&v), &len) < 0) {
++      return X_STATUS_UNSUCCESSFUL;
++    }
++    value = host_name == SO_ERROR ? (v ? MapErrno(v) : 0) : uint32_t(v);
++  }
++  if (*optlen < 4) return X_STATUS_UNSUCCESSFUL;
++  value = rex::byte_swap(value);
++  std::memcpy(optval_be, &value, 4);
++  *optlen = 4;
+   return X_STATUS_SUCCESS;
+ }
+ 
+ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
+-  int ret = rex::net::socket_ioctl(native_handle_, cmd, arg_ptr);
+-  if (ret < 0) {
+-    // TODO: Get last error
+-    return X_STATUS_UNSUCCESSFUL;
++  // Argument is a big-endian u_long in guest memory.
++  uint32_t arg = 0;
++  if (arg_ptr) {
++    std::memcpy(&arg, arg_ptr, 4);
++    arg = rex::byte_swap(arg);
++  }
++  switch (cmd) {
++    case 0x8004667E: {  // FIONBIO
++      nonblocking_ = arg != 0;
++#if REX_PLATFORM_WIN32
++      u_long mode = arg;
++      if (ioctlsocket(native_handle_, FIONBIO, &mode) != 0) return X_STATUS_UNSUCCESSFUL;
++#else
++      int fd = int(native_handle_);
++      int flags = fcntl(fd, F_GETFL, 0);
++      if (flags < 0 || fcntl(fd, F_SETFL, arg ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK)) < 0) {
++        return X_STATUS_UNSUCCESSFUL;
++      }
++#endif
++      return X_STATUS_SUCCESS;
++    }
++    case 0x4004667F: {  // FIONREAD
++      uint32_t avail = 0;
++#if REX_PLATFORM_WIN32
++      u_long n = 0;
++      if (ioctlsocket(native_handle_, FIONREAD, &n) != 0) return X_STATUS_UNSUCCESSFUL;
++      avail = uint32_t(n);
++#else
++      int n = 0;
++      if (ioctl(int(native_handle_), FIONREAD, &n) < 0) return X_STATUS_UNSUCCESSFUL;
++      avail = uint32_t(n);
++#endif
++      if (type_ == X_SOCK_DGRAM && avail >= netplay::kHeader) avail -= netplay::kHeader;
++      avail = rex::byte_swap(avail);
++      if (arg_ptr) std::memcpy(arg_ptr, &avail, 4);
++      return X_STATUS_SUCCESS;
++    }
++    default:
++      REXLOG_WARN("netplay: socket {:X} ioctl {:08X} unsupported", handle(), cmd);
++      return X_STATUS_UNSUCCESSFUL;
+   }
+-
+-  return X_STATUS_SUCCESS;
+ }
+ 
+ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
+-  int ret = connect(native_handle_, (sockaddr*)name, name_len);
++  N_XSOCKADDR_IN to;
++  std::memcpy(&to, name, sizeof(to));
++  uint32_t ip = to.sin_addr, slot = 0;
++  if (!netplay::LookupSecureAddr(ip, &ip, &slot)) slot = 0;
++  if (type_ == X_SOCK_DGRAM) {
++    // Datagram "connect" only fixes the peer; sends still go through SendTo for the prefix.
++    peer_ = to;
++    connected_ = true;
++    return X_STATUS_SUCCESS;
++  }
++  sockaddr_in host = HostAddr(ip, HostPort(to.sin_port, slot));
++  int ret = connect(native_handle_, reinterpret_cast<sockaddr*>(&host), sizeof(host));
++  KeepError keep;
++  if (netplay::Trace()) {
++    REXLOG_INFO("netplay: socket {:X} connect {} -> {} ({})", handle(),
++                Fmt(to.sin_addr, to.sin_port), Fmt(ip, HostPort(to.sin_port, slot)), ret);
++  }
+   if (ret < 0) {
+     return X_STATUS_UNSUCCESSFUL;
+   }
+@@ -110,14 +600,42 @@ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
+ }
+ 
+ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
+-  int ret = bind(native_handle_, (sockaddr*)name, name_len);
++  uint16_t guest_port = name->sin_port;
++  uint16_t host_port = HostPort(guest_port, netplay::Slot());
++  // Bind every address: the guest only knows its own XNADDR / synthetic addresses.
++  sockaddr_in host = HostAddr(INADDR_ANY, host_port);
++  int ret = bind(native_handle_, reinterpret_cast<sockaddr*>(&host), sizeof(host));
++  KeepError keep;
++  if (netplay::Trace() || ret < 0) {
++    REXLOG_INFO("netplay: socket {:X} bind guest port {} -> host port {} ({})", handle(),
++                guest_port, host_port, ret < 0 ? keep.e : 0);
++  }
+   if (ret < 0) {
+     return X_STATUS_UNSUCCESSFUL;
+   }
+ 
+   bound_ = true;
+-  bound_port_ = name->sin_port;
++  bound_port_ = guest_port;
++
++  return X_STATUS_SUCCESS;
++}
+ 
++X_STATUS XSocket::GetSockName(N_XSOCKADDR_IN* name) {
++  sockaddr_in host{};
++  socklen_t len = sizeof(host);
++  if (getsockname(native_handle_, reinterpret_cast<sockaddr*>(&host), &len) < 0) {
++    return X_STATUS_UNSUCCESSFUL;
++  }
++  name->sin_family = X_AF_INET;
++  name->sin_port = GuestPort(ntohs(host.sin_port), netplay::Slot());
++  name->sin_addr = host.sin_addr.s_addr ? netplay::LocalIp() : 0;
++  std::memset(name->x_sin_zero, 0, sizeof(name->x_sin_zero));
++  return X_STATUS_SUCCESS;
++}
++
++X_STATUS XSocket::GetPeerName(N_XSOCKADDR_IN* name) {
++  if (!connected_) return X_STATUS_UNSUCCESSFUL;
++  *name = peer_;
+   return X_STATUS_SUCCESS;
+ }
+ 
+@@ -131,21 +649,25 @@ X_STATUS XSocket::Listen(int backlog) {
+ }
+ 
+ object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
+-  sockaddr n_sockaddr;
+-  socklen_t n_name_len = sizeof(sockaddr);
+-  uintptr_t ret = accept(native_handle_, &n_sockaddr, &n_name_len);
+-  if (ret == -1) {
++  sockaddr_in n_sockaddr{};
++  socklen_t n_name_len = sizeof(n_sockaddr);
++  auto ret = accept(native_handle_, reinterpret_cast<sockaddr*>(&n_sockaddr), &n_name_len);
++  if (ret == decltype(ret)(-1)) {
+     std::memset(name, 0, *name_len);
+     *name_len = 0;
+     return nullptr;
+   }
+ 
+-  std::memcpy(name, &n_sockaddr, n_name_len);
+-  *name_len = n_name_len;
++  N_XSOCKADDR_IN from{};
++  from.sin_family = X_AF_INET;
++  from.sin_port = ntohs(n_sockaddr.sin_port);
++  from.sin_addr = ntohl(n_sockaddr.sin_addr.s_addr);
++  std::memcpy(name, &from, std::min<size_t>(sizeof(from), size_t(*name_len)));
++  *name_len = sizeof(from);
+ 
+   // Create a kernel object to represent the new socket, and copy parameters
+   // over.
+-  auto socket = object_ref<XSocket>(new XSocket(kernel_state_, ret));
++  auto socket = object_ref<XSocket>(new XSocket(kernel_state_, uint64_t(ret)));
+   socket->af_ = af_;
+   socket->type_ = type_;
+   socket->proto_ = proto_;
+@@ -158,78 +680,135 @@ int XSocket::Shutdown(int how) {
+ }
+ 
+ int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
++  if (type_ == X_SOCK_DGRAM) {
++    return RecvFrom(buf, buf_len, flags, nullptr, nullptr);
++  }
+   return recv(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags);
+ }
+ 
+ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* from,
+                       uint32_t* from_len) {
+-  // Pop from secure packets first
+-  // TODO(DrChat): Enable when I commit XNet
+-  /*
+-  {
+-    std::lock_guard<std::mutex> lock(incoming_packet_mutex_);
+-    if (incoming_packets_.size()) {
+-      packet* pkt = (packet*)incoming_packets_.front();
+-      int data_len = pkt->data_len;
+-      std::memcpy(buf, pkt->data, std::min((uint32_t)pkt->data_len, buf_len));
+-
+-      from->sin_family = 2;
+-      from->sin_addr = pkt->src_ip;
+-      from->sin_port = pkt->src_port;
+-
+-      incoming_packets_.pop();
+-      uint8_t* pkt_ui8 = (uint8_t*)pkt;
+-      delete[] pkt_ui8;
+-
+-      return data_len;
+-    }
++  if (type_ != X_SOCK_DGRAM) {
++    int ret = recv(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags);
++    if (from_len) *from_len = 0;
++    return ret;
+   }
+-  */
+ 
+-  sockaddr_in nfrom;
+-  socklen_t nfromlen = sizeof(sockaddr_in);
+-  int ret = recvfrom(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
+-                     (sockaddr*)&nfrom, &nfromlen);
+-  if (from) {
+-    from->sin_family = nfrom.sin_family;
+-    from->sin_addr = ntohl(nfrom.sin_addr.s_addr);  // BE <- BE
+-    from->sin_port = nfrom.sin_port;
+-    std::memset(from->x_sin_zero, 0, sizeof(from->x_sin_zero));
+-  }
+-
+-  if (from_len) {
+-    *from_len = nfromlen;
++  std::vector<uint8_t> tmp(size_t(buf_len) + netplay::kHeader);
++  for (;;) {
++    sockaddr_in nfrom{};
++    socklen_t nfromlen = sizeof(sockaddr_in);
++    int ret = recvfrom(native_handle_, reinterpret_cast<char*>(tmp.data()), int(tmp.size()), flags,
++                       reinterpret_cast<sockaddr*>(&nfrom), &nfromlen);
++    if (ret < 0) {
++      return ret;
++    }
++    uint32_t src_ip = ntohl(nfrom.sin_addr.s_addr);
++    uint16_t src_port = ntohs(nfrom.sin_port);
++    uint32_t guest_ip = src_ip;
++    uint16_t guest_port = src_port;
++    const uint8_t* payload = tmp.data();
++    int len = ret;
++    if (len >= int(netplay::kHeader) && tmp[0] == netplay::kMagic0 && tmp[1] == netplay::kMagic1) {
++      uint32_t slot = std::min<uint32_t>(tmp[3], netplay::kMaxSlots - 1);
++      // A broadcast from this machine (ours, or another instance's: that one also came by
++      // loopback), looped back by the host stack: a 360 never sees its own.
++      bool local = src_ip == netplay::LocalIp() || src_ip == 0x7F000001;
++      if (local && ((tmp[2] & netplay::kViaBroadcast) ||
++                    (broadcast_socket_ && slot == netplay::Slot()))) {
++        continue;
++      }
++      if (slot != 0 || !netplay::PlainPeer(netplay::Canonical(src_ip), &guest_ip)) {
++        guest_ip = netplay::SecureAddr(src_ip, slot);
++      }
++      guest_port = GuestPort(src_port, slot);
++      payload += netplay::kHeader;
++      len -= int(netplay::kHeader);
++    }
++    std::memcpy(buf, payload, std::min<size_t>(size_t(len), buf_len));
++    if (TracePacket(trace_count_)) {
++      REXLOG_INFO("netplay: socket {:X} recv {} bytes from {} as {}", handle(), len,
++                  Fmt(src_ip, src_port), Fmt(guest_ip, guest_port));
++    }
++    if (from) {
++      from->sin_family = X_AF_INET;
++      from->sin_addr = guest_ip;
++      from->sin_port = guest_port;
++      std::memset(from->x_sin_zero, 0, sizeof(from->x_sin_zero));
++    }
++    if (from_len) {
++      *from_len = sizeof(XSOCKADDR_IN);
++    }
++    return std::min(len, int(buf_len));
+   }
+-
+-  return ret;
+ }
+ 
+ int XSocket::Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags) {
+-  return send(native_handle_, reinterpret_cast<const char*>(buf), buf_len, flags);
++  if (type_ == X_SOCK_DGRAM && connected_) {
++    return SendTo(const_cast<uint8_t*>(buf), buf_len, flags, &peer_, sizeof(peer_));
++  }
++  return send(native_handle_, reinterpret_cast<const char*>(buf), buf_len, int(flags) | kNoSigPipe);
+ }
+ 
+ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* to,
+                     uint32_t to_len) {
+-  // Send 2 copies of the packet: One to XNet (for network security) and an
+-  // unencrypted copy for other Xenia hosts.
+-  // TODO(DrChat): Enable when I commit XNet.
+-  /*
+-  auto xam = kernel_state()->GetKernelModule<xam::XamModule>("xam.xex");
+-  auto xnet = xam->xnet();
+-  if (xnet) {
+-    xnet->SendPacket(this, to, buf, buf_len);
+-  }
+-  */
+-
+-  sockaddr_in nto;
+-  if (to) {
+-    nto.sin_addr.s_addr = to->sin_addr;
+-    nto.sin_family = to->sin_family;
+-    nto.sin_port = to->sin_port;
+-  }
+-
+-  return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
+-                to ? (sockaddr*)&nto : nullptr, to_len);
++  if (!to && connected_) to = &peer_;
++  if (!to || type_ != X_SOCK_DGRAM) {
++    return send(native_handle_, reinterpret_cast<char*>(buf), buf_len, int(flags) | kNoSigPipe);
++  }
++
++  uint32_t dst_ip = to->sin_addr;
++  uint16_t dst_port = to->sin_port;
++  std::vector<uint8_t> pkt(size_t(buf_len) + netplay::kHeader);
++  pkt[0] = netplay::kMagic0;
++  pkt[1] = netplay::kMagic1;
++  pkt[2] = netplay::kVersion;
++  pkt[3] = uint8_t(netplay::Slot());
++  std::memcpy(pkt.data() + netplay::kHeader, buf, buf_len);
++
++  auto send_one = [&](uint32_t ip, uint16_t port) {
++    sockaddr_in host = HostAddr(ip, port);
++    return int(sendto(native_handle_, reinterpret_cast<char*>(pkt.data()), int(pkt.size()), flags,
++                      reinterpret_cast<sockaddr*>(&host), sizeof(host)));
++  };
++
++  int ret;
++  if (netplay::IsBroadcast(dst_ip)) {
++    // Every slot on every machine on the segment, plus netplay_peers (flagged copies), and this
++    // machine's other slots over loopback (works without a network, too).
++    ret = -1;
++    for (uint32_t s = 0; s < netplay::kMaxSlots; ++s) {
++      uint16_t port = HostPort(dst_port, s);
++      pkt[2] = netplay::kVersion | netplay::kViaBroadcast;
++      int r = send_one(0xFFFFFFFF, port);
++      for (uint32_t ip : netplay::extra_peers_) send_one(ip, port);
++      pkt[2] = netplay::kVersion;
++      if (s != netplay::Slot()) {
++        int l = send_one(0x7F000001, port);
++        if (r < 0) r = l;
++      }
++      if (r >= 0) ret = r;
++    }
++  } else {
++    uint32_t ip = dst_ip, slot = 0;
++    // Synthetic address -> (ip, slot); a plain address is slot 0 on that machine.
++    if (!netplay::LookupSecureAddr(dst_ip, &ip, &slot)) {
++      slot = 0;
++      netplay::NotePlainPeer(ip);
++    }
++    ret = send_one(ip, HostPort(dst_port, slot));
++    KeepError keep;
++    if (TracePacket(trace_count_)) {
++      REXLOG_INFO("netplay: socket {:X} send {} bytes to {} -> {}{}", handle(), buf_len,
++                  Fmt(dst_ip, dst_port), Fmt(ip, HostPort(dst_port, slot)),
++                  ret < 0 ? " failed " + std::to_string(keep.e) : "");
++    }
++  }
++  if (netplay::IsBroadcast(dst_ip) && TracePacket(trace_count_)) {
++    REXLOG_INFO("netplay: socket {:X} broadcast {} bytes to guest port {}", handle(), buf_len,
++                dst_port);
++  }
++  return ret < 0 ? ret : int(buf_len);
+ }
+ 
+ bool XSocket::QueuePacket(uint32_t src_ip, uint16_t src_port, const uint8_t* buf, size_t len) {
+diff --git a/src/kernel/xam/apps/xgi_app.cpp b/src/kernel/xam/apps/xgi_app.cpp
+index 2b222da..5e48621 100644
+--- a/src/kernel/xam/apps/xgi_app.cpp
++++ b/src/kernel/xam/apps/xgi_app.cpp
+@@ -113,6 +116,25 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+           "{:08X})",
+           session_ptr, flags, num_slots_public, num_slots_private, user_xuid, session_info_ptr,
+           nonce_ptr);
++
++      // XSESSION_CREATE_HOST: the title advertises XSESSION_INFO {XNKID, XNADDR, XNKEY}
++      // (8 + 36 + 16 bytes) in its system link beacon. A joining title passes the host's
++      // info in, so leave it alone then.
++      constexpr uint32_t kCreateHost = 0x1;
++      if ((flags & kCreateHost) && session_info_ptr) {
++        auto* info = memory_->TranslateVirtual<uint8_t*>(session_info_ptr);
++        netplay::RandomBytes(info, 8);
++        info[0] &= 0x0F;  // system link XNKID
++        netplay::BuildXnAddr(netplay::LocalIp(), netplay::Slot(), info + 8);
++        netplay::RandomBytes(info + 44, 16);
++      }
++      if (nonce_ptr) {
++        netplay::RandomBytes(memory_->TranslateVirtual<uint8_t*>(nonce_ptr), 8);
++      }
++      if (netplay::Trace()) {
++        REXKRNL_INFO("netplay: XSessionCreate flags {:08X} host {}", flags,
++                     (flags & kCreateHost) != 0);
++      }
+       return X_E_SUCCESS;
+     }
+     case 0x000B0011: {

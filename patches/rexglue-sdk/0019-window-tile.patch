@@ -1,0 +1,36 @@
+diff --git a/src/ui/window_sdl.cpp b/src/ui/window_sdl.cpp
+index 2251429..561378a 100644
+--- a/src/ui/window_sdl.cpp
++++ b/src/ui/window_sdl.cpp
+@@ -40,6 +40,10 @@
+ #include <rex/ui/surface_gnulinux.h>
+ #endif
+ 
++REXCVAR_DEFINE_STRING(window_tile, "", "UI/Window",
++                      "Windowed: \"left\" or \"right\" fills that half of the display's usable area "
++                      "(16:9), e.g. two instances side by side");
++
+ namespace rex::ui {
+ 
+ namespace {
+@@ -170,6 +174,20 @@ bool WindowSDL::OpenImpl() {
+     }
+   }
+ 
++  // window_tile: left / right half of the display the window opened on (see monitor above).
++  if (std::string tile = REXCVAR_GET(window_tile);
++      !IsFullscreen() && (tile == "left" || tile == "right")) {
++    SDL_Rect area{};
++    if (SDL_GetDisplayUsableBounds(SDL_GetDisplayForWindow(sdl_window_), &area) && area.w > 0) {
++      int w = area.w / 2;
++      int h = std::min(w * 9 / 16, area.h);
++      w = std::min(w, h * 16 / 9);
++      SDL_SetWindowSize(sdl_window_, w, h);
++      SDL_SetWindowPosition(sdl_window_, area.x + (tile == "right" ? area.w - w : 0),
++                            area.y + (area.h - h) / 2);
++    }
++  }
++
+   if (IsFullscreen()) {
+     // Borderless desktop fullscreen (a NULL display mode is SDL3's default).
+     SDL_SetWindowFullscreen(sdl_window_, true);
