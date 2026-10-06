@@ -29,6 +29,10 @@ BOTS_KBM_BIND(move_left, "A", "Move left (left stick)");
 BOTS_KBM_BIND(move_right, "D", "Move right (left stick)");
 BOTS_KBM_BIND(right_trigger, "LMB", "Fire (RT)");
 BOTS_KBM_BIND(left_trigger, "RMB", "Aim (LT)");
+// In a vehicle the triggers are the throttle (RT) and brake / reverse (LT) and you can't shoot: PC driving games put
+// those on W / S (GTA IV, Saints Row 2), so while driving these replace the trigger keys and the stick's forward/back.
+BOTS_KBM_BIND(accelerate, "W", "Accelerate while driving (RT)");
+BOTS_KBM_BIND(brake, "S", "Brake / reverse while driving (LT)");
 BOTS_KBM_BIND(a, "Space", "Cover / run / confirm (A)");
 // E is Gears' use/interact key; BotS's contextual actions (counter-kills, special moves) are B, and
 // the on-screen prompt shows the first key listed.
@@ -273,8 +277,8 @@ void MouseKeyboardDriver::OnLostFocus(rex::ui::UISetupEvent&) {
 
 void MouseKeyboardDriver::TakeMouseDelta(float& dx, float& dy) {
   std::lock_guard lock(mutex_);
-  const float s = float(Pressed(REXCVAR_GET(kbm_left_trigger)) ? REXCVAR_GET(kbm_aim_sensitivity)
-                                                                : REXCVAR_GET(kbm_sensitivity));
+  const bool aiming = !driving_.load(std::memory_order_relaxed) && Pressed(REXCVAR_GET(kbm_left_trigger));
+  const float s = float(aiming ? REXCVAR_GET(kbm_aim_sensitivity) : REXCVAR_GET(kbm_sensitivity));
   dx = mouse_dx_ * s;
   // Window y grows downward; the engine's MouseY is positive for "look up".
   dy = (REXCVAR_GET(kbm_invert_y) ? mouse_dy_ : -mouse_dy_) * s;
@@ -361,13 +365,20 @@ X_RESULT MouseKeyboardDriver::GetDeviceState(rex::input::DeviceId id, rex::input
     for (int bit = 0; bit < 16; ++bit)
       if (now < tap_until_[bit]) buttons |= uint16_t(1u << bit);
     out->gamepad.buttons = buttons;
-    out->gamepad.left_trigger = Pressed(REXCVAR_GET(kbm_left_trigger)) ? 0xFF : 0;
-    out->gamepad.right_trigger = Pressed(REXCVAR_GET(kbm_right_trigger)) ? 0xFF : 0;
+    const bool driving = !menu && driving_.load(std::memory_order_relaxed);
+    if (driving != last_driving_) {
+      last_driving_ = driving;
+      REXLOG_INFO("keyboard/mouse: {}", driving ? "driving (accelerate / brake keys are the triggers)" : "not driving");
+    }
+    const std::string& lt = driving ? REXCVAR_GET(kbm_brake) : REXCVAR_GET(kbm_left_trigger);
+    const std::string& rt = driving ? REXCVAR_GET(kbm_accelerate) : REXCVAR_GET(kbm_right_trigger);
+    out->gamepad.left_trigger = Pressed(lt) ? 0xFF : 0;
+    out->gamepad.right_trigger = Pressed(rt) ? 0xFF : 0;
     int32_t lx = 0, ly = 0;
     if (Pressed(REXCVAR_GET(kbm_move_left))) lx -= 32767;
     if (Pressed(REXCVAR_GET(kbm_move_right))) lx += 32767;
-    if (Pressed(REXCVAR_GET(kbm_move_forward))) ly += 32767;
-    if (Pressed(REXCVAR_GET(kbm_move_back))) ly -= 32767;
+    if (!driving && Pressed(REXCVAR_GET(kbm_move_forward))) ly += 32767;
+    if (!driving && Pressed(REXCVAR_GET(kbm_move_back))) ly -= 32767;
     out->gamepad.thumb_lx = int16_t(lx);
     out->gamepad.thumb_ly = int16_t(ly);
   }

@@ -505,7 +505,7 @@ const char* NameOf(uint8_t* base, uint32_t index) {
 // Name indices this file needs, found once by scanning FName::Names (they all exist once the script packages load).
 struct Names {
   uint32_t option = 0, toggle = 0, slider = 0, image = 0, left = 0, right = 0, main_menu = 0, quit = 0, title = 0, label = 0, online_message = 0;
-  uint32_t easel = 0, music_player = 0, conveyer = 0, loadout = 0;
+  uint32_t easel = 0, music_player = 0, conveyer = 0, loadout = 0, driving_vehicle = 0;
 };
 
 const Names* GetNames(uint8_t* base) {
@@ -525,7 +525,8 @@ const Names* GetNames(uint8_t* base) {
                                                       {"OnlinePlayMessage", &n.online_message}, {"SfUI_Easel", &n.easel},
                                                       {"C1UI_MusicPlayer", &n.music_player},
                                                       {"C1UI_DataConveyer", &n.conveyer},
-                                                      {"C1UI_WeaponLoadout", &n.loadout}};
+                                                      {"C1UI_WeaponLoadout", &n.loadout},
+                                                      {"C1DrivingVehicleBase", &n.driving_vehicle}};
   for (uint32_t i = 0; i < count; ++i) {
     const uint32_t entry = LoadU32(base, names + 4 * i);
     if (!Readable(entry)) continue;
@@ -1361,9 +1362,60 @@ extern "C" void sub_82E2EBB8(PPCContext& __restrict ctx, uint8_t* base) {
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) kbm->SetPaused(false);
 }
 
+// Whether the local player is driving: GEngine +0x2D8 GamePlayers[0] (LocalPlayer) +0x40 Actor (C1PlayerController)
+// +0x208 Controller.Pawn is a C1DrivingVehicleBase (Rolling Start's C1DrivingVehicle_PimpTruck, the Humvee). Mounted
+// guns are SfTurret actors, not vehicles, so they keep the mouse.
+static bool Driving(uint8_t* base) {
+  using menu_pointer::Readable;
+  const auto* n = menu_pointer::GetNames(base);
+  const uint32_t engine = LoadU32(base, kGEngine);
+  if (!n || !Readable(engine) || !LoadU32(base, engine + 0x2D8 + 4)) return false;
+  const uint32_t players = LoadU32(base, engine + 0x2D8);
+  const uint32_t player = Readable(players) ? LoadU32(base, players) : 0;
+  const uint32_t controller = Readable(player) ? LoadU32(base, player + 0x40) : 0;
+  const uint32_t pawn = Readable(controller) ? LoadU32(base, controller + 0x208) : 0;
+  return Readable(pawn) && menu_pointer::IsA(base, pawn, n->driving_vehicle);
+}
+
 extern "C" void sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_82E2E860(ctx, base);
-  if (auto* kbm = bots::MouseKeyboardDriver::instance()) kbm->NoteHudTick();
+  if (auto* kbm = bots::MouseKeyboardDriver::instance()) {
+    kbm->NoteHudTick();
+    kbm->SetDriving(Driving(base));
+  }
+}
+
+// BOTS_KEY_TEST=<secs>:<key>,d|u[;...] (test only): press / release a keyboard key (kbm binding names: W, Space, LMB,
+// ...) at that time, counted from the first frame.
+static void KeyTest(bots::MouseKeyboardDriver& kbm, float dt) {
+  struct Key {
+    float at;
+    uint16_t vk;
+    bool down;
+  };
+  static std::vector<Key> plan = [] {
+    std::vector<Key> out;
+    const char* v = std::getenv("BOTS_KEY_TEST");
+    for (const char* p = v ? v : ""; *p;) {
+      float at = 0;
+      char name[32] = {}, action = 0;
+      if (std::sscanf(p, "%f:%31[^,],%c", &at, name, &action) < 3) break;
+      out.push_back({at, uint16_t(rex::ui::ParseVirtualKey(name)), action == 'd'});
+      p = std::strchr(p, ';');
+      if (!p) break;
+      ++p;
+    }
+    if (!out.empty()) REXLOG_INFO("BOTS_KEY_TEST: {} key events", out.size());
+    return out;
+  }();
+  static float clock = 0;
+  static size_t current = 0;
+  if (current >= plan.size()) return;
+  clock += dt;
+  for (; current < plan.size() && clock >= plan[current].at; ++current) {
+    REXLOG_INFO("BOTS_KEY_TEST: key {:#x} {} at {:.1f} s", plan[current].vk, plan[current].down ? "down" : "up", clock);
+    kbm.TestKey(plan[current].vk, plan[current].down);
+  }
 }
 
 extern "C" void sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base) {
@@ -1394,6 +1446,7 @@ extern "C" void sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base) {
   quit_option::Tick(ctx, base);
   float dx = 0, dy = 0;
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) {
+    KeyTest(*kbm, dt);
     kbm->TakeMouseDelta(dx, dy);
     static std::vector<bool> enter;
     kbm->TakeEnterEvents(enter);

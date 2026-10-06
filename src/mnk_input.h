@@ -72,6 +72,9 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   void SetMenuScene(bool menu) { menu_scene_.store(menu, std::memory_order_relaxed); }
   void NoteHudTick() { hud_tick_.store(Now(), std::memory_order_relaxed); }
   bool MenuMode() const;
+  // The player is driving (their pawn is a C1DrivingVehicleBase; set from the HUD tick): the triggers come from
+  // kbm_accelerate / kbm_brake instead of the mouse buttons, and those keys stop moving the left stick.
+  void SetDriving(bool driving) { driving_.store(driving, std::memory_order_relaxed); }
   // Engine Enter key edges (true = pressed) since the last call, oldest first. Game thread.
   void TakeEnterEvents(std::vector<bool>& out);
 
@@ -82,6 +85,12 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   // Briefly press these pad buttons (X_INPUT_GAMEPAD_* mask) on the synthetic controller, as a wheel notch does.
   // Screens that only take pad buttons (the music player) get mouse clicks this way.
   void TapButtons(uint16_t mask);
+
+  // BOTS_KEY_TEST (game_hooks.cpp, test only): press / release a key as if typed (claims window focus).
+  void TestKey(uint16_t vk, bool down) {
+    has_focus_ = true;
+    SetKey(vk, down);
+  }
 
   X_STATUS Setup() override { return X_STATUS_SUCCESS; }
   void EnumerateDevices(std::vector<rex::input::DeviceInfo>& out) override;
@@ -140,9 +149,9 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   std::atomic<uint32_t> pointer_moves_{0};
   std::vector<bool> enter_events_;         // engine Enter edges for the game thread
   bool click_is_enter_ = false;            // the left button went down in menu mode: its release is Enter's too
-  std::atomic<bool> paused_{false}, menu_scene_{false};
+  std::atomic<bool> paused_{false}, menu_scene_{false}, driving_{false};
   std::atomic<int64_t> hud_tick_{0};       // Now() of the last gameplay HUD tick
-  bool last_menu_ = false;                 // GetDeviceState (guest thread), for the log
+  bool last_menu_ = false, last_driving_ = false;  // GetDeviceState (guest thread), for the log
   uint32_t packet_ = 0;
   uint64_t last_sig_ = ~0ull;
 

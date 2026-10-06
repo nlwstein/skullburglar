@@ -79,6 +79,7 @@ std::vector<Setting> Catalog() {
   } kBindings[] = {
       {"kbm_move_forward", "Move forward"}, {"kbm_move_back", "Move back"}, {"kbm_move_left", "Move left"},
       {"kbm_move_right", "Move right"}, {"kbm_right_trigger", "Fire"}, {"kbm_left_trigger", "Aim"},
+      {"kbm_accelerate", "Accelerate (driving)"}, {"kbm_brake", "Brake / reverse (driving)"},
       {"kbm_a", "Cover / use / confirm"}, {"kbm_b", "Special move / counter-kill / back"},
       {"kbm_x", "Reload / pick up weapon"}, {"kbm_y", "Gangsta Fury / skip"},
       {"kbm_right_shoulder", "Throw grenade"}, {"kbm_left_shoulder", "Next grenade"},

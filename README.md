@@ -25,8 +25,8 @@ and that is where most of the work in this port has gone.
   at 275 fps where Xenia manages 89 and GPU emulation in this port 108, while keeping the GPU a third to a half as
   busy at 60 fps and using less memory. The emulated GPU stays available as a fallback (`--gpu_plugin=xenos`).
 - **Keyboard and mouse, done properly.** Mouse look goes through the engine's own PC mouse input rather than a fake
-  analog stick, so there is no stick acceleration curve or turn lag. Menus are point-and-click, including toggles and
-  sliders. Every button prompt in the game (menus, HUD, tutorials, pickups) switches to keyboard and mouse icons for
+  analog stick, so there is no stick acceleration curve or turn lag. Vehicles drive on W / S like a PC driving game
+  instead of the console's trigger throttle. Menus are point-and-click, including toggles and sliders. Every button prompt in the game (menus, HUD, tutorials, pickups) switches to keyboard and mouse icons for
   your actual key bindings, and back to controller icons the moment you pick up a pad. Keys can be rebound in the
   launcher.
 - **60 fps on the Steam Deck.** The Deck holds the 60 fps cap (about 74 fps uncapped in the benchmark scene below),
