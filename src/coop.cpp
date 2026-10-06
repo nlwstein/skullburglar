@@ -191,6 +191,8 @@ void ApplyCoopDefaults() {
   if (player == 2) {
     SetUnlessCommandLine("user_xuid", "B13EBABEBABE0002");
     SetUnlessCommandLine("user_gamertag", "Player2");
+    // Both instances play the same game world; two mixes of it on one PC only double the sound.
+    SetUnlessCommandLine("audio_mute", "true");
   }
   // This window's pad must keep working while the other window has focus. SDL reads the hint
   // when the input system opens the joystick subsystem.
