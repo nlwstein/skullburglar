@@ -27,6 +27,8 @@ REXCVAR_DEFINE_INT32(pad, 0, "bots",
 REXCVAR_DEFINE_BOOL(coop, false, "bots",
                     "Couch co-op: also start player 2 in a second window (see coop_pads)");
 REXCVAR_DEFINE_STRING(coop_pads, "1,2", "bots", "Controllers for co-op players 1 and 2");
+REXCVAR_DEFINE_BOOL(split_screen, false, "bots",
+                    "One-window co-op: a second controller joins with START, the screen split in two");
 REXCVAR_DEFINE_INT32(coop_player, 1, "bots", "Which co-op player this instance is (internal)");
 
 namespace bots {
@@ -193,6 +195,11 @@ std::unique_ptr<rex::input::DeviceAssignment> MakePadAssignment() {
   int pad = CoopPad();
   if (pad <= 0) return nullptr;
   return std::make_unique<PadAssignment>(uint32_t(pad - 1));
+}
+
+bool SplitScreen() {
+  static const bool test = std::getenv("BOTS_SPLIT_TEST") != nullptr;
+  return (REXCVAR_GET(split_screen) || test) && !REXCVAR_GET(coop) && CoopPad() <= 0;
 }
 
 int CoopPlayer() {

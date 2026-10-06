@@ -18,6 +18,10 @@ int CoopPad();
 // The assignment for --pad, or null when --pad is 0.
 std::unique_ptr<rex::input::DeviceAssignment> MakePadAssignment();
 
+// --split_screen: one-window co-op. A second pad's START joins its player into the same game, the
+// screen split in two (B-134). Off with --coop (two windows) or --pad.
+bool SplitScreen();
+
 // --coop: 1 or 2 for the two instances of a co-op launch, 0 otherwise.
 int CoopPlayer();
 

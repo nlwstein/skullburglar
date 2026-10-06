@@ -29,6 +29,7 @@
 #include <rex/system/xmemory.h>
 
 #include "app_quit.h"
+#include "coop.h"
 #include "mnk_input.h"
 #include "prompt_state.h"
 
@@ -197,6 +198,11 @@ extern "C" void sub_82BF31D8(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_82BF31D8(ctx, base);
 }
 
+namespace split_screen {
+void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state);
+bool Command(const std::string& cmd);
+}  // namespace split_screen
+
 // BOTS_EXEC: run UE3 console commands in game, the way the engine runs its own -EXEC= file at startup
 // (sub_82358A38 @0x82358E90): GamePlayers(0) of Cast<UGameEngine>(GEngine), FExec subobject at
 // +60, vtbl[0] = Exec(const TCHAR* Cmd, FOutputDevice& Ar), Ar = *GLog. The shipped story game
@@ -248,6 +254,7 @@ void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std:
     for (int i = 0; i < count; ++i, addr += 4) REXLOG_INFO("BOTS_EXEC peek {:08X} = {:08X}", addr, LoadU32(base, addr));
     return;
   }
+  if (split_screen::Command(cmd)) return;
   if (!st.buffer) st.buffer = rex::system::kernel_memory()->SystemHeapAlloc(0x400);
   ctx.r3.u64 = LoadU32(base, kGEngine);
   sub_823501E0(ctx, base);  // Cast<UGameEngine>
@@ -298,6 +305,7 @@ extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
     }
   }
   if (state && ctx.r3.u32 == 0) quit_option::FilterPad(base, state);
+  split_screen::Poll(ctx, base, user, ctx.r3.u32 == 0 ? state : 0);
   ExecState* st = Exec();
   if (!st) return;
   auto now = std::chrono::steady_clock::now();
@@ -1546,18 +1554,114 @@ void ExposeBuddyRequest(uint8_t* base, uint32_t controller) {
   REXLOG_INFO("split screen: ServerRequestBuddyCharacter is exec ({:08X})", fn);
 }
 
-void Tick(uint8_t* base) {
-  static const bool on = std::getenv("BOTS_SPLIT_TEST") != nullptr;
-  if (!on || !Patch(base)) return;
+uint32_t Player(uint8_t* base, uint32_t index) {
   const uint32_t engine = LoadU32(base, kGEngine);
-  if (const uint32_t players = LoadU32(base, engine + 0x2D8); Readable(players) && LoadU32(base, engine + 0x2DC))
-    if (const uint32_t p0 = LoadU32(base, players); Readable(p0)) ExposeBuddyRequest(base, LoadU32(base, p0 + 0x40));
-  const uint32_t players = LoadU32(base, engine + 0x2D8), count = LoadU32(base, engine + 0x2D8 + 4);
-  static uint32_t seen = 0;
-  if (count == seen) return;
-  seen = count;
-  for (uint32_t i = 0; i < count && i < 4 && Readable(players); ++i) {
-    const uint32_t p = LoadU32(base, players + 4 * i);
+  if (!Readable(engine) || LoadU32(base, engine + 0x2DC) <= index) return 0;
+  const uint32_t players = LoadU32(base, engine + 0x2D8);
+  return Readable(players) ? LoadU32(base, players + 4 * index) : 0;
+}
+
+uint32_t PlayerCount(uint8_t* base) {
+  const uint32_t engine = LoadU32(base, kGEngine);
+  return Readable(engine) ? LoadU32(base, engine + 0x2DC) : 0;
+}
+
+// Controller.Pawn of a LocalPlayer's actor (+0x40), 0 if none. The property's offset is UProperty +0x64.
+uint32_t PawnOf(uint8_t* base, uint32_t player) {
+  static uint32_t offset = 0;
+  const uint32_t controller = Readable(player) ? LoadU32(base, player + 0x40) : 0;
+  if (!Readable(controller)) return 0;
+  if (!offset)
+    if (const uint32_t prop = FindFunction(base, controller, "Pawn")) offset = LoadU32(base, prop + 0x64);
+  const uint32_t pawn = offset ? LoadU32(base, controller + offset) : 0;
+  return Readable(pawn) ? pawn : 0;
+}
+
+// Joining. A pad that no local player uses pressing START during play (player 1 has a pawn) joins as player 2, or the
+// "splitjoin" console command (tests) joins the first free one. From the input poll on the game thread, where typed
+// console commands run too: DebugCreatePlayer <pad> (CreatePlayer spawns the controller, which waits in Spectating),
+// SetSplit 1 (top / bottom), then player 2 asks for the buddy's body until its controller has a pawn.
+struct Join {
+  int pad = -1;  // the joining controller id while a join runs
+  int tries = 0;
+  bool requested = false;
+  std::chrono::steady_clock::time_point next;
+  uint16_t buttons[4] = {};
+  ExecState exec;
+};
+Join join;
+
+bool Command(const std::string& cmd) {
+  if (cmd != "splitjoin") return false;
+  join.requested = true;
+  return true;
+}
+
+bool PadUsed(uint8_t* base, uint32_t pad) {
+  for (uint32_t i = 0, n = PlayerCount(base); i < n && i < 4; ++i)
+    if (const uint32_t p = Player(base, i); Readable(p) && LoadU32(base, p + 0x60) == pad) return true;
+  return false;
+}
+
+void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
+  static const bool on = bots::SplitScreen();
+  if (!on || user >= 4) return;
+  const uint16_t buttons = state ? uint16_t(Raw(base, state)[4] << 8 | Raw(base, state)[5]) : 0;
+  const bool start = (buttons & 0x10) && !(join.buttons[user] & 0x10);  // XINPUT_GAMEPAD_START, pressed now
+  join.buttons[user] = buttons;
+  if (!Patch(base)) return;
+  const uint32_t p0 = Player(base, 0);
+  if (!Readable(p0)) return;
+  ExposeBuddyRequest(base, LoadU32(base, p0 + 0x40));
+  const PPCRegister r3 = ctx.r3;  // keep the poll's return value
+  const auto now = std::chrono::steady_clock::now();
+  if (join.pad < 0) {
+    const bool ready = PlayerCount(base) == 1 && PawnOf(base, p0);
+    int pad = -1;
+    // BOTS_SPLIT_TEST's scripted input reaches every pad, so there only "splitjoin" joins.
+    static const bool scripted = std::getenv("BOTS_SPLIT_TEST") != nullptr;
+    if (ready && start && !scripted && !PadUsed(base, user)) pad = int(user);
+    if (ready && join.requested)
+      for (uint32_t i = 0; i < 4 && pad < 0; ++i)
+        if (!PadUsed(base, i)) pad = int(i);
+    if (pad < 0) return;
+    join.requested = false;
+    join.pad = pad;
+    join.tries = 0;
+    join.next = now + std::chrono::seconds(2);
+    if (!join.exec.buffer) join.exec.buffer = rex::system::kernel_memory()->SystemHeapAlloc(0x400);
+    REXLOG_INFO("split screen: controller {} joins", pad);
+    RunPlayerCommand(ctx, base, join.exec, p0, fmt::format("DebugCreatePlayer {}", pad));
+    RunPlayerCommand(ctx, base, join.exec, p0, "SetSplit 1");
+  } else if (now >= join.next) {
+    const uint32_t p1 = Player(base, 1);
+    if (PawnOf(base, p1)) {
+      REXLOG_INFO("split screen: player 2 (controller {}) is in, pawn {:08X}", join.pad, PawnOf(base, p1));
+      join.pad = -1;
+    } else if (!Readable(p1) || ++join.tries > 5) {
+      REXLOG_WARN("split screen: player 2 (controller {}) got no pawn", join.pad);
+      join.pad = -1;
+    } else {
+      RunPlayerCommand(ctx, base, join.exec, p1, "ServerRequestBuddyCharacter");
+      join.next = now + std::chrono::seconds(3);
+    }
+  }
+  ctx.r3 = r3;
+}
+
+// Log the local players when their number or controllers change.
+void Tick(uint8_t* base) {
+  static const bool on = bots::SplitScreen();
+  if (!on) return;
+  const uint32_t count = PlayerCount(base);
+  static uint32_t seen = 0, ids = 0;
+  uint32_t now_ids = count;
+  for (uint32_t i = 0; i < count && i < 4; ++i)
+    if (const uint32_t p = Player(base, i); Readable(p)) now_ids |= (LoadU32(base, p + 0x60) & 0xFF) << (8 + 8 * i);
+  if (count == seen && now_ids == ids) return;
+  seen = count, ids = now_ids;
+  for (uint32_t i = 0; i < count && i < 4; ++i) {
+    const uint32_t p = Player(base, i);
     if (!Readable(p)) continue;
     REXLOG_INFO("split screen: player {} {:08X} controller id {} origin {} {} size {} {} actor {:08X}", i, p,
                 LoadU32(base, p + 0x60), menu_pointer::LoadF32(base, p + 0x68), menu_pointer::LoadF32(base, p + 0x6C),
