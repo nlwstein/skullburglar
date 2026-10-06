@@ -20,6 +20,8 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <set>
+#include <unordered_map>
 #include <string>
 
 #include <rex/logging.h>
@@ -202,6 +204,10 @@ namespace split_screen {
 void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state);
 bool Command(const std::string& cmd);
 }  // namespace split_screen
+namespace debug {
+bool Command(uint8_t* base, const std::string& cmd);
+void LogGuestStack(PPCContext& ctx, uint8_t* base, const char* tag, int frames = 16);
+}  // namespace debug
 
 // BOTS_EXEC: run UE3 console commands in game, the way the engine runs its own -EXEC= file at startup
 // (sub_82358A38 @0x82358E90): GamePlayers(0) of Cast<UGameEngine>(GEngine), FExec subobject at
@@ -255,7 +261,7 @@ void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std:
     for (int i = 0; i < count; ++i, addr += 4) REXLOG_INFO("BOTS_EXEC peek {:08X} = {:08X}", addr, LoadU32(base, addr));
     return;
   }
-  if (split_screen::Command(cmd)) return;
+  if (split_screen::Command(cmd) || debug::Command(base, cmd)) return;
   if (!st.buffer) st.buffer = rex::system::kernel_memory()->SystemHeapAlloc(0x400);
   ctx.r3.u64 = LoadU32(base, kGEngine);
   sub_823501E0(ctx, base);  // Cast<UGameEngine>
@@ -1541,6 +1547,12 @@ uint32_t FindFunction(uint8_t* base, uint32_t object, const char* name) {
   return fn;
 }
 
+// The offset of the object's property `name` (UProperty +0x64 Offset), 0xFFFFFFFF if its class has none.
+uint32_t Prop(uint8_t* base, uint32_t object, const char* name) {
+  const uint32_t prop = FindFunction(base, object, name);
+  return prop ? LoadU32(base, prop + 0x64) : 0xFFFFFFFF;
+}
+
 // A joining network player's controller asks for the buddy's body from its Spectating state, but only
 // `if (NetMode == NM_Client)`; a second local player on the host never does. Flag
 // C1PlayerController.ServerRequestBuddyCharacter exec (UFunction +0x94 FunctionFlags, FUNC_Exec 0x200) so it can be run
@@ -1640,6 +1652,16 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
     Run(ctx, base, p0, "SetSplit 1");
     // Scripted input reaches every pad, so the title screen may have given player 1 controller 1: swap them back.
     if (scripted && LoadU32(base, p0 + 0x60) != 0) Run(ctx, base, p0, "SSSwapControllers");
+    // Player 1's HUD scenes were laid out for the whole screen: reopen them for the top half (C1HUD execs). Hiding
+    // closes HUD scenes by template, whoever owns them, so player 2's HUD opens again too. ShowGameHUD leaves the main
+    // HUD scene hidden (it calls HideHUDScene right after opening it); UnPauseShowHUD shows it, as after a pause.
+    Run(ctx, base, p0, "HideGameHUD true");
+    Run(ctx, base, p0, "ShowGameHUD true");
+    Run(ctx, base, p0, "UnPauseShowHUD");
+    if (const uint32_t p1 = Player(base, 1); Readable(p1)) {
+      Run(ctx, base, p1, "ShowGameHUD true");
+      Run(ctx, base, p1, "UnPauseShowHUD");
+    }
   } else if (const uint32_t p1 = Player(base, 1); Readable(p1)) {
     if (PawnOf(base, p1)) {
       if (join.tries) REXLOG_INFO("split screen: player 2 is in, pawn {:08X}", PawnOf(base, p1));
@@ -1688,6 +1710,159 @@ void Tick(uint8_t* base) {
   }
 }
 }  // namespace split_screen
+
+// Debug aids for UI and engine work (console commands through BOTS_EXEC / BOTS_EXEC_FILE, next to "peek"):
+//   props <hex object> [tag]  every property of the object's class chain: class, name, property type, offset, the word
+//                             there as hex and as a float
+//   uiscenes [tree|full]      the scene client's active scenes: name, owner LocalPlayer, SceneRenderMode (1 = drawn in
+//                             the owner's share of the screen), Position, CurrentViewportSize, and each scene's top-level
+//                             widgets with RenderBounds (scene pixels, before the split-screen draw shift). "tree" walks
+//                             every widget (Children, and HudWidget_BigNumber Digits) with the bHidden flags word,
+//                             Opacity and C1UI_HudWidget OpacityAlpha; "full" adds the client's and each scene's vtable,
+//                             the GetViewport* UFunction records and the props of every top-level widget.
+//   uiprops <widget name>     the props of every widget of that name in any active scene (Children and Digits, at any
+//                             depth), tagged with the scene's owner LocalPlayer.
+// LogGuestStack is for hooks: the guest call chain at that point.
+namespace debug {
+using menu_pointer::Readable;
+
+const char* NameOf(uint8_t* base, uint32_t object) {
+  return Readable(object) ? menu_pointer::NameOf(base, LoadU32(base, object + 0x2C)) : "None";
+}
+
+void Props(uint8_t* base, uint32_t object, const std::string& tag) {
+  if (!Readable(object)) {
+    REXLOG_WARN("props: {:08X} is not readable", object);
+    return;
+  }
+  REXLOG_INFO("props {:08X} {} ({})", object, NameOf(base, object), NameOf(base, LoadU32(base, object + 0x34)));
+  for (uint32_t cls = LoadU32(base, object + 0x34), depth = 0; Readable(cls) && depth < 12;
+       cls = LoadU32(base, cls + 0x3C), ++depth)
+    for (uint32_t f = LoadU32(base, cls + 0x50), n = 0; Readable(f) && n < 4096; f = LoadU32(base, f + 0x40), ++n) {
+      const char* type = NameOf(base, LoadU32(base, f + 0x34));
+      if (!std::strstr(type, "Property")) continue;
+      const uint32_t off = LoadU32(base, f + 0x64), v = LoadU32(base, object + off);
+      REXLOG_INFO("  {} {}.{} {} +{:X} = {:08X} ({})", tag, NameOf(base, cls), NameOf(base, f), type, off, v,
+                  menu_pointer::LoadF32(base, object + off));
+    }
+}
+
+std::string Words(uint8_t* base, uint32_t from, uint32_t to) {
+  std::string out;
+  for (uint32_t a = from; a < to; a += 4) out += fmt::format(" {:08X}", LoadU32(base, a));
+  return out;
+}
+
+// One line per widget, its Children and Digits below it.
+void Tree(uint8_t* base, uint32_t w, int depth) {
+  using split_screen::Prop;
+  if (!Readable(w) || depth > 10) return;
+  auto f = [&](uint32_t object, const char* name) {
+    const uint32_t off = Prop(base, object, name);
+    return off == 0xFFFFFFFF ? -1.f : menu_pointer::LoadF32(base, object + off);
+  };
+  const uint32_t hidden = Prop(base, w, "bHidden");
+  REXLOG_INFO("  {:>{}}{:08X} {} ({}) bounds {} {} {} {} flags {:08X} opacity {} alpha {}", "", 2 * depth, w,
+              NameOf(base, w), NameOf(base, LoadU32(base, w + 0x34)), menu_pointer::LoadF32(base, w + 0x204),
+              menu_pointer::LoadF32(base, w + 0x208), menu_pointer::LoadF32(base, w + 0x20C),
+              menu_pointer::LoadF32(base, w + 0x210), hidden == 0xFFFFFFFF ? 0 : LoadU32(base, w + hidden),
+              f(w, "Opacity"), f(w, "OpacityAlpha"));
+  const uint32_t co = Prop(base, w, "Children");
+  if (co != 0xFFFFFFFF)
+    for (uint32_t k = 0, n = LoadU32(base, w + co + 4); k < n && k < 64; ++k)
+      Tree(base, LoadU32(base, LoadU32(base, w + co) + 4 * k), depth + 1);
+  if (const uint32_t digits = Prop(base, w, "Digits"); digits != 0xFFFFFFFF)
+    for (uint32_t d = 0; d < 7; ++d) Tree(base, LoadU32(base, w + digits + 4 * d), depth + 1);
+}
+
+// Props of every widget named `name` below `w`.
+void FindProps(uint8_t* base, uint32_t w, const char* name, const std::string& tag, int depth) {
+  using split_screen::Prop;
+  if (!Readable(w) || depth > 10) return;
+  if (!std::strcmp(NameOf(base, w), name)) Props(base, w, tag);
+  const uint32_t co = Prop(base, w, "Children");
+  if (co != 0xFFFFFFFF)
+    for (uint32_t k = 0, n = LoadU32(base, w + co + 4); k < n && k < 64; ++k)
+      FindProps(base, LoadU32(base, LoadU32(base, w + co) + 4 * k), name, tag, depth + 1);
+}
+
+void Scenes(uint8_t* base, bool full, bool tree, const char* find = nullptr) {
+  using split_screen::Prop;
+  auto f = [&](uint32_t a) { return menu_pointer::LoadF32(base, a); };
+  const uint32_t engine = LoadU32(base, kGEngine);
+  const uint32_t viewport = Readable(engine) ? LoadU32(base, engine + 0x2E4) : 0;
+  const uint32_t ui = Readable(viewport) ? LoadU32(base, viewport + Prop(base, viewport, "UIController")) : 0;
+  const uint32_t client = Readable(ui) ? LoadU32(base, ui + Prop(base, ui, "SceneClient")) : 0;
+  if (!Readable(client)) {
+    REXLOG_WARN("uiscenes: no scene client yet");
+    return;
+  }
+  const uint32_t off = Prop(base, client, "ActiveScenes");
+  const uint32_t scenes = LoadU32(base, client + off), count = LoadU32(base, client + off + 4);
+  REXLOG_INFO("uiscenes: client {:08X} {} vt {:08X}, {} active", client, NameOf(base, LoadU32(base, client + 0x34)),
+              LoadU32(base, client), count);
+  if (full) REXLOG_INFO("uiscenes: client vt{}", Words(base, LoadU32(base, client), LoadU32(base, client) + 400));
+  for (uint32_t i = 0; i < count && i < 64; ++i) {
+    const uint32_t sc = LoadU32(base, scenes + 4 * i);
+    if (!Readable(sc)) continue;
+    if (find) {
+      FindProps(base, sc, find, fmt::format("{:08X}", LoadU32(base, sc + Prop(base, sc, "PlayerOwner"))), 0);
+      continue;
+    }
+    const uint32_t pos = sc + Prop(base, sc, "Position"), size = sc + Prop(base, sc, "CurrentViewportSize");
+    REXLOG_INFO("uiscene {} {:08X} {} owner {:08X} mode {} pos {} {} {} {} vsize {} {}", i, sc, NameOf(base, sc),
+                LoadU32(base, sc + Prop(base, sc, "PlayerOwner")), Raw(base, sc + Prop(base, sc, "SceneRenderMode"))[0],
+                f(pos), f(pos + 4), f(pos + 8), f(pos + 12), f(size), f(size + 4));
+    if (full) {
+      REXLOG_INFO("  vt {:08X}:{}", LoadU32(base, sc), Words(base, LoadU32(base, sc), LoadU32(base, sc) + 800));
+      for (const char* name : {"GetViewportOrigin", "GetViewportSize", "GetViewportOffset", "GetViewportScale"})
+        if (const uint32_t fn = split_screen::FindFunction(base, sc, name))
+          REXLOG_INFO("  fn {} {:08X}:{}", name, fn, Words(base, fn + 0x80, fn + 0xC0));
+    }
+    const uint32_t co = Prop(base, sc, "Children");
+    const uint32_t kids = LoadU32(base, sc + co), nk = LoadU32(base, sc + co + 4);
+    for (uint32_t k = 0; k < nk && k < 64; ++k) {
+      const uint32_t w = LoadU32(base, kids + 4 * k);
+      if (!Readable(w)) continue;
+      if (tree) {
+        Tree(base, w, 1);
+        continue;
+      }
+      REXLOG_INFO("  widget {:08X} {} ({}) bounds {} {} {} {}", w, NameOf(base, w), NameOf(base, LoadU32(base, w + 0x34)),
+                  f(w + 0x204), f(w + 0x208), f(w + 0x20C), f(w + 0x210));
+      if (full) Props(base, w, fmt::format("{}.{}", NameOf(base, sc), NameOf(base, w)));
+    }
+  }
+}
+
+bool Command(uint8_t* base, const std::string& cmd) {
+  if (cmd == "uiscenes" || cmd == "uiscenes full" || cmd == "uiscenes tree")
+    return Scenes(base, cmd == "uiscenes full", cmd == "uiscenes tree"), true;
+  if (cmd.rfind("uiprops ", 0) == 0) return Scenes(base, false, false, cmd.c_str() + 8), true;
+  if (cmd.rfind("props ", 0) == 0) {
+    char* end = nullptr;
+    const uint32_t object = static_cast<uint32_t>(std::strtoul(cmd.c_str() + 6, &end, 16));
+    std::string tag = end ? end : "";
+    tag.erase(0, tag.find_first_not_of(' '));
+    return Props(base, object, tag), true;
+  }
+  return false;
+}
+
+// The guest call chain from r1 (PPC back chain: the word at a frame's stack pointer is the caller's stack pointer; the
+// return address is saved 8 bytes below that). Stops at a frame that isn't readable or doesn't move up the stack by
+// less than 64 KB - the last frame's back chain points past the stack's top, which isn't mapped.
+void LogGuestStack(PPCContext& ctx, uint8_t* base, const char* tag, int frames) {
+  std::string chain = fmt::format(" {:08X}", static_cast<uint32_t>(ctx.lr));
+  for (uint32_t sp = ctx.r1.u32, n = 0; n < uint32_t(frames) && Readable(sp); ++n) {
+    const uint32_t next = LoadU32(base, sp);
+    if (next <= sp || next - sp > 0x10000 || !Readable(next - 8)) break;
+    chain += fmt::format(" {:08X}", LoadU32(base, next - 8));
+    sp = next;
+  }
+  REXLOG_INFO("stack {}:{}", tag, chain);
+}
+}  // namespace debug
 
 extern "C" void sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_82E2E860(ctx, base);
@@ -1845,6 +2020,79 @@ extern "C" void sub_827DA828(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_827DA828(ctx, base);
   if (TravelTrace())
     REXLOG_INFO("travel trace: Browse -> {} , TravelURL '{}'", ctx.r3.u32, FStr(base, engine + 0x46C));
+}
+
+// Split screen: where each player's UI scenes (the HUD) draw. C1GameUISceneClient's GetViewportSize (sub_828A6C58)
+// gives a scene that renders per player (UIScene +0x174 PlayerOwner, +0x1F1 SceneRenderMode 1, SPLITRENDER_PlayerOwner)
+// its owner's share of the screen, but GetViewportOrigin (sub_828A6C40) is a stub answering (0, 0), so every player's
+// HUD was laid out, and drawn, from the top left. Answering the real origin there doesn't work: the layout code adds it
+// more than once along docking chains. So layout keeps origin (0, 0), and while C1GameUISceneClient renders such a
+// scene (sub_82F899D8: r3 the client, r4 the canvas, r5 the scene) its widgets' draw rectangles (UIObject +0x204
+// RenderBounds[4], +0x214 RenderBoundsVertices[4] Vector2D) move by the owner's LocalPlayer Origin (+0x68) / Size
+// (+0x70) times the scene's viewport size (UIScene +0x1F4 CurrentViewportSize), and are put back afterwards.
+namespace split_screen {
+// The widget's draw rectangle, saved, then moved.
+void Shift(uint8_t* base, uint32_t w, float dx, float dy, std::vector<std::pair<uint32_t, uint32_t>>& saved) {
+  for (uint32_t k = 0; k < 12; ++k) {  // RenderBounds L T R B, then four (x, y) vertices
+    const uint32_t a = w + 0x204 + 4 * k;
+    const uint32_t bits = LoadU32(base, a);
+    saved.emplace_back(a, bits);
+    float v;
+    std::memcpy(&v, &bits, 4);
+    v += (k < 4 ? k : k - 4) % 2 ? dy : dx;
+    uint32_t out;
+    std::memcpy(&out, &v, 4);
+    StoreU32(base, a, out);
+  }
+}
+// Every widget the scene draws, recursively: its Children, and HudWidget_BigNumber's Digits[7] (the cash and score
+// digits, which are its Children too in the HUD scenes seen so far).
+void Collect(uint8_t* base, uint32_t object, uint32_t children_offset, std::vector<uint32_t>& out, int depth) {
+  auto add = [&](uint32_t w) {
+    if (!menu_pointer::Readable(w) || std::find(out.begin(), out.end(), w) != out.end()) return;
+    out.push_back(w);
+    if (depth < 8) Collect(base, w, children_offset, out, depth + 1);
+  };
+  const uint32_t kids = LoadU32(base, object + children_offset), count = LoadU32(base, object + children_offset + 4);
+  for (uint32_t i = 0; i < count && i < 256; ++i) add(LoadU32(base, kids + 4 * i));
+  static std::unordered_map<uint32_t, uint32_t> digits_offset;  // by class
+  const uint32_t cls = LoadU32(base, object + 0x34);
+  auto it = digits_offset.find(cls);
+  if (it == digits_offset.end()) it = digits_offset.emplace(cls, Prop(base, object, "Digits")).first;
+  if (it->second != 0xFFFFFFFF)
+    for (uint32_t d = 0; d < 7; ++d) add(LoadU32(base, object + it->second + 4 * d));
+}
+}  // namespace split_screen
+extern "C" void __imp__sub_82F899D8(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_82F899D8(PPCContext& __restrict ctx, uint8_t* base) {
+  static const bool on = bots::SplitScreen();
+  const uint32_t scene = ctx.r5.u32;
+  float dx = 0, dy = 0;
+  if (on && menu_pointer::Readable(scene) && Raw(base, scene + 0x1F1)[0] == 1) {
+    if (const uint32_t player = LoadU32(base, scene + 0x174); menu_pointer::Readable(player)) {
+      const float sx = menu_pointer::LoadF32(base, player + 0x70), sy = menu_pointer::LoadF32(base, player + 0x74);
+      if (sx > 0) dx = menu_pointer::LoadF32(base, player + 0x68) / sx * menu_pointer::LoadF32(base, scene + 0x1F4);
+      if (sy > 0) dy = menu_pointer::LoadF32(base, player + 0x6C) / sy * menu_pointer::LoadF32(base, scene + 0x1F8);
+    }
+  }
+  // Debug aid: BOTS_UI_SKIP_PLAYER=<n> (0-3) draws none of local player n's UI scenes, to tell the players' HUDs apart.
+  static const int skip = [] {
+    const char* v = std::getenv("BOTS_UI_SKIP_PLAYER");
+    return v && *v ? std::atoi(v) : -1;
+  }();
+  if (skip >= 0 && menu_pointer::Readable(scene) && LoadU32(base, scene + 0x174) &&
+      LoadU32(base, scene + 0x174) == split_screen::Player(base, uint32_t(skip)))
+    return;
+  if (dx == 0 && dy == 0) return __imp__sub_82F899D8(ctx, base);
+  static uint32_t children_offset = split_screen::Prop(base, scene, "Children");
+  static std::vector<uint32_t> widgets;
+  static std::vector<std::pair<uint32_t, uint32_t>> saved;
+  widgets.clear();
+  saved.clear();
+  split_screen::Collect(base, scene, children_offset, widgets, 0);
+  for (const uint32_t w : widgets) split_screen::Shift(base, w, dx, dy, saved);
+  __imp__sub_82F899D8(ctx, base);
+  for (const auto& [a, bits] : saved) StoreU32(base, a, bits);
 }
 
 // Split screen: the final post-process pass (sub_82D7E850: r3 the effect, r5 the view) sets the back buffer as its
