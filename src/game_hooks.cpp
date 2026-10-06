@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <deque>
 #include <filesystem>
@@ -22,6 +23,7 @@
 #include <mutex>
 #include <set>
 #include <unordered_map>
+#include <utility>
 #include <string>
 
 #include <rex/logging.h>
@@ -1714,17 +1716,32 @@ void Tick(uint8_t* base) {
 // Debug aids for UI and engine work (console commands through BOTS_EXEC / BOTS_EXEC_FILE, next to "peek"):
 //   props <hex object> [tag]  every property of the object's class chain: class, name, property type, offset, the word
 //                             there as hex and as a float
-//   uiscenes [tree|full]      the scene client's active scenes: name, owner LocalPlayer, SceneRenderMode (1 = drawn in
+//   uiscenes [tree|full|stack] the scene client's active scenes: name, owner LocalPlayer, SceneRenderMode (1 = drawn in
 //                             the owner's share of the screen), Position, CurrentViewportSize, and each scene's top-level
 //                             widgets with RenderBounds (scene pixels, before the split-screen draw shift). "tree" walks
 //                             every widget (Children, and HudWidget_BigNumber Digits) with the bHidden flags word,
 //                             Opacity and C1UI_HudWidget OpacityAlpha; "full" adds the client's and each scene's vtable,
-//                             the GetViewport* UFunction records and the props of every top-level widget.
+//                             the GetViewport* UFunction records and the props of every top-level widget. "stack"
+//                             lists each scene's RenderStack (+0x19C, the widgets it draws, in order) with each
+//                             widget's owner.
+//   traceimage <name>         log the first renders of UIImages of that name per scene, with the guest call chain
+//                             (also BOTS_TRACE_UIIMAGE)
 //   uiprops <widget name>     the props of every widget of that name in any active scene (Children and Digits, at any
 //                             depth), tagged with the scene's owner LocalPlayer.
+//   words <hex addr> <count> [tag]  raw guest words from addr, as hex and as floats
+//   renderdiff                the next split-screen-shifted scene draw logs every word of the scene and its widgets
+//                             (first 0x1600 bytes) that differs after the draw and the shift's restore: what drawing
+//                             changed for good
 // LogGuestStack is for hooks: the guest call chain at that point.
 namespace debug {
 using menu_pointer::Readable;
+
+std::string trace_image = [] {
+  const char* v = std::getenv("BOTS_TRACE_UIIMAGE");
+  return std::string(v ? v : "");
+}();
+std::unordered_map<uint32_t, int> trace_image_seen;  // renders logged, by scene
+bool render_diff = false;
 
 const char* NameOf(uint8_t* base, uint32_t object) {
   return Readable(object) ? menu_pointer::NameOf(base, LoadU32(base, object + 0x2C)) : "None";
@@ -1786,7 +1803,7 @@ void FindProps(uint8_t* base, uint32_t w, const char* name, const std::string& t
       FindProps(base, LoadU32(base, LoadU32(base, w + co) + 4 * k), name, tag, depth + 1);
 }
 
-void Scenes(uint8_t* base, bool full, bool tree, const char* find = nullptr) {
+void Scenes(uint8_t* base, bool full, bool tree, const char* find = nullptr, bool stack = false) {
   using split_screen::Prop;
   auto f = [&](uint32_t a) { return menu_pointer::LoadF32(base, a); };
   const uint32_t engine = LoadU32(base, kGEngine);
@@ -1813,6 +1830,15 @@ void Scenes(uint8_t* base, bool full, bool tree, const char* find = nullptr) {
     REXLOG_INFO("uiscene {} {:08X} {} owner {:08X} mode {} pos {} {} {} {} vsize {} {}", i, sc, NameOf(base, sc),
                 LoadU32(base, sc + Prop(base, sc, "PlayerOwner")), Raw(base, sc + Prop(base, sc, "SceneRenderMode"))[0],
                 f(pos), f(pos + 4), f(pos + 8), f(pos + 12), f(size), f(size + 4));
+    if (stack) {
+      const uint32_t rs = Prop(base, sc, "RenderStack");
+      for (uint32_t k = 0, n = LoadU32(base, sc + rs + 4); k < n && k < 512; ++k) {
+        const uint32_t w = LoadU32(base, LoadU32(base, sc + rs) + 4 * k);
+        REXLOG_INFO("  render {} {:08X} {} ({}) in {}", k, w, NameOf(base, w), NameOf(base, LoadU32(base, w + 0x34)),
+                    NameOf(base, Readable(w) ? LoadU32(base, w + 0x17C) : 0));
+      }
+      continue;
+    }
     if (full) {
       REXLOG_INFO("  vt {:08X}:{}", LoadU32(base, sc), Words(base, LoadU32(base, sc), LoadU32(base, sc) + 800));
       for (const char* name : {"GetViewportOrigin", "GetViewportSize", "GetViewportOffset", "GetViewportScale"})
@@ -1836,8 +1862,25 @@ void Scenes(uint8_t* base, bool full, bool tree, const char* find = nullptr) {
 }
 
 bool Command(uint8_t* base, const std::string& cmd) {
-  if (cmd == "uiscenes" || cmd == "uiscenes full" || cmd == "uiscenes tree")
-    return Scenes(base, cmd == "uiscenes full", cmd == "uiscenes tree"), true;
+  if (cmd == "uiscenes" || cmd == "uiscenes full" || cmd == "uiscenes tree" || cmd == "uiscenes stack")
+    return Scenes(base, cmd == "uiscenes full", cmd == "uiscenes tree", nullptr, cmd == "uiscenes stack"), true;
+  if (cmd.rfind("traceimage ", 0) == 0) {
+    trace_image = cmd.substr(11);
+    trace_image_seen.clear();
+    return true;
+  }
+  if (cmd == "renderdiff") return render_diff = true;
+  if (cmd.rfind("words ", 0) == 0) {
+    char* end = nullptr;
+    const uint32_t addr = static_cast<uint32_t>(std::strtoul(cmd.c_str() + 6, &end, 16));
+    const uint32_t count = std::min<uint32_t>(static_cast<uint32_t>(std::strtoul(end, &end, 0)), 1024);
+    std::string tag = end ? end : "";
+    tag.erase(0, tag.find_first_not_of(' '));
+    for (uint32_t k = 0; k < count && Readable(addr + 4 * k); ++k)
+      REXLOG_INFO("{} {:08X} +{:X} = {:08X} ({})", tag, addr + 4 * k, 4 * k, LoadU32(base, addr + 4 * k),
+                  menu_pointer::LoadF32(base, addr + 4 * k));
+    return true;
+  }
   if (cmd.rfind("uiprops ", 0) == 0) return Scenes(base, false, false, cmd.c_str() + 8), true;
   if (cmd.rfind("props ", 0) == 0) {
     char* end = nullptr;
@@ -1850,19 +1893,36 @@ bool Command(uint8_t* base, const std::string& cmd) {
 }
 
 // The guest call chain from r1 (PPC back chain: the word at a frame's stack pointer is the caller's stack pointer; the
-// return address is saved 8 bytes below that). Stops at a frame that isn't readable or doesn't move up the stack by
-// less than 64 KB - the last frame's back chain points past the stack's top, which isn't mapped.
+// return address is saved 8 bytes below that). Bounded by the thread's stack (KPCR at r13: +0x70 stack base, the high
+// end, +0x74 its low end): the outermost frame's back chain points at the base, and the page above it isn't mapped.
 void LogGuestStack(PPCContext& ctx, uint8_t* base, const char* tag, int frames) {
+  const uint32_t pcr = ctx.r13.u32;  // outside Readable()'s range
+  uint32_t top = pcr ? LoadU32(base, pcr + 0x70) : 0, bottom = pcr ? LoadU32(base, pcr + 0x74) : 0;
+  if (!(bottom <= ctx.r1.u32 && ctx.r1.u32 < top)) top = bottom = 0;  // unknown stack: the return address only
   std::string chain = fmt::format(" {:08X}", static_cast<uint32_t>(ctx.lr));
-  for (uint32_t sp = ctx.r1.u32, n = 0; n < uint32_t(frames) && Readable(sp); ++n) {
+  for (uint32_t sp = ctx.r1.u32, n = 0; n < uint32_t(frames) && sp + 4 <= top; ++n) {
     const uint32_t next = LoadU32(base, sp);
-    if (next <= sp || next - sp > 0x10000 || !Readable(next - 8)) break;
+    if (next <= sp || next > top || next - 8 < bottom) break;
     chain += fmt::format(" {:08X}", LoadU32(base, next - 8));
     sp = next;
   }
-  REXLOG_INFO("stack {}:{}", tag, chain);
+  REXLOG_INFO("stack {} [{:08X}-{:08X}]:{}", tag, bottom, top, chain);
 }
 }  // namespace debug
+
+// Debug aid: BOTS_TRACE_UIIMAGE=<widget name> (or the console command "traceimage <name>", which also restarts the
+// count) logs the first renders of UIImages of that name (UIImage::Render_Widget, sub_8281D990: r3 the image, r4 the
+// canvas) in each scene (UIObject +0x180 OwnerScene), with the guest call chain.
+extern "C" void __imp__sub_8281D990(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_8281D990(PPCContext& __restrict ctx, uint8_t* base) {
+  if (!debug::trace_image.empty() && debug::trace_image == debug::NameOf(base, ctx.r3.u32)) {
+    const uint32_t scene = LoadU32(base, ctx.r3.u32 + 0x180);
+    if (debug::trace_image_seen[scene]++ < 4)
+      debug::LogGuestStack(ctx, base, fmt::format("{} {:08X} scene {:08X} owner {:08X}", debug::trace_image,
+                                                  ctx.r3.u32, scene, LoadU32(base, scene + 0x174)).c_str());
+  }
+  __imp__sub_8281D990(ctx, base);
+}
 
 extern "C" void sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_82E2E860(ctx, base);
@@ -2031,18 +2091,43 @@ extern "C" void sub_827DA828(PPCContext& __restrict ctx, uint8_t* base) {
 // RenderBounds[4], +0x214 RenderBoundsVertices[4] Vector2D) move by the owner's LocalPlayer Origin (+0x68) / Size
 // (+0x70) times the scene's viewport size (UIScene +0x1F4 CurrentViewportSize), and are put back afterwards.
 namespace split_screen {
-// The widget's draw rectangle, saved, then moved.
-void Shift(uint8_t* base, uint32_t w, float dx, float dy, std::vector<std::pair<uint32_t, uint32_t>>& saved) {
+// A face of a widget's Position, moved with its draw rectangle (see Shift).
+struct Moved {
+  uint32_t address, was, moved;  // the face's bits before and after the move
+  float by;
+};
+// The widget's draw rectangle, saved, then moved. Its Position (UIScreenObject +0x3C UIScreenValue_Bounds: Value[4]
+// L T R B, then ScaleType[4] bytes) moves too where it is relative to the viewport or the scene, and the move is taken
+// back out afterwards (Unshift) - drawing can write Position from the moved rectangle: the HUD's jackpot counters
+// (cash, score) set their digits' Position each frame, which without this drifted 360 px down a frame, off screen.
+void Shift(uint8_t* base, uint32_t w, float dx, float dy, float view_w, float view_h,
+           std::vector<std::pair<uint32_t, uint32_t>>& saved, std::vector<Moved>& moved) {
   for (uint32_t k = 0; k < 12; ++k) {  // RenderBounds L T R B, then four (x, y) vertices
     const uint32_t a = w + 0x204 + 4 * k;
     const uint32_t bits = LoadU32(base, a);
     saved.emplace_back(a, bits);
-    float v;
-    std::memcpy(&v, &bits, 4);
-    v += (k < 4 ? k : k - 4) % 2 ? dy : dx;
-    uint32_t out;
-    std::memcpy(&out, &v, 4);
-    StoreU32(base, a, out);
+    StoreU32(base, a, std::bit_cast<uint32_t>(std::bit_cast<float>(bits) + ((k < 4 ? k : k - 4) % 2 ? dy : dx)));
+  }
+  for (uint32_t face = 0; face < 4; ++face) {
+    const bool y = face % 2;
+    const float d = y ? dy : dx, extent = y ? view_h : view_w;
+    float by = 0;
+    switch (Raw(base, w + 0x4C)[face]) {  // EPositionEvalType
+      case 1: case 2: by = d; break;                             // PixelViewport, PixelScene
+      case 4: case 6: by = extent > 0 ? d / extent : 0; break;   // PercentageViewport, PercentageScene
+      default: break;                                            // owner-relative: the owner moves too
+    }
+    if (by == 0) continue;
+    const uint32_t a = w + 0x3C + 4 * face, was = LoadU32(base, a);
+    const uint32_t bits = std::bit_cast<uint32_t>(std::bit_cast<float>(was) + by);
+    StoreU32(base, a, bits);
+    moved.push_back({a, was, bits, by});
+  }
+}
+void Unshift(uint8_t* base, const std::vector<Moved>& moved) {
+  for (const auto& m : moved) {  // untouched faces get their exact bits back (+by -by can round)
+    const uint32_t now = LoadU32(base, m.address);
+    StoreU32(base, m.address, now == m.moved ? m.was : std::bit_cast<uint32_t>(std::bit_cast<float>(now) - m.by));
   }
 }
 // Every widget the scene draws, recursively: its Children, and HudWidget_BigNumber's Digits[7] (the cash and score
@@ -2087,12 +2172,40 @@ extern "C" void sub_82F899D8(PPCContext& __restrict ctx, uint8_t* base) {
   static uint32_t children_offset = split_screen::Prop(base, scene, "Children");
   static std::vector<uint32_t> widgets;
   static std::vector<std::pair<uint32_t, uint32_t>> saved;
+  static std::vector<split_screen::Moved> moved;
   widgets.clear();
   saved.clear();
+  moved.clear();
   split_screen::Collect(base, scene, children_offset, widgets, 0);
-  for (const uint32_t w : widgets) split_screen::Shift(base, w, dx, dy, saved);
+  const bool diff = std::exchange(debug::render_diff, false);
+  constexpr uint32_t kDiffBytes = 0x1600;
+  std::vector<uint8_t> before;
+  if (diff) {
+    widgets.insert(widgets.begin(), scene);
+    for (const uint32_t w : widgets) before.insert(before.end(), Raw(base, w), Raw(base, w) + kDiffBytes);
+    widgets.erase(widgets.begin());
+  }
+  const float view_w = menu_pointer::LoadF32(base, scene + 0x1F4), view_h = menu_pointer::LoadF32(base, scene + 0x1F8);
+  for (const uint32_t w : widgets) split_screen::Shift(base, w, dx, dy, view_w, view_h, saved, moved);
   __imp__sub_82F899D8(ctx, base);
   for (const auto& [a, bits] : saved) StoreU32(base, a, bits);
+  split_screen::Unshift(base, moved);
+  if (diff) {
+    widgets.insert(widgets.begin(), scene);
+    int logged = 0;
+    for (size_t i = 0; i < widgets.size(); ++i)
+      for (uint32_t o = 0; o < kDiffBytes; o += 4) {
+        uint32_t was;
+        std::memcpy(&was, &before[i * kDiffBytes + o], 4);
+        was = __builtin_bswap32(was);
+        if (const uint32_t now = LoadU32(base, widgets[i] + o); now != was && logged++ < 200)
+          REXLOG_INFO("renderdiff {:08X} {} +{:X}: {:08X} ({}) -> {:08X} ({})", widgets[i],
+                      debug::NameOf(base, widgets[i]), o, was, std::bit_cast<float>(was), now,
+                      std::bit_cast<float>(now));
+      }
+    REXLOG_INFO("renderdiff: scene {:08X} shift {} {}, {} widgets, {} words changed", scene, dx, dy, widgets.size() - 1,
+                logged);
+  }
 }
 
 // Split screen: the final post-process pass (sub_82D7E850: r3 the effect, r5 the view) sets the back buffer as its
