@@ -1450,6 +1450,15 @@ static bool Driving(uint8_t* base) {
   const uint32_t player = Readable(players) ? LoadU32(base, players) : 0;
   const uint32_t controller = Readable(player) ? LoadU32(base, player + 0x40) : 0;
   const uint32_t pawn = Readable(controller) ? LoadU32(base, controller + 0x208) : 0;
+  static uint32_t seen_controller = 0, seen_pawn = 0;
+  if (controller != seen_controller || pawn != seen_pawn) {
+    seen_controller = controller, seen_pawn = pawn;
+    auto cls = [base](uint32_t o) {
+      return Readable(o) && Readable(LoadU32(base, o + 0x34))
+                 ? menu_pointer::NameOf(base, LoadU32(base, LoadU32(base, o + 0x34) + 0x2C)) : "-";
+    };
+    REXLOG_INFO("player: controller {:08X} {} pawn {:08X} {}", controller, cls(controller), pawn, cls(pawn));
+  }
   return Readable(pawn) && menu_pointer::IsA(base, pawn, n->driving_vehicle);
 }
 
