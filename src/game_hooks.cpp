@@ -237,6 +237,8 @@ ExecState* Exec() {
   return state;
 }
 
+void RunPlayerCommand(PPCContext& ctx, uint8_t* base, ExecState& st, uint32_t player, const std::string& cmd);
+
 void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std::string& cmd) {
   // "peek <hex addr> [count]": log guest words (pointers the game fills in at runtime).
   if (cmd.rfind("peek ", 0) == 0) {
@@ -250,12 +252,20 @@ void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std:
   ctx.r3.u64 = LoadU32(base, kGEngine);
   sub_823501E0(ctx, base);  // Cast<UGameEngine>
   const uint32_t engine = ctx.r3.u32;
+  // "p2:<command>" runs it as the second local player (split screen).
+  const bool p2 = cmd.rfind("p2:", 0) == 0;
+  const uint32_t index = p2 ? 1 : 0;
   const uint32_t players = engine ? LoadU32(base, engine + 728) : 0;
-  const uint32_t player = players && LoadU32(base, engine + 732) ? LoadU32(base, players) : 0;
+  const uint32_t player = players && LoadU32(base, engine + 732) > index ? LoadU32(base, players + 4 * index) : 0;
   if (!player || !st.buffer) {
     REXLOG_WARN("BOTS_EXEC: no local player yet, dropped: {}", cmd);
     return;
   }
+  RunPlayerCommand(ctx, base, st, player, p2 ? cmd.substr(3) : cmd);
+}
+
+// Exec `cmd` through a LocalPlayer's FExec (+60).
+void RunPlayerCommand(PPCContext& ctx, uint8_t* base, ExecState& st, uint32_t player, const std::string& cmd) {
   uint8_t* out = Raw(base, st.buffer);
   size_t n = std::min<size_t>(cmd.size(), 0x1FE);
   for (size_t i = 0; i < n; ++i) { out[2 * i] = 0; out[2 * i + 1] = static_cast<uint8_t>(cmd[i]); }
@@ -1462,48 +1472,103 @@ static bool Driving(uint8_t* base) {
   return Readable(pawn) && menu_pointer::IsA(base, pawn, n->driving_vehicle);
 }
 
-// BOTS_SPLIT_TEST=1 (experiment): the shipped GameViewportClient.SetSplitscreenConfiguration always picks eSST_NONE,
-// so with two GamePlayers both draw full screen. Lay them out top / bottom instead: LocalPlayer +0x60 ControllerId,
-// +0x68 Origin, +0x70 Size (Vector2D, fractions of the viewport).
-static void SplitTest(uint8_t* base) {
-  // BOTS_SPLIT_TEST=half: only player 0, in the top half (one view, smaller than the screen).
-  static const char* mode = std::getenv("BOTS_SPLIT_TEST");
-  if (!mode) return;
-  const bool half = !std::strcmp(mode, "half");
-  using menu_pointer::Readable;
+// Split screen (B-134). The shipped GameViewportClient.SetSplitscreenConfiguration(SplitType) starts with
+// `SplitscreenType = 0;` (eSST_NONE whatever it is passed), so every LocalPlayer keeps the full screen; the
+// SplitscreenInfo layouts are intact. Its bytecode is patched in place to `SplitscreenType = SplitType;` and the
+// engine's own layout then applies (LayoutPlayers re-applies SplitscreenType; `SetSplit <n>` picks 1 2P horizontal,
+// 2 2P vertical). UObject +0x28 Outer, +0x2C Name, +0x34 Class; UField +0x40 Next; UStruct +0x50 Children,
+// +0x58 Script (TArray<BYTE>). LocalPlayer +0x60 ControllerId, +0x68 Origin, +0x70 Size.
+namespace split_screen {
+using menu_pointer::Readable;
+
+uint32_t FindField(uint8_t* base, uint32_t strct, const char* name) {
+  for (uint32_t f = LoadU32(base, strct + 0x50), n = 0; Readable(f) && n < 4096; f = LoadU32(base, f + 0x40), ++n)
+    if (!std::strcmp(menu_pointer::NameOf(base, LoadU32(base, f + 0x2C)), name)) return f;
+  return 0;
+}
+
+// Once: rewrite the first 15 bytes. Before: 0F 01 <SplitscreenType> 24 00 (let member = byte 0) and
+// 0F 00 <Idx> 25 (let Idx = 0; locals start zeroed, so it can go). After: 0F 01 <SplitscreenType> 00 <SplitType>
+// then 5 x 0B (EX_Nothing). The loop's jump target (0x0F) is unchanged.
+bool Patch(uint8_t* base) {
+  static int state = 0;  // 0 not yet, 1 done, -1 gave up
+  if (state) return state > 0;
   const uint32_t engine = LoadU32(base, kGEngine);
-  if (!Readable(engine)) return;
+  const uint32_t viewport = Readable(engine) ? LoadU32(base, engine + 0x2E4) : 0;
+  if (!Readable(viewport)) return false;
+  uint32_t fn = 0;
+  for (uint32_t cls = LoadU32(base, viewport + 0x34), depth = 0; Readable(cls) && !fn && depth < 8;
+       cls = LoadU32(base, cls + 0x3C), ++depth)
+    fn = FindField(base, cls, "SetSplitscreenConfiguration");
+  const uint32_t param = Readable(fn) ? LoadU32(base, fn + 0x50) : 0;
+  const uint32_t code = Readable(fn) ? LoadU32(base, fn + 0x58) : 0;
+  state = -1;
+  if (!Readable(param) || !Readable(code) || LoadU32(base, fn + 0x5C) < 15) {
+    REXLOG_WARN("split screen: SetSplitscreenConfiguration not found");
+    return false;
+  }
+  uint8_t* p = Raw(base, code);
+  const uint32_t member = LoadU32(base, code + 2);
+  if (!(p[0] == 0x0F && p[1] == 0x01 && p[6] == 0x24 && p[7] == 0x00 && p[8] == 0x0F && p[9] == 0x00 &&
+        p[14] == 0x25) || !Readable(member) ||
+      std::strcmp(menu_pointer::NameOf(base, LoadU32(base, member + 0x2C)), "SplitscreenType")) {
+    REXLOG_WARN("split screen: unexpected SetSplitscreenConfiguration bytecode, not patched");
+    return false;
+  }
+  p[6] = 0x00;  // EX_LocalVariable
+  StoreU32(base, code + 7, param);
+  std::memset(p + 11, 0x0B, 4);
+  state = 1;
+  REXLOG_INFO("split screen: SetSplitscreenConfiguration patched ({:08X})", fn);
+  return true;
+}
+
+// The function `name` of the object's class (or a superclass), 0 if none.
+uint32_t FindFunction(uint8_t* base, uint32_t object, const char* name) {
+  uint32_t fn = 0;
+  for (uint32_t cls = Readable(object) ? LoadU32(base, object + 0x34) : 0, depth = 0; Readable(cls) && !fn && depth < 12;
+       cls = LoadU32(base, cls + 0x3C), ++depth)
+    fn = FindField(base, cls, name);
+  return fn;
+}
+
+// A joining network player's controller asks for the buddy's body from its Spectating state, but only
+// `if (NetMode == NM_Client)`; a second local player on the host never does. Flag
+// C1PlayerController.ServerRequestBuddyCharacter exec (UFunction +0x94 FunctionFlags, FUNC_Exec 0x200) so it can be
+// run as that player ("p2:ServerRequestBuddyCharacter").
+void ExposeBuddyRequest(uint8_t* base, uint32_t controller) {
+  static bool done = false;
+  if (done) return;
+  const uint32_t fn = FindFunction(base, controller, "ServerRequestBuddyCharacter");
+  if (!fn) return;
+  StoreU32(base, fn + 0x94, LoadU32(base, fn + 0x94) | 0x200);
+  done = true;
+  REXLOG_INFO("split screen: ServerRequestBuddyCharacter is exec ({:08X})", fn);
+}
+
+void Tick(uint8_t* base) {
+  static const bool on = std::getenv("BOTS_SPLIT_TEST") != nullptr;
+  if (!on || !Patch(base)) return;
+  const uint32_t engine = LoadU32(base, kGEngine);
+  if (const uint32_t players = LoadU32(base, engine + 0x2D8); Readable(players) && LoadU32(base, engine + 0x2DC))
+    if (const uint32_t p0 = LoadU32(base, players); Readable(p0)) ExposeBuddyRequest(base, LoadU32(base, p0 + 0x40));
   const uint32_t players = LoadU32(base, engine + 0x2D8), count = LoadU32(base, engine + 0x2D8 + 4);
   static uint32_t seen = 0;
-  if (count != seen) {
-    seen = count;
-    for (uint32_t i = 0; i < count && i < 4 && Readable(players); ++i) {
-      const uint32_t p = LoadU32(base, players + 4 * i);
-      if (!Readable(p)) continue;
-      REXLOG_INFO("split: player {} {:08X} controller id {} origin {} {} size {} {} actor {:08X}", i, p,
-                  LoadU32(base, p + 0x60), menu_pointer::LoadF32(base, p + 0x68), menu_pointer::LoadF32(base, p + 0x6C),
-                  menu_pointer::LoadF32(base, p + 0x70), menu_pointer::LoadF32(base, p + 0x74), LoadU32(base, p + 0x40));
-    }
-  }
-  if (count != (half ? 1u : 2u) || !Readable(players)) return;
-  auto f32 = [](float v) {
-    uint32_t u;
-    std::memcpy(&u, &v, 4);
-    return u;
-  };
-  for (uint32_t i = 0; i < count; ++i) {
+  if (count == seen) return;
+  seen = count;
+  for (uint32_t i = 0; i < count && i < 4 && Readable(players); ++i) {
     const uint32_t p = LoadU32(base, players + 4 * i);
     if (!Readable(p)) continue;
-    StoreU32(base, p + 0x68, f32(0.0f));
-    StoreU32(base, p + 0x6C, f32(i ? 0.5f : 0.0f));
-    StoreU32(base, p + 0x70, f32(1.0f));
-    StoreU32(base, p + 0x74, f32(0.5f));
+    REXLOG_INFO("split screen: player {} {:08X} controller id {} origin {} {} size {} {} actor {:08X}", i, p,
+                LoadU32(base, p + 0x60), menu_pointer::LoadF32(base, p + 0x68), menu_pointer::LoadF32(base, p + 0x6C),
+                menu_pointer::LoadF32(base, p + 0x70), menu_pointer::LoadF32(base, p + 0x74), LoadU32(base, p + 0x40));
   }
 }
+}  // namespace split_screen
 
 extern "C" void sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_82E2E860(ctx, base);
-  SplitTest(base);
+  split_screen::Tick(base);
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) {
     kbm->NoteHudTick();
     kbm->SetDriving(Driving(base));
@@ -1657,4 +1722,27 @@ extern "C" void sub_827DA828(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_827DA828(ctx, base);
   if (TravelTrace())
     REXLOG_INFO("travel trace: Browse -> {} , TravelURL '{}'", ctx.r3.u32, FStr(base, engine + 0x46C));
+}
+
+// Split screen: the final post-process pass (sub_82D7E850: r3 the effect, r5 the view) sets the back buffer as its
+// target and clears it to black, once per view - stock UE3 clears only for the first view (bDeferClear), but the game
+// never shipped split screen, so the second view's clear wiped the first's finished image. Only the view at the top
+// left (origin 0,0, which every layout has; view +0x34 X, +0x38 Y) clears now.
+namespace split_screen {
+thread_local uint32_t final_pass_view = 0;
+}
+extern "C" void __imp__sub_82D7E850(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_82D7E850(PPCContext& __restrict ctx, uint8_t* base) {
+  const uint32_t saved = split_screen::final_pass_view;
+  split_screen::final_pass_view = ctx.r5.u32;
+  __imp__sub_82D7E850(ctx, base);
+  split_screen::final_pass_view = saved;
+}
+extern "C" void __imp__sub_827BBC10(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_827BBC10(PPCContext& __restrict ctx, uint8_t* base) {
+  if (const uint32_t view = split_screen::final_pass_view;
+      view && ctx.lr == 0x82D7EEC0 && (LoadU32(base, view + 0x34) || LoadU32(base, view + 0x38))) {
+    return;
+  }
+  __imp__sub_827BBC10(ctx, base);
 }

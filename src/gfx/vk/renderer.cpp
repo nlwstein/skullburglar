@@ -1,6 +1,7 @@
 #include "renderer.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -1019,6 +1020,21 @@ void Renderer::MaterializeRawDepth(Image& raw) {
 void Renderer::DumpResolve(const Image& image, uint32_t address) {
   static const char* dump_dir = std::getenv("BOTS_DUMP_RESOLVES");
   if (!dump_dir || !*dump_dir) return;
+  // BOTS_DUMP_RESOLVES_AT=<secs>[,<count>]: only <count> (default 64) resolves, from <secs> after the first one.
+  static const auto window = [] {
+    const char* v = std::getenv("BOTS_DUMP_RESOLVES_AT");
+    float at = 0;
+    int count = 64;
+    if (v) std::sscanf(v, "%f,%d", &at, &count);
+    return std::pair<float, int>(v ? at : -1.0f, count);
+  }();
+  static const auto first = std::chrono::steady_clock::now();
+  static int dumped = 0;
+  if (window.first >= 0 &&
+      (std::chrono::duration<float>(std::chrono::steady_clock::now() - first).count() < window.first ||
+       dumped >= window.second))
+    return;
+  ++dumped;
   std::vector<uint8_t> rgb;
   uint32_t width, height;
   if (ReadImage(image, rgb, width, height)) {
