@@ -165,7 +165,31 @@ int CoopPad() {
   return std::clamp(REXCVAR_GET(pad), 0, 4);
 }
 
+// BOTS_SPLIT_TEST (experiment): pads N -> user N as usual, and scripted input drives users 0 and 1 alike, so a second
+// local player has a connected controller on a machine without pads.
+class SplitTestAssignment final : public rex::input::DeviceAssignment {
+ public:
+  void OnDevicesChanged(const std::vector<rex::input::DeviceInfo>& devices) override {
+    for (auto& u : users_) u.clear();
+    for (const auto& device : devices) {
+      if (device.synthetic) {
+        users_[0].push_back(device.id), users_[1].push_back(device.id);
+      } else if (device.ordinal < users_.size()) {
+        users_[device.ordinal].push_back(device.id);
+      }
+    }
+  }
+  void DevicesForUser(uint32_t user_index, std::vector<rex::input::DeviceId>& out) const override {
+    out.clear();
+    if (user_index < users_.size()) out = users_[user_index];
+  }
+
+ private:
+  std::vector<std::vector<rex::input::DeviceId>> users_ = std::vector<std::vector<rex::input::DeviceId>>(4);
+};
+
 std::unique_ptr<rex::input::DeviceAssignment> MakePadAssignment() {
+  if (std::getenv("BOTS_SPLIT_TEST")) return std::make_unique<SplitTestAssignment>();
   int pad = CoopPad();
   if (pad <= 0) return nullptr;
   return std::make_unique<PadAssignment>(uint32_t(pad - 1));

@@ -1462,8 +1462,48 @@ static bool Driving(uint8_t* base) {
   return Readable(pawn) && menu_pointer::IsA(base, pawn, n->driving_vehicle);
 }
 
+// BOTS_SPLIT_TEST=1 (experiment): the shipped GameViewportClient.SetSplitscreenConfiguration always picks eSST_NONE,
+// so with two GamePlayers both draw full screen. Lay them out top / bottom instead: LocalPlayer +0x60 ControllerId,
+// +0x68 Origin, +0x70 Size (Vector2D, fractions of the viewport).
+static void SplitTest(uint8_t* base) {
+  // BOTS_SPLIT_TEST=half: only player 0, in the top half (one view, smaller than the screen).
+  static const char* mode = std::getenv("BOTS_SPLIT_TEST");
+  if (!mode) return;
+  const bool half = !std::strcmp(mode, "half");
+  using menu_pointer::Readable;
+  const uint32_t engine = LoadU32(base, kGEngine);
+  if (!Readable(engine)) return;
+  const uint32_t players = LoadU32(base, engine + 0x2D8), count = LoadU32(base, engine + 0x2D8 + 4);
+  static uint32_t seen = 0;
+  if (count != seen) {
+    seen = count;
+    for (uint32_t i = 0; i < count && i < 4 && Readable(players); ++i) {
+      const uint32_t p = LoadU32(base, players + 4 * i);
+      if (!Readable(p)) continue;
+      REXLOG_INFO("split: player {} {:08X} controller id {} origin {} {} size {} {} actor {:08X}", i, p,
+                  LoadU32(base, p + 0x60), menu_pointer::LoadF32(base, p + 0x68), menu_pointer::LoadF32(base, p + 0x6C),
+                  menu_pointer::LoadF32(base, p + 0x70), menu_pointer::LoadF32(base, p + 0x74), LoadU32(base, p + 0x40));
+    }
+  }
+  if (count != (half ? 1u : 2u) || !Readable(players)) return;
+  auto f32 = [](float v) {
+    uint32_t u;
+    std::memcpy(&u, &v, 4);
+    return u;
+  };
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint32_t p = LoadU32(base, players + 4 * i);
+    if (!Readable(p)) continue;
+    StoreU32(base, p + 0x68, f32(0.0f));
+    StoreU32(base, p + 0x6C, f32(i ? 0.5f : 0.0f));
+    StoreU32(base, p + 0x70, f32(1.0f));
+    StoreU32(base, p + 0x74, f32(0.5f));
+  }
+}
+
 extern "C" void sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_82E2E860(ctx, base);
+  SplitTest(base);
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) {
     kbm->NoteHudTick();
     kbm->SetDriving(Driving(base));
