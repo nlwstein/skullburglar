@@ -1,4 +1,5 @@
 #include "coop.h"
+#include "script_input.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -21,6 +22,8 @@ extern char** environ;
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
 #include <rex/logging.h>
+#include <rex/runtime.h>
+#include <rex/system/kernel_state.h>
 
 REXCVAR_DEFINE_INT32(pad, 0, "bots",
                      "Controller (1-4, connection order) that drives this instance; 0: all pads");
@@ -33,6 +36,11 @@ REXCVAR_DEFINE_INT32(coop_player, 1, "bots", "Which co-op player this instance i
 
 namespace bots {
 namespace {
+
+// Player 2's identity, in either co-op mode.
+constexpr uint64_t kPlayerTwoXuid = 0xB13EBABEBABE0002ull;
+constexpr const char* kPlayerTwoXuidText = "B13EBABEBABE0002";
+constexpr const char* kPlayerTwoGamertag = "Player2";
 
 class PadAssignment final : public rex::input::DeviceAssignment {
  public:
@@ -168,13 +176,15 @@ int CoopPad() {
 }
 
 // BOTS_SPLIT_TEST (experiment): pads N -> user N as usual, and scripted input drives users 0 and 1 alike, so a second
-// local player has a connected controller on a machine without pads.
+// local player has a connected controller on a machine without pads; the second scripted pad ("2/" steps) only user 1.
 class SplitTestAssignment final : public rex::input::DeviceAssignment {
  public:
   void OnDevicesChanged(const std::vector<rex::input::DeviceInfo>& devices) override {
     for (auto& u : users_) u.clear();
     for (const auto& device : devices) {
-      if (device.synthetic) {
+      if (device.synthetic && device.name == ScriptInputDriver::kPad2Name) {
+        users_[1].push_back(device.id);  // BOTS_INPUT "2/..." steps: player 2 alone
+      } else if (device.synthetic) {
         users_[0].push_back(device.id), users_[1].push_back(device.id);
       } else if (device.ordinal < users_.size()) {
         users_[device.ordinal].push_back(device.id);
@@ -220,8 +230,8 @@ void ApplyCoopDefaults() {
   SetUnlessCommandLine("fullscreen", "false");
   SetUnlessCommandLine("window_tile", player == 1 ? "left" : "right");
   if (player == 2) {
-    SetUnlessCommandLine("user_xuid", "B13EBABEBABE0002");
-    SetUnlessCommandLine("user_gamertag", "Player2");
+    SetUnlessCommandLine("user_xuid", kPlayerTwoXuidText);
+    SetUnlessCommandLine("user_gamertag", kPlayerTwoGamertag);
     // Both instances play the same game world; two mixes of it on one PC only double the sound.
     SetUnlessCommandLine("audio_mute", "true");
   }
@@ -235,6 +245,26 @@ void ApplyCoopDefaults() {
 #endif
   }
   REXLOG_INFO("coop: player {}, pad {}", player, CoopPad());
+}
+
+namespace {
+int player_two_user = -1;  // the XAM user player 2 is signed in as, -1 if none
+}
+
+void SignInPlayerTwo(uint32_t user_index) {
+  auto* kernel = rex::system::kernel_state();
+  if (!kernel) return;
+  player_two_user = int(user_index);
+  const auto& root = kernel->emulator()->user_data_root();
+  kernel->SignInUser(user_index, kPlayerTwoXuid, kPlayerTwoGamertag,
+                     root.empty() ? std::filesystem::path() : PlayerTwoPath(std::filesystem::absolute(root)));
+}
+
+void SignOutPlayerTwo() {
+  auto* kernel = rex::system::kernel_state();
+  if (!kernel || player_two_user < 0) return;
+  kernel->SignOutUser(uint32_t(player_two_user));
+  player_two_user = -1;
 }
 
 void SpawnPlayerTwo(const std::filesystem::path& game_data_root,

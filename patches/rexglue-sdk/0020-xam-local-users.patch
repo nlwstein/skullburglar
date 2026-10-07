@@ -1,0 +1,257 @@
+diff --git a/include/rex/system/kernel_state.h b/include/rex/system/kernel_state.h
+index 9b9cf9e..516ec6f 100644
+--- a/include/rex/system/kernel_state.h
++++ b/include/rex/system/kernel_state.h
+@@ -200,6 +200,14 @@ class KernelState {
+   xam::AppManager* app_manager() const { return app_manager_.get(); }
+   xam::ContentManager* content_manager() const { return content_manager_.get(); }
+   xam::UserProfile* user_profile() const { return user_profile_.get(); }
++  // Local users by XAM user index (0-3): user 0 always, others while signed in (split screen); else nullptr.
++  xam::UserProfile* user_profile(uint32_t user_index) const;
++  // Signs in another local user with its own identity, and its content (saves, profile settings) under
++  // content_root (empty: the user data root). Broadcasts XN_SYS_SIGNINCHANGED.
++  void SignInUser(uint32_t user_index, uint64_t xuid, const std::string& name,
++                  const std::filesystem::path& content_root);
++  void SignOutUser(uint32_t user_index);
++  uint32_t SignedInMask() const;  // bit n: user n is signed in
+ 
+   // Access must be guarded by the global critical region.
+   util::ObjectTable* object_table() { return &object_table_; }
+@@ -354,6 +362,9 @@ class KernelState {
+   std::unique_ptr<xam::AppManager> app_manager_;
+   std::unique_ptr<xam::ContentManager> content_manager_;
+   std::unique_ptr<xam::UserProfile> user_profile_;
++  // Users 1-3: kept once created (guest threads may still hold one), signed in while the flag is set.
++  std::unique_ptr<xam::UserProfile> other_users_[3];
++  std::atomic<bool> other_signed_in_[3] = {};
+ 
+   rex::thread::global_critical_region global_critical_region_;
+ 
+diff --git a/include/rex/system/xam/content_manager.h b/include/rex/system/xam/content_manager.h
+index 949d185..7ad831f 100644
+--- a/include/rex/system/xam/content_manager.h
++++ b/include/rex/system/xam/content_manager.h
+@@ -12,6 +12,7 @@
+ #pragma once
+ 
+ #include <memory>
++#include <mutex>
+ #include <string>
+ #include <unordered_map>
+ #include <vector>
+@@ -33,6 +34,8 @@ namespace rex {
+ namespace system {
+ namespace xam {
+ 
++class UserProfile;
++
+ // If set in XCONTENT_AGGREGATE_DATA, will be substituted with the running
+ // titles ID
+ // TODO: check if actual x360 kernel/xam has a value similar to this
+@@ -170,7 +173,9 @@ class ContentManager {
+   X_RESULT ReadContentHeaderFile(const std::string_view file_name, uint64_t xuid, uint32_t title_id,
+                                  XContentType content_type, XCONTENT_AGGREGATE_DATA& data) const;
+ 
+-  std::filesystem::path ResolveGameUserContentPath();
++  std::filesystem::path ResolveGameUserContentPath(const UserProfile* profile = nullptr);
++  // Content of this XUID lives under root instead of the user data root (another local user's own folder).
++  void SetUserContentRoot(uint64_t xuid, std::filesystem::path root);
+   bool IsContentOpen(const XCONTENT_AGGREGATE_DATA& data) const;
+   void CloseOpenedFilesFromContent(const std::string_view root_name);
+ 
+@@ -198,6 +203,9 @@ class ContentManager {
+ 
+   KernelState* kernel_state_;
+   std::filesystem::path root_path_;
++  std::unordered_map<uint64_t, std::filesystem::path> user_roots_;  // by XUID, guarded by user_roots_mutex_
++  mutable std::mutex user_roots_mutex_;
++  std::filesystem::path RootFor(uint64_t xuid) const;
+ 
+   // TODO(benvanik): remove use of global lock, it's bad here!
+   rex::thread::global_critical_region global_critical_region_;
+diff --git a/src/kernel/xam/xam_content.cpp b/src/kernel/xam/xam_content.cpp
+index 1fb1e16..d1b225a 100644
+--- a/src/kernel/xam/xam_content.cpp
++++ b/src/kernel/xam/xam_content.cpp
+@@ -9,6 +9,9 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <atomic>
++#include <functional>
++#include <string_view>
+ #include <rex/cvar.h>
+ #include <rex/kernel/xam/private.h>
+ #include <rex/logging.h>
+@@ -57,6 +60,19 @@ u32 XamContentResolve_entry(u32 user_index, mapped_void content_data_ptr, mapped
+ }
+ 
+ // https://github.com/MrColdbird/gameservice/blob/master/ContentManager.cpp
++// The XUID whose content a call for this user index sees: a signed-in local user's, else user 0's.
++static uint64_t ContentXuid(uint32_t user_index, const char* caller) {
++  auto* user = user_index < 4 ? REX_KERNEL_STATE()->user_profile(user_index) : nullptr;
++  if (user_index && user_index < 4) {  // what a title stores for other local users: the first call of each kind
++    static std::atomic<uint32_t> logged{0};
++    const uint32_t bit = 1u << (std::hash<std::string_view>{}(caller) % 32);
++    if (!(logged.fetch_or(bit) & bit)) {
++      REXKRNL_INFO("{}: user {} ({})", caller, user_index, user ? user->name() : "not signed in");
++    }
++  }
++  return (user ? user : REX_KERNEL_STATE()->user_profile())->xuid();
++}
++
+ // https://github.com/LestaD/SourceEngine2007/blob/master/se2007/engine/xboxsystem.cpp#L499
+ u32 XamContentCreateEnumerator_entry(u32 user_index, u32 device_id, u32 content_type,
+                                      u32 content_flags, u32 items_per_enumerate,
+@@ -75,7 +91,7 @@ u32 XamContentCreateEnumerator_entry(u32 user_index, u32 device_id, u32 content_
+     *buffer_size_ptr = sizeof(XCONTENT_DATA) * items_per_enumerate;
+   }
+ 
+-  uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
++  uint64_t xuid = ContentXuid(user_index, __func__);
+ 
+   auto e = make_object<XStaticEnumerator<XCONTENT_DATA>>(REX_KERNEL_STATE(), items_per_enumerate);
+   auto result = e->Initialize(0xFF, 0xFE, 0x20005, 0x20007, 0);
+@@ -119,7 +135,7 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
+                        u32 content_data_size, u32 flags, mapped_u32 disposition_ptr,
+                        mapped_u32 license_mask_ptr, u32 cache_size, u64 content_size,
+                        mapped_void overlapped_ptr) {
+-  uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
++  uint64_t xuid = ContentXuid(user_index, __func__);
+ 
+   XCONTENT_AGGREGATE_DATA content_data;
+   if (content_data_size == sizeof(XCONTENT_DATA)) {
+@@ -295,7 +311,7 @@ u32 XamContentGetCreator_entry(u32 user_index, mapped_void content_data_ptr,
+                                mapped_void overlapped_ptr) {
+   auto result = X_ERROR_SUCCESS;
+ 
+-  uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
++  uint64_t xuid = ContentXuid(user_index, __func__);
+   XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+ 
+   bool content_exists = REX_KERNEL_STATE()->content_manager()->ContentExists(xuid, content_data);
+@@ -330,7 +346,7 @@ u32 XamContentGetThumbnail_entry(u32 user_index, mapped_void content_data_ptr,
+                                  mapped_void overlapped_ptr) {
+   assert_not_null(buffer_size_ptr);
+   uint32_t buffer_size = *buffer_size_ptr;
+-  uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
++  uint64_t xuid = ContentXuid(user_index, __func__);
+   XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+ 
+   // Get thumbnail (if it exists).
+@@ -365,7 +381,7 @@ u32 XamContentGetThumbnail_entry(u32 user_index, mapped_void content_data_ptr,
+ u32 XamContentSetThumbnail_entry(u32 user_index, mapped_void content_data_ptr,
+                                  mapped_void buffer_ptr, u32 buffer_size,
+                                  mapped_void overlapped_ptr) {
+-  uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
++  uint64_t xuid = ContentXuid(user_index, __func__);
+   XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+ 
+   // Buffer is PNG data.
+@@ -383,7 +399,7 @@ u32 XamContentSetThumbnail_entry(u32 user_index, mapped_void content_data_ptr,
+ 
+ u32 XamContentDelete_entry(u32 user_index, mapped_void content_data_ptr,
+                            mapped_void overlapped_ptr) {
+-  uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
++  uint64_t xuid = ContentXuid(user_index, __func__);
+   XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
+ 
+   auto result = REX_KERNEL_STATE()->content_manager()->DeleteContent(xuid, content_data);
+diff --git a/src/system/kernel_state.cpp b/src/system/kernel_state.cpp
+index 697399c..ea0e81a 100644
+--- a/src/system/kernel_state.cpp
++++ b/src/system/kernel_state.cpp
+@@ -1108,6 +1108,42 @@ void KernelState::RegisterNotifyListener(XNotifyListener* listener) {
+   }
+ }
+ 
++xam::UserProfile* KernelState::user_profile(uint32_t user_index) const {
++  if (user_index == 0) return user_profile_.get();
++  if (user_index >= 4 || !other_signed_in_[user_index - 1]) return nullptr;
++  return other_users_[user_index - 1].get();
++}
++
++void KernelState::SignInUser(uint32_t user_index, uint64_t xuid, const std::string& name,
++                             const std::filesystem::path& content_root) {
++  if (user_index == 0 || user_index >= 4) return;
++  auto& slot = other_users_[user_index - 1];
++  if (!slot || slot->xuid() != xuid || slot->name() != name.substr(0, 15)) {
++    if (other_signed_in_[user_index - 1]) SignOutUser(user_index);
++    if (!content_root.empty()) content_manager_->SetUserContentRoot(xuid, std::filesystem::absolute(content_root));
++    // A replaced profile is leaked on purpose: a guest call may still be using it.
++    (void)slot.release();
++    slot = std::make_unique<xam::UserProfile>(xuid, name);
++    slot->set_kernel_state(this);
++  }
++  other_signed_in_[user_index - 1] = true;
++  REXSYS_INFO("User {} signed in: {} ({:016X})", user_index, slot->name(), xuid);
++  BroadcastNotification(0x0000000A, SignedInMask());  // XN_SYS_SIGNINCHANGED: who is signed in now
++}
++
++uint32_t KernelState::SignedInMask() const {
++  uint32_t mask = 1;
++  for (uint32_t i = 0; i < 3; ++i) mask |= other_signed_in_[i] ? 2u << i : 0;
++  return mask;
++}
++
++void KernelState::SignOutUser(uint32_t user_index) {
++  if (user_index == 0 || user_index >= 4 || !other_signed_in_[user_index - 1]) return;
++  other_signed_in_[user_index - 1] = false;
++  REXSYS_INFO("User {} signed out", user_index);
++  BroadcastNotification(0x0000000A, SignedInMask());
++}
++
+ void KernelState::UnregisterNotifyListener(XNotifyListener* listener) {
+   auto global_lock = global_critical_region_.Acquire();
+   for (auto it = notify_listeners_.begin(); it != notify_listeners_.end(); ++it) {
+diff --git a/src/system/xam/content_manager.cpp b/src/system/xam/content_manager.cpp
+index bd6c797..7bd6092 100644
+--- a/src/system/xam/content_manager.cpp
++++ b/src/system/xam/content_manager.cpp
+@@ -96,7 +96,7 @@ std::filesystem::path ContentManager::ResolvePackageRoot(uint64_t xuid, XContent
+ 
+   // Package root path:
+   // content_root/xuid/title_id/content_type/
+-  return root_path_ / xuid_str / title_id_str / content_type_str;
++  return RootFor(xuid) / xuid_str / title_id_str / content_type_str;
+ }
+ 
+ std::filesystem::path ContentManager::ResolvePackagePath(uint64_t xuid,
+@@ -132,7 +132,7 @@ std::filesystem::path ContentManager::ResolvePackageHeaderPath(const std::string
+ 
+   // Header root path:
+   // content_root/xuid/title_id/Headers/content_type/filename.header
+-  return root_path_ / xuid_str / title_id_str / kGameContentHeaderDirName / content_type_str /
++  return RootFor(xuid) / xuid_str / title_id_str / kGameContentHeaderDirName / content_type_str /
+          final_name;
+ }
+ 
+@@ -440,13 +440,25 @@ X_RESULT ContentManager::UnmountAndDeleteContent(uint64_t xuid,
+   return X_ERROR_FILE_NOT_FOUND;
+ }
+ 
+-std::filesystem::path ContentManager::ResolveGameUserContentPath() {
++std::filesystem::path ContentManager::ResolveGameUserContentPath(const UserProfile* profile) {
++  if (!profile) profile = kernel_state_->user_profile();
+   auto title_id = fmt::format("{:08X}", kernel_state_->title_id());
+-  auto user_name = rex::to_path(kernel_state_->user_profile()->name());
++  auto user_name = rex::to_path(profile->name());
+ 
+   // Per-game per-profile data location:
+   // content_root/title_id/profile/user_name
+-  return root_path_ / title_id / kGameUserContentDirName / user_name;
++  return RootFor(profile->xuid()) / title_id / kGameUserContentDirName / user_name;
++}
++
++void ContentManager::SetUserContentRoot(uint64_t xuid, std::filesystem::path root) {
++  std::lock_guard<std::mutex> lock(user_roots_mutex_);
++  user_roots_[xuid] = std::move(root);
++}
++
++std::filesystem::path ContentManager::RootFor(uint64_t xuid) const {
++  std::lock_guard<std::mutex> lock(user_roots_mutex_);
++  auto it = user_roots_.find(xuid);
++  return it == user_roots_.end() ? root_path_ : it->second;
+ }
+ 
+ std::unordered_map<string::string_key_case, ContentPackage*,

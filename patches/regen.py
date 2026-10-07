@@ -123,6 +123,8 @@ SERIES.append(
     # beacon SetBroadcast failed there, so New Story never launched the map on the Deck), FIONBIO/FIONREAD with their
     # big-endian argument, errno -> Winsock error codes, select's nfds from the sets, real host sockaddr_in (macOS
     # sin_len; ports and addresses in network order), SO_LINGER's struct, and no SIGPIPE on sends.
+    # user_profile and xam_user are claimed whole here; they also carry 0020's local users (UserProfile(xuid, name),
+    # settings under the profile's content root, XAM user calls answering for signed-in users 1-3).
     ("0018-netplay-system-link.patch",
      ["src/system/xsocket.cpp", "src/kernel/xam/xam_net.cpp", "include/rex/system/xsocket.h",
       "include/rex/kernel/xam/apps/xgi_app.h", "include/rex/system/xam/user_profile.h",
@@ -134,6 +136,14 @@ SERIES.append(
     ("0019-window-tile.patch",
      ["src/ui/window_sdl.cpp"], {}))
 
+SERIES.append(
+    # Local users 1-3 (split screen, B-134): KernelState::SignInUser / SignOutUser give user 1-3 a profile (XUID,
+    # gamertag) and a content root of its own, broadcasting XN_SYS_SIGNINCHANGED with the signed-in mask, and
+    # ContentManager resolves saves and profile data per XUID. XamContent* calls for a signed-in user use that user's
+    # XUID, user 0's otherwise. The UserProfile / XamUser* side is in 0018's whole-file diffs.
+    ("0020-xam-local-users.patch",
+     ["include/rex/system/kernel_state.h", "src/system/kernel_state.cpp", "include/rex/system/xam/content_manager.h",
+      "src/system/xam/content_manager.cpp", "src/kernel/xam/xam_content.cpp"], {}))
 
 def git(sdk, *args, **kw):
     return subprocess.run(["git", "-C", sdk, *args], capture_output=True, text=True,

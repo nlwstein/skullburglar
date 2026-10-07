@@ -4,6 +4,8 @@
 // (seconds since the driver was created ≈ process start; default hold 150 ms). Steps may
 // overlap. Controls: A B X Y START BACK LB RB LS RS UP DOWN LEFT RIGHT LT RT and the
 // stick directions LUP LDOWN LLEFT LRIGHT RUP RDOWN RLEFT RRIGHT (full deflection).
+// "2/<control>" presses it on a second scripted pad only, which BOTS_SPLIT_TEST gives to guest user 1
+// alone (split-screen player 2); elsewhere it merges into user 0 like the first.
 //
 // BOTS_INPUT_RANDOM=<start sec>[:seed] adds random play after <start sec>: every 0.5–2 s a new
 // left-stick direction, camera nudges, and occasional A/X/RT/LT/B/Y presses (soak testing).
@@ -45,6 +47,11 @@ class ScriptInputDriver final : public rex::input::InputDriver {
       std::getline(is, ctl, ':');
       std::getline(is, hold, ':');
       if (t.empty() || ctl.empty()) continue;
+      if (ctl.rfind("2/", 0) == 0) {
+        s.pad = 1;
+        ctl = ctl.substr(2);
+        has_pad2_ = true;
+      }
       s.at_ms = static_cast<int64_t>(std::atof(t.c_str()) * 1000);
       s.hold_ms = hold.empty() ? 150 : std::atoi(hold.c_str());
       s.control = ctl;
@@ -67,24 +74,32 @@ class ScriptInputDriver final : public rex::input::InputDriver {
     info.name = "Script";
     info.synthetic = true;
     out.push_back(info);
+    if (has_pad2_) {
+      info.id = kDevicePad2;
+      info.name = kPad2Name;
+      out.push_back(info);
+    }
   }
 
+  static constexpr const char* kPad2Name = "Script pad 2";
+
   X_RESULT GetDeviceState(rex::input::DeviceId id, rex::input::X_INPUT_STATE* out) override {
-    if (id != kDevice) return X_ERROR_DEVICE_NOT_CONNECTED;
+    if (id != kDevice && !(has_pad2_ && id == kDevicePad2)) return X_ERROR_DEVICE_NOT_CONNECTED;
+    const int pad = id == kDevice ? 0 : 1;
     if (!out) return X_ERROR_SUCCESS;
     std::memset(out, 0, sizeof(*out));
     int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                       std::chrono::steady_clock::now() - start_).count();
     uint16_t buttons = 0;
     for (auto& s : steps_) {
-      if (now < s.at_ms || now >= s.at_ms + s.hold_ms) continue;
+      if (s.pad != pad || now < s.at_ms || now >= s.at_ms + s.hold_ms) continue;
       Apply(s.control, buttons, *out);
       if (!s.logged) {
         s.logged = true;
-        REXLOG_INFO("script input: press {} at {} ms", s.control, now);
+        REXLOG_INFO("script input: press {}{} at {} ms", pad ? "2/" : "", s.control, now);
       }
     }
-    if (random_from_ms_ >= 0 && now >= random_from_ms_) Random(now, buttons, *out);
+    if (pad == 0 && random_from_ms_ >= 0 && now >= random_from_ms_) Random(now, buttons, *out);
     out->gamepad.buttons = buttons;
     // Games detect change by packet number; bump it whenever the state changes.
     uint64_t sig = buttons | uint64_t(out->gamepad.left_trigger) << 16 |
@@ -93,17 +108,17 @@ class ScriptInputDriver final : public rex::input::InputDriver {
                    uint64_t(uint16_t(out->gamepad.thumb_ly)) << 48;
     sig ^= (uint64_t(uint16_t(out->gamepad.thumb_rx)) << 7) ^
            (uint64_t(uint16_t(out->gamepad.thumb_ry)) << 29);
-    if (sig != last_sig_) {
-      last_sig_ = sig;
-      ++packet_;
+    if (sig != last_sig_[pad]) {
+      last_sig_[pad] = sig;
+      ++packet_[pad];
     }
-    out->packet_number = packet_;
+    out->packet_number = packet_[pad];
     return X_ERROR_SUCCESS;
   }
 
   X_RESULT GetDeviceCapabilities(rex::input::DeviceId id, uint32_t,
                                  rex::input::X_INPUT_CAPABILITIES* caps) override {
-    if (id != kDevice) return X_ERROR_DEVICE_NOT_CONNECTED;
+    if (id != kDevice && !(has_pad2_ && id == kDevicePad2)) return X_ERROR_DEVICE_NOT_CONNECTED;
     if (caps) {
       std::memset(caps, 0, sizeof(*caps));
       caps->type = 0x01;      // XINPUT_DEVTYPE_GAMEPAD
@@ -120,21 +135,24 @@ class ScriptInputDriver final : public rex::input::InputDriver {
   }
 
   X_RESULT SetDeviceVibration(rex::input::DeviceId id, rex::input::X_INPUT_VIBRATION*) override {
-    return id == kDevice ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
+    return id == kDevice || (has_pad2_ && id == kDevicePad2) ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
   X_RESULT GetDeviceKeystroke(rex::input::DeviceId id, uint32_t,
                               rex::input::X_INPUT_KEYSTROKE*) override {
-    return id == kDevice ? X_ERROR_EMPTY : X_ERROR_DEVICE_NOT_CONNECTED;
+    return id == kDevice || (has_pad2_ && id == kDevicePad2) ? X_ERROR_EMPTY : X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
  private:
-  static constexpr auto kDevice = static_cast<rex::input::DeviceId>(0x53435249);  // 'SCRI'
+  static constexpr auto kDevice = static_cast<rex::input::DeviceId>(0x53435249);      // 'SCRI'
+  static constexpr auto kDevicePad2 = static_cast<rex::input::DeviceId>(0x53435232);  // 'SCR2'
+  bool has_pad2_ = false;
 
   struct Step {
     int64_t at_ms = 0;
     int hold_ms = 150;
     std::string control;
+    int pad = 0;  // 1: the second scripted pad
     bool logged = false;
   };
 
@@ -209,8 +227,8 @@ class ScriptInputDriver final : public rex::input::InputDriver {
 
   std::chrono::steady_clock::time_point start_;
   std::vector<Step> steps_;
-  uint32_t packet_ = 0;
-  uint64_t last_sig_ = ~0ull;
+  uint32_t packet_[2] = {};
+  uint64_t last_sig_[2] = {~0ull, ~0ull};
 };
 
 }  // namespace bots

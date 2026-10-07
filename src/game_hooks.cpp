@@ -203,6 +203,7 @@ extern "C" void sub_82BF31D8(PPCContext& __restrict ctx, uint8_t* base) {
 }
 
 namespace split_screen {
+extern bool running_ours;
 void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state);
 bool Command(const std::string& cmd);
 }  // namespace split_screen
@@ -292,7 +293,9 @@ void RunPlayerCommand(PPCContext& ctx, uint8_t* base, ExecState& st, uint32_t pl
   ctx.r3.u64 = exec;
   ctx.r4.u64 = st.buffer;
   ctx.r5.u64 = LoadU32(base, kGLog);
+  const bool was = std::exchange(split_screen::running_ours, true);
   rex::runtime::ResolveIndirectFunction(fn)(ctx, base);
+  split_screen::running_ours = was;
 }
 }  // namespace
 
@@ -1604,13 +1607,16 @@ struct Join {
   std::chrono::steady_clock::time_point next;
   uint16_t buttons[4] = {};
   ExecState exec;
+  bool leave = false;  // player 2 asked to leave (quit from their pause menu, or "splitleave")
+  std::chrono::steady_clock::time_point relayout{};  // when player 1's HUD is laid out again after player 2 left
+  int relayout_step = 0;                             // 1 close player 1's HUD scenes, 2 open them again
 };
 Join join;
 
 bool Command(const std::string& cmd) {
-  if (cmd != "splitjoin") return false;
-  join.requested = true;
-  return true;
+  if (cmd == "splitjoin") return join.requested = true;
+  if (cmd == "splitleave") return join.leave = true;
+  return false;
 }
 
 bool PadUsed(uint8_t* base, uint32_t pad) {
@@ -1624,6 +1630,33 @@ void Run(PPCContext& ctx, uint8_t* base, uint32_t player, const std::string& cmd
   if (join.exec.buffer) RunPlayerCommand(ctx, base, join.exec, player, cmd, false);
 }
 
+// C1HUD.ReceivePauseMessage opens PauseMessageSceneTemplate (BuddyPaused: "the other player has paused the game, kick
+// them?") on every HUD whose player isn't WorldInfo.Pauser. Over the network that's the other machine's player; with
+// both players local it's player 2's HUD whenever anyone pauses (the pause is player 1's), and its kick action would
+// end the session. So while more than one local player plays, the local HUDs have no template, and player 1's gets it
+// back when they play alone again.
+void SuppressBuddyPause(uint8_t* base, uint32_t count) {
+  static uint32_t template_ = 0, hud_offset = 0, template_offset = 0xFFFFFFFF;
+  for (uint32_t i = 0; i < count && i < 4; ++i) {
+    const uint32_t player = Player(base, i), actor = Readable(player) ? LoadU32(base, player + 0x40) : 0;
+    if (!Readable(actor)) continue;
+    if (!hud_offset)
+      if (const uint32_t prop = FindFunction(base, actor, "myHUD")) hud_offset = LoadU32(base, prop + 0x64);
+    const uint32_t hud = hud_offset ? LoadU32(base, actor + hud_offset) : 0;
+    if (!Readable(hud)) continue;
+    if (template_offset == 0xFFFFFFFF) template_offset = Prop(base, hud, "PauseMessageSceneTemplate");
+    if (template_offset == 0xFFFFFFFF) return;
+    const uint32_t now = LoadU32(base, hud + template_offset);
+    if (count > 1 && now) {
+      if (template_ != now) REXLOG_INFO("split screen: no pause message scene ({:08X}) while sharing the screen", now);
+      template_ = now;
+      StoreU32(base, hud + template_offset, 0);
+    } else if (count == 1 && !now && template_) {
+      StoreU32(base, hud + template_offset, template_);
+    }
+  }
+}
+
 void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
   static const bool on = bots::SplitScreen();
   if (!on || user >= 4) return;
@@ -1634,9 +1667,45 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
   const uint32_t p0 = Player(base, 0);
   if (!Readable(p0)) return;
   ExposeBuddyRequest(base, LoadU32(base, p0 + 0x40));
+  SuppressBuddyPause(base, PlayerCount(base));
   const bool playing = PawnOf(base, p0) != 0;
   const PPCRegister r3 = ctx.r3;  // keep the poll's return value
   const auto now = std::chrono::steady_clock::now();
+  if (join.leave) {
+    join.leave = false;
+    if (const uint32_t p1 = Player(base, 1); PlayerCount(base) > 1 && Readable(p1)) {
+      // Player 2 leaves: remove them (GameViewportClient execs; RemovePlayer destroys their pawn and controller) and
+      // give player 1 the whole screen again. Player 1's HUD is laid out for it a moment later: reopened in the same
+      // frame, its scenes still had the half screen's viewport size (run-121).
+      REXLOG_INFO("split screen: player 2 leaves");
+      // CovertOne_Story.Logout tells the other player their buddy left (C1PlayerController.OpenBuddyDisconnectDialog,
+      // BuddyDisconnectConfirmation, a modal dialog for network co-op): player 1's controller gets no such scene.
+      if (const uint32_t pc = LoadU32(base, p0 + 0x40); Readable(pc))
+        if (const uint32_t at = Prop(base, pc, "m_BuddyDisconnectScene"); at != 0xFFFFFFFF) StoreU32(base, pc + at, 0);
+      Run(ctx, base, p0, fmt::format("DebugRemovePlayer {}", LoadU32(base, p1 + 0x60)));
+      Run(ctx, base, p0, "SetSplit 0");
+      bots::SignOutPlayerTwo();
+      join.relayout = now + std::chrono::milliseconds(500);
+      join.relayout_step = 1;
+    }
+  }
+  // Player 2's own quit (QuitToMainMenuHUD from their menu) closes HUD scenes by template, the first found: player 1's
+  // main HUD scene. Removing player 2 then hands player 1 theirs (runs 122-124: fcHUD3, player 2's object, owned by
+  // player 1 and still 360 high), which ShowGameHUD would just reuse. So HideGameHUD twice (one scene per template
+  // each), then reopen a second later.
+  if (join.relayout_step && now >= join.relayout) {
+    if (join.relayout_step == 1) {
+      REXLOG_INFO("split screen: player 1's HUD takes the whole screen again");
+      Run(ctx, base, p0, "HideGameHUD true");
+      Run(ctx, base, p0, "HideGameHUD true");
+      join.relayout = now + std::chrono::seconds(1);
+      join.relayout_step = 2;
+    } else {
+      Run(ctx, base, p0, "ShowGameHUD true");
+      Run(ctx, base, p0, "UnPauseShowHUD");
+      join.relayout_step = 0;
+    }
+  }
   if (PlayerCount(base) == 1) {
     // BOTS_SPLIT_TEST's scripted input reaches every pad, so there only "splitjoin" joins.
     static const bool scripted = std::getenv("BOTS_SPLIT_TEST") != nullptr;
@@ -1650,6 +1719,8 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
     join.tries = 0;
     join.next = now + std::chrono::seconds(2);
     REXLOG_INFO("split screen: controller {} joins", pad);
+    // Player 2 plays as the XAM user of the controller it ends up with (after the swap below).
+    bots::SignInPlayerTwo(scripted && LoadU32(base, p0 + 0x60) != 0 ? LoadU32(base, p0 + 0x60) : uint32_t(pad));
     Run(ctx, base, p0, fmt::format("DebugCreatePlayer {}", pad));
     Run(ctx, base, p0, "SetSplit 1");
     // Scripted input reaches every pad, so the title screen may have given player 1 controller 1: swap them back.
@@ -1732,6 +1803,8 @@ void Tick(uint8_t* base) {
 //   renderdiff                the next split-screen-shifted scene draw logs every word of the scene and its widgets
 //                             (first 0x1600 bytes) that differs after the draw and the shift's restore: what drawing
 //                             changed for good
+//   traceeasel [n]            the next n (40) easel post-renders (C1UI_Easel / SfUI_Easel canvases: button bar prompts)
+//                             log the widget, the canvas rectangle GetPosition gave and each draw's position and origin
 // LogGuestStack is for hooks: the guest call chain at that point.
 namespace debug {
 using menu_pointer::Readable;
@@ -1742,6 +1815,7 @@ std::string trace_image = [] {
 }();
 std::unordered_map<uint32_t, int> trace_image_seen;  // renders logged, by scene
 bool render_diff = false;
+int trace_easel = 0;
 
 const char* NameOf(uint8_t* base, uint32_t object) {
   return Readable(object) ? menu_pointer::NameOf(base, LoadU32(base, object + 0x2C)) : "None";
@@ -1870,6 +1944,8 @@ bool Command(uint8_t* base, const std::string& cmd) {
     return true;
   }
   if (cmd == "renderdiff") return render_diff = true;
+  if (cmd == "traceeasel" || cmd.rfind("traceeasel ", 0) == 0)
+    return trace_easel = cmd.size() > 11 ? std::atoi(cmd.c_str() + 11) : 40, true;
   if (cmd.rfind("words ", 0) == 0) {
     char* end = nullptr;
     const uint32_t addr = static_cast<uint32_t>(std::strtoul(cmd.c_str() + 6, &end, 16));
@@ -2091,6 +2167,7 @@ extern "C" void sub_827DA828(PPCContext& __restrict ctx, uint8_t* base) {
 // RenderBounds[4], +0x214 RenderBoundsVertices[4] Vector2D) move by the owner's LocalPlayer Origin (+0x68) / Size
 // (+0x70) times the scene's viewport size (UIScene +0x1F4 CurrentViewportSize), and are put back afterwards.
 namespace split_screen {
+thread_local float draw_dx = 0, draw_dy = 0;  // the split-screen scene being drawn's shift, (0, 0) outside one
 // A face of a widget's Position, moved with its draw rectangle (see Shift).
 struct Moved {
   uint32_t address, was, moved;  // the face's bits before and after the move
@@ -2180,18 +2257,17 @@ extern "C" void sub_82F899D8(PPCContext& __restrict ctx, uint8_t* base) {
   const bool diff = std::exchange(debug::render_diff, false);
   constexpr uint32_t kDiffBytes = 0x1600;
   std::vector<uint8_t> before;
-  if (diff) {
-    widgets.insert(widgets.begin(), scene);
+  if (diff)
     for (const uint32_t w : widgets) before.insert(before.end(), Raw(base, w), Raw(base, w) + kDiffBytes);
-    widgets.erase(widgets.begin());
-  }
   const float view_w = menu_pointer::LoadF32(base, scene + 0x1F4), view_h = menu_pointer::LoadF32(base, scene + 0x1F8);
   for (const uint32_t w : widgets) split_screen::Shift(base, w, dx, dy, view_w, view_h, saved, moved);
+  split_screen::draw_dx = dx;
+  split_screen::draw_dy = dy;
   __imp__sub_82F899D8(ctx, base);
+  split_screen::draw_dx = split_screen::draw_dy = 0;
   for (const auto& [a, bits] : saved) StoreU32(base, a, bits);
   split_screen::Unshift(base, moved);
   if (diff) {
-    widgets.insert(widgets.begin(), scene);
     int logged = 0;
     for (size_t i = 0; i < widgets.size(); ++i)
       for (uint32_t o = 0; o < kDiffBytes; o += 4) {
@@ -2203,9 +2279,104 @@ extern "C" void sub_82F899D8(PPCContext& __restrict ctx, uint8_t* base) {
                       debug::NameOf(base, widgets[i]), o, was, std::bit_cast<float>(was), now,
                       std::bit_cast<float>(now));
       }
-    REXLOG_INFO("renderdiff: scene {:08X} shift {} {}, {} widgets, {} words changed", scene, dx, dy, widgets.size() - 1,
+    REXLOG_INFO("renderdiff: scene {:08X} shift {} {}, {} widgets, {} words changed", scene, dx, dy, widgets.size(),
                 logged);
   }
+}
+
+// Split screen: easels (C1UI_Easel / SfUI_Easel: button bars, also inside dialogs) draw in their post-render
+// (sub_82DDAE08: r3 the widget, r4 the FCanvas), and the jitter labels (HudWidget_JitterForegroundLabel: the pause
+// menu's header and options) in their Render_Widget (sub_82F05818; the dark copies behind them, HudWidget_JitterLabel,
+// sub_82F05158). Both hand the FCanvas helpers (DrawString
+// sub_82790FA8, DrawTile sub_82790150: f1 X, f2 Y) positions they worked out themselves from the layout, not the
+// RenderBounds the scene draw moved, so player 2's prompts and pause menu drew over player 1's half. Inside a
+// split-screen scene draw, those helpers add the scene's shift for them. (The easel's UCanvas origin, +64 OrgX / +68
+// OrgY from GetPosition(face, EVALPOS_PixelViewport), sub_82844190, isn't it: the positions are already absolute.)
+namespace split_screen {
+thread_local uint32_t easel = 0;  // the easel drawing, 0 if none
+thread_local bool tracing_easel = false;
+thread_local bool own_positions = false;      // a widget drawing from positions of its own (jitter labels)
+void EaselOrigin(PPCContext& ctx, uint8_t* base) {
+  if (!easel && !own_positions) return;
+  if (tracing_easel) REXLOG_INFO("traceeasel:   draw at {} {} + {} {}", ctx.f1.f64, ctx.f2.f64, draw_dx, draw_dy);
+  ctx.f1.f64 = double(float(ctx.f1.f64) + draw_dx);
+  ctx.f2.f64 = double(float(ctx.f2.f64) + draw_dy);
+}
+}  // namespace split_screen
+extern "C" void __imp__sub_82790FA8(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_82790FA8(PPCContext& __restrict ctx, uint8_t* base) {
+  split_screen::EaselOrigin(ctx, base);
+  __imp__sub_82790FA8(ctx, base);
+}
+extern "C" void __imp__sub_82790150(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_82790150(PPCContext& __restrict ctx, uint8_t* base) {
+  split_screen::EaselOrigin(ctx, base);
+  __imp__sub_82790150(ctx, base);
+}
+extern "C" void __imp__sub_82F05818(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_82F05818(PPCContext& __restrict ctx, uint8_t* base) {
+  const bool was = std::exchange(split_screen::own_positions, true);
+  __imp__sub_82F05818(ctx, base);
+  split_screen::own_positions = was;
+}
+// HudWidget_JitterLabel's (MenuJitterLabel: the dark copy behind each pause menu label) Render_Widget, the same way.
+extern "C" void __imp__sub_82F05158(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_82F05158(PPCContext& __restrict ctx, uint8_t* base) {
+  const bool was = std::exchange(split_screen::own_positions, true);
+  __imp__sub_82F05158(ctx, base);
+  split_screen::own_positions = was;
+}
+extern "C" void __imp__sub_82844190(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_82844190(PPCContext& __restrict ctx, uint8_t* base) {
+  if (!split_screen::tracing_easel || ctx.lr < 0x82DDAE08 || ctx.lr >= 0x82DDB0A0)
+    return __imp__sub_82844190(ctx, base);
+  const uint32_t face = ctx.r4.u8;
+  __imp__sub_82844190(ctx, base);
+  REXLOG_INFO("traceeasel:   face {}: {}", face, ctx.f1.f64);
+}
+extern "C" void __imp__sub_82DDAE08(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_82DDAE08(PPCContext& __restrict ctx, uint8_t* base) {
+  const uint32_t w = ctx.r3.u32;
+  const bool trace = debug::trace_easel > 0;
+  if (trace) {
+    --debug::trace_easel;
+    REXLOG_INFO("traceeasel: {:08X} {} ({}) full viewport {}", w, debug::NameOf(base, w),
+                debug::NameOf(base, LoadU32(base, w + 0x34)), LoadU32(base, w + 0x410) >> 31);
+  }
+  const uint32_t outer = std::exchange(split_screen::easel, w);
+  const bool was = std::exchange(split_screen::tracing_easel, trace);
+  __imp__sub_82DDAE08(ctx, base);
+  split_screen::tracing_easel = was;
+  split_screen::easel = outer;
+}
+
+// ULocalPlayer::Exec (sub_825D67A8: r3 the player's FExec at LocalPlayer +60, r4 the command, UTF-16): every console
+// command a player runs, the UI's included (menus run execs such as QuitToMainMenu as their player). Logged, apart
+// from our own (RunPlayerCommand logs those), as a map of what the menus do. With split screen, player 2 quitting from
+// their pause menu would end the game for both (QuitToMainMenu ends with "Disconnect"); they leave it instead.
+namespace split_screen {
+bool running_ours = false;  // set by RunPlayerCommand around its exec
+}
+extern "C" void __imp__sub_825D67A8(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_825D67A8(PPCContext& __restrict ctx, uint8_t* base) {
+  if (split_screen::running_ours) return __imp__sub_825D67A8(ctx, base);
+  std::string cmd;
+  for (uint32_t a = ctx.r4.u32; menu_pointer::Readable(a & ~3u) && cmd.size() < 200; a += 2) {
+    const uint16_t c = uint16_t(Raw(base, a)[0] << 8 | Raw(base, a)[1]);
+    if (!c) break;
+    cmd.push_back(c < 0x80 ? char(c) : '?');
+  }
+  const uint32_t player = ctx.r3.u32 - 60;
+  uint32_t index = 0;
+  while (index < 4 && split_screen::Player(base, index) != player) ++index;
+  REXLOG_INFO("exec (player {}): {}", index, cmd);
+  static const bool split = bots::SplitScreen();
+  if (split && index >= 1 && index < 4 && strncasecmp(cmd.c_str(), "QuitToMainMenu", 14) == 0) {
+    split_screen::join.leave = true;
+    ctx.r3.u64 = 1;  // handled
+    return;
+  }
+  __imp__sub_825D67A8(ctx, base);
 }
 
 // Split screen: the final post-process pass (sub_82D7E850: r3 the effect, r5 the view) sets the back buffer as its

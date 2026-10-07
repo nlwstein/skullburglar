@@ -4,6 +4,7 @@
 // player 2 (SpawnPlayerTwo).
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 
@@ -21,6 +22,13 @@ std::unique_ptr<rex::input::DeviceAssignment> MakePadAssignment();
 // --split_screen: one-window co-op. A second pad's START joins its player into the same game, the
 // screen split in two (B-134). Off with --coop (two windows) or --pad.
 bool SplitScreen();
+
+// Split screen: sign player 2 in as XAM user user_index with the identity --coop gives player 2's
+// instance (XUID, gamertag) and its data in the same "-p2" folder, so profile settings and saves follow
+// player 2 between one-window and two-window co-op.
+void SignInPlayerTwo(uint32_t user_index);
+// Split screen: sign player 2 out again (they left), if signed in.
+void SignOutPlayerTwo();
 
 // --coop: 1 or 2 for the two instances of a co-op launch, 0 otherwise.
 int CoopPlayer();
