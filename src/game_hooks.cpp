@@ -1613,6 +1613,7 @@ struct Join {
   std::chrono::steady_clock::time_point relayout{};  // when player 1's HUD is laid out again after player 2 left
   int relayout_step = 0;                             // 1 close player 1's HUD scenes, 2 open them again
   bool front_end = false;  // the leave happens at the front end: no HUD to lay out again
+  uint32_t swallow_start = 0;  // pads (bit per user) whose joining START press is hidden until released
 };
 Join join;
 
@@ -1666,6 +1667,15 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
   const uint16_t buttons = state ? uint16_t(Raw(base, state)[4] << 8 | Raw(base, state)[5]) : 0;
   const bool start = (buttons & 0x10) && !(join.buttons[user] & 0x10);  // XINPUT_GAMEPAD_START, pressed now
   join.buttons[user] = buttons;
+  // The START press that joins player 2 is only for joining: still held in the frames after the join, the new
+  // player's controller read it as a pause, opening their pause menu (and closing player 1's if they had paused,
+  // leaving a pause neither could lift: only the pauser unpauses).
+  if (join.swallow_start & (1u << user)) {
+    if (state && (buttons & 0x10))
+      Raw(base, state)[5] &= uint8_t(~0x10);
+    else
+      join.swallow_start &= ~(1u << user);
+  }
   if (!Patch(base)) return;
   const uint32_t p0 = Player(base, 0);
   if (!Readable(p0)) return;
@@ -1748,6 +1758,10 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
     join.tries = 0;
     join.next = now + std::chrono::seconds(2);
     REXLOG_INFO("split screen: controller {} joins", pad);
+    if (start && pad == int(user) && state) {
+      join.swallow_start |= 1u << user;
+      Raw(base, state)[5] &= uint8_t(~0x10);
+    }
     // Player 2 plays as the XAM user of the controller it ends up with (after the swap below).
     bots::SignInPlayerTwo(scripted && LoadU32(base, p0 + 0x60) != 0 ? LoadU32(base, p0 + 0x60) : uint32_t(pad));
     Run(ctx, base, p0, fmt::format("DebugCreatePlayer {}", pad));
