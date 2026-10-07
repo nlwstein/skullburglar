@@ -1831,6 +1831,30 @@ void Run(PPCContext& ctx, uint8_t* base, uint32_t player, const std::string& cmd
   if (join.exec.buffer) RunPlayerCommand(ctx, base, join.exec, player, cmd, false);
 }
 
+// C1HUD.DisplayDeathScene opens DeathSceneClientTemplate on a network client and DeathSceneTemplate (retry from the
+// checkpoint, quit) everywhere else, so player 2 got the host's death menu. Retrying is the host's call
+// (C1PlayerController.OnLoadLastCheckpoint ignores anyone but ctrl_FiftyCent), so player 2's HUD gets the client menu,
+// as the buddy has over the network.
+void ClientDeathMenu(uint8_t* base, uint32_t count) {
+  static uint32_t done = 0, hud_offset = 0, template_offset = 0xFFFFFFFF, client_offset = 0xFFFFFFFF;
+  for (uint32_t i = 1; i < count && i < 4; ++i) {
+    const uint32_t player = Player(base, i), actor = Readable(player) ? LoadU32(base, player + 0x40) : 0;
+    if (!Readable(actor)) continue;
+    if (!hud_offset)
+      if (const uint32_t prop = FindFunction(base, actor, "myHUD")) hud_offset = LoadU32(base, prop + 0x64);
+    const uint32_t hud = hud_offset ? LoadU32(base, actor + hud_offset) : 0;
+    if (!Readable(hud) || hud == done) continue;
+    if (template_offset == 0xFFFFFFFF) template_offset = Prop(base, hud, "DeathSceneTemplate");
+    if (client_offset == 0xFFFFFFFF) client_offset = Prop(base, hud, "DeathSceneClientTemplate");
+    if (template_offset == 0xFFFFFFFF || client_offset == 0xFFFFFFFF) return;
+    const uint32_t client = LoadU32(base, hud + client_offset);
+    if (!Readable(client)) continue;
+    StoreU32(base, hud + template_offset, client);
+    done = hud;
+    REXLOG_INFO("split screen: player {}'s HUD {:08X} opens the client death menu ({:08X})", i + 1, hud, client);
+  }
+}
+
 // C1HUD.ReceivePauseMessage opens PauseMessageSceneTemplate (BuddyPaused: "the other player has paused the game, kick
 // them?") on every HUD whose player isn't WorldInfo.Pauser. Over the network that's the other machine's player; with
 // both players local it's player 2's HUD whenever anyone pauses (the pause is player 1's), and its kick action would
@@ -1884,6 +1908,7 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
   if (!Readable(p0)) return;
   ExposeBuddyRequest(base, LoadU32(base, p0 + 0x40));
   SuppressBuddyPause(base, PlayerCount(base));
+  ClientDeathMenu(base, PlayerCount(base));
   const bool playing = PawnOf(base, p0) != 0;
   const PPCRegister r3 = ctx.r3;  // keep the poll's return value
   const auto now = std::chrono::steady_clock::now();
@@ -2291,6 +2316,22 @@ bool Command(uint8_t* base, const std::string& cmd) {
   }
   if (cmd == "renderdiff") return render_diff = true;
   if (cmd == "gfxcapture") return bots::gfx::RequestCapture(), true;
+  // "mkexec <function>": flag a function of the local players' controller or pawn classes exec (UFunction +0x94
+  // FunctionFlags, FUNC_Exec 0x200) so tests can run it from the console, e.g. "p2:GotoStateReviving".
+  if (cmd.rfind("mkexec ", 0) == 0) {
+    const std::string name = cmd.substr(7);
+    for (uint32_t i = 0, n = split_screen::PlayerCount(base); i < n && i < 4; ++i) {
+      const uint32_t player = split_screen::Player(base, i);
+      const uint32_t controller = Readable(player) ? LoadU32(base, player + 0x40) : 0;
+      for (const uint32_t object : {controller, split_screen::PawnOf(base, player)}) {
+        const uint32_t fn = Readable(object) ? split_screen::FindFunction(base, object, name.c_str()) : 0;
+        if (!fn || std::string_view(split_screen::ClassName(base, fn)) != "Function") continue;
+        StoreU32(base, fn + 0x94, LoadU32(base, fn + 0x94) | 0x200);
+        REXLOG_INFO("mkexec: {}.{} ({:08X}) is exec", split_screen::ClassName(base, object), name, fn);
+      }
+    }
+    return true;
+  }
   if (cmd == "traceeasel" || cmd.rfind("traceeasel ", 0) == 0)
     return trace_easel = cmd.size() > 11 ? std::atoi(cmd.c_str() + 11) : 40, true;
   if (cmd.rfind("words ", 0) == 0) {
