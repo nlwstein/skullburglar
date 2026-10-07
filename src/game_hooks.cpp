@@ -1614,12 +1614,25 @@ struct Join {
   int relayout_step = 0;                             // 1 close player 1's HUD scenes, 2 open them again
   bool front_end = false;  // the leave happens at the front end: no HUD to lay out again
   uint32_t swallow_start = 0;  // pads (bit per user) whose joining START press is hidden until released
+  uint32_t connected = 0, seen = 0;  // pads (bit per user) whose last poll answered, and that have been polled
 };
 Join join;
+
+// The game keeps which pads are connected from XN_SYS_INPUTDEVICESCHANGED, and the SDK sends that once, at boot.
+// A pad plugged in (or woken) later then reads as unplugged for good: C1PlayerController.PlayerTick pauses whenever its
+// player's pad is unplugged, so player 2 on such a pad got their pause menu every tick and could never resume (seen on
+// real pads). So tell the game whenever a pad comes or goes, and on every join.
+void NotifyPads(const char* why) {
+  if (auto* kernel = rex::system::kernel_state()) {
+    REXLOG_INFO("split screen: pads changed ({}), connected {:X}", why, join.connected);
+    kernel->BroadcastNotification(0x00000012, 0);  // XN_SYS_INPUTDEVICESCHANGED
+  }
+}
 
 bool Command(const std::string& cmd) {
   if (cmd == "splitjoin") return join.requested = true;
   if (cmd == "splitleave") return join.leave = true;
+  if (cmd == "padsnotify") return NotifyPads("padsnotify"), true;
   return false;
 }
 
@@ -1664,6 +1677,11 @@ void SuppressBuddyPause(uint8_t* base, uint32_t count) {
 void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
   static const bool on = bots::SplitScreen();
   if (!on || user >= 4) return;
+  if (const uint32_t bit = 1u << user, was = join.connected; !(join.seen & bit) || bool(was & bit) != bool(state)) {
+    join.connected = state ? was | bit : was & ~bit;
+    if (join.seen & bit) NotifyPads(state ? "connected" : "unplugged");
+    join.seen |= bit;
+  }
   const uint16_t buttons = state ? uint16_t(Raw(base, state)[4] << 8 | Raw(base, state)[5]) : 0;
   const bool start = (buttons & 0x10) && !(join.buttons[user] & 0x10);  // XINPUT_GAMEPAD_START, pressed now
   join.buttons[user] = buttons;
@@ -1758,6 +1776,7 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
     join.tries = 0;
     join.next = now + std::chrono::seconds(2);
     REXLOG_INFO("split screen: controller {} joins", pad);
+    NotifyPads("join");
     if (start && pad == int(user) && state) {
       join.swallow_start |= 1u << user;
       Raw(base, state)[5] &= uint8_t(~0x10);
