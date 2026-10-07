@@ -35,6 +35,7 @@
 
 #include "app_quit.h"
 #include "coop.h"
+#include "gfx/capture.h"
 #include "mnk_input.h"
 #include "prompt_state.h"
 
@@ -1804,6 +1805,9 @@ void Tick(uint8_t* base) {
 //   renderdiff                the next split-screen-shifted scene draw logs every word of the scene and its widgets
 //                             (first 0x1600 bytes) that differs after the draw and the shift's restore: what drawing
 //                             changed for good
+//   poke <hex addr> <hex word> write one guest word (logs the old value)
+//   splitpp share|own         player 2's LocalPlayer.PlayerPostProcess: player 1's chain, or back to its own
+//   gfxcapture                record the next frame's D3D calls (gfx/capture.cpp; launch with BOTS_GFX_CAPTURE=1e9)
 //   traceeasel [n]            the next n (40) easel post-renders (C1UI_Easel / SfUI_Easel canvases: button bar prompts)
 //                             log the widget, the canvas rectangle GetPosition gave and each draw's position and origin
 // LogGuestStack is for hooks: the guest call chain at that point.
@@ -1945,6 +1949,7 @@ bool Command(uint8_t* base, const std::string& cmd) {
     return true;
   }
   if (cmd == "renderdiff") return render_diff = true;
+  if (cmd == "gfxcapture") return bots::gfx::RequestCapture(), true;
   if (cmd == "traceeasel" || cmd.rfind("traceeasel ", 0) == 0)
     return trace_easel = cmd.size() > 11 ? std::atoi(cmd.c_str() + 11) : 40, true;
   if (cmd.rfind("words ", 0) == 0) {
@@ -1956,6 +1961,32 @@ bool Command(uint8_t* base, const std::string& cmd) {
     for (uint32_t k = 0; k < count && Readable(addr + 4 * k); ++k)
       REXLOG_INFO("{} {:08X} +{:X} = {:08X} ({})", tag, addr + 4 * k, 4 * k, LoadU32(base, addr + 4 * k),
                   menu_pointer::LoadF32(base, addr + 4 * k));
+    return true;
+  }
+  if (cmd.rfind("poke ", 0) == 0) {
+    char* end = nullptr;
+    const uint32_t addr = static_cast<uint32_t>(std::strtoul(cmd.c_str() + 5, &end, 16));
+    const uint32_t value = static_cast<uint32_t>(std::strtoul(end, &end, 16));
+    if (!Readable(addr)) {
+      REXLOG_INFO("poke: {:08X} not readable", addr);
+      return true;
+    }
+    REXLOG_INFO("poke {:08X}: {:08X} -> {:08X}", addr, LoadU32(base, addr), value);
+    StoreU32(base, addr, value);
+    return true;
+  }
+  if (cmd == "splitpp share" || cmd == "splitpp own") {
+    // LocalPlayer.PlayerPostProcess (+0x78): player 2's own post-process chain, or player 1's.
+    static uint32_t own = 0;
+    const uint32_t p1 = split_screen::Player(base, 0), p2 = split_screen::Player(base, 1);
+    if (!Readable(p1) || !Readable(p2)) {
+      REXLOG_INFO("splitpp: no player 2");
+      return true;
+    }
+    if (!own || LoadU32(base, p2 + 0x78) != LoadU32(base, p1 + 0x78)) own = LoadU32(base, p2 + 0x78);
+    StoreU32(base, p2 + 0x78, cmd == "splitpp share" ? LoadU32(base, p1 + 0x78) : own);
+    REXLOG_INFO("splitpp: player 2's chain {:08X} (player 1's {:08X}, own {:08X})", LoadU32(base, p2 + 0x78),
+                LoadU32(base, p1 + 0x78), own);
     return true;
   }
   if (cmd.rfind("uiprops ", 0) == 0) return Scenes(base, false, false, cmd.c_str() + 8), true;

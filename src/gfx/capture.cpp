@@ -1,4 +1,5 @@
 // BOTS_GFX_CAPTURE="<sec>[,<sec>...]": capture one frame of D3D calls per listed time (native renderer, P1).
+// The "gfxcapture" console command captures the next frame instead (set BOTS_GFX_CAPTURE=1e9 to turn the hooks on).
 //
 // Seconds count from the first D3DDevice_Swap. The frame after that Swap is recorded until the next Swap, into
 // $BOTS_GFX_CAPTURE_DIR/f<frame>/ (default dir: gfxcap):
@@ -306,6 +307,13 @@ void StartRecording(Capture& c) {
 }
 
 }  // namespace
+
+void RequestCapture() {
+  Capture& c = Cap();
+  std::lock_guard lock(c.mutex);
+  c.times.insert(c.times.begin(), 0.0);
+  REXLOG_INFO("gfx capture: next frame requested{}", CaptureConfigured() ? "" : " (BOTS_GFX_CAPTURE unset: ignored)");
+}
 
 bool CaptureConfigured() {
   static const bool on = [] {
