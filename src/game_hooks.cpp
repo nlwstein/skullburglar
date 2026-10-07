@@ -1851,6 +1851,19 @@ void WatchCameras(uint8_t* base) {
     bots::gfx::RequestCapture();
   }
   const uint32_t count = PlayerCount(base);
+  // A camera actor that keeps its aspect ratio (the minigames' CameraActorReplicated) shrinks its player's view to a
+  // 16:9 box inside the half-screen. The views then no longer cover the screen, so the viewport client fills it with a
+  // black tile - drawn after the views, over both of them (seen on real pads; draw 417 of capture f12570). With two
+  // players, camera actors fill their player's view instead. CameraActor's first bool, the top bit of its word.
+  for (uint32_t i = 0; count > 1 && i < count && i < 4; ++i) {
+    const uint32_t pc = LoadU32(base, Player(base, i) + 0x40);
+    const uint32_t target = Readable(pc) ? LoadU32(base, pc + Prop(base, pc, "ViewTarget")) : 0;
+    if (!Readable(target)) continue;
+    const uint32_t at = Prop(base, target, "bConstrainAspectRatio");
+    if (at == 0xFFFFFFFF || !(LoadU32(base, target + at) & 0x80000000)) continue;
+    REXLOG_INFO("split screen: player {}'s camera actor {:08X} fills their view (no aspect ratio box)", i, target);
+    StoreU32(base, target + at, LoadU32(base, target + at) & ~0x80000000u);
+  }
   if (count < 2 || dumps >= 300 || now < next) return;
   std::vector<uint32_t> state, targets;
   for (uint32_t i = 0; i < count && i < 4; ++i) {
