@@ -1794,9 +1794,8 @@ struct Join {
   uint16_t buttons[4] = {};
   ExecState exec;
   bool leave = false;  // player 2 asked to leave (quit from their pause menu, or "splitleave")
-  uint32_t confirm_pad = 0xFF;  // pad that gets an A press (player 2's, to close their death menu), 0xFF none
-  std::chrono::steady_clock::time_point confirm_until{};
-  bool host_death_menu_seen = false;  // player 1's death menu was up while player 2's was
+  std::atomic<uint32_t> last_press_pad{0xFF};  // pad that last pressed A or START, and when (steady clock ticks)
+  std::atomic<int64_t> last_press_at{0};
   std::chrono::steady_clock::time_point relayout{};  // when player 1's HUD is laid out again after player 2 left
   int relayout_step = 0;                             // 1 close player 1's HUD scenes, 2 open them again
   bool front_end = false;  // the leave happens at the front end: no HUD to lay out again
@@ -1869,9 +1868,9 @@ uint32_t HudOf(uint8_t* base, uint32_t player) {
 //   the scenes below. Over the network each machine shows one player's menus; here player 2's death menu, opened
 //   last, sat on top of player 1's and player 1 could not retry (seen on real pads). With two players, Locked scenes
 //   become INPUTMODE_MatchingOnly (owner only, the rest goes down the stack).
-// - Player 2's client menu pauses the game (bPauseGameWhileActive) until they confirm it; over the network it only
-//   pauses their own machine. Player 1's retry then waited on player 2 (seen on real pads). So when player 1's menu
-//   closes with player 2's still up, player 2's pad presses A, which runs the menu's own confirm.
+// - Player 1's retry asks "load the last checkpoint?" in a dialog (C1SeqAct_DialogWindow, native) that opened as
+//   player 2's, on player 2's button bar (seen on real pads): only player 2 could answer. A dialog that opens for a
+//   player other than the one who just pressed A or START moves to the presser: owner, input mask and button bar.
 void DeathMenus(uint8_t* base, uint32_t count) {
   static uint32_t done = 0, template_offset = 0xFFFFFFFF, client_offset = 0xFFFFFFFF;
   static auto next = std::chrono::steady_clock::time_point{};
@@ -1890,26 +1889,33 @@ void DeathMenus(uint8_t* base, uint32_t count) {
       REXLOG_INFO("split screen: player 2's HUD {:08X} opens the client death menu ({:08X})", hud, client);
     }
   }
-  bool host_menu = false, client_menu = false;
+  static uint32_t moved = 0;
+  uint32_t presser = 0, presser_index = 0;
+  const int64_t age = now.time_since_epoch().count() - join.last_press_at.load();
+  if (age >= 0 && age < std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::seconds(2)).count())
+    for (uint32_t i = 0; i < count && i < 4; ++i)
+      if (const uint32_t player = Player(base, i); Readable(player) && LoadU32(base, player + 0x60) == join.last_press_pad)
+        presser = player, presser_index = i;
+  uint32_t dialog = 0, presser_bar = 0;
   ForEachScene(base, [&](uint32_t scene) {
     if (const uint32_t at = Prop(base, scene, "SceneInputMode"); at != 0xFFFFFFFF && Raw(base, scene + at)[0] == 1)
       Raw(base, scene + at)[0] = 2;
-    const std::string_view name = menu_pointer::NameOf(base, LoadU32(base, scene + 0x2C));
-    const uint32_t owner = ObjectProp(base, scene, "PlayerOwner");
-    host_menu |= name == "DeathMenu_Server" && owner == p0;
-    client_menu |= name == "DeathMenu_Client" && owner == p1;
+    const std::string_view cls = ClassName(base, scene);
+    if (cls == "C1UIScene_DialogWindow" && scene != moved) dialog = scene;
+    if (cls.rfind("ButtonBarScene", 0) == 0 && ObjectProp(base, scene, "PlayerOwner") == presser) presser_bar = scene;
   });
-  if (!client_menu) {
-    join.host_death_menu_seen = false;
-  } else if (host_menu) {
-    join.host_death_menu_seen = true;
-  } else if (join.host_death_menu_seen && join.confirm_pad == 0xFF) {
-    join.host_death_menu_seen = false;
-    join.confirm_pad = LoadU32(base, p1 + 0x60);
-    join.confirm_until = now + std::chrono::milliseconds(150);
-    REXLOG_INFO("split screen: player 1 left their death menu, player 2's closes too (pad {} presses A)",
-                join.confirm_pad);
-  }
+  if (!dialog || !presser) return;
+  const uint32_t owner_at = Prop(base, dialog, "PlayerOwner"), mask_at = Prop(base, dialog, "PlayerInputMask");
+  if (owner_at == 0xFFFFFFFF || mask_at == 0xFFFFFFFF) return;
+  moved = dialog;
+  const uint32_t owner = LoadU32(base, dialog + owner_at);
+  if (owner == presser) return;
+  StoreU32(base, dialog + owner_at, presser);
+  Raw(base, dialog + mask_at)[0] = uint8_t(1u << presser_index);
+  if (const uint32_t bar_at = Prop(base, dialog, "MyButtonScene"); bar_at != 0xFFFFFFFF && presser_bar)
+    StoreU32(base, dialog + bar_at, presser_bar);
+  REXLOG_INFO("split screen: dialog {} ({:08X}) opened as {:08X}'s, moves to player {} who asked for it",
+              menu_pointer::NameOf(base, LoadU32(base, dialog + 0x2C)), dialog, owner, presser_index + 1);
 }
 
 // C1HUD.ReceivePauseMessage opens PauseMessageSceneTemplate (BuddyPaused: "the other player has paused the game, kick
@@ -1948,7 +1954,8 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
     join.seen |= bit;
   }
   const uint16_t buttons = state ? uint16_t(Raw(base, state)[4] << 8 | Raw(base, state)[5]) : 0;
-  const bool start = (buttons & 0x10) && !(join.buttons[user] & 0x10);  // XINPUT_GAMEPAD_START, pressed now
+  const uint16_t prev_buttons = join.buttons[user];
+  const bool start = (buttons & 0x10) && !(prev_buttons & 0x10);  // XINPUT_GAMEPAD_START, pressed now
   join.buttons[user] = buttons;
   // The START press that joins player 2 is only for joining: still held in the frames after the join, the new
   // player's controller read it as a pause, opening their pause menu (and closing player 1's if they had paused,
@@ -1959,11 +1966,9 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
     else
       join.swallow_start &= ~(1u << user);
   }
-  if (user == join.confirm_pad) {
-    if (std::chrono::steady_clock::now() >= join.confirm_until)
-      join.confirm_pad = 0xFF;
-    else if (state)
-      Raw(base, state)[4] |= 0x10;  // XINPUT_GAMEPAD_A (0x1000), big-endian wButtons
+  if ((buttons & 0x1010) & ~prev_buttons) {  // A or START pressed now
+    join.last_press_pad = user;
+    join.last_press_at = std::chrono::steady_clock::now().time_since_epoch().count();
   }
   if (OffGameThread()) return;  // joins, script and console commands only on the game thread
   if (!Patch(base)) return;
