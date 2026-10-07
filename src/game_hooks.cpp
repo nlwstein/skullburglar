@@ -1781,10 +1781,32 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
   ctx.r3 = r3;
 }
 
+}  // namespace split_screen
+namespace debug {
+void Scenes(uint8_t* base, bool full, bool tree, const char* find, bool stack);
+}
+namespace split_screen {
+
+// Scripted co-op moments black out both views with the HUD still drawn (B-134): log the GameViewportClient's
+// bDisableWorldRendering word whenever it changes, with the active scenes (each with its own flag word).
+void WatchWorldRendering(uint8_t* base, uint32_t player) {
+  static uint32_t last = 0xFFFFFFFF;
+  const uint32_t vc_prop = FindFunction(base, player, "ViewportClient");
+  const uint32_t vc = vc_prop ? LoadU32(base, player + LoadU32(base, vc_prop + 0x64)) : 0;
+  const uint32_t prop = Readable(vc) ? FindFunction(base, vc, "bDisableWorldRendering") : 0;
+  if (!prop) return;
+  const uint32_t word = LoadU32(base, vc + LoadU32(base, prop + 0x64));
+  if (word == last) return;
+  REXLOG_INFO("split screen: viewport client {:08X} bDisableWorldRendering word {:08X} (was {:08X})", vc, word, last);
+  last = word;
+  debug::Scenes(base, false, false, nullptr, false);
+}
+
 // Log the local players when their number, controllers, actors or pawns change.
 void Tick(uint8_t* base) {
   static const bool on = bots::SplitScreen();
   if (!on) return;
+  if (const uint32_t p = Player(base, 0); Readable(p)) WatchWorldRendering(base, p);
   auto cls = [&](uint32_t o) {
     return Readable(o) ? menu_pointer::NameOf(base, LoadU32(base, LoadU32(base, o + 0x34) + 0x2C)) : "None";
   };
@@ -1832,6 +1854,7 @@ void Tick(uint8_t* base) {
 //   renderdiff                the next split-screen-shifted scene draw logs every word of the scene and its widgets
 //                             (first 0x1600 bytes) that differs after the draw and the shift's restore: what drawing
 //                             changed for good
+//   splitcams                 each local player's view target, cinematic flags, camera fade and POV
 //   poke <hex addr> <hex word> write one guest word (logs the old value)
 //   splitpp share|own         player 2's LocalPlayer.PlayerPostProcess: player 1's chain, or back to its own
 //   gfxcapture                record the next frame's D3D calls (gfx/capture.cpp; launch with BOTS_GFX_CAPTURE=1e9)
@@ -1933,9 +1956,12 @@ void Scenes(uint8_t* base, bool full, bool tree, const char* find = nullptr, boo
       continue;
     }
     const uint32_t pos = sc + Prop(base, sc, "Position"), size = sc + Prop(base, sc, "CurrentViewportSize");
-    REXLOG_INFO("uiscene {} {:08X} {} owner {:08X} mode {} pos {} {} {} {} vsize {} {}", i, sc, NameOf(base, sc),
-                LoadU32(base, sc + Prop(base, sc, "PlayerOwner")), Raw(base, sc + Prop(base, sc, "SceneRenderMode"))[0],
-                f(pos), f(pos + 4), f(pos + 8), f(pos + 12), f(size), f(size + 4));
+    // "flags word": the word holding the scene's bDisableWorldRendering (and its neighbouring bools).
+    const uint32_t dwr = split_screen::FindFunction(base, sc, "bDisableWorldRendering");
+    REXLOG_INFO("uiscene {} {:08X} {} owner {:08X} mode {} pos {} {} {} {} vsize {} {} flags word {:08X}", i, sc,
+                NameOf(base, sc), LoadU32(base, sc + Prop(base, sc, "PlayerOwner")),
+                Raw(base, sc + Prop(base, sc, "SceneRenderMode"))[0], f(pos), f(pos + 4), f(pos + 8), f(pos + 12),
+                f(size), f(size + 4), dwr ? LoadU32(base, sc + LoadU32(base, dwr + 0x64)) : 0);
     if (stack) {
       const uint32_t rs = Prop(base, sc, "RenderStack");
       for (uint32_t k = 0, n = LoadU32(base, sc + rs + 4); k < n && k < 512; ++k) {
@@ -2000,6 +2026,29 @@ bool Command(uint8_t* base, const std::string& cmd) {
     }
     REXLOG_INFO("poke {:08X}: {:08X} -> {:08X}", addr, LoadU32(base, addr), value);
     StoreU32(base, addr, value);
+    return true;
+  }
+  if (cmd == "splitcams") {
+    // Each local player's view: controller ViewTarget, cinematic flags, PlayerCamera fade and its view target / POV.
+    auto cls = [&](uint32_t o) {
+      return Readable(o) ? menu_pointer::NameOf(base, LoadU32(base, LoadU32(base, o + 0x34) + 0x2C)) : "None";
+    };
+    auto f32 = [&](uint32_t a) { return menu_pointer::LoadF32(base, a); };
+    for (uint32_t i = 0, n = split_screen::PlayerCount(base); i < n && i < 4; ++i) {
+      const uint32_t pc = LoadU32(base, split_screen::Player(base, i) + 0x40);
+      if (!Readable(pc)) continue;
+      auto at = [&](uint32_t o, const char* name) { return split_screen::Prop(base, o, name); };
+      const uint32_t vt = LoadU32(base, pc + at(pc, "ViewTarget")), cam = LoadU32(base, pc + at(pc, "PlayerCamera"));
+      REXLOG_INFO("splitcams: player {} pc {:08X} {} ViewTarget {:08X} {} cinematic word {:08X}", i, pc, cls(pc), vt,
+                  cls(vt), LoadU32(base, pc + at(pc, "bCinematicMode")));
+      if (!Readable(cam)) continue;
+      const uint32_t v = cam + at(cam, "ViewTarget");
+      REXLOG_INFO("splitcams: player {} camera {:08X} {} fading word {:08X} FadeAmount {} FadeColor {:08X} target "
+                  "{:08X} {} POV {} {} {} FOV {} aspect {}",
+                  i, cam, cls(cam), LoadU32(base, cam + at(cam, "bEnableFading")), f32(cam + at(cam, "FadeAmount")),
+                  LoadU32(base, cam + at(cam, "FadeColor")), LoadU32(base, v), cls(LoadU32(base, v)), f32(v + 8),
+                  f32(v + 12), f32(v + 16), f32(v + 32), f32(v + 36));
+    }
     return true;
   }
   if (cmd == "splitpp share" || cmd == "splitpp own") {
