@@ -1796,6 +1796,11 @@ struct Join {
   bool leave = false;  // player 2 asked to leave (quit from their pause menu, or "splitleave")
   std::atomic<uint32_t> last_press_pad{0xFF};  // pad that last pressed A or START, and when (steady clock ticks)
   std::atomic<int64_t> last_press_at{0};
+  // A dialog moved to the player who asked for it (DeathMenus) keeps its input and focus on the player it opened for:
+  // while it's up, the asker's A and B are read from the opener's pad instead (pad numbers, 0xFF = none).
+  std::atomic<uint32_t> forward_from{0xFF}, forward_to{0xFF};
+  std::atomic<uint32_t> fake_pad{0xFF}, fake_buttons{0};  // "padpress <user> <hex buttons>" (tests): held a few polls
+  std::atomic<int> fake_polls{0};
   std::chrono::steady_clock::time_point relayout{};  // when player 1's HUD is laid out again after player 2 left
   int relayout_step = 0;                             // 1 close player 1's HUD scenes, 2 open them again
   bool front_end = false;  // the leave happens at the front end: no HUD to lay out again
@@ -1819,6 +1824,13 @@ bool Command(const std::string& cmd) {
   if (cmd == "splitjoin") return join.requested = true;
   if (cmd == "splitleave") return join.leave = true;
   if (cmd == "padsnotify") return NotifyPads("padsnotify"), true;
+  if (cmd.rfind("padpress ", 0) == 0) {
+    unsigned user = 0, buttons = 0;
+    if (std::sscanf(cmd.c_str() + 9, "%u %x", &user, &buttons) != 2 || user >= 4) return false;
+    join.fake_buttons = buttons, join.fake_pad = user, join.fake_polls = 6;
+    REXLOG_INFO("split screen: pad {} presses {:04X}", user, buttons);
+    return true;
+  }
   return false;
 }
 
@@ -1870,7 +1882,9 @@ uint32_t HudOf(uint8_t* base, uint32_t player) {
 //   become INPUTMODE_MatchingOnly (owner only, the rest goes down the stack).
 // - Player 1's retry asks "load the last checkpoint?" in a dialog (C1SeqAct_DialogWindow, native) that opened as
 //   player 2's, on player 2's button bar (seen on real pads): only player 2 could answer. A dialog that opens for a
-//   player other than the one who just pressed A or START moves to the presser: owner, input mask and button bar.
+//   player other than the one who just pressed A or START moves to the presser's half of the screen (owner and button
+//   bar). Its input mask and focus stay with the player it opened for (focus is kept per player index: given the
+//   presser's mask, it took no A from anyone), so while it's up the presser's A and B go to the opener's pad (Poll).
 void DeathMenus(uint8_t* base, uint32_t count) {
   static uint32_t done = 0, template_offset = 0xFFFFFFFF, client_offset = 0xFFFFFFFF;
   static auto next = std::chrono::steady_clock::time_point{};
@@ -1890,6 +1904,7 @@ void DeathMenus(uint8_t* base, uint32_t count) {
     }
   }
   static uint32_t moved = 0;
+  bool moved_up = false;
   uint32_t presser = 0, presser_index = 0;
   const int64_t age = now.time_since_epoch().count() - join.last_press_at.load();
   if (age >= 0 && age < std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::seconds(2)).count())
@@ -1902,20 +1917,27 @@ void DeathMenus(uint8_t* base, uint32_t count) {
       Raw(base, scene + at)[0] = 2;
     const std::string_view cls = ClassName(base, scene);
     if (cls == "C1UIScene_DialogWindow" && scene != moved) dialog = scene;
+    if (scene == moved) moved_up = true;
     if (cls.rfind("ButtonBarScene", 0) == 0 && ObjectProp(base, scene, "PlayerOwner") == presser) presser_bar = scene;
   });
+  if (!moved_up && join.forward_to != 0xFF) {
+    REXLOG_INFO("split screen: moved dialog closed, pad {} reads its own A and B again", join.forward_from.load());
+    join.forward_from = 0xFF, join.forward_to = 0xFF;
+  }
   if (!dialog || !presser) return;
-  const uint32_t owner_at = Prop(base, dialog, "PlayerOwner"), mask_at = Prop(base, dialog, "PlayerInputMask");
-  if (owner_at == 0xFFFFFFFF || mask_at == 0xFFFFFFFF) return;
+  const uint32_t owner_at = Prop(base, dialog, "PlayerOwner");
+  if (owner_at == 0xFFFFFFFF) return;
   moved = dialog;
   const uint32_t owner = LoadU32(base, dialog + owner_at);
-  if (owner == presser) return;
+  if (owner == presser || !Readable(owner)) return;
   StoreU32(base, dialog + owner_at, presser);
-  Raw(base, dialog + mask_at)[0] = uint8_t(1u << presser_index);
+  join.forward_from = LoadU32(base, presser + 0x60), join.forward_to = LoadU32(base, owner + 0x60);
   if (const uint32_t bar_at = Prop(base, dialog, "MyButtonScene"); bar_at != 0xFFFFFFFF && presser_bar)
     StoreU32(base, dialog + bar_at, presser_bar);
-  REXLOG_INFO("split screen: dialog {} ({:08X}) opened as {:08X}'s, moves to player {} who asked for it",
-              menu_pointer::NameOf(base, LoadU32(base, dialog + 0x2C)), dialog, owner, presser_index + 1);
+  REXLOG_INFO("split screen: dialog {} ({:08X}) opened as {:08X}'s, moves to player {} who asked for it (pad {} "
+              "answers through pad {})",
+              menu_pointer::NameOf(base, LoadU32(base, dialog + 0x2C)), dialog, owner, presser_index + 1,
+              join.forward_from.load(), join.forward_to.load());
 }
 
 // C1HUD.ReceivePauseMessage opens PauseMessageSceneTemplate (BuddyPaused: "the other player has paused the game, kick
@@ -1953,6 +1975,11 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
     if (join.seen & bit) NotifyPads(state ? "connected" : "unplugged");
     join.seen |= bit;
   }
+  if (state && join.fake_pad == user && join.fake_polls > 0) {
+    const uint32_t fake = join.fake_buttons;
+    Raw(base, state)[4] |= uint8_t(fake >> 8), Raw(base, state)[5] |= uint8_t(fake);
+    if (--join.fake_polls == 0) join.fake_pad = 0xFF;
+  }
   const uint16_t buttons = state ? uint16_t(Raw(base, state)[4] << 8 | Raw(base, state)[5]) : 0;
   const uint16_t prev_buttons = join.buttons[user];
   const bool start = (buttons & 0x10) && !(prev_buttons & 0x10);  // XINPUT_GAMEPAD_START, pressed now
@@ -1965,6 +1992,10 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
       Raw(base, state)[5] &= uint8_t(~0x10);
     else
       join.swallow_start &= ~(1u << user);
+  }
+  if (const uint32_t from = join.forward_from, to = join.forward_to; state && from < 4 && to < 4 && from != to) {
+    if (user == from) Raw(base, state)[4] &= uint8_t(~0x30);  // A and B (0x1000, 0x2000): not for the asker's menus
+    if (user == to) Raw(base, state)[4] |= uint8_t((join.buttons[from] >> 8) & 0x30);
   }
   if ((buttons & 0x1010) & ~prev_buttons) {  // A or START pressed now
     join.last_press_pad = user;
