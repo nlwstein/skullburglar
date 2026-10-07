@@ -1794,6 +1794,9 @@ struct Join {
   uint16_t buttons[4] = {};
   ExecState exec;
   bool leave = false;  // player 2 asked to leave (quit from their pause menu, or "splitleave")
+  uint32_t confirm_pad = 0xFF;  // pad that gets an A press (player 2's, to close their death menu), 0xFF none
+  std::chrono::steady_clock::time_point confirm_until{};
+  bool host_death_menu_seen = false;  // player 1's death menu was up while player 2's was
   std::chrono::steady_clock::time_point relayout{};  // when player 1's HUD is laid out again after player 2 left
   int relayout_step = 0;                             // 1 close player 1's HUD scenes, 2 open them again
   bool front_end = false;  // the leave happens at the front end: no HUD to lay out again
@@ -1831,27 +1834,81 @@ void Run(PPCContext& ctx, uint8_t* base, uint32_t player, const std::string& cmd
   if (join.exec.buffer) RunPlayerCommand(ctx, base, join.exec, player, cmd, false);
 }
 
-// C1HUD.DisplayDeathScene opens DeathSceneClientTemplate on a network client and DeathSceneTemplate (retry from the
-// checkpoint, quit) everywhere else, so player 2 got the host's death menu. Retrying is the host's call
-// (C1PlayerController.OnLoadLastCheckpoint ignores anyone but ctrl_FiftyCent), so player 2's HUD gets the client menu,
-// as the buddy has over the network.
-void ClientDeathMenu(uint8_t* base, uint32_t count) {
-  static uint32_t done = 0, hud_offset = 0, template_offset = 0xFFFFFFFF, client_offset = 0xFFFFFFFF;
-  for (uint32_t i = 1; i < count && i < 4; ++i) {
-    const uint32_t player = Player(base, i), actor = Readable(player) ? LoadU32(base, player + 0x40) : 0;
-    if (!Readable(actor)) continue;
-    if (!hud_offset)
-      if (const uint32_t prop = FindFunction(base, actor, "myHUD")) hud_offset = LoadU32(base, prop + 0x64);
-    const uint32_t hud = hud_offset ? LoadU32(base, actor + hud_offset) : 0;
-    if (!Readable(hud) || hud == done) continue;
+// Every active UI scene (GameUISceneClient.ActiveScenes).
+template <typename F>
+void ForEachScene(uint8_t* base, F&& f) {
+  const uint32_t engine = LoadU32(base, kGEngine);
+  const uint32_t viewport = Readable(engine) ? LoadU32(base, engine + 0x2E4) : 0;
+  const uint32_t ui = ObjectProp(base, viewport, "UIController"), client = ObjectProp(base, ui, "SceneClient");
+  const uint32_t active = Readable(client) ? Prop(base, client, "ActiveScenes") : 0xFFFFFFFF;
+  if (active == 0xFFFFFFFF) return;
+  const uint32_t scenes = LoadU32(base, client + active);
+  for (uint32_t i = 0, n = LoadU32(base, client + active + 4); i < n && i < 64; ++i)
+    if (const uint32_t scene = LoadU32(base, scenes + 4 * i); Readable(scene)) f(scene);
+}
+
+// Flag a function exec (UFunction +0x94 FunctionFlags, FUNC_Exec 0x200) so a console command can run it.
+bool MakeExec(uint8_t* base, uint32_t object, const char* name) {
+  const uint32_t fn = Readable(object) ? FindFunction(base, object, name) : 0;
+  if (!fn || std::string_view(ClassName(base, fn)) != "Function") return false;
+  StoreU32(base, fn + 0x94, LoadU32(base, fn + 0x94) | 0x200);
+  return true;
+}
+
+uint32_t HudOf(uint8_t* base, uint32_t player) {
+  const uint32_t actor = Readable(player) ? LoadU32(base, player + 0x40) : 0;
+  return ObjectProp(base, actor, "myHUD");
+}
+
+// Death menus with two local players.
+// - C1HUD.DisplayDeathScene opens DeathSceneClientTemplate on a network client and DeathSceneTemplate (retry from the
+//   checkpoint, quit) everywhere else, so player 2 got the host's menu. Retrying is the host's call
+//   (C1PlayerController.OnLoadLastCheckpoint ignores anyone but ctrl_FiftyCent), so player 2's HUD gets the client
+//   menu, as the buddy has over the network.
+// - Every menu scene is INPUTMODE_Locked: its owner's input only, and everyone else's swallowed rather than passed to
+//   the scenes below. Over the network each machine shows one player's menus; here player 2's death menu, opened
+//   last, sat on top of player 1's and player 1 could not retry (seen on real pads). With two players, Locked scenes
+//   become INPUTMODE_MatchingOnly (owner only, the rest goes down the stack).
+// - Player 2's client menu pauses the game (bPauseGameWhileActive) until they confirm it; over the network it only
+//   pauses their own machine. Player 1's retry then waited on player 2 (seen on real pads). So when player 1's menu
+//   closes with player 2's still up, player 2's pad presses A, which runs the menu's own confirm.
+void DeathMenus(uint8_t* base, uint32_t count) {
+  static uint32_t done = 0, template_offset = 0xFFFFFFFF, client_offset = 0xFFFFFFFF;
+  static auto next = std::chrono::steady_clock::time_point{};
+  if (count < 2) return;
+  const auto now = std::chrono::steady_clock::now();
+  if (now < next) return;
+  next = now + std::chrono::milliseconds(100);
+  const uint32_t p0 = Player(base, 0), p1 = Player(base, 1);
+  if (const uint32_t hud = HudOf(base, p1); Readable(hud) && hud != done) {
     if (template_offset == 0xFFFFFFFF) template_offset = Prop(base, hud, "DeathSceneTemplate");
     if (client_offset == 0xFFFFFFFF) client_offset = Prop(base, hud, "DeathSceneClientTemplate");
-    if (template_offset == 0xFFFFFFFF || client_offset == 0xFFFFFFFF) return;
-    const uint32_t client = LoadU32(base, hud + client_offset);
-    if (!Readable(client)) continue;
-    StoreU32(base, hud + template_offset, client);
-    done = hud;
-    REXLOG_INFO("split screen: player {}'s HUD {:08X} opens the client death menu ({:08X})", i + 1, hud, client);
+    const uint32_t client = client_offset != 0xFFFFFFFF ? LoadU32(base, hud + client_offset) : 0;
+    if (template_offset != 0xFFFFFFFF && Readable(client)) {
+      StoreU32(base, hud + template_offset, client);
+      done = hud;
+      REXLOG_INFO("split screen: player 2's HUD {:08X} opens the client death menu ({:08X})", hud, client);
+    }
+  }
+  bool host_menu = false, client_menu = false;
+  ForEachScene(base, [&](uint32_t scene) {
+    if (const uint32_t at = Prop(base, scene, "SceneInputMode"); at != 0xFFFFFFFF && Raw(base, scene + at)[0] == 1)
+      Raw(base, scene + at)[0] = 2;
+    const std::string_view name = menu_pointer::NameOf(base, LoadU32(base, scene + 0x2C));
+    const uint32_t owner = ObjectProp(base, scene, "PlayerOwner");
+    host_menu |= name == "DeathMenu_Server" && owner == p0;
+    client_menu |= name == "DeathMenu_Client" && owner == p1;
+  });
+  if (!client_menu) {
+    join.host_death_menu_seen = false;
+  } else if (host_menu) {
+    join.host_death_menu_seen = true;
+  } else if (join.host_death_menu_seen && join.confirm_pad == 0xFF) {
+    join.host_death_menu_seen = false;
+    join.confirm_pad = LoadU32(base, p1 + 0x60);
+    join.confirm_until = now + std::chrono::milliseconds(150);
+    REXLOG_INFO("split screen: player 1 left their death menu, player 2's closes too (pad {} presses A)",
+                join.confirm_pad);
   }
 }
 
@@ -1902,13 +1959,19 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
     else
       join.swallow_start &= ~(1u << user);
   }
+  if (user == join.confirm_pad) {
+    if (std::chrono::steady_clock::now() >= join.confirm_until)
+      join.confirm_pad = 0xFF;
+    else if (state)
+      Raw(base, state)[4] |= 0x10;  // XINPUT_GAMEPAD_A (0x1000), big-endian wButtons
+  }
   if (OffGameThread()) return;  // joins, script and console commands only on the game thread
   if (!Patch(base)) return;
   const uint32_t p0 = Player(base, 0);
   if (!Readable(p0)) return;
   ExposeBuddyRequest(base, LoadU32(base, p0 + 0x40));
   SuppressBuddyPause(base, PlayerCount(base));
-  ClientDeathMenu(base, PlayerCount(base));
+  DeathMenus(base, PlayerCount(base));
   const bool playing = PawnOf(base, p0) != 0;
   const PPCRegister r3 = ctx.r3;  // keep the poll's return value
   const auto now = std::chrono::steady_clock::now();
@@ -1975,6 +2038,12 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
       Run(ctx, base, p0, "ShowGameHUD true");
       Run(ctx, base, p0, "UnPauseShowHUD");
       join.relayout_step = 0;
+      // Removing player 2 closes player 1's death menu too (both down, then player 2 quit from theirs): player 1 is
+      // left dead with nothing to press (seen on real pads). Open it again.
+      if (!PawnOf(base, p0) && MakeExec(base, HudOf(base, p0), "DisplayDeathScene")) {
+        REXLOG_INFO("split screen: player 1 is dead, their death menu opens again");
+        Run(ctx, base, p0, "DisplayDeathScene");
+      }
     }
   }
   if (PlayerCount(base) == 1) {
@@ -2201,8 +2270,12 @@ void Props(uint8_t* base, uint32_t object, const std::string& tag) {
       const char* type = NameOf(base, LoadU32(base, f + 0x34));
       if (!std::strstr(type, "Property")) continue;
       const uint32_t off = LoadU32(base, f + 0x64), v = LoadU32(base, object + off);
-      REXLOG_INFO("  {} {}.{} {} +{:X} = {:08X} ({})", tag, NameOf(base, cls), NameOf(base, f), type, off, v,
-                  menu_pointer::LoadF32(base, object + off));
+      if (std::string_view(type) == "BoolProperty")  // UBoolProperty +0x68 BitMask
+        REXLOG_INFO("  {} {}.{} {} +{:X} = {:08X} mask {:08X} -> {}", tag, NameOf(base, cls), NameOf(base, f), type,
+                    off, v, LoadU32(base, f + 0x68), (v & LoadU32(base, f + 0x68)) != 0);
+      else
+        REXLOG_INFO("  {} {}.{} {} +{:X} = {:08X} ({})", tag, NameOf(base, cls), NameOf(base, f), type, off, v,
+                    menu_pointer::LoadF32(base, object + off));
     }
 }
 
