@@ -1835,11 +1835,58 @@ void WatchWorldRendering(uint8_t* base, uint32_t player) {
   debug::Scenes(base, false, false, nullptr, false);
 }
 
+// The minigames (MinigameControl) black out both views with the HUD drawn, and bDisableWorldRendering stays put (B-134):
+// with two players, log "splitcams" and the scenes whenever a player's view target, cinematic flags, camera fade or
+// camera target changes (at most twice a second, 300 times a run). With BOTS_GFX_CAPTURE set, a second after a view
+// target change also records a frame for bots-replay (4 a run).
+void WatchCameras(uint8_t* base) {
+  static std::vector<uint32_t> last, last_targets;
+  static int dumps = 0, captures = 0;
+  static std::chrono::steady_clock::time_point next{}, capture_at{};
+  static const bool capture = std::getenv("BOTS_GFX_CAPTURE") != nullptr;
+  const auto now = std::chrono::steady_clock::now();
+  if (capture_at != std::chrono::steady_clock::time_point{} && now >= capture_at) {
+    capture_at = {};
+    REXLOG_INFO("split screen: capturing a frame after the view change");
+    bots::gfx::RequestCapture();
+  }
+  const uint32_t count = PlayerCount(base);
+  if (count < 2 || dumps >= 300 || now < next) return;
+  std::vector<uint32_t> state, targets;
+  for (uint32_t i = 0; i < count && i < 4; ++i) {
+    const uint32_t pc = LoadU32(base, Player(base, i) + 0x40);
+    if (!Readable(pc)) continue;
+    const uint32_t cam = LoadU32(base, pc + Prop(base, pc, "PlayerCamera"));
+    targets.push_back(LoadU32(base, pc + Prop(base, pc, "ViewTarget")));
+    state.insert(state.end(), {LoadU32(base, pc + Prop(base, pc, "ViewTarget")),
+                               LoadU32(base, pc + Prop(base, pc, "bCinematicMode"))});
+    if (Readable(cam))
+      state.insert(state.end(), {LoadU32(base, cam + Prop(base, cam, "bEnableFading")),
+                                 uint32_t(menu_pointer::LoadF32(base, cam + Prop(base, cam, "FadeAmount")) * 4),
+                                 LoadU32(base, cam + Prop(base, cam, "FadeColor")),
+                                 LoadU32(base, cam + Prop(base, cam, "ViewTarget"))});
+  }
+  if (state == last) return;
+  const bool target_changed = !last_targets.empty() && targets != last_targets;
+  last = state;
+  last_targets = targets;
+  ++dumps;
+  next = now + std::chrono::milliseconds(500);
+  REXLOG_INFO("split screen: view changed");
+  debug::Command(base, "splitcams");
+  debug::Scenes(base, false, false, nullptr, false);
+  if (capture && target_changed && captures < 4) {
+    ++captures;
+    capture_at = now + std::chrono::seconds(1);
+  }
+}
+
 // Log the local players when their number, controllers, actors or pawns change.
 void Tick(uint8_t* base) {
   static const bool on = bots::SplitScreen();
   if (!on) return;
   if (const uint32_t p = Player(base, 0); Readable(p)) WatchWorldRendering(base, p);
+  WatchCameras(base);
   auto cls = [&](uint32_t o) {
     return Readable(o) ? menu_pointer::NameOf(base, LoadU32(base, LoadU32(base, o + 0x34) + 0x2C)) : "None";
   };
