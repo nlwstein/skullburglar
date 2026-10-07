@@ -21,6 +21,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <unordered_map>
@@ -1711,6 +1712,75 @@ void OwnScreenEffects(PPCContext& ctx, uint8_t* base) {
   REXLOG_INFO("split screen: player 2's HUD {:08X} has its own screen effects ({} materials)", hud1, copies.size());
 }
 
+// Player 2's HUD widgets' materials. The same thing in the HUD scenes: a widget that draws through a material instance
+// (the health bar: HudWidget_HealthBar writes LifeAmount into BarMatInstConst, which its BarImage draws as
+// UIImage.ImageComponent.ImageRef.ImageTexture) shares the instance with player 1's copy of the widget, so both bars
+// showed whoever wrote last. Every second, give player 2's scenes child instances of any shared one: one copy per
+// original per pass, so a widget and the image drawing its material keep using the same one. Copies are made with
+// player 2's LocalPlayer as outer, which is how a pass knows a widget already has its own.
+void OwnHudMaterials(PPCContext& ctx, uint8_t* base) {
+  static auto next = std::chrono::steady_clock::time_point{};
+  const auto now = std::chrono::steady_clock::now();
+  if (now < next) return;
+  next = now + std::chrono::seconds(1);
+  const uint32_t p1 = Player(base, 1);
+  const uint32_t engine = LoadU32(base, kGEngine);
+  const uint32_t viewport = Readable(engine) ? LoadU32(base, engine + 0x2E4) : 0;
+  const uint32_t ui = ObjectProp(base, viewport, "UIController"), client = ObjectProp(base, ui, "SceneClient");
+  const uint32_t active = Readable(client) ? Prop(base, client, "ActiveScenes") : 0xFFFFFFFF;
+  if (!Readable(p1) || active == 0xFFFFFFFF) return;
+  std::unordered_map<uint32_t, uint32_t> copies;
+  auto own = [&](uint32_t object, uint32_t at) {
+    const uint32_t mic = LoadU32(base, object + at);
+    if (!Readable(mic) || LoadU32(base, mic + 0x28) == p1 ||
+        std::string_view(ClassName(base, mic)) != "MaterialInstanceConstant" ||
+        LoadU32(base, LoadU32(base, mic) + 400) != 0x82A88140)
+      return;
+    uint32_t& copy = copies[mic];
+    if (!copy) {
+      ctx.r3.u64 = LoadU32(base, mic + 0x34);
+      ctx.r4.u64 = p1;
+      ctx.r5.u64 = ctx.r6.u64 = ctx.r7.u64 = ctx.r8.u64 = ctx.r9.u64 = 0;
+      sub_825C96A0(ctx, base);  // ConstructObject
+      if (!Readable(ctx.r3.u32)) return;
+      copy = ctx.r3.u32;
+      ctx.r3.u64 = copy;
+      ctx.r4.u64 = mic;
+      sub_82A88140(ctx, base);  // UMaterialInstanceConstant::SetParent
+    }
+    StoreU32(base, object + at, copy);
+  };
+  // Every object property of the widget's own classes (not Object's) holding a material instance.
+  auto own_props = [&](uint32_t object) {
+    for (uint32_t cls = LoadU32(base, object + 0x34), depth = 0; Readable(cls) && depth < 16;
+         cls = LoadU32(base, cls + 0x3C), ++depth) {
+      if (std::string_view(menu_pointer::NameOf(base, LoadU32(base, cls + 0x2C))) == "Object") break;
+      for (uint32_t f = LoadU32(base, cls + 0x50), n = 0; Readable(f) && n < 4096; f = LoadU32(base, f + 0x40), ++n)
+        if (std::string_view(ClassName(base, f)) == "ObjectProperty") own(object, LoadU32(base, f + 0x64));
+    }
+  };
+  std::function<void(uint32_t, int)> walk = [&](uint32_t w, int depth) {
+    if (!Readable(w) || depth > 12) return;
+    own_props(w);
+    const uint32_t texture = ObjectProp(base, ObjectProp(base, w, "ImageComponent"), "ImageRef");
+    if (const uint32_t at = texture ? Prop(base, texture, "ImageTexture") : 0xFFFFFFFF; at != 0xFFFFFFFF)
+      own(texture, at);
+    if (const uint32_t image = ObjectProp(base, w, "MyImage")) walk(image, depth + 1);
+    if (const uint32_t co = Prop(base, w, "Children"); co != 0xFFFFFFFF)
+      for (uint32_t k = 0, n = LoadU32(base, w + co + 4); k < n && k < 128; ++k)
+        walk(LoadU32(base, LoadU32(base, w + co) + 4 * k), depth + 1);
+    if (const uint32_t digits = Prop(base, w, "Digits"); digits != 0xFFFFFFFF)
+      for (uint32_t d = 0; d < 7; ++d) walk(LoadU32(base, w + digits + 4 * d), depth + 1);
+  };
+  const uint32_t scenes = LoadU32(base, client + active);
+  for (uint32_t i = 0, n = LoadU32(base, client + active + 4); i < n && i < 64; ++i) {
+    const uint32_t scene = LoadU32(base, scenes + 4 * i);
+    if (ObjectProp(base, scene, "PlayerOwner") == p1) walk(scene, 0);
+  }
+  if (!copies.empty())
+    REXLOG_INFO("split screen: player 2's HUD widgets get their own copies of {} materials", copies.size());
+}
+
 // Joining. A pad that no local player uses pressing START during play (player 1 has a pawn) joins as player 2, or the
 // "splitjoin" console command (tests) joins the first free one. From the input poll on the game thread, where typed
 // console commands run too: DebugCreatePlayer <pad> (CreatePlayer spawns the controller, which waits in Spectating)
@@ -1817,7 +1887,10 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
   const bool playing = PawnOf(base, p0) != 0;
   const PPCRegister r3 = ctx.r3;  // keep the poll's return value
   const auto now = std::chrono::steady_clock::now();
-  if (PlayerCount(base) > 1) OwnScreenEffects(ctx, base);
+  if (PlayerCount(base) > 1) {
+    OwnScreenEffects(ctx, base);
+    OwnHudMaterials(ctx, base);
+  }
   // Player 1 quit to the main menu with player 2 still in: the front end has no split screen and, with two profiles
   // signed in, keeps showing "multiple gamer profiles" (seen on real pads). Player 2 leaves there too.
   if (PlayerCount(base) > 1 && !join.leave) {
