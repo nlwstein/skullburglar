@@ -233,6 +233,53 @@ int Render(Capture& capture, const std::filesystem::path& out, int repeat) {
   return 0;
 }
 
+// BOTS_REPLAY_SKIP=first-last,n,...: the frame without those draws (numbered as --draws numbers them), each draw
+// packet (DRAW_INDX, DRAW_INDX_2) blanked to type-2 no-ops, to find which draw makes something on screen.
+void SkipDraws(std::vector<uint8_t>& pm4) {
+  const char* spec = std::getenv("BOTS_REPLAY_SKIP");
+  if (!spec) return;
+  std::vector<std::pair<unsigned, unsigned>> ranges;
+  for (const char* p = spec; *p;) {
+    char* end;
+    const unsigned first = unsigned(std::strtoul(p, &end, 10));
+    unsigned last = first;
+    if (*end == '-') last = unsigned(std::strtoul(end + 1, &end, 10));
+    ranges.emplace_back(first, last);
+    p = *end ? end + 1 : end;
+  }
+  auto word = [&](size_t i) {
+    return uint32_t(pm4[i * 4]) << 24 | uint32_t(pm4[i * 4 + 1]) << 16 | uint32_t(pm4[i * 4 + 2]) << 8 | pm4[i * 4 + 3];
+  };
+  const size_t n = pm4.size() / 4;
+  unsigned draw = 0, skipped = 0;
+  for (size_t i = 0; i < n;) {
+    const uint32_t h = word(i), type = h >> 30;
+    if (type == 0) {
+      i += 2 + ((h >> 16) & 0x3FFF);
+    } else if (type == 1) {
+      i += 3;
+    } else if (type == 2) {
+      i += 1;
+    } else {
+      const uint32_t op = (h >> 8) & 0x7F, count = ((h >> 16) & 0x3FFF) + 1;
+      if (op == 0x22 || op == 0x36) {
+        ++draw;
+        for (const auto& [first, last] : ranges) {
+          if (draw >= first && draw <= last) {
+            for (size_t k = i; k <= i + count && k < n; ++k) {
+              pm4[k * 4] = 0x80, pm4[k * 4 + 1] = pm4[k * 4 + 2] = pm4[k * 4 + 3] = 0;
+            }
+            ++skipped;
+            break;
+          }
+        }
+      }
+      i += 1 + count;
+    }
+  }
+  std::printf("BOTS_REPLAY_SKIP %s: %u of %u draw packets skipped\n", spec, skipped, draw);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -253,6 +300,7 @@ int main(int argc, char** argv) {
     capture.Load(argv[1]);
     std::printf("frame %u: %zu calls, %zu KB PM4, device %08X, front buffer %08X\n", capture.frame,
                 capture.calls.size(), capture.pm4.size() >> 10, capture.device, capture.front_buffer);
+    SkipDraws(capture.pm4);
     if (render_out) return Render(capture, render_out, repeat);
 
     Logger logger(capture, verbose);

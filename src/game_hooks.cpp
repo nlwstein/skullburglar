@@ -2574,7 +2574,11 @@ extern "C" void sub_825D67A8(PPCContext& __restrict ctx, uint8_t* base) {
 // Split screen: the final post-process pass (sub_82D7E850: r3 the effect, r5 the view) sets the back buffer as its
 // target and clears it to black, once per view - stock UE3 clears only for the first view (bDeferClear), but the game
 // never shipped split screen, so the second view's clear wiped the first's finished image. Only the view at the top
-// left (origin 0,0, which every layout has; view +0x34 X, +0x38 Y) clears now.
+// left (origin 0,0, which every layout has; view +0x34 X, +0x38 Y) clears now. And with two players nobody does: the
+// back buffer shares EDRAM with the scene colour, and the first view's clear wiped the second view's scene alpha (its
+// scene depth) before that view's final pass read it, so player 2's view came out fogged blue, more so the farther
+// apart the players were (seen on real pads; bots-replay with BOTS_REPLAY_SKIP on the clear draw). Two views fill the
+// screen between them, so nothing needs the clear then.
 namespace split_screen {
 thread_local uint32_t final_pass_view = 0;
 }
@@ -2588,7 +2592,8 @@ extern "C" void sub_82D7E850(PPCContext& __restrict ctx, uint8_t* base) {
 extern "C" void __imp__sub_827BBC10(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_827BBC10(PPCContext& __restrict ctx, uint8_t* base) {
   if (const uint32_t view = split_screen::final_pass_view;
-      view && ctx.lr == 0x82D7EEC0 && (LoadU32(base, view + 0x34) || LoadU32(base, view + 0x38))) {
+      view && ctx.lr == 0x82D7EEC0 &&
+      (LoadU32(base, view + 0x34) || LoadU32(base, view + 0x38) || split_screen::PlayerCount(base) > 1)) {
     return;
   }
   __imp__sub_827BBC10(ctx, base);

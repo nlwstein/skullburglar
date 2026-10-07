@@ -2,7 +2,7 @@
 
     python3 tools/gfxcap.py summary CAPDIR        # calls per entry point, draws, memory
     python3 tools/gfxcap.py calls CAPDIR [N]      # first N calls (default all), with arguments
-    python3 tools/gfxcap.py pm4 CAPDIR [FIRST [N]] # calls with the PM4 packets each emitted
+    python3 tools/gfxcap.py pm4 CAPDIR [FIRST [N]] # calls with the PM4 packets each emitted (GFXCAP_FULL=1: every word)
     python3 tools/gfxcap.py mem CAPDIR ADDR [LEN] # guest bytes at a virtual address, or pADDR for physical
 
 Names come from docs/knowledge/d3d-runtime.md (outside this repo); NAMES below keeps the ones the
@@ -72,6 +72,7 @@ CONST_BASE = {0: 0x4000, 1: 0x4800, 2: 0x4900, 3: 0x4908, 4: 0x2000}
 
 def pm4_packets(data):
     """Yields (dword offset, text) for big-endian PM4 dwords."""
+    full = bool(os.environ.get("GFXCAP_FULL"))  # whole register / constant blocks, not the first 8 words
     n = len(data) // 4
     d = struct.unpack(f">{n}I", data[: n * 4])
     i = 0
@@ -82,8 +83,8 @@ def pm4_packets(data):
             count = ((h >> 16) & 0x3FFF) + 1
             reg, one = h & 0x7FFF, (h >> 15) & 1
             vals = d[i + 1 : i + 1 + count]
-            yield i, f"type0 {reg:04X}{'' if one else '+'} = " + " ".join(f"{v:08X}" for v in vals[:8]) + \
-                (" …" if count > 8 else "")
+            yield i, f"type0 {reg:04X}{'' if one else '+'} = " + " ".join(f"{v:08X}" for v in (vals if full else vals[:8])) + \
+                (" …" if count > 8 and not full else "")
             i += 1 + count
         elif t == 1:
             yield i, f"type1 {h & 0x7FF:04X}={d[i + 1]:08X} {(h >> 11) & 0x7FF:04X}={d[i + 2]:08X}"
@@ -97,10 +98,11 @@ def pm4_packets(data):
             if op == 0x2D and body:
                 kind, index = (body[0] >> 16) & 0xFF, body[0] & 0x7FF
                 reg = CONST_BASE.get(kind, 0) + index
-                text = f"SET_CONSTANT {reg:04X}+{count - 1}: " + " ".join(f"{v:08X}" for v in body[1:7]) + \
-                    (" …" if count > 7 else "")
+                text = f"SET_CONSTANT {reg:04X}+{count - 1}: " + " ".join(f"{v:08X}" for v in (body[1:] if full else body[1:7])) + \
+                    (" …" if count > 7 and not full else "")
             else:
-                text = f"{name} " + " ".join(f"{v:08X}" for v in body[:8]) + (" …" if count > 8 else "")
+                text = f"{name} " + " ".join(f"{v:08X}" for v in (body if full else body[:8])) + \
+                    (" …" if count > 8 and not full else "")
             yield i, text
             i += 1 + count
 
