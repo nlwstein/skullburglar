@@ -1837,13 +1837,17 @@ void WatchWorldRendering(uint8_t* base, uint32_t player) {
 
 // The minigames (MinigameControl) black out both views with the HUD drawn, and bDisableWorldRendering stays put (B-134):
 // with two players, log "splitcams" and the scenes whenever a player's view target, cinematic flags, camera fade or
-// camera target changes (at most twice a second, 300 times a run). With BOTS_GFX_CAPTURE set, a second after a view
-// target change also records a frame for bots-replay (4 a run).
+// camera target changes (at most twice a second, 300 times a run). With BOTS_SPLIT_CAPTURE=1 (and BOTS_GFX_CAPTURE set),
+// a second after a view target change also records a frame for bots-replay (4 a run); each one stalls the game about
+// half a second, which reads as a stutter, so it's opt-in.
 void WatchCameras(uint8_t* base) {
   static std::vector<uint32_t> last, last_targets;
   static int dumps = 0, captures = 0;
   static std::chrono::steady_clock::time_point next{}, capture_at{};
-  static const bool capture = std::getenv("BOTS_GFX_CAPTURE") != nullptr;
+  static const bool capture = std::getenv("BOTS_GFX_CAPTURE") && [] {
+    const char* v = std::getenv("BOTS_SPLIT_CAPTURE");
+    return v && *v == '1';
+  }();
   const auto now = std::chrono::steady_clock::now();
   if (capture_at != std::chrono::steady_clock::time_point{} && now >= capture_at) {
     capture_at = {};
@@ -2610,4 +2614,51 @@ extern "C" void sub_827BBC10(PPCContext& __restrict ctx, uint8_t* base) {
     return;
   }
   __imp__sub_827BBC10(ctx, base);
+}
+
+// Split screen: the final pass's clamp rect for its blur samples (RenderTargetClampParameter, a pixel-shader float4
+// set through sub_827BCF50: r6 bytes, r7 the values) is (X - 0.5, Y - 0.5, X + SizeX - 0.5, Y + SizeY - 0.5) over the
+// buffer size, so a view's min edge is the centre of the last row (or column) of the view before it. The back buffer
+// shares EDRAM with the scene colour, so by the second view's pass that row holds the first view's finished 8888
+// image read as HDR colour: while the camera moved, motion blur at the second view's top edge clamped onto it and
+// drew a green line between the views (seen on real pads; bots-replay of a capture, its c6 is 359.5/720 for player 2).
+// Move a min edge that isn't the screen's one texel into the view. Only a vector that matches the view (view +0x34
+// X, +0x38 Y, +0x3C SizeX, +0x40 SizeY, ints) is touched.
+extern "C" void __imp__sub_827BCF50(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_827BCF50(PPCContext& __restrict ctx, uint8_t* base) {
+  const uint32_t view = split_screen::final_pass_view, values = ctx.r7.u32;
+  if (view && ctx.r6.u32 == 16 && values >= 0x40000000u && values < 0xA0000000u && !(values & 3) &&
+      split_screen::PlayerCount(base) > 1) {
+    auto load = [&](uint32_t a) { const uint32_t v = LoadU32(base, a); float f; std::memcpy(&f, &v, 4); return f; };
+    float v[4];
+    for (int i = 0; i < 4; ++i) v[i] = load(values + 4 * i);
+    float size[2];  // buffer width, height
+    bool match = true;
+    for (int a = 0; a < 2 && match; ++a) {
+      const float origin = float(int32_t(LoadU32(base, view + 0x34 + 4 * a)));
+      const float extent = float(int32_t(LoadU32(base, view + 0x3C + 4 * a)));
+      size[a] = v[a] != 0.0f ? (origin - 0.5f) / v[a] : 0.0f;
+      match = extent > 0.0f && size[a] >= origin + extent - 0.5f && size[a] < 16384.0f &&
+              std::fabs(v[a + 2] * size[a] - (origin + extent - 0.5f)) < 0.01f;
+    }
+    if (match) {
+      bool moved = false;
+      for (int a = 0; a < 2; ++a) {
+        const float origin = float(int32_t(LoadU32(base, view + 0x34 + 4 * a)));
+        if (origin <= 0.0f) continue;
+        moved = true;
+        const float f = (origin + 0.5f) / size[a];
+        uint32_t bits;
+        std::memcpy(&bits, &f, 4);
+        StoreU32(base, values + 4 * a, bits);
+      }
+      static std::atomic<int> logged{0};
+      if (moved && logged.fetch_add(1) < 2) {
+        REXLOG_INFO("split screen: view at {},{} keeps its blur inside it (clamp {} {} {} {}, buffer {}x{})",
+                    int32_t(LoadU32(base, view + 0x34)), int32_t(LoadU32(base, view + 0x38)), v[0], v[1], v[2], v[3],
+                    size[0], size[1]);
+      }
+    }
+  }
+  __imp__sub_827BCF50(ctx, base);
 }
