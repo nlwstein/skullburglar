@@ -1,23 +1,24 @@
 diff --git a/include/rex/system/kernel_state.h b/include/rex/system/kernel_state.h
-index 9b9cf9e..516ec6f 100644
+index 9b9cf9e..9656dbd 100644
 --- a/include/rex/system/kernel_state.h
 +++ b/include/rex/system/kernel_state.h
-@@ -200,6 +200,14 @@ class KernelState {
+@@ -200,6 +200,15 @@ class KernelState {
    xam::AppManager* app_manager() const { return app_manager_.get(); }
    xam::ContentManager* content_manager() const { return content_manager_.get(); }
    xam::UserProfile* user_profile() const { return user_profile_.get(); }
 +  // Local users by XAM user index (0-3): user 0 always, others while signed in (split screen); else nullptr.
 +  xam::UserProfile* user_profile(uint32_t user_index) const;
 +  // Signs in another local user with its own identity, and its content (saves, profile settings) under
-+  // content_root (empty: the user data root). Broadcasts XN_SYS_SIGNINCHANGED.
++  // content_root (empty: the user data root). Broadcasts XN_SYS_SIGNINCHANGED when notify is set: games
++  // can take that for a profile change and drop to their front end, so a drop-in join may leave it off.
 +  void SignInUser(uint32_t user_index, uint64_t xuid, const std::string& name,
-+                  const std::filesystem::path& content_root);
-+  void SignOutUser(uint32_t user_index);
++                  const std::filesystem::path& content_root, bool notify = true);
++  void SignOutUser(uint32_t user_index, bool notify = true);
 +  uint32_t SignedInMask() const;  // bit n: user n is signed in
  
    // Access must be guarded by the global critical region.
    util::ObjectTable* object_table() { return &object_table_; }
-@@ -354,6 +362,9 @@ class KernelState {
+@@ -354,6 +363,9 @@ class KernelState {
    std::unique_ptr<xam::AppManager> app_manager_;
    std::unique_ptr<xam::ContentManager> content_manager_;
    std::unique_ptr<xam::UserProfile> user_profile_;
@@ -158,7 +159,7 @@ index 1fb1e16..d1b225a 100644
  
    auto result = REX_KERNEL_STATE()->content_manager()->DeleteContent(xuid, content_data);
 diff --git a/src/system/kernel_state.cpp b/src/system/kernel_state.cpp
-index 697399c..ea0e81a 100644
+index 697399c..a897216 100644
 --- a/src/system/kernel_state.cpp
 +++ b/src/system/kernel_state.cpp
 @@ -1108,6 +1108,42 @@ void KernelState::RegisterNotifyListener(XNotifyListener* listener) {
@@ -172,11 +173,11 @@ index 697399c..ea0e81a 100644
 +}
 +
 +void KernelState::SignInUser(uint32_t user_index, uint64_t xuid, const std::string& name,
-+                             const std::filesystem::path& content_root) {
++                             const std::filesystem::path& content_root, bool notify) {
 +  if (user_index == 0 || user_index >= 4) return;
 +  auto& slot = other_users_[user_index - 1];
 +  if (!slot || slot->xuid() != xuid || slot->name() != name.substr(0, 15)) {
-+    if (other_signed_in_[user_index - 1]) SignOutUser(user_index);
++    if (other_signed_in_[user_index - 1]) SignOutUser(user_index, notify);
 +    if (!content_root.empty()) content_manager_->SetUserContentRoot(xuid, std::filesystem::absolute(content_root));
 +    // A replaced profile is leaked on purpose: a guest call may still be using it.
 +    (void)slot.release();
@@ -185,7 +186,7 @@ index 697399c..ea0e81a 100644
 +  }
 +  other_signed_in_[user_index - 1] = true;
 +  REXSYS_INFO("User {} signed in: {} ({:016X})", user_index, slot->name(), xuid);
-+  BroadcastNotification(0x0000000A, SignedInMask());  // XN_SYS_SIGNINCHANGED: who is signed in now
++  if (notify) BroadcastNotification(0x0000000A, SignedInMask());  // XN_SYS_SIGNINCHANGED: who is signed in now
 +}
 +
 +uint32_t KernelState::SignedInMask() const {
@@ -194,11 +195,11 @@ index 697399c..ea0e81a 100644
 +  return mask;
 +}
 +
-+void KernelState::SignOutUser(uint32_t user_index) {
++void KernelState::SignOutUser(uint32_t user_index, bool notify) {
 +  if (user_index == 0 || user_index >= 4 || !other_signed_in_[user_index - 1]) return;
 +  other_signed_in_[user_index - 1] = false;
 +  REXSYS_INFO("User {} signed out", user_index);
-+  BroadcastNotification(0x0000000A, SignedInMask());
++  if (notify) BroadcastNotification(0x0000000A, SignedInMask());
 +}
 +
  void KernelState::UnregisterNotifyListener(XNotifyListener* listener) {

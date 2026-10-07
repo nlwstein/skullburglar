@@ -251,19 +251,27 @@ namespace {
 int player_two_user = -1;  // the XAM user player 2 is signed in as, -1 if none
 }
 
+// No XN_SYS_SIGNINCHANGED for player 2: the game reads it as a profile change mid-game, disconnects both
+// players and shows "multiple gamer profiles detected" (first real-pad test). BOTS_SIGNIN_NOTIFY=1 sends it.
+bool NotifySignIn() {
+  static const bool notify = std::getenv("BOTS_SIGNIN_NOTIFY") != nullptr;
+  return notify;
+}
+
 void SignInPlayerTwo(uint32_t user_index) {
   auto* kernel = rex::system::kernel_state();
   if (!kernel) return;
   player_two_user = int(user_index);
   const auto& root = kernel->emulator()->user_data_root();
   kernel->SignInUser(user_index, kPlayerTwoXuid, kPlayerTwoGamertag,
-                     root.empty() ? std::filesystem::path() : PlayerTwoPath(std::filesystem::absolute(root)));
+                     root.empty() ? std::filesystem::path() : PlayerTwoPath(std::filesystem::absolute(root)),
+                     NotifySignIn());
 }
 
 void SignOutPlayerTwo() {
   auto* kernel = rex::system::kernel_state();
   if (!kernel || player_two_user < 0) return;
-  kernel->SignOutUser(uint32_t(player_two_user));
+  kernel->SignOutUser(uint32_t(player_two_user), NotifySignIn());
   player_two_user = -1;
 }
 
