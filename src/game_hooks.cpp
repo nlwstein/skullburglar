@@ -49,6 +49,8 @@ extern "C" void __imp__sub_82E2EBB8(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_828291E0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_82853F50(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_825C96A0(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_82A88140(PPCContext& __restrict ctx, uint8_t* base);
 
 namespace {
 // Guest address → host pointer, as REX_RAW_ADDR in generated/default/bots_pch.h (Mac arm64 layout).
@@ -1609,6 +1611,106 @@ uint32_t PawnOf(uint8_t* base, uint32_t player) {
   return Readable(pawn) ? pawn : 0;
 }
 
+// An object property's value (0 if the object has no such property or the value is not an object).
+uint32_t ObjectProp(uint8_t* base, uint32_t object, const char* name) {
+  const uint32_t at = Readable(object) ? Prop(base, object, name) : 0xFFFFFFFF;
+  const uint32_t value = at != 0xFFFFFFFF ? LoadU32(base, object + at) : 0;
+  return Readable(value) ? value : 0;
+}
+
+const char* ClassName(uint8_t* base, uint32_t object) {
+  const uint32_t cls = Readable(object) ? LoadU32(base, object + 0x34) : 0;
+  return Readable(cls) ? menu_pointer::NameOf(base, LoadU32(base, cls + 0x2C)) : "None";
+}
+
+// Player 2's loadout. A network player's join URL carries their profile's loadout (BuildJoinURL: ?gun0..3), which
+// CovertOne_Story.Login puts in their controller's config_guns; ReplaceBuddyCharacter hands those out with the buddy's
+// body. A second local player never logs in, so they came in with no weapon at all (no pistol in the first level).
+// Before they ask for the body, give them player 1's weapons, one of each kind, as their loadout.
+void GiveLoadout(uint8_t* base, uint32_t p0, uint32_t p1) {
+  const uint32_t pc = Readable(p1) ? LoadU32(base, p1 + 0x40) : 0;
+  const uint32_t guns = Readable(pc) ? Prop(base, pc, "config_guns") : 0xFFFFFFFF;
+  if (guns == 0xFFFFFFFF) return;
+  for (uint32_t i = 0; i < 4; ++i)
+    if (LoadU32(base, pc + guns + 4 * i)) return;
+  uint32_t item = ObjectProp(base, ObjectProp(base, PawnOf(base, p0), "InvManager"), "InventoryChain");
+  uint32_t given = 0, kinds = 0;
+  for (uint32_t k = 0; item && given < 4 && k < 64; ++k, item = ObjectProp(base, item, "Inventory")) {
+    bool weapon = false;
+    for (uint32_t c = LoadU32(base, item + 0x34), d = 0; Readable(c) && d < 12; c = LoadU32(base, c + 0x3C), ++d)
+      weapon |= std::string_view(menu_pointer::NameOf(base, LoadU32(base, c + 0x2C))) == "C1Weapon";
+    const uint32_t type = weapon ? Prop(base, item, "WeaponType") : 0xFFFFFFFF;
+    const uint32_t kind = type != 0xFFFFFFFF ? Raw(base, item + type)[0] : 32;
+    if (kind >= 32 || (kinds & (1u << kind)) || std::string_view(ClassName(base, item)) == "C1WeaponNone") continue;
+    kinds |= 1u << kind;
+    StoreU32(base, pc + guns + 4 * given++, LoadU32(base, item + 0x34));
+    REXLOG_INFO("split screen: player 2's loadout gets {}", ClassName(base, item));
+  }
+}
+
+// Player 2's screen effects. C1HUD's damage / low-health, death, reviving and slow-motion effects are post-process
+// chains and material instances from the C1HUD package that every HUD points at: the same objects. Each HUD inserts
+// a chain into its own player's post-process, but sets parameters on the shared materials, so one player getting hurt
+// tinted the other's view too (network co-op has a copy per machine). Give player 2's HUD its own: copies of the chains
+// and their effects (ConstructObject with the original as template) and material instances whose parent is the shared
+// one (so they start out looking the same). Done once per HUD, before it has inserted any chain.
+void OwnScreenEffects(PPCContext& ctx, uint8_t* base) {
+  static uint32_t done = 0;
+  const uint32_t p1 = Player(base, 1), pc0 = LoadU32(base, Player(base, 0) + 0x40);
+  const uint32_t pc1 = Readable(p1) ? LoadU32(base, p1 + 0x40) : 0;
+  const uint32_t hud0 = ObjectProp(base, pc0, "myHUD"), hud1 = ObjectProp(base, pc1, "myHUD");
+  if (!hud0 || !hud1 || hud0 == hud1 || hud1 == done) return;
+  if (LoadU32(base, p1 + 128)) return;  // LocalPlayer.PlayerPostProcessChains not empty: a chain is in, wait
+  done = hud1;
+  auto construct = [&](uint32_t cls, uint32_t from) {
+    ctx.r3.u64 = cls;
+    ctx.r4.u64 = hud1;
+    ctx.r5.u64 = 0;  // NAME_None
+    ctx.r6.u64 = 0;
+    ctx.r7.u64 = from;  // template
+    ctx.r8.u64 = 0;
+    ctx.r9.u64 = 0;
+    sub_825C96A0(ctx, base);  // ConstructObject
+    return Readable(ctx.r3.u32) ? ctx.r3.u32 : 0u;
+  };
+  std::unordered_map<uint32_t, uint32_t> copies;
+  auto own_material = [&](uint32_t mic) {
+    if (const auto it = copies.find(mic); it != copies.end()) return it->second;
+    if (std::string_view(ClassName(base, mic)) != "MaterialInstanceConstant" ||
+        LoadU32(base, LoadU32(base, mic) + 400) != 0x82A88140)
+      return mic;
+    const uint32_t copy = construct(LoadU32(base, mic + 0x34), 0);
+    if (!copy) return mic;
+    ctx.r3.u64 = copy;
+    ctx.r4.u64 = mic;
+    sub_82A88140(ctx, base);  // UMaterialInstanceConstant::SetParent
+    return copies[mic] = copy;
+  };
+  for (const char* name : {"DamageEffectMaterialInstance", "DeathEffectMaterialInstance",
+                           "CriticalHealthBlurMaterialInstance", "SlowmoMIC"}) {
+    const uint32_t at = Prop(base, hud1, name), mic = ObjectProp(base, hud1, name);
+    if (mic && mic == ObjectProp(base, hud0, name)) StoreU32(base, hud1 + at, own_material(mic));
+  }
+  for (const char* name : {"DamageEffectPostProcess", "DeathPostProcessEffect", "RevivingEffectPostProcessChain",
+                           "SlowmoEffectPostProcessChain"}) {
+    const uint32_t at = Prop(base, hud1, name), chain = ObjectProp(base, hud1, name);
+    if (!chain || chain != ObjectProp(base, hud0, name)) continue;
+    const uint32_t copy = construct(LoadU32(base, chain + 0x34), chain);
+    const uint32_t effects = copy ? Prop(base, copy, "Effects") : 0xFFFFFFFF;
+    if (effects == 0xFFFFFFFF || LoadU32(base, copy + effects) == LoadU32(base, chain + effects)) continue;
+    for (uint32_t i = 0, n = LoadU32(base, copy + effects + 4); i < n && i < 16; ++i) {
+      const uint32_t slot = LoadU32(base, copy + effects) + 4 * i, effect = LoadU32(base, slot);
+      const uint32_t own = Readable(effect) ? construct(LoadU32(base, effect + 0x34), effect) : 0;
+      if (!own) continue;
+      if (const uint32_t mic = ObjectProp(base, own, "Material"))
+        StoreU32(base, own + Prop(base, own, "Material"), own_material(mic));
+      StoreU32(base, slot, own);
+    }
+    StoreU32(base, hud1 + at, copy);
+  }
+  REXLOG_INFO("split screen: player 2's HUD {:08X} has its own screen effects ({} materials)", hud1, copies.size());
+}
+
 // Joining. A pad that no local player uses pressing START during play (player 1 has a pawn) joins as player 2, or the
 // "splitjoin" console command (tests) joins the first free one. From the input poll on the game thread, where typed
 // console commands run too: DebugCreatePlayer <pad> (CreatePlayer spawns the controller, which waits in Spectating)
@@ -1715,6 +1817,7 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
   const bool playing = PawnOf(base, p0) != 0;
   const PPCRegister r3 = ctx.r3;  // keep the poll's return value
   const auto now = std::chrono::steady_clock::now();
+  if (PlayerCount(base) > 1) OwnScreenEffects(ctx, base);
   // Player 1 quit to the main menu with player 2 still in: the front end has no split screen and, with two profiles
   // signed in, keeps showing "multiple gamer profiles" (seen on real pads). Player 2 leaves there too.
   if (PlayerCount(base) > 1 && !join.leave) {
@@ -1818,6 +1921,7 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
     } else if (playing && now >= join.next) {
       if (++join.tries == 10) REXLOG_WARN("split screen: player 2 still has no pawn, retrying quietly");
       if (join.tries < 10) REXLOG_INFO("split screen: player 2 requests the buddy's body");
+      GiveLoadout(base, p0, p1);
       Run(ctx, base, p1, "ServerRequestBuddyCharacter");
       join.next = now + std::chrono::seconds(3);
     } else if (!playing) {
