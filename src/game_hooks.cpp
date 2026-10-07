@@ -26,6 +26,7 @@
 #include <unordered_map>
 #include <utility>
 #include <string>
+#include <thread>
 
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
@@ -206,6 +207,16 @@ extern "C" void sub_82BF31D8(PPCContext& __restrict ctx, uint8_t* base) {
 
 namespace split_screen {
 extern bool running_ours;
+// The thread that runs the HUD tick (Tick below): the game thread. XInputGetState is also polled from other threads
+// (the loading screen's), where nothing may run script or console commands: a join made during a load ran
+// DebugCreatePlayer and ServerRequestBuddyCharacter from the loading thread, which then blocked while the game thread
+// waited on a render fence it held, and the game froze on the loading screen (seen on real pads; a minidump had both
+// threads' guest stacks).
+std::atomic<std::thread::id> game_thread{};
+bool OffGameThread() {
+  const std::thread::id id = game_thread.load(std::memory_order_relaxed);
+  return id != std::thread::id{} && id != std::this_thread::get_id();
+}
 void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state);
 bool Command(const std::string& cmd);
 }  // namespace split_screen
@@ -320,6 +331,7 @@ extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
   }
   if (state && ctx.r3.u32 == 0) quit_option::FilterPad(base, state);
   split_screen::Poll(ctx, base, user, ctx.r3.u32 == 0 ? state : 0);
+  if (split_screen::OffGameThread()) return;
   ExecState* st = Exec();
   if (!st) return;
   auto now = std::chrono::steady_clock::now();
@@ -1694,6 +1706,7 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
     else
       join.swallow_start &= ~(1u << user);
   }
+  if (OffGameThread()) return;  // joins, script and console commands only on the game thread
   if (!Patch(base)) return;
   const uint32_t p0 = Player(base, 0);
   if (!Readable(p0)) return;
@@ -1900,6 +1913,7 @@ void WatchCameras(uint8_t* base) {
 
 // Log the local players when their number, controllers, actors or pawns change.
 void Tick(uint8_t* base) {
+  game_thread.store(std::this_thread::get_id(), std::memory_order_relaxed);
   static const bool on = bots::SplitScreen();
   if (!on) return;
   if (const uint32_t p = Player(base, 0); Readable(p)) WatchWorldRendering(base, p);
