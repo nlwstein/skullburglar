@@ -14,6 +14,7 @@
 #include <cmath>
 
 #include <algorithm>
+#include <cctype>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -2371,7 +2372,11 @@ extern "C" void sub_825D67A8(PPCContext& __restrict ctx, uint8_t* base) {
   while (index < 4 && split_screen::Player(base, index) != player) ++index;
   REXLOG_INFO("exec (player {}): {}", index, cmd);
   static const bool split = bots::SplitScreen();
-  if (split && index >= 1 && index < 4 && strncasecmp(cmd.c_str(), "QuitToMainMenu", 14) == 0) {
+  auto lower = [](std::string t) {
+    for (char& c : t) c = char(std::tolower(static_cast<unsigned char>(c)));
+    return t;
+  };
+  if (split && index >= 1 && index < 4 && lower(cmd).rfind("quittomainmenu", 0) == 0) {
     split_screen::join.leave = true;
     ctx.r3.u64 = 1;  // handled
     return;
