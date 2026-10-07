@@ -1612,6 +1612,7 @@ struct Join {
   bool leave = false;  // player 2 asked to leave (quit from their pause menu, or "splitleave")
   std::chrono::steady_clock::time_point relayout{};  // when player 1's HUD is laid out again after player 2 left
   int relayout_step = 0;                             // 1 close player 1's HUD scenes, 2 open them again
+  bool front_end = false;  // the leave happens at the front end: no HUD to lay out again
 };
 Join join;
 
@@ -1673,6 +1674,15 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
   const bool playing = PawnOf(base, p0) != 0;
   const PPCRegister r3 = ctx.r3;  // keep the poll's return value
   const auto now = std::chrono::steady_clock::now();
+  // Player 1 quit to the main menu with player 2 still in: the front end has no split screen and, with two profiles
+  // signed in, keeps showing "multiple gamer profiles" (seen on real pads). Player 2 leaves there too.
+  if (PlayerCount(base) > 1 && !join.leave) {
+    const uint32_t pc = LoadU32(base, p0 + 0x40);
+    if (Readable(pc) &&
+        std::string_view(menu_pointer::NameOf(base, LoadU32(base, LoadU32(base, pc + 0x34) + 0x2C))) ==
+            "C1EntryPlayerController")
+      join.leave = join.front_end = true;
+  }
   if (join.leave) {
     join.leave = false;
     if (const uint32_t p1 = Player(base, 1); PlayerCount(base) > 1 && Readable(p1)) {
@@ -1682,13 +1692,30 @@ void Poll(PPCContext& ctx, uint8_t* base, uint32_t user, uint32_t state) {
       REXLOG_INFO("split screen: player 2 leaves");
       // CovertOne_Story.Logout tells the other player their buddy left (C1PlayerController.OpenBuddyDisconnectDialog,
       // BuddyDisconnectConfirmation, a modal dialog for network co-op): player 1's controller gets no such scene.
-      if (const uint32_t pc = LoadU32(base, p0 + 0x40); Readable(pc))
+      const uint32_t pc = LoadU32(base, p0 + 0x40);
+      if (Readable(pc))
         if (const uint32_t at = Prop(base, pc, "m_BuddyDisconnectScene"); at != 0xFFFFFFFF) StoreU32(base, pc + at, 0);
+      // Logout also queues a checkpoint reload (pending_load_checkpoint) and the buddy-left dialog
+      // (pendingBuddyDisconnectMessage): keep those flag words as they were. And it leaves the front end a "Buddy
+      // Quit, the game will restart from the last checkpoint" message (FE_ErrorMessage(1), shown at the next main
+      // menu): FE_ErrorMessage(0) clears it, as joining an invite does.
+      std::vector<std::pair<uint32_t, uint32_t>> flags;
+      for (const char* name : {"pending_load_checkpoint", "pendingBuddyDisconnectMessage"})
+        if (const uint32_t at = Readable(pc) ? Prop(base, pc, name) : 0xFFFFFFFF; at != 0xFFFFFFFF)
+          flags.emplace_back(pc + at, LoadU32(base, pc + at));
       Run(ctx, base, p0, fmt::format("DebugRemovePlayer {}", LoadU32(base, p1 + 0x60)));
+      for (const auto& [at, word] : flags) StoreU32(base, at, word);
+      if (Readable(pc)) {
+        const uint32_t fe_error = LoadU32(base, LoadU32(base, pc) + 1484);  // AC1PlayerController::FE_ErrorMessage
+        ctx.r3.u64 = pc;
+        ctx.r4.u64 = 0;
+        rex::runtime::ResolveIndirectFunction(fe_error)(ctx, base);
+      }
       Run(ctx, base, p0, "SetSplit 0");
       bots::SignOutPlayerTwo();
       join.relayout = now + std::chrono::milliseconds(500);
-      join.relayout_step = 1;
+      join.relayout_step = join.front_end ? 0 : 1;
+      join.front_end = false;
     }
   }
   // Player 2's own quit (QuitToMainMenuHUD from their menu) closes HUD scenes by template, the first found: player 1's
