@@ -2,11 +2,17 @@
 
 > "Bitch took my skull."
 
+### ⬇️ **[Download Skullburglar at skullburglar.stz.sh](https://skullburglar.stz.sh)**
+
+Ready-to-play builds for Windows, macOS (Apple silicon), Linux and the Steam Deck. The launcher sets the game up
+from your own disc and updates itself. You don't need to build anything from this repository to play.
+
 A native PC, Mac and Steam Deck port of the 2009 Xbox 360 game *50 Cent: Blood on the Sand*, built by statically
 recompiling the game's executable with the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk).
 
-**You need your own copy of the game.** This repository contains no game data, no game code and no
-recompiled output: you extract your disc and run the recompiler yourself. See [BUILDING.md](BUILDING.md).
+**You need your own copy of the game.** Neither the downloads nor this repository contain any game data, game code
+or recompiled output. To play, get the launcher from [the download page](https://skullburglar.stz.sh). To build from
+source, see [BUILDING.md](BUILDING.md).
 
 > **This is an AI-generated project.** Nearly all of the code, reverse engineering and documentation here was written
 > by an AI coding agent, directed and play-tested by a human maintainer. It is not a weekend recompile thrown over the

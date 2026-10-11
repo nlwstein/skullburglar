@@ -110,7 +110,7 @@ data.
 When the project sets them as CI variables, the release also reaches players: `UPDATE_URL` (the address of the releases
 JSON) is built into the launcher, which then checks for newer versions (`src/setup/update_check.h`; the `check_updates`
 setting turns it off), and `DOWNLOADS_BUCKET` plus `DOWNLOADS_PAGE` make the release job copy the player packages to
-that Cloudflare R2 bucket behind a sign-in-only download page and add the release to its `version.json`
+that Cloudflare R2 bucket behind the public download page and add the release to its `version.json`
 (`tools/ci/publish_downloads.py`; it keeps the newest three versions downloadable). Notes there come from the
 `feat`/`fix`/`perf` commits: give a player-visible commit a `Release-note:` trailer written for players
 (`Release-note: none` leaves it out).

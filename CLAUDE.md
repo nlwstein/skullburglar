@@ -33,8 +33,8 @@ Build steps are in `BUILDING.md`; contribution rules in `CONTRIBUTING.md`.
   a GitLab release, nothing is committed back). The commit type is the version bump, so pick it with care; don't create
   `v*` tags by hand. CI reads the game executable from a private assets project: anything derived from it (codegen
   output, compiled objects, packages) stays on the private GitLab instance: its package registries and its own
-  runners' build caches (ccache). The one exception is the release job's copy of the player packages to the private,
-  sign-in-only download site (`tools/ci/publish_downloads.py`). Never upload or log it anywhere else. Commits players
+  runners' build caches (ccache). The one exception is the release job's copy of the player packages to the public
+  download site (skullburglar.stz.sh) (`tools/ci/publish_downloads.py`). Never upload or log it anywhere else. Commits players
   will notice get a `Release-note:` trailer in plain player language; it becomes the download page's release notes.
   After changing codegen's inputs (manifest, `config/`, recompiler patches), run `tools/ci/codegen_publish.sh`.
 - Not in git: `game/`, `generated/`, `out/`, `run/`, `logs/`, `dumps/`, `shaders/`.
