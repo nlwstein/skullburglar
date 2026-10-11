@@ -7,6 +7,8 @@ The texts come from the SDK checkout the release was built from (tools/ci/sdk.sh
 Over-inclusion is harmless; a missing notice is not, so a thirdparty/ directory with no license text that isn't in
 NOTES or SKIP fails the build.
 """
+from __future__ import annotations
+
 import re
 import subprocess
 import sys
