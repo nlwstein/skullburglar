@@ -81,10 +81,21 @@ Logs
   Linux    logs/ next to bots; the AppImage writes ~/.local/state/bots-recomp/logs
 
 Updating: on Windows run the new setup (it finds your install and updates it); elsewhere replace the AppImage,
-folder or app with the new version. Game files, saves and settings stay.
+folder or app with the new version from https://skullburglar.stz.sh. Game files, saves and settings stay.
 
 
 Reporting a problem
 -------------------
 
-Send your platform, GPU, what you were doing and the newest log file (plus the .dmp on a Windows crash).
+Open an issue at https://github.com/nlwstein/skullburglar/issues with your platform, GPU, what you were doing and
+the newest log file (plus the .dmp on a Windows crash).
+
+
+About
+-----
+
+Downloads and news: https://skullburglar.stz.sh. Source: https://github.com/nlwstein/skullburglar (BSD 3-Clause).
+THIRD-PARTY-NOTICES.txt lists the other software included and its licenses.
+
+An unofficial fan project, not affiliated with or endorsed by 50 Cent, the game's developer or publisher, or
+Microsoft. All trademarks belong to their owners.

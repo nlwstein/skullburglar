@@ -74,6 +74,7 @@ VIAddVersionKey "LegalCopyright" ""
   Delete "$INSTDIR\bots.exe"
   Delete "$INSTDIR\*.dll"
   Delete "$INSTDIR\README.txt"
+  Delete "$INSTDIR\THIRD-PARTY-NOTICES.txt"
   Delete "$INSTDIR\skullburglar.ico"
   RMDir /r "$INSTDIR\pipelines"
 !macroend

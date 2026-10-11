@@ -133,5 +133,7 @@ if [ -n "${REFS:-}" ]; then
   cp "$REFS" "$DIST/pipelines/5451083B.refs"
 fi
 cp packaging/README.txt "$DIST/"
+# Our license, the SDK's and every SDK dependency's, from the SDK checkout this was built from.
+python3 tools/ci/third_party_notices.py "$SDK" "$DIST/THIRD-PARTY-NOTICES.txt"
 ls -la "$DIST"
 du -sh "$DIST" "$SYM"

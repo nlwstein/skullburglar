@@ -58,13 +58,13 @@ macos)
   for f in "$NAME"/*.dylib; do ditto "$f" "$APP/Contents/MacOS/$(basename "$f")"; done
   ditto "$NAME/vulkan" "$APP/Contents/Resources/vulkan"
   [ ! -d "$NAME/pipelines" ] || ditto "$NAME/pipelines" "$APP/Contents/Resources/pipelines"
-  cp "$REPO/packaging/macos/Skullburglar.icns" "$APP/Contents/Resources/"
+  cp "$REPO/packaging/macos/Skullburglar.icns" "$NAME/THIRD-PARTY-NOTICES.txt" "$APP/Contents/Resources/"
   sed "s/@VERSION@/$VERSION/g" "$REPO/packaging/macos/Info.plist" > "$APP/Contents/Info.plist"
   plutil -lint "$APP/Contents/Info.plist"
   # Ad-hoc signature over the whole bundle (it seals Info.plist and Resources); not notarized.
   codesign --force --deep --sign - "$APP"
   codesign --verify --deep --strict "$APP"
-  cp "$NAME/README.txt" "$PKG/dmg/"
+  cp "$NAME/README.txt" "$NAME/THIRD-PARTY-NOTICES.txt" "$PKG/dmg/"
   ln -s /Applications "$PKG/dmg/Applications"
   hdiutil create -quiet -volname "Skullburglar $VERSION" -srcfolder "$PKG/dmg" -fs HFS+ -format UDZO -ov \
     "$REL/$NAME.dmg"
