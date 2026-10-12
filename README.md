@@ -62,6 +62,10 @@ and that is where most of the work in this port has gone.
 - **Resolution and display options.** Render at the original 720p or at 1080p, 1440p or 4K, or below 720p for weak
   GPUs (Intel graphics picks a lower scale automatically). VSync, frame-rate cap, fullscreen and windowed, all from
   the launcher.
+- **Ultrawide.** The launcher's "Aspect ratio" setting renders 21:9, 32:9 or the shape of your screen (Automatic)
+  instead of a pillarboxed 16:9 picture, showing more at the sides with the original vertical view. Menus and the
+  HUD stretch, the story cutscenes (pre-rendered 16:9 videos) keep side bars, and the Music Player's bottom row is
+  cut off at wide ratios ([#1](https://github.com/nlwstein/skullburglar/issues/1)).
 
 ## Status
 
@@ -72,8 +76,6 @@ The whole story is playable from start to finish on Windows, Linux, the Steam De
 
 Each has a GitHub issue: subscribe to it for progress, or comment there rather than opening a new one.
 
-- **Ultrawide and field of view** ([#1](https://github.com/nlwstein/skullburglar/issues/1)). Proper 21:9 and wider
-  support instead of pillarboxing, and a field-of-view setting.
 - **Online co-op** ([#6](https://github.com/nlwstein/skullburglar/issues/6)). Co-op over the internet without a VPN,
   not just on a local network.
 - **Frame rates above 60** ([#7](https://github.com/nlwstein/skullburglar/issues/7)). The launcher's "Unlimited" frame
