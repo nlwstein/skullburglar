@@ -105,6 +105,9 @@ PLATFORM=ios SDK=out/sdk tools/ios/build.sh build bundle ipa     # or PLATFORM=t
   `Documents/game` on iOS (kept out of device backups) and `Library/Caches/game` on tvOS, whose apps get no persistent
   storage, so tvOS may clear them when it runs short of space. App updates keep them. For development, the `data`
   step copies `game/` over USB instead.
+- **Icons:** `tools/ios/make_icons.py` (a uv script; needs the cairo library) draws the iPhone icon and the layered
+  Apple TV icon and Top Shelf banners from `packaging/linux/skullburglar.svg` into `tools/ios/Assets.*.xcassets`; the
+  `bundle` step compiles them with `actool`. Rerun it after changing the SVG.
 - **Shader warm-up:** the bundle carries the macOS shader refs (`REFS`); iOS and tvOS share macOS's device class.
 - **Limits:** the game quits when it goes to the background (the renderer can't pause yet). Split-screen co-op isn't
   available (it starts a second process). The guest memory needs one 4.5 GB stretch of address space: iOS asks for the

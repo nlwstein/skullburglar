@@ -23,8 +23,8 @@ cd "$(dirname "$0")/../.."
 
 PLATFORM=${PLATFORM:-ios}
 case $PLATFORM in
-ios) SYSTEM=iOS SDKNAME=iphoneos DATA=Documents/game ;;
-tvos) SYSTEM=tvOS SDKNAME=appletvos DATA=Library/Caches/game ;;
+ios) SYSTEM=iOS SDKNAME=iphoneos DATA=Documents/game ICON=AppIcon DEVICES="--target-device iphone --target-device ipad" ;;
+tvos) SYSTEM=tvOS SDKNAME=appletvos DATA=Library/Caches/game ICON="App Icon & Top Shelf Image" DEVICES="--target-device tv" ;;
 *) echo "PLATFORM must be ios or tvos" >&2; exit 1 ;;
 esac
 CONFIG=${CONFIG:-RelWithDebInfo}
@@ -113,6 +113,12 @@ do_bundle() {
             "DTXcodeBuild $(xcodebuild -version | awk 'NR==2{print $3}')" "DTCompiler com.apple.compilers.llvm.clang.1_0"; do
     /usr/libexec/PlistBuddy -c "Add :${kv%% *} string ${kv#* }" "$APP/Info.plist"
   done
+  # Icons (tools/ios/make_icons.py draws them): actool writes Assets.car and the icon keys to merge into Info.plist.
+  # shellcheck disable=SC2086
+  xcrun actool "tools/ios/Assets.$PLATFORM.xcassets" --compile "$APP" --platform $SDKNAME \
+    --minimum-deployment-target 17.0 --app-icon "$ICON" $DEVICES \
+    --output-partial-info-plist "$OUT/icons.plist" --output-format human-readable-text --notices --warnings >/dev/null
+  /usr/libexec/PlistBuddy -c "Merge $OUT/icons.plist" "$APP/Info.plist" >/dev/null
   plutil -convert binary1 "$APP/Info.plist"
   [ ! -f "$PROFILE" ] || cp "$PROFILE" "$APP/embedded.mobileprovision"
 }
