@@ -35,6 +35,9 @@ and that is where most of the work in this port has gone.
   instead of the console's trigger throttle. Menus are point-and-click, including toggles and sliders. Every button prompt in the game (menus, HUD, tutorials, pickups) switches to keyboard and mouse icons for
   your actual key bindings, and back to controller icons the moment you pick up a pad. Keys can be rebound in the
   launcher.
+- **PlayStation controllers.** DualShock 4 and DualSense show PlayStation buttons in every prompt (cross, circle,
+  Options and so on), switching to Xbox or keyboard icons as soon as you use something else. The launcher's
+  "Controller button prompts" setting picks one style instead.
 - **60 fps on the Steam Deck.** The Deck holds the 60 fps cap (about 74 fps uncapped in the benchmark scene below),
   where GPU emulation runs at about 21.
 - **Shader precompilation.** On first launch the port compiles the game's shaders for your GPU before the title
@@ -48,9 +51,14 @@ and that is where most of the work in this port has gone.
     starts a story; the other picks Play Game, then Join COOP, and chooses that game from the list. On by default.
     On Windows the launcher asks for firewall access up front and shows whether LAN games can get through.
   - **Split-screen co-op (experimental):** two players on one screen, split top and bottom. Turn it on in the
-    launcher, start a story, and press START on a second controller to join. Each player has their own HUD, profile
-    and saves.
-  - **Two windows on one PC (experimental):** the launcher's "Co-op on this PC" opens a second window for player 2.
+    launcher, start a story, and press START on a second controller to join. Each player
+    has their own view, HUD, pause menu, loadout, profile and achievements; partners revive each other, either player
+    can retry from the last checkpoint, and player 2 can quit without ending player 1's game.
+  - **Two windows on one PC (experimental):** the launcher's "Co-op on this PC" opens a second window for player 2,
+    with "Co-op controllers" choosing whose pad is whose.
+
+  Split-screen and two-window co-op are experimental only because they've had less play-testing than single-player:
+  problems go in [#8](https://github.com/nlwstein/skullburglar/issues/8).
 - **Resolution and display options.** Render at the original 720p or at 1080p, 1440p or 4K, or below 720p for weak
   GPUs (Intel graphics picks a lower scale automatically). VSync, frame-rate cap, fullscreen and windowed, all from
   the launcher.
@@ -62,16 +70,20 @@ The whole story is playable from start to finish on Windows, Linux, the Steam De
 
 ## Upcoming major features
 
-- **Online co-op.** Co-op over the internet, not just a local network.
-- **Frame rates above 60.** The game's simulation and cutscenes assume 60 fps or less; making higher frame rates
+Each has a GitHub issue: subscribe to it for progress, or comment there rather than opening a new one.
+
+- **Ultrawide and field of view** ([#1](https://github.com/nlwstein/skullburglar/issues/1)). Proper 21:9 and wider
+  support instead of pillarboxing, and a field-of-view setting.
+- **Online co-op** ([#6](https://github.com/nlwstein/skullburglar/issues/6)). Co-op over the internet without a VPN,
+  not just on a local network.
+- **Frame rates above 60** ([#7](https://github.com/nlwstein/skullburglar/issues/7)). The launcher's "Unlimited" frame
+  rate works, but parts of the game's simulation and its cutscenes assume 60 fps or less; making higher frame rates
   safe needs per-system fixes.
-- **Ultrawide and field of view.** Proper 21:9 and wider support instead of letterboxing, and a field-of-view setting.
-- **In-game key rebinding.** Rebinding from the settings overlay as well as the launcher.
-- **Better low-end performance.** More headroom on integrated graphics and on the Deck's CPU.
 
 ## Reporting problems
 
-Open an issue with your platform, GPU, what you were doing and the game's log (run with `--log_file=<path>` to
+Check the [open issues](https://github.com/nlwstein/skullburglar/issues) first: known problems and planned features
+are tracked there, and a comment on an existing issue helps more than a duplicate. Otherwise, open an issue with your platform, GPU, what you were doing and the game's log (run with `--log_file=<path>` to
 write one). On Windows a crash also writes `logs\crash-<pid>.dmp`; attach it if there is one. Every report is read,
 reproduced where possible and fixed.
 

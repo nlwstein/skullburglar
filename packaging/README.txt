@@ -48,7 +48,8 @@ minute). Later starts reuse them.
 Playing
 -------
 
-A controller works as on the Xbox. Keyboard and mouse:
+A controller works as on the Xbox. With a DualShock 4 or DualSense the prompts show PlayStation buttons; the
+launcher's "Controller button prompts" setting can pick Xbox or PlayStation instead. Keyboard and mouse:
 
   Move          W A S D              Fire / aim        Left / right mouse button
   Cover, run    Space                Reload, pick up   R
@@ -113,8 +114,9 @@ folder or app with the new version from https://skullburglar.stz.sh. Game files,
 Reporting a problem
 -------------------
 
-Open an issue at https://github.com/nlwstein/skullburglar/issues with your platform, GPU, what you were doing and
-the newest log file (plus the .dmp on a Windows crash).
+Check the open issues at https://github.com/nlwstein/skullburglar/issues first: if your problem is already there,
+add a comment to it. Otherwise open an issue with your platform, GPU, what you were doing and the newest log file
+(plus the .dmp on a Windows crash).
 
 
 About
