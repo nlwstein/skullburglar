@@ -55,6 +55,15 @@
 #if defined(_WIN32)
 void InstallWindowsCrashLogger();  // src/crash_win.cpp
 #endif
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if TARGET_OS_IPHONE  // iOS and tvOS
+#include "ios/ios_app.h"
+#if !TARGET_OS_TV
+#include "ios/touch_input.h"
+#endif
+#endif
 
 class BotsApp : public rex::ReXApp {
  public:
@@ -96,6 +105,30 @@ class BotsApp : public rex::ReXApp {
   void OnConfigurePaths(rex::PathConfig& paths) override {
     namespace fs = std::filesystem;
     std::error_code ec;
+#if TARGET_OS_IPHONE
+    // iOS and tvOS (experimental): everything lives in the app container. The game files go in <data>/game (copied
+    // there over USB, or on iOS through the Files app), saves in <data>/user, the shader cache in Caches; <data> is
+    // Documents on iOS and Caches on tvOS (bots::ios::DataDir). No launcher.
+    {
+      const fs::path docs = bots::ios::DataDir();
+      if (paths.game_data_root.empty()) paths.game_data_root = docs / "game";
+      if (rex::cvar::Query<std::string>("user_data_root").empty()) paths.user_data_root = docs / "user";
+      if (rex::cvar::Query<std::string>("cache_root").empty()) paths.cache_root = bots::ios::CachesDir() / "bots";
+      paths.config_path = paths.user_data_root / "bots.toml";
+      config_path_ = paths.config_path;
+      game_root_given_ = true;
+      fs::create_directories(paths.user_data_root, ec);
+      fs::create_directories(paths.cache_root, ec);
+      if (rex::cvar::Query<std::string>("log_file").empty()) {
+        fs::create_directories(docs / "logs", ec);
+        char stamp[32];
+        const std::time_t now = std::time(nullptr);
+        std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", std::localtime(&now));
+        rex::cvar::SetFlagByName("log_file", (docs / "logs" / ("bots-" + std::string(stamp) + ".log")).string());
+      }
+      return;
+    }
+#endif
     if (!fs::exists(paths.config_path, ec)) paths.config_path = paths.user_data_root / "bots.toml";
     config_path_ = paths.config_path;
     UseBundleLogDir();
@@ -134,6 +167,9 @@ class BotsApp : public rex::ReXApp {
   // open it.
   std::optional<rex::PathConfig> OnFinalizePaths(
       const rex::PathConfig& defaults, std::function<void(rex::PathConfig)> resume) override {
+#if TARGET_OS_IPHONE
+    return defaults;  // no launcher on iOS and tvOS
+#endif
     bool requested = !game_root_given_;
     if (rex::cvar::GetFlagSource("launcher") != rex::cvar::Source::kDefault)
       requested = rex::cvar::Query<bool>("launcher");
@@ -378,6 +414,13 @@ class BotsApp : public rex::ReXApp {
     input->AddDriver(std::move(kbm));
     const char* script = std::getenv("BOTS_INPUT");
     if (script && *script) input->AddDriver(std::make_unique<bots::ScriptInputDriver>(script));
+#if TARGET_OS_IPHONE
+#if !TARGET_OS_TV
+    // On-screen controller, shown while no game controller is connected.
+    input->AddDriver(std::make_unique<bots::ios::TouchInputDriver>());
+#endif
+    bots::ios::InstallAppUI();
+#endif
   }
 
   // BOTS_CAPTURE_DIR=<dir> [BOTS_CAPTURE_SECS=5]: periodically save the guest output

@@ -63,6 +63,10 @@ set_source_files_properties(src/setup/update_check.cpp PROPERTIES
 # First-run setup window's native file picker (B-061).
 if(WIN32)
     list(APPEND BOTS_SOURCES src/setup/file_picker_win.cpp)
+elseif(CMAKE_SYSTEM_NAME MATCHES "^(iOS|tvOS)$")
+    # Experimental iOS and tvOS builds (tools/ios/build.sh): no launcher; on iOS an on-screen controller.
+    enable_language(OBJCXX)
+    list(APPEND BOTS_SOURCES src/setup/file_picker_ios.cpp src/ios/ios_app.mm)
 elseif(APPLE)
     enable_language(OBJCXX)
     list(APPEND BOTS_SOURCES src/setup/file_picker_mac.mm)
@@ -78,7 +82,13 @@ else()
 endif()
 
 rexglue_setup_target(bots GPU_PLUGINS xenos)
-if(APPLE)
+if(CMAKE_SYSTEM_NAME MATCHES "^(iOS|tvOS)$")
+    target_link_libraries(bots PRIVATE "-framework UIKit" "-framework GameController")
+    target_include_directories(bots PRIVATE src)
+    set_source_files_properties(src/ios/ios_app.mm PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS -fobjc-arc)
+    # The app bundle (tools/ios/build.sh) keeps the dylibs next to the executable, as on macOS.
+    set_target_properties(bots PROPERTIES INSTALL_RPATH "@executable_path" BUILD_WITH_INSTALL_RPATH ON)
+elseif(APPLE)
     target_link_libraries(bots PRIVATE "-framework AppKit")
     # The precompiled header is C++ only.
     set_source_files_properties(src/setup/file_picker_mac.mm PROPERTIES SKIP_PRECOMPILE_HEADERS ON)

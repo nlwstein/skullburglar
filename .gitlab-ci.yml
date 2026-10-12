@@ -39,7 +39,7 @@ checks:
   interruptible: true
   script:
     - python3 tools/leak_scan.py tree
-    - for f in tools/ci/*.sh packaging/linux/AppRun; do sh -n "$f"; done
+    - for f in tools/ci/*.sh tools/ios/build.sh packaging/linux/AppRun; do sh -n "$f"; done
     - python3 -m py_compile tools/ci/gitlab_release.py tools/ci/publish_downloads.py
     - SUBMODULES=0 tools/ci/sdk.sh "$(mktemp -d)/sdk"
 
@@ -127,6 +127,32 @@ build:macos:
         exit 0
       fi
     - tools/ci/gitlab_build.sh macos
+
+# iOS and tvOS (experimental, tools/ios/build.sh): unsigned IPAs in the package registry as skullburglar-apple/<VERSION>,
+# signed when they're installed. On branches named for them (apple, ios, tvos), and on main with BUILD=1; not part of
+# releases. They need a Mac runner with Xcode and its iOS and tvOS platforms (the command line tools have no iOS SDKs),
+# tagged `xcode` as well as `macos`.
+.apple:
+  stage: build
+  tags: [macos, xcode]
+  needs: []
+  interruptible: true
+  timeout: 4h
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /(^|\/)(apple|ios|tvos)/
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $BUILD == "1"
+  script:
+    - VERSION=apple-$CI_COMMIT_SHORT_SHA tools/ci/gitlab_build.sh "$PLATFORM"
+
+build:ios:
+  extends: .apple
+  variables:
+    PLATFORM: ios
+
+build:tvos:
+  extends: .apple
+  variables:
+    PLATFORM: tvos
 
 release:
   stage: release

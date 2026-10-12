@@ -79,6 +79,27 @@ tools/win-cross/build.sh   # D3D12, clang + xwin -> ~/bots/win/dist/bots-win64.z
 Running the Linux build needs a Vulkan GPU passed into the container (`--gpus all` and
 `NVIDIA_DRIVER_CAPABILITIES=all` for NVIDIA) and a display.
 
+## iOS and tvOS (experimental)
+
+An iPhone, iPad or Apple TV build, with Xcode (not just its command line tools) and codegen output already in
+`generated/`. There's no launcher: the game boots straight away from the app's data folder. On iOS an on-screen
+controller shows while no game controller is connected; tvOS needs a paired controller.
+
+```bash
+tools/ci/sdk.sh out/sdk                     # SDK with the patches, including 0023 (iOS/tvOS)
+PLATFORM=ios SDK=out/sdk tools/ios/build.sh build bundle ipa     # or PLATFORM=tvos
+```
+
+- **Signing and installing:** `TEAM=<team id> BUNDLE_ID=<bundle id> DEVICE=<udid>` with the steps
+  `profile sign install` signs with a development profile and installs over USB or the network (`xcrun devicectl`).
+  The profile step needs the device registered to the team. A sideloading tool can sign the unsigned IPA instead.
+- **Game files:** the `data` step copies `game/` to the app's data folder on the device: `Documents/game` on iOS
+  (also reachable through the Files app), `Library/Caches/game` on tvOS, whose apps get no persistent storage.
+- **Shader warm-up:** the bundle carries the macOS shader refs (`REFS`); iOS and tvOS share macOS's device class.
+- **Limits:** the game quits when it goes to the background (the renderer can't pause yet). The guest memory
+  needs one 4.5 GB stretch of address space: iOS asks for the extended virtual addressing entitlement; on the Apple
+  TV it fits only on models with more than 3 GB of memory.
+
 ## Release builds
 
 `tools/ci/` builds release packages from a clean checkout (CI does all three): `sdk.sh` clones the pinned SDK and
