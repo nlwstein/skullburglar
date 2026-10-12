@@ -356,12 +356,21 @@ void Begin(nw_connection_t connection, NSDictionary<NSString*, NSString*>* query
   // Files kept from an earlier, interrupted import count towards the space already taken.
   const uint64_t have = BytesIn(g_partial);
   const auto space = fs::space(g_partial, ec);
+#if TARGET_OS_TV
+  // tvOS frees other apps' caches as this one writes, and that purgeable space isn't in the free figure (nor is there a
+  // tvOS call for it), so try anyway; running out mid-import fails the file, and the import resumes once there's room.
+  if (!ec && have < bytes && space.available < bytes - have + kSpareSpace) {
+    REXLOG_WARN("import: {:.1f} GB free for {:.1f} GB of game files; relying on tvOS to free cached data",
+                space.available / 1e9, (bytes - have) / 1e9);
+  }
+#else
   if (!ec && have < bytes && space.available < bytes - have + kSpareSpace) {
     RespondText(connection, 507, [NSString stringWithFormat:@"The device needs %.1f GB free for the game files, and has "
                                                              "%.1f GB.",
                                                             (bytes - have + kSpareSpace) / 1e9, space.available / 1e9]);
     return;
   }
+#endif
   g_total_bytes = bytes;
   g_total_files = files;
   g_done_bytes = g_done_files = 0;
