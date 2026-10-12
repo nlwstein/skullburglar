@@ -152,6 +152,10 @@ SERIES.append(
     ("0021-input-pad-style-virtual-pad.patch",
      ["include/rex/input/input_driver.h", "include/rex/input/sdl/sdl_input_driver.h",
       "src/input/sdl/sdl_input_driver.cpp"], {}))
+SERIES.append(
+    # Guest memory on macOS and Linux: unlink the POSIX shm object right after shm_open, so its memory is freed
+    # however the process ends (the game leaves with _exit, which skips CloseFileMappingHandle's unlink).
+    ("0022-posix-unlink-guest-memory.patch", ["src/core/memory_posix.cpp"], {}))
 
 def git(sdk, *args, **kw):
     return subprocess.run(["git", "-C", sdk, *args], capture_output=True, text=True,
