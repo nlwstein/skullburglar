@@ -46,6 +46,7 @@
 #include "app_quit.h"
 #include "mnk_input.h"
 #include "coop.h"
+#include "widescreen.h"
 #include "script_input.h"
 #include "setup/app_paths.h"
 #include "setup/settings.h"
@@ -376,6 +377,7 @@ class BotsApp : public rex::ReXApp {
     SetLaunchCommandLine();
     RegisterFullscreenBind();
     bots::SpawnPlayerTwo(game_data_root(), user_data_root(), cache_root());
+    if (runtime()) bots::SetWidescreenWindow(runtime()->display_window());
     if (!runtime() || !runtime()->input_system()) return;
     auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system());
     if (auto assignment = bots::MakePadAssignment()) {

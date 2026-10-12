@@ -54,6 +54,10 @@ std::vector<Setting> Catalog() {
                {{"-1", "Game default"}, {"0", "Off"}, {"1", "1x"}, {"2", "2x"}, {"3", "4x"},
                 {"4", "8x"}, {"5", "16x"}}});
   s.back().emulated_only = true;
+  s.push_back({"aspect_ratio", "", "Aspect ratio",
+               "Wider than 16:9 fills an ultrawide screen and shows more at the sides; the HUD and menus stretch. "
+               "Automatic matches the screen in fullscreen, or the window. Native renderer only.",
+               {{"16:9", "16:9 (original)"}, {"auto", "Automatic"}, {"21:9", "21:9"}, {"32:9", "32:9"}}});
   s.push_back({"framerate_limit", "", "Frame rate limit", "",
                {{"30", "30 fps"}, {"60", "60 fps (recommended)"}, {"0", "Unlimited"}}});
   s.push_back({"present_vsync", "", "VSync", "Off has the lowest latency but can tear.", {}});

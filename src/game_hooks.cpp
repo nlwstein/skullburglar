@@ -37,6 +37,7 @@
 
 #include "app_quit.h"
 #include "coop.h"
+#include "widescreen.h"
 #include "gfx/capture.h"
 #include "mnk_input.h"
 #include "prompt_state.h"
@@ -768,7 +769,7 @@ std::string ClassChain(uint8_t* base, uint32_t object) {
   return out;
 }
 
-// BOTS_POINTER_TEST=<secs>:<x>,<y>[,d|u][;...] (test only): put the pointer at UI pixel x,y (1280x720) from that
+// BOTS_POINTER_TEST=<secs>:<x>,<y>[,d|u][;...] (test only): put the pointer at UI pixel x,y (1280 x GuestHeight) from that
 // time on; `d` / `u` also press / release the left button there (a menu click, i.e. an Enter edge).
 bool TestPointer(float dt, float& px, float& py, uint32_t& moves, std::vector<bool>& clicks) {
   struct Move {
@@ -802,7 +803,7 @@ bool TestPointer(float dt, float& px, float& py, uint32_t& moves, std::vector<bo
   }
   if (!current) return false;
   px = plan[current - 1].x / 1280.0f;
-  py = plan[current - 1].y / 720.0f;
+  py = plan[current - 1].y / float(bots::GuestHeight());
   moves = uint32_t(current);
   return true;
 }
@@ -1146,7 +1147,7 @@ void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32
     return;
   }
   pointer_valid = true;
-  pointer_x = px * 1280.0f, pointer_y = py * 720.0f;
+  pointer_x = px * 1280.0f, pointer_y = py * float(bots::GuestHeight());
   if (!n) return;
   if (focused && IsA(base, focused, n->music_player)) {
     dragging = 0;
@@ -1167,8 +1168,9 @@ void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32
     dragging = 0;
     return;
   }
-  // Window -> UI pixels (the UI is laid out at 1280x720 and scaled to the window).
-  const float x = px * 1280.0f, y = py * 720.0f;
+  // Window -> UI pixels (the UI is laid out at the back buffer size, 1280x720 or ultrawide 1280xN, and scaled to the
+  // window).
+  const float x = px * 1280.0f, y = py * float(bots::GuestHeight());
   const Widget* hovered = nullptr;
   for (const auto& w : widgets) {
     // Rows: the label's box is narrow, so accept the whole row height left of the right edge plus a margin.

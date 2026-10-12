@@ -68,10 +68,14 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
       const float output_scale = renderer_->output_scale();
       const uint32_t out_width = uint32_t(float(width) * output_scale + 0.5f);
       const uint32_t out_height = uint32_t(float(height) * output_scale + 0.5f);
+      // The presenter fits the output to the window at the display's aspect ratio. A frame wider than that is the
+      // ultrawide back buffer (src/widescreen.h, e.g. 1280x548): fit it at its own shape instead of squeezing it.
+      uint32_t aspect_w = std::max(1u, uint32_t(video_mode.display_width));
+      uint32_t aspect_h = std::max(1u, uint32_t(video_mode.display_height));
+      if (uint64_t(width) * aspect_h > uint64_t(aspect_w) * height) aspect_w = width, aspect_h = height;
       const auto* ramp = reinterpret_cast<const uint32_t*>(gamma_ramp_256_entry_table());
       presenter->RefreshGuestOutput(
-          out_width, out_height, std::max(1u, uint32_t(video_mode.display_width)),
-          std::max(1u, uint32_t(video_mode.display_height)),
+          out_width, out_height, aspect_w, aspect_h,
           [&](rex::ui::Presenter::GuestOutputRefreshContext& context) -> bool {
             auto& vulkan_context =
                 static_cast<rex::ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext&>(context);

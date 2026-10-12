@@ -2,6 +2,7 @@
 #include "mnk_input.h"
 
 #include "prompt_state.h"
+#include "widescreen.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -256,8 +257,10 @@ void MouseKeyboardDriver::OnMouseMove(rex::ui::MouseEvent& e) {
   if (!captured_ && window_) {
     const float w = float(window_->GetActualPhysicalWidth()), h = float(window_->GetActualPhysicalHeight());
     if (w > 0 && h > 0) {
-      pointer_x_.store(float(x) / w, std::memory_order_relaxed);
-      pointer_y_.store(float(y) / h, std::memory_order_relaxed);
+      float fx, fy;
+      WindowToPicture(float(x), float(y), w, h, fx, fy);
+      pointer_x_.store(fx, std::memory_order_relaxed);
+      pointer_y_.store(fy, std::memory_order_relaxed);
       pointer_moves_.fetch_add(1, std::memory_order_relaxed);
     }
   }

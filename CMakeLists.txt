@@ -46,6 +46,7 @@ set(BOTS_SOURCES
     src/coop.cpp
     src/game_hooks.cpp
     src/mnk_input.cpp
+    src/widescreen.cpp
     src/gfx/d3d_hooks.cpp
     src/gfx/capture.cpp
     src/gfx/shadow.cpp

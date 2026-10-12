@@ -51,3 +51,24 @@ address = 0x82FD1D94
 name = "BotsGuardNullEntryList"
 registers = ["r10", "r11"]
 jump_address_on_true = 0x82FD1DE0
+
+# Ultrawide (GitHub #1, src/widescreen.cpp): the places the Xenia 21:9 game patch changes, ratio chosen at run time.
+[[midasm_hook]]
+address = 0x8256AC28
+name = "BotsWideBackBufferHeight"
+registers = ["r11"]
+
+[[midasm_hook]]
+address = 0x82BC8FB8
+name = "BotsWideAspect"
+registers = ["f0"]
+
+[[midasm_hook]]
+address = 0x825CDAF8
+name = "BotsWideSkipConstrainedCamera"
+jump_address_on_true = 0x825CDBAC
+
+[[midasm_hook]]
+address = 0x82F62E5C
+name = "BotsWideFov"
+registers = ["f1"]
