@@ -144,6 +144,14 @@ SERIES.append(
     ("0020-xam-local-users.patch",
      ["include/rex/system/kernel_state.h", "src/system/kernel_state.cpp", "include/rex/system/xam/content_manager.h",
       "src/system/xam/content_manager.cpp", "src/kernel/xam/xam_content.cpp"], {}))
+SERIES.append(
+    # PlayStation pads (B-160): rex::input::LastActivePadStyle() reports whether the pad last used is a DualShock 4,
+    # a DualSense or anything else (by SDL's gamepad type), so the game can draw matching button prompts; the game
+    # can't ask SDL itself, which is linked into the runtime library and not exported on Windows. REX_VIRTUAL_PAD
+    # attaches an SDL virtual pad with a real pad's USB ids and presses buttons on a timeline, for testing.
+    ("0021-input-pad-style-virtual-pad.patch",
+     ["include/rex/input/input_driver.h", "include/rex/input/sdl/sdl_input_driver.h",
+      "src/input/sdl/sdl_input_driver.cpp"], {}))
 
 def git(sdk, *args, **kw):
     return subprocess.run(["git", "-C", sdk, *args], capture_output=True, text=True,

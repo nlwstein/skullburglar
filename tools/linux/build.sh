@@ -55,7 +55,7 @@ fi
 # level (build/ is written by root in the container, so clean it from there).
 grep -qs "march=x86-64-v[234]" build/CMakeCache.txt || docker exec $C rm -rf /w/build
 # Sources are pre-generated on the host that ran codegen (same as the Windows build): make the codegen step a no-op.
-sed -i "s|    COMMAND \$<TARGET_FILE:rex::rexglue> codegen \${CMAKE_CURRENT_SOURCE_DIR}/bots_manifest.toml|    COMMAND \${CMAKE_COMMAND} -E true|" game/generated/rexglue.cmake
+sed -i "s|    COMMAND .* codegen \${CMAKE_CURRENT_SOURCE_DIR}/bots_manifest.toml|    COMMAND \${CMAKE_COMMAND} -E true|" game/generated/rexglue.cmake
 sed -i "/DEPFILE .*codegen.d/d" game/generated/rexglue.cmake
 docker exec -w /w/game $C sh -c "[ -f /w/build/build.ninja ] || cmake -G Ninja -B /w/build \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo -DREXSDK_DIR=/w/sdk -DCMAKE_C_FLAGS=-march=x86-64-v2 -DCMAKE_CXX_FLAGS=-march=x86-64-v2"

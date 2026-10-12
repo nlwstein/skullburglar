@@ -11,7 +11,8 @@
 // click in menus) send the engine's own Enter key instead of a pad button.
 //
 // Button prompts (B-105): the last device used wins. Keyboard/mouse input switches the prompts to keyboard/mouse
-// glyphs (kbm_prompts), real controller input switches them back; see prompt_state.h.
+// glyphs (kbm_prompts), real controller input switches them back: to PlayStation glyphs when that pad is a DualShock 4
+// or DualSense (B-160, pad_prompts), else the game's own Xbox ones; see prompt_state.h.
 #pragma once
 
 #include <atomic>
@@ -31,11 +32,14 @@
 #include <rex/ui/window.h>
 #include <rex/ui/window_listener.h>
 
+#include "prompt_state.h"
+
 REXCVAR_DECLARE(bool, kbm);
 REXCVAR_DECLARE(double, kbm_sensitivity);
 REXCVAR_DECLARE(double, kbm_aim_sensitivity);
 REXCVAR_DECLARE(bool, kbm_invert_y);
 REXCVAR_DECLARE(bool, kbm_prompts);
+REXCVAR_DECLARE(std::string, pad_prompts);
 
 namespace bots {
 
@@ -53,14 +57,19 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   static MouseKeyboardDriver* instance() { return instance_.load(std::memory_order_acquire); }
 
   // Which device the button prompts show (prompt_state.h). Normally the last device used; public for BOTS_PROMPT_TEST.
+  static void SetPromptDevice(PromptDevice device);
+  // Keyboard/mouse (if kbm_prompts allows), or the controller: PadPromptDevice().
   static void SetPromptMode(bool keyboard_mouse);
+  // The prompts for the controller: pad_prompts, or with "auto" the style of the pad used last.
+  static PromptDevice PadPromptDevice();
 
   // Mouse motion since the last call, in pixels (+x right, +y up), scaled by kbm_sensitivity (kbm_aim_sensitivity
   // while the Aim key is held) and kbm_invert_y. Zero while the pointer isn't captured.
   void TakeMouseDelta(float& dx, float& dy);
 
   // The merged controller state the game read for user 0 (guest XInputGetState). Input beyond what this driver
-  // contributed came from a real controller: prompts switch back to it.
+  // contributed came from a real controller: prompts switch back to it. While a controller's prompts show, they
+  // follow PadPromptDevice() (another pad, or pad_prompts changed in the settings).
   void NoteGuestPad(uint16_t buttons, uint8_t lt, uint8_t rt, int16_t lx, int16_t ly, int16_t rx, int16_t ry);
 
   // Menu mode: the game is paused (C1HUD NativePauseGame/NativeUnpauseGame) or the gameplay HUD stopped ticking
