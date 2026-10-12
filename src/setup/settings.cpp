@@ -59,6 +59,10 @@ std::vector<Setting> Catalog() {
   s.push_back({"present_vsync", "", "VSync", "Off has the lowest latency but can tear.", {}});
   s.push_back({"check_updates", "", "Check for new versions",
                "When the launcher opens, look online for a newer Skullburglar and offer its download page.", {}});
+  s.push_back({"pad_prompts", "", "Controller button prompts",
+               "Which buttons the game shows. Automatic matches the controller you used last. Native renderer only.",
+               {{"auto", "Automatic"}, {"xbox", "Xbox"}, {"ps4", "PlayStation 4"}, {"ps5", "PlayStation 5"}}});
+  s.back().section = "Controller";
   s.push_back({"split_screen", "", "Split-screen co-op (experimental)",
                "One window, split top and bottom. During a story, press START on a second controller to join as "
                "player 2; player 2 leaves with Quit in their pause menu. The two-window option below overrides it.",

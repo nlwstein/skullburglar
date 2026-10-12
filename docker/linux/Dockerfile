@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       clang lld llvm cmake ninja-build build-essential pkg-config autoconf \
       libgtk-3-dev libx11-xcb-dev libxss-dev libvulkan-dev vulkan-tools \
       libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev libdecor-0-dev \
-      libasound2-dev libpulse-dev libpipewire-0.3-dev \
+      libasound2-dev libpulse-dev libpipewire-0.3-dev libudev-dev \
       libglvnd0 libgl1 libegl1 libx11-6 libxext6 xvfb xauth \
  && rm -rf /var/lib/apt/lists/*
 

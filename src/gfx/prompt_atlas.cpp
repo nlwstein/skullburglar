@@ -1,4 +1,4 @@
-// Keyboard/mouse button prompts (backlog B-105); see prompt_atlas.h.
+// Keyboard/mouse (B-105) and PlayStation (B-160) button prompts; see prompt_atlas.h.
 #include "prompt_atlas.h"
 
 #include <algorithm>
@@ -17,11 +17,11 @@
 #define STBI_NO_STDIO
 #include <stb_image.h>
 
-// assets/prompts/keyboard-mouse.{png,xml}, embedded by CMake (prompt_glyphs.cpp in the build tree).
-extern const unsigned char kPromptGlyphsPng[];
-extern const size_t kPromptGlyphsPngSize;
-extern const unsigned char kPromptGlyphsXml[];
-extern const size_t kPromptGlyphsXmlSize;
+// assets/prompts/{keyboard-mouse,playstation}.{png,xml}, embedded by CMake (prompt_glyphs.cpp in the build tree).
+extern const unsigned char kPromptGlyphsPng[], kPlayStationGlyphsPng[];
+extern const size_t kPromptGlyphsPngSize, kPlayStationGlyphsPngSize;
+extern const unsigned char kPromptGlyphsXml[], kPlayStationGlyphsXml[];
+extern const size_t kPromptGlyphsXmlSize, kPlayStationGlyphsXmlSize;
 
 namespace bots::prompts {
 
@@ -42,32 +42,39 @@ int Attribute(std::string_view tag, std::string_view name) {
   return at == std::string_view::npos ? 0 : std::atoi(tag.data() + at + name.size() + 3);
 }
 
-const Sheet& GetSheet() {
-  static const Sheet sheet = [] {
-    Sheet s;
-    int channels = 0;
-    stbi_uc* pixels = stbi_load_from_memory(kPromptGlyphsPng, int(kPromptGlyphsPngSize), &s.width, &s.height,
-                                            &channels, 4);
-    if (!pixels) {
-      std::fprintf(stderr, "prompts: glyph sheet failed to load: %s\n", stbi_failure_reason());
-      return s;
-    }
-    s.rgba.assign(pixels, pixels + size_t(s.width) * s.height * 4);
-    stbi_image_free(pixels);
-    // <SubTexture name="keyboard_a" x="..." y="..." width="64" height="64" />
-    const std::string_view xml(reinterpret_cast<const char*>(kPromptGlyphsXml), kPromptGlyphsXmlSize);
-    for (size_t at = xml.find("<SubTexture"); at != std::string_view::npos; at = xml.find("<SubTexture", at + 1)) {
-      const std::string_view tag = xml.substr(at, xml.find('>', at) - at);
-      const size_t name = tag.find("name=\"");
-      if (name == std::string_view::npos) continue;
-      const size_t end = tag.find('"', name + 6);
-      // The sheet's y runs up from the bottom edge.
-      const int h = Attribute(tag, "height");
-      s.glyphs[std::string(tag.substr(name + 6, end - name - 6))] = {
-          Attribute(tag, "x"), s.height - Attribute(tag, "y") - h, Attribute(tag, "width"), h};
-    }
+Sheet LoadSheet(const unsigned char* png, size_t png_size, const unsigned char* xml_data, size_t xml_size) {
+  Sheet s;
+  int channels = 0;
+  stbi_uc* pixels = stbi_load_from_memory(png, int(png_size), &s.width, &s.height, &channels, 4);
+  if (!pixels) {
+    std::fprintf(stderr, "prompts: glyph sheet failed to load: %s\n", stbi_failure_reason());
     return s;
-  }();
+  }
+  s.rgba.assign(pixels, pixels + size_t(s.width) * s.height * 4);
+  stbi_image_free(pixels);
+  // <SubTexture name="keyboard_a" x="..." y="..." width="64" height="64" />
+  const std::string_view xml(reinterpret_cast<const char*>(xml_data), xml_size);
+  for (size_t at = xml.find("<SubTexture"); at != std::string_view::npos; at = xml.find("<SubTexture", at + 1)) {
+    const std::string_view tag = xml.substr(at, xml.find('>', at) - at);
+    const size_t name = tag.find("name=\"");
+    if (name == std::string_view::npos) continue;
+    const size_t end = tag.find('"', name + 6);
+    // The sheet's y runs up from the bottom edge.
+    const int h = Attribute(tag, "height");
+    s.glyphs[std::string(tag.substr(name + 6, end - name - 6))] = {
+        Attribute(tag, "x"), s.height - Attribute(tag, "y") - h, Attribute(tag, "width"), h};
+  }
+  return s;
+}
+
+const Sheet& KeyboardSheet() {
+  static const Sheet sheet = LoadSheet(kPromptGlyphsPng, kPromptGlyphsPngSize, kPromptGlyphsXml, kPromptGlyphsXmlSize);
+  return sheet;
+}
+
+const Sheet& PlayStationSheet() {
+  static const Sheet sheet = LoadSheet(kPlayStationGlyphsPng, kPlayStationGlyphsPngSize, kPlayStationGlyphsXml,
+                                       kPlayStationGlyphsXmlSize);
   return sheet;
 }
 
@@ -136,38 +143,90 @@ void Draw(const Sheet& sheet, const Rect& glyph, float cx, float cy, int size, s
   }
 }
 
-}  // namespace
+// Centre and glyph size of each button in the original atlas (measured from it; the game's UVs are 32x32 cells for
+// A B X Y, 64x64 for the rest, 64x32 for Start and Back). Both sticks share one cell, drawn with an "L" or "R" over
+// it: it shows the left-stick click (taunt).
+struct Cell {
+  float cx, cy;
+  int size;
+};
+constexpr Cell kX{16, 16, 32}, kA{48, 16, 32}, kB{16, 48, 32}, kY{48, 48, 32}, kRB{96, 32, 40}, kLB{160, 32, 40},
+    kStick{224, 32, 56}, kDpad{32, 96, 56}, kStart{96, 80, 30}, kBack{96, 112, 30}, kLT{160, 96, 44}, kRT{224, 96, 44};
 
-std::vector<uint8_t> BuildButtonAtlas() {
-  const Sheet& sheet = GetSheet();
+std::vector<uint8_t> KeyboardAtlas() {
+  const Sheet& sheet = KeyboardSheet();
   if (sheet.rgba.empty()) return {};
   std::vector<uint8_t> out(size_t(kButtonAtlasWidth) * kButtonAtlasHeight * 4, 0);
-  // Centre and glyph size of each button in the original atlas (measured from it; the game's UVs are 32x32 cells for
-  // A B X Y, 64x64 for the rest, 64x32 for Start and Back). Both sticks share one cell, drawn with an "L" or "R"
-  // over it: it shows the left-stick click (taunt).
   static const struct {
-    float cx, cy;
-    int size;
+    Cell cell;
     const char* bind;
   } kCells[] = {
-      {16, 16, 32, "kbm_x"},           {48, 16, 32, "kbm_a"},
-      {16, 48, 32, "kbm_b"},           {48, 48, 32, "kbm_y"},
-      {96, 32, 40, "kbm_right_shoulder"}, {160, 32, 40, "kbm_left_shoulder"},
-      {224, 32, 56, "kbm_left_thumb"},  {32, 96, 56, "kbm_dpad_up"},
-      {96, 80, 30, "kbm_start"},       {96, 112, 30, "kbm_back"},
-      {160, 96, 44, "kbm_left_trigger"}, {224, 96, 44, "kbm_right_trigger"},
+      {kX, "kbm_x"},           {kA, "kbm_a"},
+      {kB, "kbm_b"},           {kY, "kbm_y"},
+      {kRB, "kbm_right_shoulder"}, {kLB, "kbm_left_shoulder"},
+      {kStick, "kbm_left_thumb"},  {kDpad, "kbm_dpad_up"},
+      {kStart, "kbm_start"},       {kBack, "kbm_back"},
+      {kLT, "kbm_left_trigger"}, {kRT, "kbm_right_trigger"},
   };
-  for (const auto& cell : kCells) {
-    const std::string keys = rex::cvar::Query<std::string>(cell.bind);
+  for (const auto& [cell, bind] : kCells) {
+    const std::string keys = rex::cvar::Query<std::string>(bind);
     const Rect* glyph = nullptr;
     // Weapon select is four directions; the wheel says it best when it is bound.
-    if (std::string_view(cell.bind) == "kbm_dpad_up" && keys.find("Wheel") != std::string::npos) {
+    if (std::string_view(bind) == "kbm_dpad_up" && keys.find("Wheel") != std::string::npos) {
       if (const auto it = sheet.glyphs.find("mouse_scroll_vertical"); it != sheet.glyphs.end()) glyph = &it->second;
     }
     if (!glyph) glyph = GlyphFor(sheet, keys);
     if (glyph) Draw(sheet, *glyph, cell.cx, cell.cy, cell.size, out);
   }
   return out;
+}
+
+// By position, as SDL maps the pads: Cross is A, Circle B, Square X, Triangle Y; Options is Start; Share (DualShock 4)
+// and Create (DualSense) are Back. The coloured face buttons read best at the size the HUD draws them.
+std::vector<uint8_t> PlayStationAtlas(bool dualsense) {
+  const Sheet& sheet = PlayStationSheet();
+  if (sheet.rgba.empty()) return {};
+  std::vector<uint8_t> out(size_t(kButtonAtlasWidth) * kButtonAtlasHeight * 4, 0);
+  const struct {
+    Cell cell;
+    const char* glyph;
+  } cells[] = {
+      {kX, "playstation_button_color_square"},
+      {kA, "playstation_button_color_cross"},
+      {kB, "playstation_button_color_circle"},
+      {kY, "playstation_button_color_triangle"},
+      {kRB, "playstation_trigger_r1"},
+      {kLB, "playstation_trigger_l1"},
+      {kStick, "playstation_button_l3"},
+      {kDpad, "playstation_dpad"},
+      {kStart, dualsense ? "playstation5_button_options" : "playstation4_button_options"},
+      {kBack, dualsense ? "playstation5_button_create" : "playstation4_button_share"},
+      {kLT, "playstation_trigger_l2"},
+      {kRT, "playstation_trigger_r2"},
+  };
+  for (const auto& [cell, name] : cells) {
+    if (const auto it = sheet.glyphs.find(name); it != sheet.glyphs.end()) {
+      Draw(sheet, it->second, cell.cx, cell.cy, cell.size, out);
+    } else {
+      std::fprintf(stderr, "prompts: no glyph %s\n", name);
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
+std::vector<uint8_t> BuildButtonAtlas(PromptDevice device) {
+  switch (device) {
+    case PromptDevice::kKeyboardMouse:
+      return KeyboardAtlas();
+    case PromptDevice::kPlayStation4:
+      return PlayStationAtlas(false);
+    case PromptDevice::kPlayStation5:
+      return PlayStationAtlas(true);
+    default:
+      return {};
+  }
 }
 
 }  // namespace bots::prompts

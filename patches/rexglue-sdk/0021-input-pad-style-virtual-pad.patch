@@ -1,0 +1,193 @@
+diff --git a/include/rex/input/input_driver.h b/include/rex/input/input_driver.h
+index 52116f1..4d03117 100644
+--- a/include/rex/input/input_driver.h
++++ b/include/rex/input/input_driver.h
+@@ -11,6 +11,7 @@
+  */
+ 
+ #include <cstddef>
++#include <cstdint>
+ #include <functional>
+ #include <vector>
+ 
+@@ -27,6 +28,14 @@ namespace rex::input {
+ 
+ class InputSystem;
+ 
++/// The button faces of a physical pad, for drawing matching button prompts.
++enum class PadStyle : uint32_t { kXbox = 0, kPlayStation4 = 1, kPlayStation5 = 2 };
++
++/// The style of the pad that last pressed a button or pushed a stick or trigger
++/// well off rest (SDL backend; DualShock 4 / DualSense by SDL's gamepad type).
++/// kXbox until a pad is used, and always with the XInput backend. Any thread.
++PadStyle LastActivePadStyle();
++
+ class InputDriver {
+  public:
+   virtual ~InputDriver() = default;
+diff --git a/include/rex/input/sdl/sdl_input_driver.h b/include/rex/input/sdl/sdl_input_driver.h
+index cf0e3d1..438c06c 100644
+--- a/include/rex/input/sdl/sdl_input_driver.h
++++ b/include/rex/input/sdl/sdl_input_driver.h
+@@ -65,6 +65,7 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener
+     bool state_changed;
+     bool is_active;
+     DeviceId id;
++    PadStyle style;  // button faces, for LastActivePadStyle()
+     // Per pad rather than per guest user, so it survives reassignment.
+     KeystrokeState keystroke;
+   };
+diff --git a/src/input/sdl/sdl_input_driver.cpp b/src/input/sdl/sdl_input_driver.cpp
+index c7c440d..9d23365 100644
+--- a/src/input/sdl/sdl_input_driver.cpp
++++ b/src/input/sdl/sdl_input_driver.cpp
+@@ -9,8 +9,13 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <algorithm>
+ #include <array>
++#include <chrono>
++#include <cstdlib>
+ #include <filesystem>
++#include <string>
++#include <thread>
+ 
+ #include <rex/assert.h>
+ #include <rex/chrono/clock.h>
+@@ -30,6 +35,88 @@ namespace {
+ // SDL clamps to SDL_MAX_RUMBLE_DURATION_MS, which is not a public constant.
+ constexpr uint32_t kRumbleDurationMs = 0xFFFF;
+ 
++// LastActivePadStyle(): written on the thread that drains events, read anywhere.
++std::atomic<uint32_t> last_pad_style{uint32_t(PadStyle::kXbox)};
++
++PadStyle StyleOf(SDL_Gamepad* gamepad) {
++  switch (SDL_GetGamepadType(gamepad)) {
++    case SDL_GAMEPAD_TYPE_PS4:
++      return PadStyle::kPlayStation4;
++    case SDL_GAMEPAD_TYPE_PS5:
++      return PadStyle::kPlayStation5;
++    default:
++      return PadStyle::kXbox;
++  }
++}
++
++// REX_VIRTUAL_PAD=ps4|ps5|xbox[;<secs>:<button>...] (testing): attach an SDL virtual gamepad with that pad's USB
++// vendor/product ids, which SDL types the same way as the real pad, and press each named button (SDL's names: a, b,
++// x, y, back, start, leftshoulder, dpup, ...) for 150 ms that many seconds after attaching. Needs SDL_INIT_GAMEPAD.
++void AttachVirtualPad() {
++  const char* spec = std::getenv("REX_VIRTUAL_PAD");
++  if (!spec || !*spec) return;
++  // A test run is rarely the focused window, and SDL drops joystick events then.
++  SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
++  static constexpr struct {
++    const char* kind;
++    uint16_t vendor, product;
++    const char* name;
++  } kPads[] = {{"ps4", 0x054C, 0x09CC, "Virtual DualShock 4"},
++               {"ps5", 0x054C, 0x0CE6, "Virtual DualSense"},
++               {"xbox", 0x045E, 0x028E, "Virtual Xbox 360 Controller"}};
++  const std::string text(spec);
++  const std::string kind = text.substr(0, text.find(';'));
++  const auto* pad = std::find_if(std::begin(kPads), std::end(kPads), [&](const auto& p) { return kind == p.kind; });
++  if (pad == std::end(kPads)) {
++    REXLOG_WARN("REX_VIRTUAL_PAD: unknown pad '{}' (ps4, ps5 or xbox)", kind);
++    return;
++  }
++  SDL_VirtualJoystickDesc desc;
++  SDL_INIT_INTERFACE(&desc);
++  desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
++  desc.vendor_id = pad->vendor;
++  desc.product_id = pad->product;
++  desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
++  desc.nbuttons = SDL_GAMEPAD_BUTTON_DPAD_RIGHT + 1;  // with no button_mask, SDL maps button i to SDL_GamepadButton i
++  desc.name = pad->name;
++  const SDL_JoystickID id = SDL_AttachVirtualJoystick(&desc);
++  SDL_Joystick* joystick = id ? SDL_OpenJoystick(id) : nullptr;
++  if (!joystick) {
++    REXLOG_ERROR("REX_VIRTUAL_PAD: attach failed: {}", SDL_GetError());
++    return;
++  }
++  struct Press {
++    std::chrono::milliseconds at;
++    SDL_GamepadButton button;
++  };
++  std::vector<Press> presses;
++  for (size_t at = text.find(';'); at != std::string::npos; at = text.find(';', at + 1)) {
++    const std::string item = text.substr(at + 1, text.find(';', at + 1) - at - 1);
++    const size_t colon = item.find(':');
++    const SDL_GamepadButton button =
++        colon == std::string::npos ? SDL_GAMEPAD_BUTTON_INVALID : SDL_GetGamepadButtonFromString(item.c_str() + colon + 1);
++    if (button == SDL_GAMEPAD_BUTTON_INVALID || button >= desc.nbuttons) {
++      REXLOG_WARN("REX_VIRTUAL_PAD: skipped '{}' (want <secs>:<button>)", item);
++      continue;
++    }
++    presses.push_back({std::chrono::milliseconds(int64_t(std::atof(item.c_str()) * 1000)), button});
++  }
++  REXLOG_INFO("REX_VIRTUAL_PAD: attached \"{}\" ({:04X}:{:04X}), {} presses", pad->name, pad->vendor, pad->product,
++              presses.size());
++  if (presses.empty()) return;
++  // The joystick stays open for the process: a test hook, not worth a shutdown handshake.
++  std::thread([joystick, presses] {
++    const auto start = std::chrono::steady_clock::now();
++    for (const Press& press : presses) {
++      std::this_thread::sleep_until(start + press.at);
++      REXLOG_INFO("REX_VIRTUAL_PAD: {}", SDL_GetGamepadStringForButton(press.button));
++      SDL_SetJoystickVirtualButton(joystick, press.button, true);
++      std::this_thread::sleep_for(std::chrono::milliseconds(150));
++      SDL_SetJoystickVirtualButton(joystick, press.button, false);
++    }
++  }).detach();
++}
++
+ }  // namespace
+ 
+ SDLInputDriver::SDLInputDriver(rex::ui::Window* window, size_t window_z_order)
+@@ -113,6 +200,7 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
+         }
+       }
+       REXLOG_INFO("SDL input driver initialized successfully");
++      AttachVirtualPad();
+     });
+   }
+ }
+@@ -462,6 +550,7 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
+   // order and leaves non-XInput pads unnumbered.
+   ControllerState state = {};
+   state.sdl = controller;
++  state.style = StyleOf(controller);
+   state.id = AllocateDeviceId();
+   state.state_changed = true;  // XInput starts with packet_number = 1
+   UpdateXCapabilities(state);
+@@ -522,6 +611,12 @@ void SDLInputDriver::OnControllerDeviceAxisMotionLocked(const SDL_Event& event)
+       break;
+   }
+   controllers_.at(*idx).state_changed = true;
++  // Prompts follow a stick pushed well off centre or a trigger pulled, not drift.
++  const bool trigger = event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ||
++                       event.gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER;
++  if (std::abs(int(event.gaxis.value)) > (trigger ? HID_SDL_TRIGG_THRES << 7 : HID_SDL_THUMB_THRES)) {
++    last_pad_style.store(uint32_t(controllers_.at(*idx).style), std::memory_order_relaxed);
++  }
+ }
+ 
+ void SDLInputDriver::OnControllerDeviceButtonChangedLocked(const SDL_Event& event) {
+@@ -581,6 +676,7 @@ void SDLInputDriver::OnControllerDeviceButtonChangedLocked(const SDL_Event& even
+       return;
+     }
+     xbuttons |= xbutton;
++    last_pad_style.store(uint32_t(controller.style), std::memory_order_relaxed);
+   } else {
+     xbuttons &= ~xbutton;
+   }
+@@ -723,3 +819,9 @@ inline uint64_t SDLInputDriver::AnalogToKeyfield(const X_INPUT_GAMEPAD& gamepad)
+ }
+ 
+ }  // namespace rex::input::sdl
++
++namespace rex::input {
++
++PadStyle LastActivePadStyle() { return PadStyle(sdl::last_pad_style.load(std::memory_order_relaxed)); }
++
++}  // namespace rex::input

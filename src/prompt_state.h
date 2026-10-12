@@ -1,4 +1,4 @@
-// Which device the on-screen button prompts are drawn for (backlog B-105).
+// Which device the on-screen button prompts are drawn for (backlog B-105; PlayStation pads B-160).
 //
 // The game's input side (mnk_input.cpp) writes it; the native renderer, a separate plugin library with no access to
 // the game's symbols, reads it. The game owns the one instance and publishes its address in the process environment
@@ -21,9 +21,18 @@
 
 namespace bots {
 
+// What the prompts show. kXbox is the game's own atlas; the others are drawn by prompt_atlas.cpp.
+enum class PromptDevice : uint32_t { kXbox = 0, kKeyboardMouse = 1, kPlayStation4 = 2, kPlayStation5 = 3 };
+
+inline bool IsPlayStation(PromptDevice device) {
+  return device == PromptDevice::kPlayStation4 || device == PromptDevice::kPlayStation5;
+}
+
 struct PromptState {
-  std::atomic<uint32_t> keyboard_mouse{0};  // 1: show keyboard/mouse prompts
-  std::atomic<uint32_t> generation{0};      // bumped on every change; the renderer reloads the prompt textures
+  std::atomic<uint32_t> device{0};      // PromptDevice
+  std::atomic<uint32_t> generation{0};  // bumped on every change; the renderer reloads the prompt textures
+
+  PromptDevice Device() const { return PromptDevice(device.load(std::memory_order_relaxed)); }
 };
 
 inline constexpr const char* kPromptStateEnv = "BOTS_PROMPT_STATE";

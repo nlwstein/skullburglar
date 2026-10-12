@@ -279,7 +279,8 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
                  mip_max, uint32_t(fetch.pitch),
                  (unsigned long long)bots::prompts::Hash(memory_(base_page << 12), bots::prompts::kButtonAtlasBytes));
   }
-  // B-105: the controller-button atlas, swapped for keyboard/mouse glyphs while that is the last device used.
+  // B-105/B-160: the controller-button atlas, swapped for keyboard/mouse or PlayStation glyphs while that is the last
+  // device used.
   if (width == bots::prompts::kButtonAtlasWidth && height == bots::prompts::kButtonAtlasHeight && depth == 1 &&
       base_page && fetch.tiled && fetch.format == xe::TextureFormat::k_DXT4_5 &&
       bots::prompts::Hash(memory_(base_page << 12), bots::prompts::kButtonAtlasBytes) ==
@@ -287,7 +288,10 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
     const bots::PromptState* state = bots::FindPromptState();
     texture.prompt_atlas = true;
     texture.prompt_generation = state ? state->generation.load() : 0;
-    if (state && state->keyboard_mouse.load() && LoadPromptAtlas(texture, base_page << 12)) return;
+    if (state && state->Device() != bots::PromptDevice::kXbox &&
+        LoadPromptAtlas(texture, base_page << 12, state->Device())) {
+      return;
+    }
   }
   if (!CreateImage(texture.image, host.format, width, height, false, view_type, false, depth, mip_max + 1)) {
     std::fprintf(stderr, "native renderer: texture image %ux%ux%u format %d failed\n", width, height, depth,
@@ -375,9 +379,9 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
   }
 }
 
-bool Renderer::LoadPromptAtlas(GuestTexture& texture, uint32_t address) {
+bool Renderer::LoadPromptAtlas(GuestTexture& texture, uint32_t address, bots::PromptDevice device) {
   namespace p = bots::prompts;
-  const std::vector<uint8_t> pixels = p::BuildButtonAtlas();
+  const std::vector<uint8_t> pixels = p::BuildButtonAtlas(device);
   if (pixels.empty()) return false;
   if (!CreateImage(texture.image, VK_FORMAT_R8G8B8A8_UNORM, p::kButtonAtlasWidth, p::kButtonAtlasHeight, false,
                    VK_IMAGE_VIEW_TYPE_2D_ARRAY, false, 1, 1)) {
@@ -404,10 +408,11 @@ bool Renderer::LoadPromptAtlas(GuestTexture& texture, uint32_t address) {
   vk_.vkCmdCopyBufferToImage(cmd_, ring_.buffer, texture.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
   Barrier();
   ++stats_.textures;
-  static bool logged = false;
-  if (!logged) {
-    logged = true;
-    std::fprintf(stderr, "prompts: keyboard/mouse button atlas loaded\n");
+  static uint32_t logged = 0;  // one line per device
+  if (!(logged & (1u << uint32_t(device)))) {
+    logged |= 1u << uint32_t(device);
+    static constexpr const char* kNames[] = {"Xbox", "keyboard/mouse", "DualShock 4", "DualSense"};
+    std::fprintf(stderr, "prompts: %s button atlas loaded\n", kNames[uint32_t(device)]);
   }
   return true;
 }

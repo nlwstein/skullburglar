@@ -1,14 +1,17 @@
-// Keyboard/mouse button prompts (backlog B-105).
+// Keyboard/mouse (backlog B-105) and PlayStation (B-160) button prompts.
 //
 // Every controller-button prompt in the game (menu button bar, HUD action prompts, pickups, tutorials) cuts its glyph
-// out of one texture, UI_Shared.360_buttons_COMP01. While keyboard/mouse is the last device used
+// out of one texture, UI_Shared.360_buttons_COMP01. While keyboard/mouse or a PlayStation pad is the last device used
 // (prompt_state.h), the renderer loads a replacement for it: the same cell layout with a keyboard or mouse glyph for
-// the first key bound to each button (kbm_* cvars). Glyphs: Kenney "Input Prompts" (CC0, assets/prompts).
+// the first key bound to each button (kbm_* cvars), or the DualShock 4 / DualSense button for each Xbox one.
+// Glyphs: Kenney "Input Prompts" (CC0, assets/prompts).
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+
+#include "../prompt_state.h"
 
 namespace bots::prompts {
 
@@ -22,8 +25,8 @@ inline uint64_t Hash(const uint8_t* data, size_t size) {
   return h;
 }
 
-// The keyboard/mouse atlas, RGBA8 rows top to bottom (kButtonAtlasWidth x kButtonAtlasHeight), from the current
-// bindings. Empty if the glyph sheet failed to load.
-std::vector<uint8_t> BuildButtonAtlas();
+// The atlas for a device other than kXbox, RGBA8 rows top to bottom (kButtonAtlasWidth x kButtonAtlasHeight); the
+// keyboard/mouse one from the current bindings. Empty if the glyph sheet failed to load.
+std::vector<uint8_t> BuildButtonAtlas(PromptDevice device);
 
 }  // namespace bots::prompts

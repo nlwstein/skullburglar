@@ -466,13 +466,21 @@ void MemoryDumpTick(uint8_t* base, float dt) {
 }
 
 // B-105 text prompts: the one localized string that names a pad button is [ButtonBar] PressStart, "Press START
-// button" (title screen). While keyboard/mouse prompts are shown it reads "Press ENTER" (kbm_confirm). The config
-// cache's value and any labels already built from it are FStrings {data, count, max}; the new text is shorter, so it
-// is written into the same buffers (and back for a controller). The guest heap is rescanned only when the prompt
-// device changes; labels built later copy the config value, which is already right.
+// button" (title screen). While keyboard/mouse prompts are shown it reads "Press ENTER" (kbm_confirm), and "Press
+// OPTIONS" for a PlayStation pad (B-160). The config cache's value and any labels already built from it are FStrings
+// {data, count, max}; each replacement is no longer than the original, so it is written into the same buffers (and
+// back for an Xbox pad). The guest heap is rescanned only when the text changes; labels built later copy the config
+// value, which is already right.
 namespace press_start {
-constexpr char16_t kPad[] = u"Press START button", kKeyboard[] = u"Press ENTER";
-constexpr uint32_t kPadCount = std::size(kPad), kKeyboardCount = std::size(kKeyboard);  // FString count: with the null
+constexpr char16_t kPad[] = u"Press START button";
+constexpr uint32_t kPadCount = std::size(kPad);  // FString count: with the null; also the smallest buffer it is in
+constexpr std::u16string_view kTexts[] = {u"Press START button", u"Press ENTER", u"Press OPTIONS"};
+static_assert(kTexts[1].size() < kPadCount && kTexts[2].size() < kPadCount);
+
+// Which of kTexts the prompts call for.
+int TextFor(bots::PromptDevice device) {
+  return device == bots::PromptDevice::kKeyboardMouse ? 1 : bots::IsPlayStation(device) ? 2 : 0;
+}
 
 std::vector<uint8_t> Utf16Be(const char16_t* s, uint32_t count) {
   std::vector<uint8_t> out;
@@ -505,13 +513,12 @@ bool Committed(uint32_t address, uint32_t size) {
          uint64_t(address) + size <= uint64_t(info.base_address) + info.region_size;
 }
 
-void Rewrite(uint8_t* base, bool keyboard) {
+void Rewrite(uint8_t* base, int from_text, int to_text) {
   using clock = std::chrono::steady_clock;
   const auto t0 = clock::now();
-  const auto pad = Utf16Be(kPad, kPadCount), key = Utf16Be(kKeyboard, kKeyboardCount);
-  const std::vector<uint8_t>& from = keyboard ? pad : key;
-  const std::vector<uint8_t>& to = keyboard ? key : pad;
-  const uint32_t from_count = keyboard ? kPadCount : kKeyboardCount, to_count = keyboard ? kKeyboardCount : kPadCount;
+  const std::u16string_view from_view = kTexts[from_text], to_view = kTexts[to_text];
+  const uint32_t from_count = uint32_t(from_view.size()) + 1, to_count = uint32_t(to_view.size()) + 1;
+  const auto from = Utf16Be(from_view.data(), from_count), to = Utf16Be(to_view.data(), to_count);
   const uint32_t from_count_be = __builtin_bswap32(from_count), to_count_be = __builtin_bswap32(to_count);
   // One pass over UE3's heap (0x40000000-0x5FFFFFFF in every dump so far): an FString header {data, count, max} with
   // the right count (rare) whose data, also in the heap, holds the text.
@@ -535,8 +542,8 @@ void Rewrite(uint8_t* base, bool keyboard) {
     }
   });
   const auto ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
-  REXLOG_INFO("prompts: PressStart text -> '{}' ({} strings, {:.0f} ms)", keyboard ? "Press ENTER" : "Press START button",
-              strings, ms);
+  static constexpr const char* kNames[] = {"Press START button", "Press ENTER", "Press OPTIONS"};
+  REXLOG_INFO("prompts: PressStart text -> '{}' ({} strings, {:.0f} ms)", kNames[to_text], strings, ms);
 }
 
 // BOTS_PROMPT_TEST=<secs>:k|p[;...] (test only): switch the prompts to keyboard/mouse (k) or the pad (p) at that time.
@@ -572,15 +579,15 @@ void Tick(uint8_t* base, float dt) {
   TestSwitch(dt);
   static const bots::PromptState* state = bots::FindPromptState();
   static uint32_t seen = 0;
-  static bool rewritten = false;
+  static int shown = 0;  // kTexts index the guest strings hold
   if (!state) return;
   const uint32_t generation = state->generation.load(std::memory_order_relaxed);
   if (generation == seen) return;
   seen = generation;
-  const bool keyboard = state->keyboard_mouse.load(std::memory_order_relaxed) != 0;
-  if (!keyboard && !rewritten) return;
-  Rewrite(base, keyboard);
-  rewritten = true;
+  const int text = TextFor(state->Device());
+  if (text == shown) return;
+  Rewrite(base, shown, text);
+  shown = text;
 }
 }  // namespace press_start
 
@@ -1390,7 +1397,7 @@ uint32_t Add(PPCContext& ctx, uint8_t* base, const menu_pointer::Names& n, uint3
 
 void Tick(PPCContext& ctx, uint8_t* base, const menu_pointer::Names& n, bool menu) {
   static uint32_t done = 0;  // the screen it was added to
-  static int shown = -1;     // the text it shows: 1 keyboard/mouse, 0 pad
+  static int shown = -1;     // the text it shows: a PromptDevice
   static const bots::PromptState* prompts = bots::FindPromptState();
   uint32_t screen = menu ? 0 : FindScene(base, n.title);
   if (screen && LoadU32(base, screen + 0x260) & kInMovie) screen = 0;
@@ -1402,10 +1409,13 @@ void Tick(PPCContext& ctx, uint8_t* base, const menu_pointer::Names& n, bool men
   active = screen && label;
   menu_pointer::extra_menu = active;
   if (!active) return;
-  const int keyboard = prompts && prompts->keyboard_mouse.load(std::memory_order_relaxed) ? 1 : 0;
-  if (keyboard != shown) {
-    shown = keyboard;
-    SetLabel(ctx, base, label, keyboard ? "Quit" : "Press B to quit");
+  const bots::PromptDevice device = prompts ? prompts->Device() : bots::PromptDevice::kXbox;
+  if (int(device) != shown) {
+    shown = int(device);
+    SetLabel(ctx, base, label,
+             device == bots::PromptDevice::kKeyboardMouse ? "Quit"
+             : bots::IsPlayStation(device)                ? "Press CIRCLE to quit"
+                                                          : "Press B to quit");
   }
 }
 

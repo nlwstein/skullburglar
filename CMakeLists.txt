@@ -99,19 +99,24 @@ endif()
 if(REXSDK_DIR AND (NOT WIN32 OR REXGLUE_USE_VULKAN))
     set(REX_GRAPHICS_SRC ${REXSDK_DIR}/src/graphics)
 
-    # Keyboard/mouse prompt glyphs (assets/prompts: Kenney Input Prompts, CC0) compiled in as byte arrays. Written
-    # through configure_file so an unchanged sheet doesn't rebuild.
+    # Keyboard/mouse and PlayStation prompt glyphs (assets/prompts: Kenney Input Prompts, CC0) compiled in as byte
+    # arrays. Written through configure_file so an unchanged sheet doesn't rebuild.
     set(_glyphs_src "#include <cstddef>\n")
-    foreach(_kind Png Xml)
-        string(TOLOWER ${_kind} _ext)
-        set(_file ${CMAKE_CURRENT_SOURCE_DIR}/assets/prompts/keyboard-mouse.${_ext})
-        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_file})
-        file(READ ${_file} _hex HEX)
-        string(LENGTH "${_hex}" _len)
-        math(EXPR _len "${_len} / 2")
-        string(REGEX REPLACE "(..)" "0x\\1," _hex "${_hex}")
-        string(APPEND _glyphs_src "extern const unsigned char kPromptGlyphs${_kind}[] = {${_hex}};\n"
-            "extern const size_t kPromptGlyphs${_kind}Size = ${_len};\n")
+    foreach(_sheet keyboard-mouse:PromptGlyphs playstation:PlayStationGlyphs)
+        string(REPLACE ":" ";" _sheet "${_sheet}")
+        list(GET _sheet 0 _name)
+        list(GET _sheet 1 _symbol)
+        foreach(_kind Png Xml)
+            string(TOLOWER ${_kind} _ext)
+            set(_file ${CMAKE_CURRENT_SOURCE_DIR}/assets/prompts/${_name}.${_ext})
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_file})
+            file(READ ${_file} _hex HEX)
+            string(LENGTH "${_hex}" _len)
+            math(EXPR _len "${_len} / 2")
+            string(REGEX REPLACE "(..)" "0x\\1," _hex "${_hex}")
+            string(APPEND _glyphs_src "extern const unsigned char k${_symbol}${_kind}[] = {${_hex}};\n"
+                "extern const size_t k${_symbol}${_kind}Size = ${_len};\n")
+        endforeach()
     endforeach()
     file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/prompt_glyphs.cpp.in "${_glyphs_src}")
     configure_file(${CMAKE_CURRENT_BINARY_DIR}/prompt_glyphs.cpp.in ${CMAKE_CURRENT_BINARY_DIR}/prompt_glyphs.cpp
