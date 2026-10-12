@@ -42,9 +42,14 @@ and that is where most of the work in this port has gone.
   After that there is no shader-compile stutter in play, and later launches reuse the cache.
 - **Mac performance.** A native Apple silicon build (Vulkan through MoltenVK, tuned for Metal). An M2 Pro runs
   gameplay at well over 100 fps uncapped. Xenia has no macOS build at all.
-- **Split-screen co-op (experimental).** The original game's co-op only works over Xbox Live or system link. Here two
-  players share one screen, split top and bottom: turn on "Split-screen co-op" in the launcher, start a story, and
-  press START on a second controller to join. Each player has their own HUD, profile and saves.
+- **Co-op without Xbox Live.** The original game's co-op only works over Xbox Live or system link. Here it works
+  three ways, all from the game's own menus:
+  - **LAN co-op:** two computers on the same network (any mix of Windows, Linux, the Deck and macOS). One player
+    starts a story; the other picks Play Game, then Join COOP, and chooses that game from the list. On by default.
+  - **Split-screen co-op (experimental):** two players on one screen, split top and bottom. Turn it on in the
+    launcher, start a story, and press START on a second controller to join. Each player has their own HUD, profile
+    and saves.
+  - **Two windows on one PC (experimental):** the launcher's "Co-op on this PC" opens a second window for player 2.
 - **Resolution and display options.** Render at the original 720p or at 1080p, 1440p or 4K, or below 720p for weak
   GPUs (Intel graphics picks a lower scale automatically). VSync, frame-rate cap, fullscreen and windowed, all from
   the launcher.
@@ -56,8 +61,7 @@ The whole story is playable from start to finish on Windows, Linux, the Steam De
 
 ## Upcoming major features
 
-- **Online and LAN co-op.** Stand in for Xbox Live and system link so two copies of the port can play the story
-  together over a network.
+- **Online co-op.** Co-op over the internet, not just a local network.
 - **Frame rates above 60.** The game's simulation and cutscenes assume 60 fps or less; making higher frame rates
   safe needs per-system fixes.
 - **Ultrawide and field of view.** Proper 21:9 and wider support instead of letterboxing, and a field-of-view setting.

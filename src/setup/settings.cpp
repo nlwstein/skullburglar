@@ -59,11 +59,16 @@ std::vector<Setting> Catalog() {
   s.push_back({"present_vsync", "", "VSync", "Off has the lowest latency but can tear.", {}});
   s.push_back({"check_updates", "", "Check for new versions",
                "When the launcher opens, look online for a newer Skullburglar and offer its download page.", {}});
+  s.push_back({"user_signin_live", "", "LAN co-op",
+               "Play the story with another computer on your network. One player starts a story; the other picks "
+               "Play Game, then Join COOP, and chooses it from the list. Both computers need this on. On Windows, "
+               "allow Skullburglar through the firewall when asked, or games won't be found.",
+               {}});
+  s.back().section = "Co-op";
   s.push_back({"split_screen", "", "Split-screen co-op (experimental)",
                "One window, split top and bottom. During a story, press START on a second controller to join as "
                "player 2; player 2 leaves with Quit in their pause menu. The two-window option below overrides it.",
                {}});
-  s.back().section = "Co-op";
   s.push_back({"coop", "", "Co-op on this PC, two windows (experimental)",
                "Opens a second window for player 2. Player 1 starts a story; player 2 picks Join COOP and the game "
                "from the list.",

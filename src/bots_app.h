@@ -229,6 +229,15 @@ class BotsApp : public rex::ReXApp {
     bots::setup::MarkAppDefault(cvar);
   }
 
+  // The same for a cvar the SDK registered before this hook (REX_* is not replayed for those): set it unless the
+  // command line, the environment or bots.toml chose a value.
+  void SetCoreCvarDefault(const char* cvar, const char* value) {
+    if (bots::setup::ConfigHasKey(config_path_, cvar)) return;
+    if (rex::cvar::GetFlagSource(cvar) != rex::cvar::Source::kDefault) return;
+    rex::cvar::SetFlagByName(cvar, value);
+    bots::setup::MarkAppDefault(cvar);
+  }
+
   // The present_vsync setting (bots.toml / launcher, default on) picks the Vulkan present mode through the SDK's
   // vulkan_allow_present_mode_* cvars, read when the swapchain is created: on = FIFO (the SDK then paints on the UI
   // thread at each vblank, so the guest thread never waits for the display), off = IMMEDIATE (can tear). A present
@@ -300,6 +309,11 @@ class BotsApp : public rex::ReXApp {
     // The front end never waits for vblank (130-250 swaps/s, B-038) and gameplay runs 32-52 fps
     // since upload hoisting. Cap at 60 (SDK patch 0004 cvar; same default as xenia-canary).
     SetCvarDefault("framerate_limit", "REX_FRAMERATE_LIMIT", "60");
+    // LAN co-op (B-057): the game's co-op menus are Live-only, and the system-link hooks turn every session into a LAN
+    // one, so a "Live" sign-in is what lets Join COOP find another computer's story (and gives a host's story the slots
+    // a joiner needs). On by default so LAN co-op needs no setup; the launcher's "LAN co-op" setting turns it off. A core
+    // SDK cvar, registered before this hook, so it is set directly rather than through REX_* like the ones above.
+    SetCoreCvarDefault("user_signin_live", "true");
     ApplyVsync();
     // D3D12 (Windows): the ROV render-target path does exact 24-bit float depth in the shader, the
     // D3D12 counterpart of the float24 fix above. The default host-RTV path renders characters black

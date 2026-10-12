@@ -1503,7 +1503,7 @@ index 2d13ac8..8a26a36 100644
  X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, uint32_t optlen) {
    if (level == 0xFFFF && (optname == 0x5801 || optname == 0x5802)) {
      // Disable socket encryption
-@@ -76,32 +443,155 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
+@@ -76,32 +443,159 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
      return X_STATUS_SUCCESS;
    }
  
@@ -1554,6 +1554,10 @@ index 2d13ac8..8a26a36 100644
 +    return X_STATUS_SUCCESS;
 +  }
 +  int v = int(value);
++  // A console's 32 KB buffer holds 32 KB of datagrams; Linux, macOS and Windows count each datagram's bookkeeping
++  // too (Linux: ~2 KB per packet), so 32 KB holds about 15. A UE3 host sends a joiner ~40 packets at once (the
++  // package map), and the ones that overflowed were lost often enough to leave the joiner without its pawn.
++  if (host_level == SOL_SOCKET && (host_name == SO_RCVBUF || host_name == SO_SNDBUF)) v = std::max(v, 1 << 20);
 +  int ret = setsockopt(native_handle_, host_level, host_name, reinterpret_cast<char*>(&v), sizeof(v));
 +  if (netplay::Trace()) {
 +    REXLOG_INFO("netplay: socket {:X} setsockopt({:X}, {:X}) = {} -> {}", handle(), level, optname,

@@ -62,6 +62,31 @@ Menus work with the mouse. Button prompts follow the device you last used. Keys 
 To quit, choose Quit on the main menu or close the window.
 
 
+Co-op
+-----
+
+The story can be played by two people, three ways. All of them are in the launcher's Co-op section.
+
+LAN co-op (two computers on the same network; on by default)
+  1. Player 1 starts a story (Play Game, then New Story or a chapter).
+  2. Player 2 picks Play Game, then Join COOP, chooses a sidekick and weapons, then Find Game.
+  3. Player 1's game shows up in the Game List; select it to join. X refreshes the list.
+  Windows, Linux, the Steam Deck and macOS can play together. On Windows, allow Skullburglar through the firewall
+  the first time it asks, or games won't be found. If you dismissed that prompt: Windows Security > Firewall &
+  network protection > Allow an app through firewall, and tick Private for Skullburglar.
+  It uses UDP ports 24001 and 17777. If the list stays empty on a network that blocks broadcasts, start the game
+  with --netplay_peers=<the other computer's IP address>. Turn LAN co-op off in the launcher if you don't want
+  others on your network to see your story.
+
+Split-screen co-op (one screen; experimental)
+  Turn on "Split-screen co-op" in the launcher. During a story, press START on a second controller to join as
+  player 2. Player 2 leaves with Quit in their pause menu.
+
+Two windows on one PC (experimental)
+  Turn on "Co-op on this PC, two windows". Player 2's window opens next to player 1's: player 1 starts a story,
+  player 2 picks Play Game, then Join COOP. "Co-op controllers" picks which pad is whose.
+
+
 Where things are kept
 ---------------------
 
