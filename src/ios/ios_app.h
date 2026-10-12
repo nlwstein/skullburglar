@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 
 namespace bots::ios {
 
@@ -15,6 +16,12 @@ std::filesystem::path CachesDir();
 // Where the game files, saves and logs go: Documents on iOS. tvOS apps have no persistent storage of their own, so
 // there it is Caches, which the system may purge when the device runs short of space.
 std::filesystem::path DataDir();
+
+// Shows the import screen and serves an upload page on the local network until the player's disc image is extracted
+// into game_dir, then calls done on the main thread (game_import.mm). Call on the main thread.
+void ImportGame(const std::filesystem::path& game_dir, std::function<void()> done);
+// Keeps a folder of game files out of device backups (iOS; tvOS has none).
+void ExcludeFromBackup(const std::filesystem::path& dir);
 
 // What the on-screen controller is pressing. Written on the UI thread, read by the input driver.
 struct TouchPadState {

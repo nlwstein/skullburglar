@@ -106,8 +106,8 @@ class BotsApp : public rex::ReXApp {
     namespace fs = std::filesystem;
     std::error_code ec;
 #if TARGET_OS_IPHONE
-    // iOS and tvOS (experimental): everything lives in the app container. The game files go in <data>/game (copied
-    // there over USB, or on iOS through the Files app), saves in <data>/user, the shader cache in Caches; <data> is
+    // iOS and tvOS (experimental): everything lives in the app container. The game files go in <data>/game (imported
+    // over the local network, see OnFinalizePaths, or copied there over USB or the iOS Files app), saves in <data>/user, the shader cache in Caches; <data> is
     // Documents on iOS and Caches on tvOS (bots::ios::DataDir). No launcher.
     {
       const fs::path docs = bots::ios::DataDir();
@@ -168,7 +168,14 @@ class BotsApp : public rex::ReXApp {
   std::optional<rex::PathConfig> OnFinalizePaths(
       const rex::PathConfig& defaults, std::function<void(rex::PathConfig)> resume) override {
 #if TARGET_OS_IPHONE
-    return defaults;  // no launcher on iOS and tvOS
+    // No launcher on iOS and tvOS. Without game files, the import screen takes the player's disc image over the local
+    // network; the files stay in the app's data folder across app updates.
+    if (bots::setup::IsGameDir(defaults.game_data_root)) {
+      bots::ios::ExcludeFromBackup(defaults.game_data_root);
+      return defaults;
+    }
+    bots::ios::ImportGame(defaults.game_data_root, [defaults, resume] { resume(defaults); });
+    return std::nullopt;
 #endif
     bool requested = !game_root_given_;
     if (rex::cvar::GetFlagSource("launcher") != rex::cvar::Source::kDefault)
