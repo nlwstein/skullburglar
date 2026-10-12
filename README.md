@@ -46,6 +46,7 @@ and that is where most of the work in this port has gone.
   three ways, all from the game's own menus:
   - **LAN co-op:** two computers on the same network (any mix of Windows, Linux, the Deck and macOS). One player
     starts a story; the other picks Play Game, then Join COOP, and chooses that game from the list. On by default.
+    On Windows the launcher asks for firewall access up front and shows whether LAN games can get through.
   - **Split-screen co-op (experimental):** two players on one screen, split top and bottom. Turn it on in the
     launcher, start a story, and press START on a second controller to join. Each player has their own HUD, profile
     and saves.

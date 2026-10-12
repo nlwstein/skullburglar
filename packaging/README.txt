@@ -71,9 +71,10 @@ LAN co-op (two computers on the same network; on by default)
   1. Player 1 starts a story (Play Game, then New Story or a chapter).
   2. Player 2 picks Play Game, then Join COOP, chooses a sidekick and weapons, then Find Game.
   3. Player 1's game shows up in the Game List; select it to join. X refreshes the list.
-  Windows, Linux, the Steam Deck and macOS can play together. On Windows, allow Skullburglar through the firewall
-  the first time it asks, or games won't be found. If you dismissed that prompt: Windows Security > Firewall &
-  network protection > Allow an app through firewall, and tick Private for Skullburglar.
+  Windows, Linux, the Steam Deck and macOS can play together. On Windows, the launcher asks Windows Firewall for
+  network access the first time: choose Allow, or games won't be found. The line under "LAN co-op" in the launcher
+  says whether the firewall allows it; if it's blocking, "Allow Skullburglar" fixes it (Windows asks for
+  administrator permission).
   It uses UDP ports 24001 and 17777. If the list stays empty on a network that blocks broadcasts, start the game
   with --netplay_peers=<the other computer's IP address>. Turn LAN co-op off in the launcher if you don't want
   others on your network to see your story.
