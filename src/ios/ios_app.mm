@@ -43,33 +43,32 @@ enum : uint16_t {
 };
 enum : uint16_t { kLT = 1, kRT = 2 };  // triggers, kept apart from the button bits
 
-// The layout follows the touch layouts players know from cloud gaming and mobile shooters: a floating move stick on
-// the left, swipe-to-look on the right (finger speed drives the right stick, like a touchpad), the face diamond in the
-// lower right with a large fire button above it that also aims while dragged, shoulders at the top corners, and a
-// double tap on either side clicks that stick (L3 / R3) for as long as the finger stays down.
+// The layout of Xbox Cloud Gaming's standard touch controls, which mirrors the controller: the left stick high on the
+// left with the d-pad below and inside it; A/B/X/Y high on the right with the right stick below and inside them;
+// triggers over bumpers in the top corners; View and Menu at the top centre. Monochrome: dark translucent shapes with
+// a thin white outline and white glyphs. A stick starts where the thumb lands near it and returns home on release; a
+// double tap holds the stick's click (L3 / R3) for as long as the thumb stays down.
 namespace {
-constexpr CGFloat kStickRadius = 64;     // travel of the move stick, points
-constexpr CGFloat kKnobRadius = 28;
-constexpr CGFloat kFace = 60;            // face button diameter
-constexpr CGFloat kHitSlop = 14;         // touch area beyond a button's edge
-constexpr CGFloat kLookFullSpeed = 9;    // finger points per frame for full right-stick deflection
-constexpr CGFloat kStickDeadZone = 0.24; // XInput's right-stick dead zone; small swipes start just past it
-constexpr double kDoubleTap = 0.3;       // seconds
+constexpr CGFloat kStickRadius = 62;  // stick travel, points
+constexpr CGFloat kKnobRadius = 30;
+constexpr CGFloat kFace = 56;         // face button diameter
+constexpr CGFloat kHitSlop = 14;      // touch area beyond a button's edge
+constexpr double kDoubleTap = 0.3;    // seconds
 
-UIColor* Rgb(uint32_t rgb, CGFloat a = 1) {
-  return [UIColor colorWithRed:((rgb >> 16) & 0xFF) / 255.0 green:((rgb >> 8) & 0xFF) / 255.0
-                          blue:(rgb & 0xFF) / 255.0 alpha:a];
-}
+UIColor* Fill(bool down) { return [UIColor colorWithWhite:down ? 1 : 0 alpha:down ? 0.5 : 0.35]; }
+UIColor* Outline() { return [UIColor colorWithWhite:1 alpha:0.55]; }
 
 // A glyph as layer contents: an SF Symbol, or text in the rounded system font.
-UIImage* Glyph(NSString* text, NSString* symbol, UIColor* color, CGFloat size) {
+UIImage* Glyph(NSString* text, NSString* symbol, CGFloat size) {
+  UIColor* color = [UIColor colorWithWhite:1 alpha:0.92];
   if (symbol) {
     UIImageSymbolConfiguration* config =
         [UIImageSymbolConfiguration configurationWithPointSize:size weight:UIImageSymbolWeightBold];
-    return [[UIImage systemImageNamed:symbol withConfiguration:config] imageWithTintColor:color
-                                                                            renderingMode:UIImageRenderingModeAlwaysOriginal];
+    return [[UIImage systemImageNamed:symbol withConfiguration:config]
+        imageWithTintColor:color
+             renderingMode:UIImageRenderingModeAlwaysOriginal];
   }
-  UIFont* font = [UIFont systemFontOfSize:size weight:UIFontWeightHeavy];
+  UIFont* font = [UIFont systemFontOfSize:size weight:UIFontWeightBold];
   if (UIFontDescriptor* rounded = [font.fontDescriptor fontDescriptorWithDesign:UIFontDescriptorSystemDesignRounded]) {
     font = [UIFont fontWithDescriptor:rounded size:size];
   }
@@ -79,14 +78,21 @@ UIImage* Glyph(NSString* text, NSString* symbol, UIColor* color, CGFloat size) {
     [text drawAtPoint:CGPointZero withAttributes:attrs];
   }];
 }
+
+CAShapeLayer* ShapeLayer(CGFloat line) {
+  CAShapeLayer* layer = [CAShapeLayer layer];
+  layer.fillColor = Fill(false).CGColor;
+  layer.strokeColor = Outline().CGColor;
+  layer.lineWidth = line;
+  return layer;
+}
 }  // namespace
 
 @interface BotsPadButton : NSObject
 @property(nonatomic) uint16_t bit;
 @property(nonatomic) uint16_t trigger;
-@property(nonatomic) BOOL aims;           // dragging from it also looks (the fire button)
-@property(nonatomic) CGRect frame;        // laid out on every size change
-@property(nonatomic) CGFloat corner;      // frame.height / 2 for a circle or pill
+@property(nonatomic) CGRect frame;    // laid out on every size change
+@property(nonatomic) CGFloat corner;  // frame.height / 2: a circle or a pill
 @property(nonatomic, strong) CALayer* root;
 @property(nonatomic, strong) CAShapeLayer* shape;
 @property(nonatomic, strong) CALayer* glyph;
@@ -95,16 +101,18 @@ UIImage* Glyph(NSString* text, NSString* symbol, UIColor* color, CGFloat size) {
 @implementation BotsPadButton
 @end
 
-// A floating stick: it centres where the touch lands inside its zone and rests at `home` otherwise.
+// A stick with a home position. A touch inside its zone recentres it under the thumb; release sends it home.
 @interface BotsPadStick : NSObject
+@property(nonatomic) BOOL right;
 @property(nonatomic) CGRect zone;
 @property(nonatomic) CGPoint home;
 @property(nonatomic) CGPoint origin;
 @property(nonatomic, weak) UITouch* touch;
-@property(nonatomic) BOOL click;          // double tap: L3 held while this touch lasts
+@property(nonatomic) BOOL click;  // double tap: the stick's click, held while this touch lasts
 @property(nonatomic) CFTimeInterval lastTap;
 @property(nonatomic, strong) CAShapeLayer* base;
 @property(nonatomic, strong) CAShapeLayer* knob;
+@property(nonatomic, strong) CALayer* label;
 @end
 @implementation BotsPadStick
 @end
@@ -115,21 +123,13 @@ UIImage* Glyph(NSString* text, NSString* symbol, UIColor* color, CGFloat size) {
 @implementation BotsTouchOverlayView {
   NSMutableArray<BotsPadButton*>* _buttons;
   NSMapTable<UITouch*, BotsPadButton*>* _buttonTouches;
-  BotsPadStick* _move;
-  // Swipe-to-look: the touch, its zone, and the movement since the last display frame.
-  CGRect _lookZone;
-  __weak UITouch* _lookTouch;
-  CGPoint _lookLast;
-  CGVector _lookDelta;
-  CGVector _lookSmooth;
-  BOOL _lookClick;
-  CFTimeInterval _lookLastTap;
-  CADisplayLink* _link;
+  BotsPadStick* _sticks[2];  // left, right
   // D-pad: one control, eight directions from the angle around its centre.
   CGPoint _dpadCenter;
   CGFloat _dpadRadius;
   __weak UITouch* _dpadTouch;
   uint16_t _dpadBits;
+  CAShapeLayer* _dpadBase;
   CAShapeLayer* _dpadArms[4];  // up, down, left, right
   UIImpactFeedbackGenerator* _haptic;
 }
@@ -144,36 +144,28 @@ UIImage* Glyph(NSString* text, NSString* symbol, UIColor* color, CGFloat size) {
     _haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [_haptic prepare];
 
-    UIColor* white = [UIColor colorWithWhite:1 alpha:0.9];
     struct Def {
       NSString* text;
       NSString* symbol;
-      uint32_t color;  // 0: white
       uint16_t bit, trigger;
       CGFloat glyph;
     };
-    // Xbox face colours; Back and Start use the View and Menu glyphs.
+    // Order matters: layoutSubviews places them by index.
     const Def defs[] = {
-        {@"A", nil, 0x6DBE45, kA, 0, 26},  {@"B", nil, 0xE8483A, kB, 0, 26},
-        {@"X", nil, 0x3A8FE8, kX, 0, 26},  {@"Y", nil, 0xF2C230, kY, 0, 26},
-        {@"LB", nil, 0, kLB, 0, 17},       {@"RB", nil, 0, kRB, 0, 17},
-        {@"LT", nil, 0, 0, kLT, 18},       {nil, @"scope", 0, 0, kRT, 30},
-        {nil, @"rectangle.on.rectangle", 0, kBack, 0, 15},
-        {nil, @"line.3.horizontal", 0, kStart, 0, 15},
+        {@"A", nil, kA, 0, 24},  {@"B", nil, kB, 0, 24},   {@"X", nil, kX, 0, 24},   {@"Y", nil, kY, 0, 24},
+        {@"LB", nil, kLB, 0, 16}, {@"RB", nil, kRB, 0, 16}, {@"LT", nil, 0, kLT, 16}, {@"RT", nil, 0, kRT, 16},
+        {nil, @"rectangle.on.rectangle", kBack, 0, 14},  // View
+        {nil, @"line.3.horizontal", kStart, 0, 14},       // Menu
     };
     for (const Def& d : defs) {
       BotsPadButton* b = [BotsPadButton new];
       b.bit = d.bit;
       b.trigger = d.trigger;
-      b.aims = d.trigger == kRT;
       b.root = [CALayer layer];
-      b.shape = [CAShapeLayer layer];
-      b.shape.fillColor = [UIColor colorWithWhite:0 alpha:0.28].CGColor;
-      b.shape.strokeColor = (d.color ? Rgb(d.color, 0.7) : [UIColor colorWithWhite:1 alpha:0.5]).CGColor;
-      b.shape.lineWidth = d.color ? 2.5 : 1.5;
+      b.shape = ShapeLayer(1.5);
       [b.root addSublayer:b.shape];
       b.glyph = [CALayer layer];
-      UIImage* image = Glyph(d.text, d.symbol, d.color ? Rgb(d.color) : white, d.glyph);
+      UIImage* image = Glyph(d.text, d.symbol, d.glyph);
       b.glyph.contents = (__bridge id)image.CGImage;
       b.glyph.contentsScale = image.scale;
       b.glyph.contentsGravity = kCAGravityCenter;
@@ -182,29 +174,31 @@ UIImage* Glyph(NSString* text, NSString* symbol, UIColor* color, CGFloat size) {
       [_buttons addObject:b];
     }
 
+    _dpadBase = ShapeLayer(1.5);
+    _dpadBase.fillColor = [UIColor colorWithWhite:0 alpha:0.2].CGColor;
+    [self.layer addSublayer:_dpadBase];
     for (auto& arm : _dpadArms) {
-      arm = [CAShapeLayer layer];
-      arm.fillColor = [UIColor colorWithWhite:0 alpha:0.28].CGColor;
-      arm.strokeColor = [UIColor colorWithWhite:1 alpha:0.5].CGColor;
-      arm.lineWidth = 1.5;
+      arm = ShapeLayer(1.5);
       [self.layer addSublayer:arm];
     }
 
-    _move = [BotsPadStick new];
-    _move.base = [CAShapeLayer layer];
-    _move.base.fillColor = [UIColor colorWithWhite:0 alpha:0.22].CGColor;
-    _move.base.strokeColor = [UIColor colorWithWhite:1 alpha:0.45].CGColor;
-    _move.base.lineWidth = 2;
-    _move.knob = [CAShapeLayer layer];
-    _move.knob.fillColor = [UIColor colorWithWhite:1 alpha:0.35].CGColor;
-    _move.knob.strokeColor = [UIColor colorWithWhite:1 alpha:0.6].CGColor;
-    _move.knob.lineWidth = 1.5;
-    [self.layer addSublayer:_move.base];
-    [self.layer addSublayer:_move.knob];
-
-    _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(lookTick:)];
-    _link.paused = YES;
-    [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    for (int i = 0; i < 2; ++i) {
+      BotsPadStick* s = [BotsPadStick new];
+      s.right = i == 1;
+      s.base = ShapeLayer(1.5);
+      s.base.fillColor = [UIColor colorWithWhite:0 alpha:0.25].CGColor;
+      s.knob = ShapeLayer(1.5);
+      s.knob.fillColor = [UIColor colorWithWhite:0.15 alpha:0.6].CGColor;
+      s.label = [CALayer layer];
+      UIImage* image = Glyph(i ? @"R" : @"L", nil, 15);
+      s.label.contents = (__bridge id)image.CGImage;
+      s.label.contentsScale = image.scale;
+      s.label.contentsGravity = kCAGravityCenter;
+      [self.layer addSublayer:s.base];
+      [self.layer addSublayer:s.knob];
+      [self.layer addSublayer:s.label];
+      _sticks[i] = s;
+    }
   }
   return self;
 }
@@ -212,13 +206,13 @@ UIImage* Glyph(NSString* text, NSString* symbol, UIColor* color, CGFloat size) {
 - (void)layoutSubviews {
   [super layoutSubviews];
   // Inside the safe area (the Dynamic Island side and the home indicator), with a small margin.
-  const CGRect safe = CGRectInset(UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets), 10, 8);
+  const CGRect safe = CGRectInset(UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets), 12, 10);
   const CGFloat L = CGRectGetMinX(safe), R = CGRectGetMaxX(safe), T = CGRectGetMinY(safe), B = CGRectGetMaxY(safe);
-  const CGFloat w = safe.size.width;
+  const CGFloat w = safe.size.width, h = safe.size.height;
   auto put = [&](NSUInteger i, CGPoint c, CGSize size) {
     BotsPadButton* b = _buttons[i];
     b.frame = CGRectMake(c.x - size.width / 2, c.y - size.height / 2, size.width, size.height);
-    b.corner = size.height / 2;
+    b.corner = std::min(size.width, size.height) / 2;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     b.root.frame = b.frame;
@@ -226,25 +220,37 @@ UIImage* Glyph(NSString* text, NSString* symbol, UIColor* color, CGFloat size) {
     b.glyph.frame = b.root.bounds;
     [CATransaction commit];
   };
-  const CGSize face = CGSizeMake(kFace, kFace);
-  const CGFloat gap = kFace * 1.08;  // centre to centre, diamond arm
-  const CGPoint diamond = CGPointMake(R - gap - kFace / 2, B - gap - kFace / 2);
-  put(0, CGPointMake(diamond.x, diamond.y + gap), face);  // A
-  put(1, CGPointMake(diamond.x + gap, diamond.y), face);  // B
-  put(2, CGPointMake(diamond.x - gap, diamond.y), face);  // X
-  put(3, CGPointMake(diamond.x, diamond.y - gap), face);  // Y
-  put(4, CGPointMake(L + 62, T + 24), CGSizeMake(112, 44));  // LB
-  put(5, CGPointMake(R - 62, T + 24), CGSizeMake(112, 44));  // RB
-  // Fire above-left of the diamond, aim above Y: the two thumbs' resting reach on the right.
-  put(7, CGPointMake(diamond.x - gap * 1.85, diamond.y - gap * 1.55), CGSizeMake(84, 84));  // RT
-  put(6, CGPointMake(diamond.x + gap * 0.55, diamond.y - gap * 2.25), CGSizeMake(58, 58));  // LT
-  put(8, CGPointMake(L + w / 2 - 34, T + 22), CGSizeMake(44, 44));  // Back (View)
-  put(9, CGPointMake(L + w / 2 + 34, T + 22), CGSizeMake(44, 44));  // Start (Menu)
 
-  // D-pad: right of the move stick's resting place, low enough for a thumb sliding off the stick.
-  _dpadRadius = 52;
-  _dpadCenter = CGPointMake(L + 250, B - 62);
-  const CGFloat arm = _dpadRadius * 0.62, thick = _dpadRadius * 0.66;
+  // Right hand: A/B/X/Y high and outside, the right stick low and inside.
+  const CGFloat gap = kFace * 1.05;
+  const CGPoint face = CGPointMake(R - gap - kFace / 2, T + h * 0.52);
+  put(0, CGPointMake(face.x, face.y + gap), CGSizeMake(kFace, kFace));  // A
+  put(1, CGPointMake(face.x + gap, face.y), CGSizeMake(kFace, kFace));  // B
+  put(2, CGPointMake(face.x - gap, face.y), CGSizeMake(kFace, kFace));  // X
+  put(3, CGPointMake(face.x, face.y - gap), CGSizeMake(kFace, kFace));  // Y
+  // Shoulders: the trigger in the corner, the bumper under it.
+  const CGSize shoulder = CGSizeMake(88, 40);
+  put(6, CGPointMake(L + shoulder.width / 2, T + shoulder.height / 2), shoulder);       // LT
+  put(4, CGPointMake(L + shoulder.width / 2, T + shoulder.height * 1.7), shoulder);     // LB
+  put(7, CGPointMake(R - shoulder.width / 2, T + shoulder.height / 2), shoulder);       // RT
+  put(5, CGPointMake(R - shoulder.width / 2, T + shoulder.height * 1.7), shoulder);     // RB
+  put(8, CGPointMake(L + w / 2 - 30, T + 20), CGSizeMake(40, 40));                       // View
+  put(9, CGPointMake(L + w / 2 + 30, T + 20), CGSizeMake(40, 40));                       // Menu
+
+  // Sticks: left high and outside, right low and inside, like the controller. Each takes touches in its quarter.
+  BotsPadStick* left = _sticks[0];
+  BotsPadStick* right = _sticks[1];
+  left.home = CGPointMake(L + kStickRadius + 26, T + h * 0.55);
+  right.home = CGPointMake(R - w * 0.30, B - kStickRadius - 4);
+  const CGFloat top = T + shoulder.height * 2.3;  // below the shoulder buttons
+  left.zone = CGRectMake(CGRectGetMinX(self.bounds), top, L + w * 0.30 - CGRectGetMinX(self.bounds),
+                         CGRectGetMaxY(self.bounds) - top);
+  right.zone = CGRectMake(L + w * 0.55, T + h * 0.45, w * 0.45 - gap * 2.2, CGRectGetMaxY(self.bounds) - T - h * 0.45);
+
+  // D-pad: low and inside, under the left stick.
+  _dpadRadius = 50;
+  _dpadCenter = CGPointMake(L + w * 0.30, B - _dpadRadius - 2);
+  const CGFloat arm = _dpadRadius * 0.64, thick = _dpadRadius * 0.62;
   const CGRect arms[4] = {
       CGRectMake(_dpadCenter.x - thick / 2, _dpadCenter.y - _dpadRadius, thick, arm),
       CGRectMake(_dpadCenter.x - thick / 2, _dpadCenter.y + _dpadRadius - arm, thick, arm),
@@ -253,48 +259,46 @@ UIImage* Glyph(NSString* text, NSString* symbol, UIColor* color, CGFloat size) {
   };
   [CATransaction begin];
   [CATransaction setDisableActions:YES];
-  for (int i = 0; i < 4; ++i) _dpadArms[i].path = [UIBezierPath bezierPathWithRoundedRect:arms[i] cornerRadius:8].CGPath;
+  _dpadBase.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(CGRectMake(_dpadCenter.x, _dpadCenter.y, 0, 0),
+                                                                       -_dpadRadius - 6, -_dpadRadius - 6)]
+                       .CGPath;
+  for (int i = 0; i < 4; ++i) _dpadArms[i].path = [UIBezierPath bezierPathWithRoundedRect:arms[i] cornerRadius:6].CGPath;
   [CATransaction commit];
 
-  // Move on the left 40% below the shoulders, look on the rest; buttons take their touches first.
-  _move.zone = CGRectMake(CGRectGetMinX(self.bounds), T + 52, L + w * 0.40 - CGRectGetMinX(self.bounds),
-                          CGRectGetMaxY(self.bounds) - T - 52);
-  _move.home = CGPointMake(L + kStickRadius + 40, B - kStickRadius - 30);
-  _lookZone = CGRectMake(L + w * 0.40, T + 52, CGRectGetMaxX(self.bounds) - L - w * 0.40,
-                         CGRectGetMaxY(self.bounds) - T - 52);
-  [self drawMove:CGVectorMake(0, 0)];
+  for (BotsPadStick* s : {left, right}) [self drawStick:s offset:CGVectorMake(0, 0)];
   [self drawButtons];
 }
 
-- (void)drawMove:(CGVector)offset {
-  const CGPoint c = _move.touch ? _move.origin : _move.home;
+- (void)drawStick:(BotsPadStick*)s offset:(CGVector)offset {
+  const CGPoint c = s.touch ? s.origin : s.home;
+  const CGPoint k = CGPointMake(c.x + offset.dx, c.y + offset.dy);
   [CATransaction begin];
   [CATransaction setDisableActions:YES];
-  _move.base.path = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(c.x - kStickRadius, c.y - kStickRadius,
-                                                                      2 * kStickRadius, 2 * kStickRadius)]
-                        .CGPath;
-  _move.knob.path = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(c.x + offset.dx - kKnobRadius,
-                                                                      c.y + offset.dy - kKnobRadius,
-                                                                      2 * kKnobRadius, 2 * kKnobRadius)]
-                        .CGPath;
-  _move.base.opacity = _move.touch ? 1.0 : 0.6;
-  _move.knob.opacity = _move.touch ? 1.0 : 0.6;
-  _move.knob.fillColor = [UIColor colorWithWhite:1 alpha:_move.click ? 0.75 : 0.35].CGColor;
+  s.base.path = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(c.x - kStickRadius, c.y - kStickRadius,
+                                                                  2 * kStickRadius, 2 * kStickRadius)]
+                    .CGPath;
+  s.knob.path = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(k.x - kKnobRadius, k.y - kKnobRadius,
+                                                                  2 * kKnobRadius, 2 * kKnobRadius)]
+                    .CGPath;
+  s.knob.fillColor = (s.click ? [UIColor colorWithWhite:1 alpha:0.55] : [UIColor colorWithWhite:0.15 alpha:0.6]).CGColor;
+  s.label.frame = CGRectMake(k.x - kKnobRadius, k.y - kKnobRadius, 2 * kKnobRadius, 2 * kKnobRadius);
+  const float opacity = s.touch ? 1.0 : 0.75;
+  s.base.opacity = s.knob.opacity = s.label.opacity = opacity;
   [CATransaction commit];
 }
 
 - (void)drawButtons {
   [CATransaction begin];
-  [CATransaction setAnimationDuration:0.06];
+  [CATransaction setAnimationDuration:0.05];
   for (BotsPadButton* b in _buttons) {
-    b.shape.fillColor = [UIColor colorWithWhite:b.down ? 1 : 0 alpha:b.down ? 0.45 : 0.28].CGColor;
-    b.root.transform = b.down ? CATransform3DMakeScale(0.92, 0.92, 1) : CATransform3DIdentity;
+    b.shape.fillColor = Fill(b.down).CGColor;
+    b.root.transform = b.down ? CATransform3DMakeScale(0.93, 0.93, 1) : CATransform3DIdentity;
     b.root.opacity = b.down ? 1.0 : 0.8;
   }
   const uint16_t bits[4] = {kUp, kDown, kLeft, kRight};
   for (int i = 0; i < 4; ++i) {
     const bool down = _dpadBits & bits[i];
-    _dpadArms[i].fillColor = [UIColor colorWithWhite:down ? 1 : 0 alpha:down ? 0.45 : 0.28].CGColor;
+    _dpadArms[i].fillColor = Fill(down).CGColor;
     _dpadArms[i].opacity = down ? 1.0 : 0.8;
   }
   [CATransaction commit];
@@ -306,8 +310,8 @@ UIImage* Glyph(NSString* text, NSString* symbol, UIColor* color, CGFloat size) {
   CGFloat best_d = CGFLOAT_MAX;
   for (BotsPadButton* b in _buttons) {
     const CGRect f = b.frame;
-    // Distance from p to the rounded rect: to its core segment, minus the corner radius.
     const CGFloat r = b.corner;
+    // Distance from p to the rounded rect: to its core segment, minus the corner radius.
     const CGFloat cx = std::clamp(p.x, CGRectGetMinX(f) + r, CGRectGetMaxX(f) - r);
     const CGFloat cy = std::clamp(p.y, CGRectGetMinY(f) + r, CGRectGetMaxY(f) - r);
     const CGFloat d = std::hypot(p.x - cx, p.y - cy) - r;
@@ -325,7 +329,7 @@ UIImage* Glyph(NSString* text, NSString* symbol, UIColor* color, CGFloat size) {
 
 - (uint16_t)dpadBitsAt:(CGPoint)p {
   const CGFloat dx = p.x - _dpadCenter.x, dy = p.y - _dpadCenter.y;
-  if (std::hypot(dx, dy) < _dpadRadius * 0.18) return 0;  // the centre is neutral
+  if (std::hypot(dx, dy) < _dpadRadius * 0.2) return 0;  // the centre is neutral
   // Eight 45-degree sectors; the diagonal ones press both neighbours.
   const int sector = int(std::lround(std::atan2(-dy, dx) / (M_PI / 4))) & 7;  // 0 = right, counter-clockwise
   static constexpr uint16_t kSectors[8] = {kRight, kRight | kUp, kUp, kUp | kLeft,
@@ -345,8 +349,8 @@ UIImage* Glyph(NSString* text, NSString* symbol, UIColor* color, CGFloat size) {
     if (b.trigger == kLT) lt = 255;
     if (b.trigger == kRT) rt = 255;
   }
-  if (_move.click) buttons |= kLS;
-  if (_lookClick) buttons |= kRS;
+  if (_sticks[0].click) buttons |= kLS;
+  if (_sticks[1].click) buttons |= kRS;
   // A light tap on every new press, like a controller's click.
   if ((buttons & ~pad.buttons.load(std::memory_order_relaxed)) || (lt && !pad.left_trigger.load()) ||
       (rt && !pad.right_trigger.load())) {
@@ -358,13 +362,10 @@ UIImage* Glyph(NSString* text, NSString* symbol, UIColor* color, CGFloat size) {
   [self drawButtons];
 }
 
-- (void)moveTo:(CGPoint)p {
-  CGFloat dx = p.x - _move.origin.x, dy = p.y - _move.origin.y;
+- (void)stick:(BotsPadStick*)s movedTo:(CGPoint)p {
+  CGFloat dx = p.x - s.origin.x, dy = p.y - s.origin.y;
   const CGFloat len = std::hypot(dx, dy);
   if (len > kStickRadius) {
-    // Past the rim the base follows the finger, so reversing direction is instant.
-    const CGFloat over = len - kStickRadius;
-    _move.origin = CGPointMake(_move.origin.x + dx / len * over, _move.origin.y + dy / len * over);
     dx *= kStickRadius / len;
     dy *= kStickRadius / len;
   }
@@ -372,43 +373,18 @@ UIImage* Glyph(NSString* text, NSString* symbol, UIColor* color, CGFloat size) {
     return static_cast<int16_t>(std::clamp(v / kStickRadius, CGFloat(-1), CGFloat(1)) * 32767);
   };
   auto& pad = bots::ios::TouchPad();
-  pad.thumb_lx.store(axis(dx), std::memory_order_relaxed);
-  pad.thumb_ly.store(axis(-dy), std::memory_order_relaxed);  // up is positive
-  [self drawMove:CGVectorMake(dx, dy)];
+  (s.right ? pad.thumb_rx : pad.thumb_lx).store(axis(dx), std::memory_order_relaxed);
+  (s.right ? pad.thumb_ry : pad.thumb_ly).store(axis(-dy), std::memory_order_relaxed);  // up is positive
+  [self drawStick:s offset:CGVectorMake(dx, dy)];
 }
 
-// Swipe-to-look: each display frame turns the finger's movement since the last one into a right-stick deflection,
-// lightly smoothed, starting just past the game's dead zone so slow drags still turn the camera.
-- (void)lookTick:(CADisplayLink*)link {
-  const CGFloat a = 0.55;  // smoothing: weight of the newest frame
-  _lookSmooth.dx = a * _lookDelta.dx + (1 - a) * _lookSmooth.dx;
-  _lookSmooth.dy = a * _lookDelta.dy + (1 - a) * _lookSmooth.dy;
-  _lookDelta = CGVectorMake(0, 0);
-  const auto axis = [](CGFloat v) -> int16_t {
-    const CGFloat m = std::min(std::abs(v) / kLookFullSpeed, CGFloat(1));
-    if (m < 0.02) return 0;
-    const CGFloat out = kStickDeadZone + (1 - kStickDeadZone) * m;
-    return static_cast<int16_t>(std::copysign(out, v) * 32767);
-  };
+- (void)releaseStick:(BotsPadStick*)s {
+  s.touch = nil;
+  s.click = NO;
   auto& pad = bots::ios::TouchPad();
-  pad.thumb_rx.store(axis(_lookSmooth.dx), std::memory_order_relaxed);
-  pad.thumb_ry.store(axis(-_lookSmooth.dy), std::memory_order_relaxed);
-}
-
-- (void)beginLook:(UITouch*)t at:(CGPoint)p {
-  _lookTouch = t;
-  _lookLast = p;
-  _lookDelta = _lookSmooth = CGVectorMake(0, 0);
-  _link.paused = NO;
-}
-
-- (void)endLook {
-  _lookTouch = nil;
-  _link.paused = YES;
-  _lookDelta = _lookSmooth = CGVectorMake(0, 0);
-  auto& pad = bots::ios::TouchPad();
-  pad.thumb_rx.store(0, std::memory_order_relaxed);
-  pad.thumb_ry.store(0, std::memory_order_relaxed);
+  (s.right ? pad.thumb_rx : pad.thumb_lx).store(0, std::memory_order_relaxed);
+  (s.right ? pad.thumb_ry : pad.thumb_ly).store(0, std::memory_order_relaxed);
+  [self drawStick:s offset:CGVectorMake(0, 0)];
 }
 
 - (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
@@ -417,19 +393,23 @@ UIImage* Glyph(NSString* text, NSString* symbol, UIColor* color, CGFloat size) {
     if (!_dpadTouch && [self inDpad:p]) {
       _dpadTouch = t;
       _dpadBits = [self dpadBitsAt:p];
-    } else if (BotsPadButton* b = [self buttonAt:p]) {
+      continue;
+    }
+    if (BotsPadButton* b = [self buttonAt:p]) {
       [_buttonTouches setObject:b forKey:t];
-      if (b.aims && !_lookTouch) [self beginLook:t at:p];
-    } else if (!_move.touch && CGRectContainsPoint(_move.zone, p)) {
-      _move.touch = t;
-      _move.origin = p;
-      _move.click = t.timestamp - _move.lastTap < kDoubleTap;
-      _move.lastTap = t.timestamp;
-      [self drawMove:CGVectorMake(0, 0)];
-    } else if (!_lookTouch && CGRectContainsPoint(_lookZone, p)) {
-      _lookClick = t.timestamp - _lookLastTap < kDoubleTap;
-      _lookLastTap = t.timestamp;
-      [self beginLook:t at:p];
+      continue;
+    }
+    for (BotsPadStick* s : _sticks) {
+      // The stick's own circle counts as its zone too, wherever its quarter ends.
+      const bool on_stick = std::hypot(p.x - s.home.x, p.y - s.home.y) < kStickRadius + kHitSlop;
+      if (s.touch || !(on_stick || CGRectContainsPoint(s.zone, p))) continue;
+      s.touch = t;
+      // Touching the resting stick grabs it where it is; elsewhere in the zone it recentres under the thumb.
+      s.origin = on_stick ? s.home : p;
+      s.click = t.timestamp - s.lastTap < kDoubleTap;
+      s.lastTap = t.timestamp;
+      [self stick:s movedTo:p];
+      break;
     }
   }
   [self publish];
@@ -438,45 +418,29 @@ UIImage* Glyph(NSString* text, NSString* symbol, UIColor* color, CGFloat size) {
 - (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
   for (UITouch* t in touches) {
     const CGPoint p = [t locationInView:self];
-    if (t == _move.touch) {
-      [self moveTo:p];
-    } else if (t == _dpadTouch) {
+    if (t == _dpadTouch) {
       _dpadBits = [self dpadBitsAt:p];
-    } else {
-      if (t == _lookTouch) {
-        // Coalesced touches keep fast swipes precise between frames.
-        CGPoint last = _lookLast;
-        for (UITouch* c in [event coalescedTouchesForTouch:t] ?: @[ t ]) {
-          const CGPoint q = [c preciseLocationInView:self];
-          _lookDelta.dx += q.x - last.x;
-          _lookDelta.dy += q.y - last.y;
-          last = q;
-        }
-        _lookLast = last;
+      continue;
+    }
+    bool stick = false;
+    for (BotsPadStick* s : _sticks) {
+      if (t == s.touch) {
+        [self stick:s movedTo:p];
+        stick = true;
       }
-      BotsPadButton* held = [_buttonTouches objectForKey:t];
-      // Sliding onto another button presses that one instead (A -> B rolls); the fire button holds while aiming.
-      if (held && !held.aims) {
-        if (BotsPadButton* b = [self buttonAt:p]) [_buttonTouches setObject:b forKey:t];
-      }
+    }
+    // Sliding onto another button presses that one instead (A -> B rolls).
+    if (!stick && [_buttonTouches objectForKey:t]) {
+      if (BotsPadButton* b = [self buttonAt:p]) [_buttonTouches setObject:b forKey:t];
     }
   }
   [self publish];
 }
 
 - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
-  auto& pad = bots::ios::TouchPad();
   for (UITouch* t in touches) {
-    if (t == _move.touch) {
-      _move.touch = nil;
-      _move.click = NO;
-      pad.thumb_lx.store(0, std::memory_order_relaxed);
-      pad.thumb_ly.store(0, std::memory_order_relaxed);
-      [self drawMove:CGVectorMake(0, 0)];
-    }
-    if (t == _lookTouch) {
-      _lookClick = NO;
-      [self endLook];
+    for (BotsPadStick* s : _sticks) {
+      if (t == s.touch) [self releaseStick:s];
     }
     if (t == _dpadTouch) {
       _dpadTouch = nil;
