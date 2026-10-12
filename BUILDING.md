@@ -83,7 +83,12 @@ Running the Linux build needs a Vulkan GPU passed into the container (`--gpus al
 
 An iPhone, iPad or Apple TV build, with Xcode (not just its command line tools) and codegen output already in
 `generated/`. There's no launcher: the game boots straight away from the app's data folder. On iOS an on-screen
-controller shows while no game controller is connected; tvOS needs a paired controller.
+controller, laid out like Xbox Cloud Gaming's touch controls, shows while no game controller is connected; tvOS needs
+a paired controller.
+
+**The iPhone build is experimental; the Apple TV build is very experimental.** The iPhone build plays (tested on an
+iPhone 15 Pro Max). The Apple TV build compiles and installs, but hasn't run the game yet: the game's memory layout, its
+storage and its controls there are untested.
 
 ```bash
 tools/ci/sdk.sh out/sdk                     # SDK with the patches, including 0023 (iOS/tvOS)
@@ -93,12 +98,20 @@ PLATFORM=ios SDK=out/sdk tools/ios/build.sh build bundle ipa     # or PLATFORM=t
 - **Signing and installing:** `TEAM=<team id> BUNDLE_ID=<bundle id> DEVICE=<udid>` with the steps
   `profile sign install` signs with a development profile and installs over USB or the network (`xcrun devicectl`).
   The profile step needs the device registered to the team. A sideloading tool can sign the unsigned IPA instead.
-- **Game files:** the `data` step copies `game/` to the app's data folder on the device: `Documents/game` on iOS
-  (also reachable through the Files app), `Library/Caches/game` on tvOS, whose apps get no persistent storage.
+- **Game files:** without them the app shows an import screen with a QR code, an address on port 8080 and a pairing
+  code. Open the page on a phone or computer on the same network and choose your own disc image (.iso); the page reads
+  the disc's file table in the browser and sends the game's files (about 6.8 GB; the device needs that much free), so
+  the disc image itself is never copied. An interrupted import carries on where it stopped. The files go to
+  `Documents/game` on iOS (kept out of device backups) and `Library/Caches/game` on tvOS, whose apps get no persistent
+  storage, so tvOS may clear them when it runs short of space. App updates keep them. For development, the `data`
+  step copies `game/` over USB instead.
 - **Shader warm-up:** the bundle carries the macOS shader refs (`REFS`); iOS and tvOS share macOS's device class.
-- **Limits:** the game quits when it goes to the background (the renderer can't pause yet). The guest memory
-  needs one 4.5 GB stretch of address space: iOS asks for the extended virtual addressing entitlement; on the Apple
-  TV it fits only on models with more than 3 GB of memory.
+- **Limits:** the game quits when it goes to the background (the renderer can't pause yet). Split-screen co-op isn't
+  available (it starts a second process). The guest memory needs one 4.5 GB stretch of address space: iOS asks for the
+  extended virtual addressing entitlement; on the Apple TV it fits only on models with more than 3 GB of memory.
+- **CI:** `build:ios` and `build:tvos` run on branches named for them (`apple`, `ios`, `tvos`) and on `main` with
+  `BUILD=1`, on a Mac runner tagged `xcode`. They upload unsigned IPAs to the package registry and aren't part of
+  releases.
 
 ## Release builds
 

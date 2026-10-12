@@ -131,10 +131,13 @@ build:macos:
 # iOS and tvOS (experimental, tools/ios/build.sh): unsigned IPAs in the package registry as skullburglar-apple/<VERSION>,
 # signed when they're installed. On branches named for them (apple, ios, tvos), and on main with BUILD=1; not part of
 # releases. They need a Mac runner with Xcode and its iOS and tvOS platforms (the command line tools have no iOS SDKs),
-# tagged `xcode` as well as `macos`.
+# tagged `xcode` as well as `macos`. DEVELOPER_DIR picks the full Xcode for these jobs only, so the runner's selected
+# developer directory can stay on the command line tools the macOS build uses.
 .apple:
   stage: build
   tags: [macos, xcode]
+  variables:
+    DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
   needs: []
   interruptible: true
   timeout: 4h
