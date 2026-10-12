@@ -37,6 +37,10 @@
 #include "shaders.h"
 #include "vk_api.h"
 
+namespace bots {
+enum class PromptDevice : uint32_t;  // prompt_state.h (it pulls in windows.h)
+}
+
 namespace bots::gfx::vk {
 
 // Keeps the renderer's GPU copy of guest physical memory current while the game runs (memory_sync.h). Without
@@ -410,7 +414,7 @@ class Renderer : public Pm4Sink {
                                   bool is_signed, uint32_t& host_swizzle);
   VkImageView SwizzledView(Image& image, uint32_t host_swizzle, bool is_signed);
   void LoadTexture(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch, GuestTexture& texture);
-  bool LoadPromptAtlas(GuestTexture& texture, uint32_t address);
+  bool LoadPromptAtlas(GuestTexture& texture, uint32_t address, bots::PromptDevice device);
   VkSampler GetSampler(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch,
                        const rex::graphics::SpirvShader::SamplerBinding& binding);
 

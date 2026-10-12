@@ -54,16 +54,29 @@ std::vector<Setting> Catalog() {
                {{"-1", "Game default"}, {"0", "Off"}, {"1", "1x"}, {"2", "2x"}, {"3", "4x"},
                 {"4", "8x"}, {"5", "16x"}}});
   s.back().emulated_only = true;
+  s.push_back({"aspect_ratio", "", "Aspect ratio",
+               "Wider than 16:9 fills an ultrawide screen and shows more at the sides; the HUD and menus stretch. "
+               "Automatic matches the screen in fullscreen, or the window. Native renderer only.",
+               {{"16:9", "16:9 (original)"}, {"auto", "Automatic"}, {"21:9", "21:9"}, {"32:9", "32:9"}}});
   s.push_back({"framerate_limit", "", "Frame rate limit", "",
                {{"30", "30 fps"}, {"60", "60 fps (recommended)"}, {"0", "Unlimited"}}});
   s.push_back({"present_vsync", "", "VSync", "Off has the lowest latency but can tear.", {}});
   s.push_back({"check_updates", "", "Check for new versions",
                "When the launcher opens, look online for a newer Skullburglar and offer its download page.", {}});
+  s.push_back({"pad_prompts", "", "Controller button prompts",
+               "Which buttons the game shows. Automatic matches the controller you used last. Native renderer only.",
+               {{"auto", "Automatic"}, {"xbox", "Xbox"}, {"ps4", "PlayStation 4"}, {"ps5", "PlayStation 5"}}});
+  s.back().section = "Controller";
+  s.push_back({"user_signin_live", "", "LAN co-op",
+               "Play the story with another computer on your network. One player starts a story; the other picks "
+               "Play Game, then Join COOP, and chooses it from the list. Both computers need this on. On Windows, "
+               "allow Skullburglar through the firewall when asked, or games won't be found.",
+               {}});
+  s.back().section = "Co-op";
   s.push_back({"split_screen", "", "Split-screen co-op (experimental)",
                "One window, split top and bottom. During a story, press START on a second controller to join as "
                "player 2; player 2 leaves with Quit in their pause menu. The two-window option below overrides it.",
                {}});
-  s.back().section = "Co-op";
   s.push_back({"coop", "", "Co-op on this PC, two windows (experimental)",
                "Opens a second window for player 2. Player 1 starts a story; player 2 picks Join COOP and the game "
                "from the list.",

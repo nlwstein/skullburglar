@@ -48,7 +48,8 @@ minute). Later starts reuse them.
 Playing
 -------
 
-A controller works as on the Xbox. Keyboard and mouse:
+A controller works as on the Xbox. With a DualShock 4 or DualSense the prompts show PlayStation buttons; the
+launcher's "Controller button prompts" setting can pick Xbox or PlayStation instead. Keyboard and mouse:
 
   Move          W A S D              Fire / aim        Left / right mouse button
   Cover, run    Space                Reload, pick up   R
@@ -60,6 +61,32 @@ A controller works as on the Xbox. Keyboard and mouse:
 
 Menus work with the mouse. Button prompts follow the device you last used. Keys can be changed in the launcher.
 To quit, choose Quit on the main menu or close the window.
+
+
+Co-op
+-----
+
+The story can be played by two people, three ways. All of them are in the launcher's Co-op section.
+
+LAN co-op (two computers on the same network; on by default)
+  1. Player 1 starts a story (Play Game, then New Story or a chapter).
+  2. Player 2 picks Play Game, then Join COOP, chooses a sidekick and weapons, then Find Game.
+  3. Player 1's game shows up in the Game List; select it to join. X refreshes the list.
+  Windows, Linux, the Steam Deck and macOS can play together. On Windows, the launcher asks Windows Firewall for
+  network access the first time: choose Allow, or games won't be found. The line under "LAN co-op" in the launcher
+  says whether the firewall allows it; if it's blocking, "Allow Skullburglar" fixes it (Windows asks for
+  administrator permission).
+  It uses UDP ports 24001 and 17777. If the list stays empty on a network that blocks broadcasts, start the game
+  with --netplay_peers=<the other computer's IP address>. Turn LAN co-op off in the launcher if you don't want
+  others on your network to see your story.
+
+Split-screen co-op (one screen; experimental)
+  Turn on "Split-screen co-op" in the launcher. During a story, press START on a second controller to join as
+  player 2. Player 2 leaves with Quit in their pause menu.
+
+Two windows on one PC (experimental)
+  Turn on "Co-op on this PC, two windows". Player 2's window opens next to player 1's: player 1 starts a story,
+  player 2 picks Play Game, then Join COOP. "Co-op controllers" picks which pad is whose.
 
 
 Where things are kept
@@ -87,8 +114,9 @@ folder or app with the new version from https://skullburglar.stz.sh. Game files,
 Reporting a problem
 -------------------
 
-Open an issue at https://github.com/nlwstein/skullburglar/issues with your platform, GPU, what you were doing and
-the newest log file (plus the .dmp on a Windows crash).
+Check the open issues at https://github.com/nlwstein/skullburglar/issues first: if your problem is already there,
+add a comment to it. Otherwise open an issue with your platform, GPU, what you were doing and the newest log file
+(plus the .dmp on a Windows crash).
 
 
 About

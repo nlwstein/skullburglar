@@ -2,6 +2,7 @@
 #include "mnk_input.h"
 
 #include "prompt_state.h"
+#include "widescreen.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -18,6 +19,9 @@ REXCVAR_DEFINE_DOUBLE(kbm_aim_sensitivity, 1.0, "bots/Input",
 REXCVAR_DEFINE_BOOL(kbm_invert_y, false, "bots/Input", "Invert mouse look up/down");
 REXCVAR_DEFINE_BOOL(kbm_prompts, true, "bots/Input",
                     "Show keyboard/mouse button prompts while keyboard/mouse is the last device used");
+REXCVAR_DEFINE_STRING(pad_prompts, "auto", "bots/Input",
+                      "Controller button prompts: auto (match the controller used last: PlayStation buttons for a "
+                      "DualShock 4 or DualSense), xbox, ps4 or ps5. Native renderer only");
 
 // Default layout follows Gears of War on PC, adapted to this game's actions. Each value is a
 // comma-separated list of key names (rex/ui/keybinds.cpp; LMB RMB MMB, plus WheelUp WheelDown).
@@ -77,16 +81,38 @@ const bool g_prompt_state_published = [] {
 
 }  // namespace
 
-void MouseKeyboardDriver::SetPromptMode(bool keyboard_mouse) {
-  keyboard_mouse = keyboard_mouse && REXCVAR_GET(kbm_prompts);
-  if (g_prompt_state.keyboard_mouse.exchange(keyboard_mouse) == uint32_t(keyboard_mouse)) return;
+void MouseKeyboardDriver::SetPromptDevice(PromptDevice device) {
+  if (g_prompt_state.device.exchange(uint32_t(device)) == uint32_t(device)) return;
   g_prompt_state.generation.fetch_add(1);
-  REXLOG_INFO("prompts: {}", keyboard_mouse ? "keyboard/mouse" : "controller");
+  static constexpr const char* kNames[] = {"Xbox controller", "keyboard/mouse", "DualShock 4", "DualSense"};
+  REXLOG_INFO("prompts: {}", kNames[uint32_t(device)]);
+}
+
+void MouseKeyboardDriver::SetPromptMode(bool keyboard_mouse) {
+  SetPromptDevice(keyboard_mouse && REXCVAR_GET(kbm_prompts) ? PromptDevice::kKeyboardMouse : PadPromptDevice());
+}
+
+PromptDevice MouseKeyboardDriver::PadPromptDevice() {
+  const std::string setting = REXCVAR_GET(pad_prompts);  // a copy: the settings overlay can change it
+  if (setting == "xbox") return PromptDevice::kXbox;
+  if (setting == "ps4") return PromptDevice::kPlayStation4;
+  if (setting == "ps5") return PromptDevice::kPlayStation5;
+  switch (rex::input::LastActivePadStyle()) {
+    case rex::input::PadStyle::kPlayStation4:
+      return PromptDevice::kPlayStation4;
+    case rex::input::PadStyle::kPlayStation5:
+      return PromptDevice::kPlayStation5;
+    default:
+      return PromptDevice::kXbox;
+  }
 }
 
 void MouseKeyboardDriver::NoteGuestPad(uint16_t buttons, uint8_t lt, uint8_t rt, int16_t lx, int16_t ly, int16_t rx,
                                        int16_t ry) {
-  if (!g_prompt_state.keyboard_mouse.load(std::memory_order_relaxed)) return;
+  if (g_prompt_state.Device() != PromptDevice::kKeyboardMouse) {
+    SetPromptDevice(PadPromptDevice());
+    return;
+  }
   rex::input::X_INPUT_STATE ours;
   {
     std::lock_guard lock(mutex_);
@@ -231,8 +257,10 @@ void MouseKeyboardDriver::OnMouseMove(rex::ui::MouseEvent& e) {
   if (!captured_ && window_) {
     const float w = float(window_->GetActualPhysicalWidth()), h = float(window_->GetActualPhysicalHeight());
     if (w > 0 && h > 0) {
-      pointer_x_.store(float(x) / w, std::memory_order_relaxed);
-      pointer_y_.store(float(y) / h, std::memory_order_relaxed);
+      float fx, fy;
+      WindowToPicture(float(x), float(y), w, h, fx, fy);
+      pointer_x_.store(fx, std::memory_order_relaxed);
+      pointer_y_.store(fy, std::memory_order_relaxed);
       pointer_moves_.fetch_add(1, std::memory_order_relaxed);
     }
   }
