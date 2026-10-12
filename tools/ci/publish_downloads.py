@@ -15,7 +15,7 @@ version.json:
      "versions": [{"version": "0.4.0", "date": "2026-10-05", "notes": ["..."], "available": true,
                    "downloads": {"windows": {"file": "...", "size": 123, "sha256": "...", "url": "/dl/0.4.0/..."}}}]}
 
-Release notes are the feat/fix/perf commits since LAST, newest first. A commit's `Release-note:` trailer is its note
+Release notes are the feat/fix/perf commits since LAST, newest first. A commit's `Release-note:` line is its note
 (written for players); `Release-note: none` leaves it out, as do commits scoped `ci` without one. Otherwise the note is
 the subject without its type. --notes-file (a JSON list of strings) replaces them.
 
@@ -99,18 +99,31 @@ def release_ref():
         return os.environ.get("CI_COMMIT_SHA", "HEAD")
 
 
+def release_notes(body):
+    """One note per `Release-note:` line, anywhere in the body (indented lines continue it). Not git's trailer parser:
+    that only reads the last paragraph, and the note usually sits in its own paragraph above Co-Authored-By."""
+    out = []
+    for line in body.splitlines():
+        if line.lower().startswith("release-note:"):
+            out.append(line.split(":", 1)[1].strip())
+        elif out and line[:1] in (" ", "\t") and line.strip():
+            out[-1] += " " + line.strip()
+        elif out and not line.strip():
+            out.append(None)  # a blank line ends a note
+    return [n for n in out if n]
+
+
 def notes(ref):
     rng = f"v{LAST}..{ref}" if LAST else ref
     out = []
-    for entry in git("log", "--no-merges", "--format=%s%x1f%(trailers:key=Release-note,valueonly,unfold)%x1e",
-                     rng).split("\x1e"):
+    for entry in git("log", "--no-merges", "--format=%s%x1f%b%x1e", rng).split("\x1e"):
         if not entry.strip():
             continue
-        subject, trailer = (entry.strip("\n").split("\x1f") + [""])[:2]
+        subject, body = (entry.strip("\n").split("\x1f") + [""])[:2]
         m = re.match(r"(\w+)(?:\(([^)]*)\))?!?:\s*(.*)", subject)
         if not m or m.group(1) not in TYPES:
             continue
-        trailers = [t.strip() for t in trailer.splitlines() if t.strip()]  # one note per Release-note: trailer
+        trailers = release_notes(body)
         if [t.lower() for t in trailers] == ["none"] or (not trailers and m.group(2) == "ci"):
             continue
         for text in trailers or [m.group(3)]:
