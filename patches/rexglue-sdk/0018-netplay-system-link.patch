@@ -1078,7 +1078,7 @@ index a77f5e6..1d99636 100644
      auto setting_id = fmt::format("{:08X}", setting->setting_id);
      auto file_path = content_dir / setting_id;
 diff --git a/src/system/xsocket.cpp b/src/system/xsocket.cpp
-index 2d13ac8..8a26a36 100644
+index 2d13ac8..b4a1ed9 100644
 --- a/src/system/xsocket.cpp
 +++ b/src/system/xsocket.cpp
 @@ -9,9 +9,18 @@
@@ -1100,12 +1100,14 @@ index 2d13ac8..8a26a36 100644
  #include <rex/platform.h>
  #include <rex/system/kernel_state.h>
  #include <rex/system/xsocket.h>
-@@ -26,13 +35,359 @@
+@@ -26,13 +35,404 @@
  #include <WS2tcpip.h>
  #else
  #include <arpa/inet.h>
 +#include <errno.h>
 +#include <fcntl.h>
++#include <ifaddrs.h>
++#include <net/if.h>
  #include <netinet/in.h>
  #include <netinet/ip.h>
 +#include <netinet/tcp.h>
@@ -1146,6 +1148,11 @@ index 2d13ac8..8a26a36 100644
 +std::once_flag init_once;
 +uint32_t slot_ = 0;
 +uint32_t local_ip_ = 0x7F000001;
++// Where a guest broadcast goes: the local subnet's broadcast address when it's known. Some networks
++// deliver 255.255.255.255 to some machines and not others (seen 2026-10-12: a Mac stopped receiving
++// it from every other machine on the LAN while the subnet's broadcast address still arrived), and a
++// system link game that never hears the search never shows up.
++uint32_t broadcast_ip_ = 0xFFFFFFFF;
 +std::vector<uint32_t> extra_peers_;
 +
 +std::mutex peers_mutex;
@@ -1185,6 +1192,42 @@ index 2d13ac8..8a26a36 100644
 +  return ip ? ip : 0x7F000001;
 +}
 +
++// The broadcast address of the interface that has `ip`, or 255.255.255.255 if there's none.
++uint32_t DetectBroadcast(uint32_t ip) {
++  uint32_t mask = 0;
++#if REX_PLATFORM_WIN32
++  auto fd = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++  if (fd != INVALID_SOCKET) {
++    INTERFACE_INFO list[32];
++    DWORD bytes = 0;
++    if (WSAIoctl(fd, SIO_GET_INTERFACE_LIST, nullptr, 0, list, sizeof(list), &bytes, nullptr, nullptr) == 0) {
++      for (DWORD i = 0; i < bytes / sizeof(INTERFACE_INFO); ++i) {
++        if (ntohl(list[i].iiAddress.AddressIn.sin_addr.s_addr) == ip) {
++          mask = ntohl(list[i].iiNetmask.AddressIn.sin_addr.s_addr);
++          break;
++        }
++      }
++    }
++    rex::net::socket_close(fd);
++  }
++#else
++  ifaddrs* list = nullptr;
++  if (getifaddrs(&list) == 0) {
++    for (ifaddrs* a = list; a; a = a->ifa_next) {
++      if (a->ifa_addr && a->ifa_netmask && a->ifa_addr->sa_family == AF_INET && (a->ifa_flags & IFF_BROADCAST) &&
++          ntohl(reinterpret_cast<sockaddr_in*>(a->ifa_addr)->sin_addr.s_addr) == ip) {
++        mask = ntohl(reinterpret_cast<sockaddr_in*>(a->ifa_netmask)->sin_addr.s_addr);
++        break;
++      }
++    }
++    freeifaddrs(list);
++  }
++#endif
++  // /31 and /32 have no broadcast address; loopback isn't a LAN.
++  if ((ip >> 24) == 127 || mask == 0 || ~mask < 3) return 0xFFFFFFFF;
++  return (ip & mask) | ~mask;
++}
++
 +void Init() {
 +  std::call_once(init_once, [] {
 +#if REX_PLATFORM_WIN32
@@ -1217,6 +1260,7 @@ index 2d13ac8..8a26a36 100644
 +    std::string addr = REXCVAR_GET(netplay_address);
 +    local_ip_ = addr.empty() ? DetectLocalIp() : ParseIp(addr);
 +    if (!local_ip_) local_ip_ = 0x7F000001;
++    broadcast_ip_ = DetectBroadcast(local_ip_);
 +    std::string list = REXCVAR_GET(netplay_peers);
 +    for (size_t pos = 0; pos < list.size();) {
 +      size_t end = list.find(',', pos);
@@ -1226,9 +1270,10 @@ index 2d13ac8..8a26a36 100644
 +      if (uint32_t ip = ParseIp(item)) extra_peers_.push_back(ip);
 +      pos = end == std::string::npos ? list.size() : end + 1;
 +    }
-+    REXLOG_INFO("netplay: slot {} at {}.{}.{}.{}, guest port P = host port P+{}", slot_,
-+                local_ip_ >> 24, (local_ip_ >> 16) & 0xFF, (local_ip_ >> 8) & 0xFF,
-+                local_ip_ & 0xFF, PortOffset(slot_));
++    REXLOG_INFO("netplay: slot {} at {}.{}.{}.{} (broadcast {}.{}.{}.{}), guest port P = host port P+{}", slot_,
++                local_ip_ >> 24, (local_ip_ >> 16) & 0xFF, (local_ip_ >> 8) & 0xFF, local_ip_ & 0xFF,
++                broadcast_ip_ >> 24, (broadcast_ip_ >> 16) & 0xFF, (broadcast_ip_ >> 8) & 0xFF,
++                broadcast_ip_ & 0xFF, PortOffset(slot_));
 +  });
 +}
 +
@@ -1460,7 +1505,7 @@ index 2d13ac8..8a26a36 100644
  XSocket::XSocket(KernelState* kernel_state) : XObject(kernel_state, kObjectType) {}
  
  XSocket::XSocket(KernelState* kernel_state, uint64_t native_handle)
-@@ -46,6 +401,7 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
+@@ -46,6 +446,7 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
    af_ = af;
    type_ = type;
    proto_ = proto;
@@ -1468,7 +1513,7 @@ index 2d13ac8..8a26a36 100644
  
    if (proto == Protocol::X_IPPROTO_VDP) {
      // VDP is a layer on top of UDP.
-@@ -53,15 +409,24 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
+@@ -53,15 +454,24 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
    }
  
    native_handle_ = socket(af, type, proto);
@@ -1494,7 +1539,7 @@ index 2d13ac8..8a26a36 100644
    if (ret != 0) {
      return X_STATUS_UNSUCCESSFUL;
    }
-@@ -69,6 +434,8 @@ X_STATUS XSocket::Close() {
+@@ -69,6 +479,8 @@ X_STATUS XSocket::Close() {
    return X_STATUS_SUCCESS;
  }
  
@@ -1503,7 +1548,7 @@ index 2d13ac8..8a26a36 100644
  X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, uint32_t optlen) {
    if (level == 0xFFFF && (optname == 0x5801 || optname == 0x5802)) {
      // Disable socket encryption
-@@ -76,32 +443,155 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
+@@ -76,32 +488,159 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
      return X_STATUS_SUCCESS;
    }
  
@@ -1554,6 +1599,10 @@ index 2d13ac8..8a26a36 100644
 +    return X_STATUS_SUCCESS;
 +  }
 +  int v = int(value);
++  // A console's 32 KB buffer holds 32 KB of datagrams; Linux, macOS and Windows count each datagram's bookkeeping
++  // too (Linux: ~2 KB per packet), so 32 KB holds about 15. A UE3 host sends a joiner ~40 packets at once (the
++  // package map), and the ones that overflowed were lost often enough to leave the joiner without its pawn.
++  if (host_level == SOL_SOCKET && (host_name == SO_RCVBUF || host_name == SO_SNDBUF)) v = std::max(v, 1 << 20);
 +  int ret = setsockopt(native_handle_, host_level, host_name, reinterpret_cast<char*>(&v), sizeof(v));
 +  if (netplay::Trace()) {
 +    REXLOG_INFO("netplay: socket {:X} setsockopt({:X}, {:X}) = {} -> {}", handle(), level, optname,
@@ -1672,7 +1721,7 @@ index 2d13ac8..8a26a36 100644
    if (ret < 0) {
      return X_STATUS_UNSUCCESSFUL;
    }
-@@ -110,14 +600,42 @@ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
+@@ -110,17 +649,45 @@ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
  }
  
  X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
@@ -1694,9 +1743,9 @@ index 2d13ac8..8a26a36 100644
    bound_ = true;
 -  bound_port_ = name->sin_port;
 +  bound_port_ = guest_port;
-+
-+  return X_STATUS_SUCCESS;
-+}
+ 
+   return X_STATUS_SUCCESS;
+ }
  
 +X_STATUS XSocket::GetSockName(N_XSOCKADDR_IN* name) {
 +  sockaddr_in host{};
@@ -1714,10 +1763,13 @@ index 2d13ac8..8a26a36 100644
 +X_STATUS XSocket::GetPeerName(N_XSOCKADDR_IN* name) {
 +  if (!connected_) return X_STATUS_UNSUCCESSFUL;
 +  *name = peer_;
-   return X_STATUS_SUCCESS;
- }
- 
-@@ -131,21 +649,25 @@ X_STATUS XSocket::Listen(int backlog) {
++  return X_STATUS_SUCCESS;
++}
++
+ X_STATUS XSocket::Listen(int backlog) {
+   int ret = listen(native_handle_, backlog);
+   if (ret < 0) {
+@@ -131,21 +698,25 @@ X_STATUS XSocket::Listen(int backlog) {
  }
  
  object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
@@ -1750,7 +1802,7 @@ index 2d13ac8..8a26a36 100644
    socket->af_ = af_;
    socket->type_ = type_;
    socket->proto_ = proto_;
-@@ -158,78 +680,135 @@ int XSocket::Shutdown(int how) {
+@@ -158,78 +729,135 @@ int XSocket::Shutdown(int how) {
  }
  
  int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
@@ -1782,13 +1834,9 @@ index 2d13ac8..8a26a36 100644
 -
 -      return data_len;
 -    }
-+  if (type_ != X_SOCK_DGRAM) {
-+    int ret = recv(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags);
-+    if (from_len) *from_len = 0;
-+    return ret;
-   }
+-  }
 -  */
- 
+-
 -  sockaddr_in nfrom;
 -  socklen_t nfromlen = sizeof(sockaddr_in);
 -  int ret = recvfrom(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
@@ -1798,8 +1846,12 @@ index 2d13ac8..8a26a36 100644
 -    from->sin_addr = ntohl(nfrom.sin_addr.s_addr);  // BE <- BE
 -    from->sin_port = nfrom.sin_port;
 -    std::memset(from->x_sin_zero, 0, sizeof(from->x_sin_zero));
--  }
--
++  if (type_ != X_SOCK_DGRAM) {
++    int ret = recv(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags);
++    if (from_len) *from_len = 0;
++    return ret;
+   }
+ 
 -  if (from_len) {
 -    *from_len = nfromlen;
 +  std::vector<uint8_t> tmp(size_t(buf_len) + netplay::kHeader);
@@ -1911,7 +1963,7 @@ index 2d13ac8..8a26a36 100644
 +    for (uint32_t s = 0; s < netplay::kMaxSlots; ++s) {
 +      uint16_t port = HostPort(dst_port, s);
 +      pkt[2] = netplay::kVersion | netplay::kViaBroadcast;
-+      int r = send_one(0xFFFFFFFF, port);
++      int r = send_one(netplay::broadcast_ip_, port);
 +      for (uint32_t ip : netplay::extra_peers_) send_one(ip, port);
 +      pkt[2] = netplay::kVersion;
 +      if (s != netplay::Slot()) {

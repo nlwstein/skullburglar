@@ -62,7 +62,7 @@ set_source_files_properties(src/setup/update_check.cpp PROPERTIES
     SKIP_PRECOMPILE_HEADERS ON)
 # First-run setup window's native file picker (B-061).
 if(WIN32)
-    list(APPEND BOTS_SOURCES src/setup/file_picker_win.cpp)
+    list(APPEND BOTS_SOURCES src/setup/file_picker_win.cpp src/setup/firewall_win.cpp)
 elseif(APPLE)
     enable_language(OBJCXX)
     list(APPEND BOTS_SOURCES src/setup/file_picker_mac.mm)
@@ -83,7 +83,9 @@ if(APPLE)
     # The precompiled header is C++ only.
     set_source_files_properties(src/setup/file_picker_mac.mm PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 elseif(WIN32)
-    target_link_libraries(bots PRIVATE ole32 shell32 winhttp)
+    target_link_libraries(bots PRIVATE ole32 oleaut32 shell32 winhttp ws2_32)
+    # winsock2.h has to come before windows.h, which the precompiled header pulls in.
+    set_source_files_properties(src/setup/firewall_win.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 endif()
 
 # SDK built from source (REXSDK_DIR, the Windows cross build): rex_app.cpp includes imgui.h, which

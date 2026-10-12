@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -28,6 +29,7 @@
 #include "file_picker.h"
 #include "iso_extract.h"
 #include "settings.h"
+#include "firewall.h"
 #include "update_check.h"
 
 namespace bots::setup {
@@ -52,9 +54,12 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     REXLOG_INFO("setup: window open (version {}, game files {} at {}, settings file {})", AppVersion(),
                 installed_ ? "installed" : "missing", game_dir_.string(), config_path_.string());
     if (UpdateCheckAvailable() && Value("check_updates") == "true") StartUpdateCheck();
+    StartFirewallWatch();
   }
 
   ~SetupDialog() override {
+    firewall_->stop = true;
+    CloseFirewallAsk();
     if (worker_.joinable()) {
       progress_->cancel = true;
       worker_.join();
@@ -107,6 +112,80 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       state->info = FetchUpdateInfo();
       state->done.store(true);
     }).detach();
+  }
+
+  // Windows Firewall and LAN co-op (firewall.h): re-read every 2 s while the window is open, so the line below the
+  // setting follows the player's answer to Windows' prompt. A thread of its own, like the update check.
+  struct FirewallWatch {
+    std::atomic<bool> stop{false}, fix{false}, fixing{false}, fix_failed{false}, asked{false};
+    std::atomic<int> state{int(FirewallState::kChecking)};
+  };
+
+  void StartFirewallWatch() {
+    firewall_ = std::make_shared<FirewallWatch>();
+#ifdef _WIN32
+    std::thread([w = firewall_] {
+      bool logged = false;
+      while (!w->stop) {
+        if (w->fix.exchange(false)) {
+          w->fixing = true;
+          w->fix_failed = !FixFirewall();
+          w->fixing = false;
+        }
+        FirewallState state = CheckFirewall();
+        // The Block rules of a prompt still open: show it as asking (the first check runs before the window appears).
+        if (state == FirewallState::kBlocked && w->asked && FirewallPromptOpen()) state = FirewallState::kNotAsked;
+        if (!logged || int(state) != w->state) REXLOG_INFO("setup: Windows Firewall for LAN co-op: {}", int(state));
+        logged = true;
+        w->state = int(state);
+        for (int i = 0; i < 20 && !w->stop && !w->fix; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+    }).detach();
+#else
+    firewall_->state = int(FirewallState::kNotApplicable);
+#endif
+  }
+
+  void DrawFirewall() {
+    const auto state = FirewallState(firewall_->state.load());
+    if (state == FirewallState::kNotApplicable || state == FirewallState::kChecking || state == FirewallState::kUnknown)
+      return;
+    if (state == FirewallState::kNotAsked && !firewall_asked_) {
+      firewall_asked_ = true;
+      firewall_->asked = true;
+      AskFirewall();  // Windows' prompt opens now, over this window, instead of during a story
+    }
+    ImGui::Indent();
+    const ImVec4 warn(1.0f, 0.75f, 0.3f, 1.0f);
+    switch (state) {
+      case FirewallState::kAllowed:
+        ImGui::TextDisabled("Windows Firewall: allowed.");
+        break;
+      case FirewallState::kNotAsked:
+        ImGui::TextColored(warn, "Windows is asking whether Skullburglar may use your network: choose Allow.");
+        break;
+      case FirewallState::kPublicNetwork:
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(warn,
+                           "This network is set to Public, where Windows Firewall blocks LAN co-op. Set it to Private "
+                           "(Settings > Network & internet > your network > Private network).");
+        ImGui::PopTextWrapPos();
+        break;
+      case FirewallState::kBlocked:
+        ImGui::TextColored(warn, "Windows Firewall is blocking LAN co-op: other players' games won't show up.");
+        ImGui::BeginDisabled(firewall_->fixing.load() || firewall_->fix.load());
+        if (ImGui::Button(firewall_->fixing.load() ? "Waiting for Windows..." : "Allow Skullburglar")) {
+          firewall_->fix = true;
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextDisabled(firewall_->fix_failed.load() ? "Not changed. Windows asks for administrator permission."
+                                                         : "Windows asks for administrator permission.");
+        break;
+      default:
+        break;
+    }
+    ImGui::Unindent();
   }
 
   void DrawUpdate() {
@@ -217,6 +296,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       } else if (!s.help.empty() && ImGui::IsItemHovered()) {
         ImGui::SetTooltip("%s", s.help.c_str());
       }
+      if (s.cvar == "user_signin_live" && s.value == "true") DrawFirewall();
       ImGui::PopID();
     }
     DrawBindings();
@@ -443,6 +523,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   std::shared_ptr<ExtractResult> result_;
   std::shared_ptr<std::atomic<bool>> done_;
   std::shared_ptr<UpdateState> update_;
+  std::shared_ptr<FirewallWatch> firewall_;
+  bool firewall_asked_ = false;
   bool update_logged_ = false;
 };
 
