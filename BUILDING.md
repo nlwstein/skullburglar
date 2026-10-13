@@ -87,8 +87,9 @@ controller, laid out like Xbox Cloud Gaming's touch controls, shows while no gam
 a paired controller.
 
 **The iPhone build is experimental; the Apple TV build is very experimental.** The iPhone build plays (tested on an
-iPhone 15 Pro Max). The Apple TV build compiles and installs, but hasn't run the game yet: the game's memory layout, its
-storage and its controls there are untested.
+iPhone 15 Pro Max). The Apple TV build (tested on an Apple TV 4K, 3rd generation) reaches the main menu but is
+stopped by tvOS on loading a level: tvOS caps an app at about 2.2 GB there, with no entitlement to raise it, and the
+game needs more.
 
 ```bash
 tools/ci/sdk.sh out/sdk                     # SDK with the patches, including 0023 (iOS/tvOS)

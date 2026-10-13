@@ -11,6 +11,10 @@
 #include <cstdlib>
 #include <cstring>
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
 #include <rex/graphics/pipeline/texture/util.h>
 #include <rex/graphics/registers.h>
 #include <rex/graphics/util/draw.h>
@@ -30,8 +34,13 @@ using Translator = rg::SpirvShaderTranslator;
 
 constexpr VkDeviceSize kSharedMemorySize = VkDeviceSize(512) << 20;
 // Per submission (kSubmissions of them, host-visible). Gameplay uses at most ~14 MB of one; loads fill it and flush
-// early, which costs nothing measurable (B-113: was 128 MB, 768 MB in all).
+// early, which costs nothing measurable (B-113: was 128 MB, 768 MB in all). The Apple TV's per-app memory limit
+// (about 2.2 GB on 4 GB models, with no entitlement to raise it) is tight enough that its rings are halved.
+#if defined(TARGET_OS_TV) && TARGET_OS_TV
+constexpr VkDeviceSize kRingSize = VkDeviceSize(16) << 20;
+#else
 constexpr VkDeviceSize kRingSize = VkDeviceSize(32) << 20;
+#endif
 // Constant buffers are dynamic uniform buffers over the ring with a fixed range each (one set per ring, only the
 // offsets change per draw). Float constants are packed to what the shader uses, at most 256 registers; the ring
 // has this much slack past kRingSize so a range starting near its end stays inside the buffer.
