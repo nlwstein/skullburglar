@@ -7,7 +7,8 @@ Run by the release job after gitlab_release.py, or by hand to add or redo a rele
 The bucket is a Cloudflare R2 bucket behind the private download site, which serves the packages to signed-in players
 and the releases file (version.json) to anyone; the launcher reads that file (src/setup/update_check.h).
 
-The packages come from this project's package registry (skullburglar/<VERSION>). Only the newest KEEP versions stay
+The packages come from this project's package registry (skullburglar/<VERSION>); the experimental iOS and tvOS IPAs
+are published when their jobs built them. Only the newest KEEP versions stay
 downloadable: older packages are deleted from the bucket, but every version stays in the file's history.
 
 version.json:
@@ -50,6 +51,11 @@ PACKAGES = {
     "macos": f"skullburglar-{VERSION}-macos-arm64.dmg",
     "linux_appimage": f"skullburglar-{VERSION}-linux-x86_64.AppImage",
     "linux_tar": f"skullburglar-{VERSION}-linux-x86_64.tar.xz",
+}
+# Experimental builds whose jobs may fail: published when the registry has them.
+OPTIONAL = {
+    "ios": f"skullburglar-{VERSION}-ios.ipa",
+    "tvos": f"skullburglar-{VERSION}-tvos.ipa",
 }
 TYPES = ("feat", "fix", "perf")
 
@@ -140,9 +146,15 @@ def main():
 
     downloads = {}
     with tempfile.TemporaryDirectory() as tmp:
-        for platform, name in PACKAGES.items():
+        for platform, name in {**PACKAGES, **OPTIONAL}.items():
             path = os.path.join(tmp, name)
-            size, sha = registry_get(name, path)
+            try:
+                size, sha = registry_get(name, path)
+            except urllib.error.HTTPError as e:
+                if platform in OPTIONAL and e.code == 404:
+                    print(f"not built, left out: {name}")
+                    continue
+                raise
             key = f"releases/{VERSION}/{name}"
             s3.upload_file(path, BUCKET, key, ExtraArgs={"ContentType": "application/octet-stream"})
             downloads[platform] = {"file": name, "size": size, "sha256": sha, "url": f"/dl/{VERSION}/{name}"}
