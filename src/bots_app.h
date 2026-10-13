@@ -111,6 +111,12 @@ class BotsApp : public rex::ReXApp {
     // over the local network, see OnFinalizePaths), saves in <data>/user, the shader cache in Caches; <data> is
     // Documents on iOS and Caches on tvOS (bots::ios::DataDir). No launcher.
     {
+#if TARGET_OS_TV
+      // SDL lists the Siri Remote as a gamepad, and it connects first, so a real controller lands on the second
+      // user slot, which has no signed-in profile ("no gamer profile is signed in" at the pay phones). The game
+      // needs a real controller anyway.
+      setenv("SDL_TV_REMOTE_AS_JOYSTICK", "0", 0);
+#endif
       const fs::path docs = bots::ios::DataDir();
       if (paths.game_data_root.empty()) paths.game_data_root = docs / "game";
       if (rex::cvar::Query<std::string>("user_data_root").empty()) paths.user_data_root = docs / "user";
