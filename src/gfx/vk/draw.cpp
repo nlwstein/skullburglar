@@ -165,7 +165,13 @@ bool Renderer::ImportGuestMemory() {
   const VkDevice dev = device_->device();
   const VkPhysicalDeviceProperties* physical = nullptr;
   vmaGetPhysicalDeviceProperties(allocator_, &physical);
+  // On by default only on Apple GPUs (all unified memory), where it's been played; other integrated GPUs (Steam Deck,
+  // laptop graphics) can opt in with BOTS_GFX_ZERO_COPY=1 until it's been tested there.
+#ifdef __APPLE__
   bool want = physical && physical->deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+#else
+  bool want = false;
+#endif
   if (const char* v = std::getenv("BOTS_GFX_ZERO_COPY"); v && *v) want = *v != '0';
   if (!want || !vk_.vkGetMemoryHostPointerPropertiesEXT) return false;
   // Physical memory has to be one host range (it is in the game; a replay's snapshot may not be).

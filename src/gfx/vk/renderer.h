@@ -517,9 +517,9 @@ class Renderer : public Pm4Sink {
   uint64_t system_constants_version_ = 0;  // bumped when they change
   uint32_t transient_sets_ = 0;  // allocated from transient_pool_ this submission
   bool shared_memory_uploaded_ = false;
-  // Unified-memory GPUs (Apple silicon, iOS, tvOS) read guest memory in place: shared_memory_ is imported host
+  // Apple GPUs (Apple silicon, iOS, tvOS) read guest memory in place: shared_memory_ is imported host
   // memory and uploads to it are skipped. Saves the 512 MB copy, which the Apple TV's ~2.2 GB per-app limit can't fit
-  // alongside the game. BOTS_GFX_ZERO_COPY=0 turns it off, =1 tries it on any GPU.
+  // alongside the game. BOTS_GFX_ZERO_COPY=0 turns it off, =1 tries it on any GPU (off by default elsewhere).
   bool zero_copy_ = false;
   VkDeviceMemory imported_memory_ = VK_NULL_HANDLE;
   uint32_t shared_memory_bindings_ = 1;
