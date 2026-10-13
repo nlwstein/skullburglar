@@ -103,7 +103,9 @@ PLATFORM=ios SDK=out/sdk tools/ios/build.sh build bundle ipa     # or PLATFORM=t
 - **Game files:** without them the app shows an import screen with a QR code, an address on port 8080 and a pairing
   code. Open the page on a phone or computer on the same network and choose your own disc image (.iso); the page reads
   the disc's file table in the browser and sends the game's files (about 6.8 GB; the device needs that much free), so
-  the disc image itself is never copied. An interrupted import carries on where it stopped. The files go to
+  the disc image itself is never copied. An interrupted import carries on where it stopped. On iOS the screen also has
+  a Choose Disc Image button (the Files picker; the image is read in place, iCloud files are downloaded first), and an
+  .iso copied into the top of the app's folder (Files app, or Finder on a Mac) is installed by itself. The files go to
   `Documents/game` on iOS (kept out of device backups) and `Library/Caches/game` on tvOS, whose apps get no persistent
   storage, so tvOS may clear them when it runs short of space. App updates keep them. For development, the `data`
   step copies `game/` over USB instead.

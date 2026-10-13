@@ -1,5 +1,7 @@
-// First-run game import for iOS and tvOS. Apple TV has no Files app, so the app serves a small web page on the local
-// network: the player opens it on a phone or computer and chooses their own disc image (.iso). The page reads the
+// First-run game import for iOS and tvOS. On iOS the player picks their own disc image (.iso) on the device (Files, or
+// a copy dropped into the app's folder with Finder or the Files app), and it's extracted in place with the launcher's
+// extractor (setup/iso_extract). Apple TV has no Files app, so the app also serves a small web page on the local
+// network (on iOS too, for a disc image that's on a computer): the player opens it on a phone or computer and chooses their own disc image (.iso). The page reads the
 // disc's file table in the browser and sends the game's files one at a time, so the device never stores the disc image
 // itself and needs only the room the game takes. Files already received are skipped, so an interrupted import picks up
 // where it stopped. Uploads need the code shown on screen and are accepted only from private, link-local or loopback
@@ -15,6 +17,9 @@
 
 #import <CoreImage/CoreImage.h>
 #import <UIKit/UIKit.h>
+#if !TARGET_OS_TV
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#endif
 #include <Network/Network.h>
 
 #include <arpa/inet.h>
@@ -23,9 +28,12 @@
 #include <net/if.h>
 #include <unistd.h>
 
+#include <atomic>
+#include <chrono>
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <rex/logging.h>
@@ -68,6 +76,9 @@ char g_code[8];
 nw_listener_t g_listener;
 dispatch_queue_t g_queue;
 uint16_t g_port;
+// An on-device extraction is running (iOS): the upload page's imports are refused meanwhile.
+std::atomic<bool> g_extracting{false};
+NSString* g_rejected;  // a dropped disc image that failed, not retried until it changes
 // The import in progress, from /begin. Touched only on g_queue.
 uint64_t g_total_bytes, g_total_files, g_done_bytes, g_done_files;
 
@@ -351,6 +362,10 @@ void Begin(nw_connection_t connection, NSDictionary<NSString*, NSString*>* query
     RespondText(connection, 413, @"That doesn't look like this game's disc image.");
     return;
   }
+  if (g_extracting) {
+    RespondText(connection, 409, @"The disc image is already being installed from the device itself.");
+    return;
+  }
   std::error_code ec;
   fs::create_directories(g_partial, ec);
   // Files kept from an earlier, interrupted import count towards the space already taken.
@@ -607,15 +622,93 @@ UIImage* QrImage(NSString* text) {
   return result;
 }
 
+#if !TARGET_OS_TV
+// Extracts the game from a disc image on the device into g_game_dir, reporting through g_status. Any thread.
+void ExtractFromDevice(NSURL* url) {
+  if (g_extracting.exchange(true)) return;
+  {
+    std::lock_guard lock(g_status.mutex);
+    if (g_status.state == State::kReceiving || g_status.state == State::kDone) {
+      g_extracting = false;  // an upload from the page is under way
+      return;
+    }
+  }
+  g_status.Set(State::kReceiving, 0, 0, @"Reading the disc image…");
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    const BOOL scoped = [url startAccessingSecurityScopedResource];
+    __block bots::setup::ExtractResult result;
+    result.error = "Couldn't open the disc image.";
+    // Coordinated reading downloads a file that's only in iCloud Drive first.
+    NSError* error = nil;
+    [[[NSFileCoordinator alloc] initWithFilePresenter:nil]
+        coordinateReadingItemAtURL:url
+                           options:NSFileCoordinatorReadingWithoutChanges
+                             error:&error
+                        byAccessor:^(NSURL* readable) {
+                          REXLOG_INFO("import: extracting {}", readable.path.UTF8String);
+                          bots::setup::ExtractProgress progress;
+                          std::atomic<bool> finished{false};
+                          bots::setup::ExtractResult extracted;  // a lambda can't capture the __block result
+                          std::thread worker([&] {
+                            extracted = bots::setup::ExtractIso(readable.path.UTF8String, g_game_dir, progress);
+                            finished = true;
+                          });
+                          while (!finished) {
+                            const uint64_t done = progress.bytes_done, total = progress.bytes_total;
+                            if (total) {
+                              g_status.Set(State::kReceiving, done, total,
+                                           [NSString stringWithFormat:@"Installing the game files… %.1f of %.1f GB",
+                                                                      done / 1e9, total / 1e9]);
+                            }
+                            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                          }
+                          worker.join();
+                          result = extracted;
+                        }];
+    if (scoped) [url stopAccessingSecurityScopedResource];
+    if (result.ok && bots::setup::IsGameDir(g_game_dir)) {
+      REXLOG_INFO("import: installed from the device");
+      g_status.Set(State::kDone, 1, 1, @"Installed. Starting the game…");
+    } else {
+      REXLOG_ERROR("import: extracting on the device failed: {}", result.error);
+      dispatch_async(dispatch_get_main_queue(), ^{ g_rejected = url.path; });
+      g_extracting = false;  // before the status, which shows the choices again
+      g_status.Set(State::kWaiting, 0, 0, [NSString stringWithFormat:@"%s Try another disc image.", result.error.c_str()]);
+    }
+  });
+}
+
+// A disc image the player copied into the app's own folder (Finder, or the Files app's "On My iPhone").
+NSURL* DroppedDiscImage() {
+  NSURL* docs = [NSURL fileURLWithPath:@(bots::ios::DocumentsDir().c_str()) isDirectory:YES];
+  for (NSURL* item in [NSFileManager.defaultManager contentsOfDirectoryAtURL:docs
+                                                  includingPropertiesForKeys:nil
+                                                                     options:NSDirectoryEnumerationSkipsHiddenFiles
+                                                                       error:nil]) {
+    if ([item.pathExtension.lowercaseString isEqualToString:@"iso"] && ![item.path isEqualToString:g_rejected]) {
+      return item;
+    }
+  }
+  return nil;
+}
+#endif
+
 }  // namespace
 
+#if !TARGET_OS_TV
+@interface BotsImportController : UIViewController <UIDocumentPickerDelegate>
+#else
 @interface BotsImportController : UIViewController
+#endif
 @property(nonatomic, strong) UILabel* addressLabel;
 @property(nonatomic, strong) UILabel* statusLabel;
 @property(nonatomic, strong) UIImageView* qr;
 @property(nonatomic, strong) UIProgressView* progress;
 @property(nonatomic, copy) NSString* shownURL;
 @property(nonatomic) unsigned shownSerial;
+@property(nonatomic) unsigned ticks;
+@property(nonatomic, copy) NSArray<UIView*>* choices;  // hidden while a disc image on the device is installing
+@property(nonatomic, strong) UIStackView* outer;        // iOS: the two columns
 @end
 
 @implementation BotsImportController
@@ -637,47 +730,126 @@ UIImage* QrImage(NSString* text) {
 #else
   const CGFloat qr = 150, spacing = 10, bar = 360;
 #endif
-  UIStackView* stack = [UIStackView new];
-  stack.axis = UILayoutConstraintAxisVertical;
-  stack.spacing = spacing;
-  stack.alignment = UIStackViewAlignmentCenter;
-  stack.translatesAutoresizingMaskIntoConstraints = NO;
-  [self.view addSubview:stack];
+  // iOS: the player's own disc image in one column, the network page in the other, side by side in landscape (a
+  // phone's landscape screen is too short for one column). tvOS: one column.
+  UIStackView* (^column)(void) = ^{
+    UIStackView* stack = [UIStackView new];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = spacing;
+    stack.alignment = UIStackViewAlignmentCenter;
+    return stack;
+  };
+  UIStackView* stack = column();
   UILabel* title = [self label:UIFontTextStyleTitle1 color:UIColor.labelColor];
   title.text = @"Skullburglar";
   [stack addArrangedSubview:title];
   UILabel* body = [self label:UIFontTextStyleBody color:UIColor.secondaryLabelColor];
+#if TARGET_OS_TV
   body.text = @"To play, open the page below on a phone or computer on the same network and choose your own disc\n"
                "image of 50 Cent: Blood on the Sand (Xbox 360, .iso). No game files are included.";
   [stack addArrangedSubview:body];
+  UIStackView* network = stack;
+  UIStackView* outer = stack;
+#else
+  body.text = @"To play, choose your own disc image of 50 Cent: Blood on the Sand (Xbox 360, .iso). No game files are "
+               "included. The game takes about 7 GB; you can delete the disc image once it's installed.";
+  [stack addArrangedSubview:body];
+  UIButtonConfiguration* look = [UIButtonConfiguration filledButtonConfiguration];
+  look.title = @"Choose Disc Image";
+  look.baseBackgroundColor = [UIColor colorWithRed:0.86 green:0.66 blue:0.25 alpha:1];
+  look.baseForegroundColor = UIColor.blackColor;
+  look.buttonSize = UIButtonConfigurationSizeLarge;
+  UIButton* choose = [UIButton buttonWithConfiguration:look primaryAction:[UIAction actionWithHandler:^(UIAction*) {
+                                                         [self choose];
+                                                       }]];
+  [stack addArrangedSubview:choose];
+  UIStackView* network = column();
+  UILabel* other = [self label:UIFontTextStyleFootnote color:UIColor.secondaryLabelColor];
+  other.text = @"Or copy the .iso into Skullburglar's folder (Files app, or Finder on a Mac), or send it from a "
+                "computer on the same network:";
+  [network addArrangedSubview:other];
+  self.outer = [[UIStackView alloc] initWithArrangedSubviews:@[ stack, network ]];
+  self.outer.alignment = UIStackViewAlignmentCenter;
+  UIStackView* outer = self.outer;
+  self.choices = @[ choose, network ];
+  [self fitLayout];
+  [self registerForTraitChanges:@[ UITraitVerticalSizeClass.class ]
+                     withAction:@selector(fitLayout)];
+#endif
   self.qr = [UIImageView new];
   self.qr.layer.magnificationFilter = kCAFilterNearest;
   self.qr.backgroundColor = UIColor.whiteColor;
   self.qr.contentMode = UIViewContentModeScaleAspectFit;
   [self.qr.widthAnchor constraintEqualToConstant:qr].active = YES;
   [self.qr.heightAnchor constraintEqualToConstant:qr].active = YES;
-  [stack addArrangedSubview:self.qr];
+  [network addArrangedSubview:self.qr];
   self.addressLabel = [self label:UIFontTextStyleHeadline color:UIColor.labelColor];
-  [stack addArrangedSubview:self.addressLabel];
+  [network addArrangedSubview:self.addressLabel];
   UILabel* code = [self label:UIFontTextStyleTitle2 color:[UIColor colorWithRed:0.86 green:0.66 blue:0.25 alpha:1]];
   code.text = [NSString stringWithFormat:@"Code %s", g_code];
-  [stack addArrangedSubview:code];
+  [network addArrangedSubview:code];
   self.progress = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
   self.progress.hidden = YES;
-  [self.progress.widthAnchor constraintEqualToConstant:bar].active = YES;
+  NSLayoutConstraint* barWidth = [self.progress.widthAnchor constraintEqualToConstant:bar];
+  barWidth.priority = UILayoutPriorityDefaultHigh;  // narrower when the column is
+  barWidth.active = YES;
   [stack addArrangedSubview:self.progress];
   self.statusLabel = [self label:UIFontTextStyleCallout color:UIColor.secondaryLabelColor];
   [stack addArrangedSubview:self.statusLabel];
+  outer.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.view addSubview:outer];
+  UILayoutGuide* safe = self.view.safeAreaLayoutGuide;
+  NSLayoutConstraint* wide = [outer.widthAnchor constraintEqualToAnchor:safe.widthAnchor multiplier:0.9];
+  wide.priority = UILayoutPriorityDefaultLow;  // the columns share the width in landscape
   [NSLayoutConstraint activateConstraints:@[
-    [stack.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-    [stack.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
-    [stack.widthAnchor constraintLessThanOrEqualToAnchor:self.view.widthAnchor multiplier:0.85],
+    [outer.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
+    [outer.centerYAnchor constraintEqualToAnchor:safe.centerYAnchor],
+    [outer.widthAnchor constraintLessThanOrEqualToAnchor:safe.widthAnchor multiplier:0.9],
+    [outer.widthAnchor constraintLessThanOrEqualToConstant:TARGET_OS_TV ? 1400 : 820],
+    [outer.heightAnchor constraintLessThanOrEqualToAnchor:safe.heightAnchor],
+    wide,
   ]];
   self.shownSerial = ~0u;
 }
 
+#if !TARGET_OS_TV
+// Side by side when the screen is short (a phone in landscape), stacked otherwise.
+- (void)fitLayout {
+  const bool wide = self.traitCollection.verticalSizeClass == UIUserInterfaceSizeClassCompact;
+  self.outer.axis = wide ? UILayoutConstraintAxisHorizontal : UILayoutConstraintAxisVertical;
+  self.outer.distribution = wide ? UIStackViewDistributionFillEqually : UIStackViewDistributionFill;
+  self.outer.spacing = wide ? 40 : 24;
+}
+
+- (void)choose {
+  NSMutableArray<UTType*>* types = [NSMutableArray arrayWithObject:UTTypeData];
+  if (UTType* iso = [UTType typeWithFilenameExtension:@"iso"]) [types insertObject:iso atIndex:0];
+  // Opened in place, not copied: the image is several GB.
+  UIDocumentPickerViewController* picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types
+                                                                                                      asCopy:NO];
+  picker.delegate = self;
+  [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController*)picker didPickDocumentsAtURLs:(NSArray<NSURL*>*)urls {
+  if (urls.firstObject) ExtractFromDevice(urls.firstObject);
+}
+#endif
+
 // Called on a timer; true once the game files are installed.
 - (BOOL)refresh {
+#if !TARGET_OS_TV
+  if (++self.ticks % 20 == 0 && !g_extracting) {
+    State state;
+    {
+      std::lock_guard lock(g_status.mutex);
+      state = g_status.state;
+    }
+    if (state == State::kWaiting) {
+      if (NSURL* dropped = DroppedDiscImage()) ExtractFromDevice(dropped);
+    }
+  }
+#endif
   NSString* address = LocalAddress();
   NSString* url = address && g_port ? [NSString stringWithFormat:@"http://%@:%u", address, g_port] : nil;
   if (url && ![url isEqualToString:self.shownURL]) {
@@ -702,6 +874,7 @@ UIImage* QrImage(NSString* text) {
   if (serial != self.shownSerial) {
     self.shownSerial = serial;
     self.statusLabel.text = message;
+    for (UIView* view in self.choices) view.hidden = g_extracting;
     self.progress.hidden = !total;
     if (total) self.progress.progress = float(double(done) / total);
   }

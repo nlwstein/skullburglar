@@ -84,7 +84,8 @@ endif()
 
 rexglue_setup_target(bots GPU_PLUGINS xenos)
 if(CMAKE_SYSTEM_NAME MATCHES "^(iOS|tvOS)$")
-    target_link_libraries(bots PRIVATE "-framework UIKit" "-framework GameController" "-framework Network" "-framework CoreImage")
+    target_link_libraries(bots PRIVATE "-framework UIKit" "-framework GameController" "-framework Network" "-framework CoreImage"
+        "-framework UniformTypeIdentifiers")
     target_include_directories(bots PRIVATE src)
     set_source_files_properties(src/ios/ios_app.mm src/ios/game_import.mm PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS -fobjc-arc)
     # The app bundle (tools/ios/build.sh) keeps the dylibs next to the executable, as on macOS.
