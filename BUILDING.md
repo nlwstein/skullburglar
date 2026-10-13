@@ -87,12 +87,13 @@ controller, laid out like Xbox Cloud Gaming's touch controls, shows while no gam
 a paired controller.
 
 **The iPhone build is experimental; the Apple TV build is very experimental.** The iPhone build plays (tested on an
-iPhone 15 Pro Max). The Apple TV build (tested on an Apple TV 4K, 3rd generation) reaches the main menu but is
-stopped by tvOS on loading a level: tvOS caps an app at about 2.2 GB there, with no entitlement to raise it, and the
-game needs more.
+iPhone 15 Pro Max). The Apple TV build (tested on an Apple TV 4K, 3rd generation) plays, but close to tvOS's
+limit of about 2.2 GB per app (there is no entitlement to raise it). It runs in a tight-memory mode for that: the GPU
+reads guest memory in place, every image and buffer gets its own allocation, and decoded BC1 textures are stored at
+16 bits per texel (the A15 has no BC texture formats).
 
 ```bash
-tools/ci/sdk.sh out/sdk                     # SDK with the patches, including 0023 (iOS/tvOS)
+tools/ci/sdk.sh out/sdk                     # SDK with the patches, including 0023 (iOS/tvOS) and 0024
 PLATFORM=ios SDK=out/sdk tools/ios/build.sh build bundle ipa     # or PLATFORM=tvos
 ```
 
