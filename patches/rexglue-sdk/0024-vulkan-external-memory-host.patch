@@ -1,0 +1,23 @@
+--- a/include/rex/ui/vulkan/device.h
++++ b/include/rex/ui/vulkan/device.h
+@@ -191,6 +191,7 @@
+     bool ext_1_1_KHR_bind_memory2 = false;              // #158
+     bool ext_1_2_KHR_spirv_1_4 = false;                 // #237
+     bool ext_EXT_memory_budget = false;                 // #238
++    bool ext_EXT_external_memory_host = false;          // #179
+     // Has optional features not implied by this being true.
+     bool ext_EXT_custom_border_color = false;
+     // Has optional features not implied by this being true.
+--- a/src/ui/vulkan/vulkan_device.cpp
++++ b/src/ui/vulkan/vulkan_device.cpp
+@@ -190,6 +190,10 @@
+   if (get_physical_device_properties2_supported) {
+     // #238.
+     XE_UI_VULKAN_STRUCT_EXTENSION(EXT_memory_budget)
++  }
++  if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 1, 0)) {
++    // #179. Lets a renderer import host memory (such as guest memory) as a buffer on unified-memory GPUs.
++    XE_UI_VULKAN_STRUCT_EXTENSION(EXT_external_memory_host)
+   }
+   if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 1, 0)) {
+     // #414.

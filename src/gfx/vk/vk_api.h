@@ -13,6 +13,8 @@ namespace bots::gfx::vk {
 #define BOTS_VK_DEVICE_FUNCTIONS(X)  \
   X(vkAllocateCommandBuffers)        \
   X(vkAllocateDescriptorSets)        \
+  X(vkAllocateMemory)                \
+  X(vkBindBufferMemory)              \
   X(vkBeginCommandBuffer)            \
   X(vkCmdBeginQuery)                 \
   X(vkCmdBeginRendering)             \
@@ -41,6 +43,7 @@ namespace bots::gfx::vk {
   X(vkCmdSetStencilWriteMask)        \
   X(vkCmdSetViewport)                \
   X(vkCmdWriteTimestamp)             \
+  X(vkCreateBuffer)                  \
   X(vkCreateCommandPool)             \
   X(vkCreateDescriptorPool)          \
   X(vkCreateDescriptorSetLayout)     \
@@ -52,6 +55,7 @@ namespace bots::gfx::vk {
   X(vkCreateQueryPool)               \
   X(vkCreateSampler)                 \
   X(vkCreateShaderModule)            \
+  X(vkDestroyBuffer)                 \
   X(vkDestroyCommandPool)            \
   X(vkDestroyDescriptorPool)         \
   X(vkDestroyDescriptorSetLayout)    \
@@ -64,6 +68,8 @@ namespace bots::gfx::vk {
   X(vkDestroySampler)                \
   X(vkDestroyShaderModule)           \
   X(vkDeviceWaitIdle)                \
+  X(vkFreeMemory)                    \
+  X(vkGetBufferMemoryRequirements)   \
   X(vkResetDescriptorPool)           \
   X(vkUpdateDescriptorSets)          \
   X(vkEndCommandBuffer)              \
@@ -80,6 +86,8 @@ struct Api {
   BOTS_VK_DEVICE_FUNCTIONS(BOTS_VK_DECLARE)
 #undef BOTS_VK_DECLARE
   PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties = nullptr;
+  // VK_EXT_external_memory_host, when the device has it enabled (else null).
+  PFN_vkGetMemoryHostPointerPropertiesEXT vkGetMemoryHostPointerPropertiesEXT = nullptr;
 
   // False if any function is missing.
   bool Load(const rex::ui::vulkan::VulkanDevice& device) {
@@ -96,6 +104,10 @@ struct Api {
     BOTS_VK_DEVICE_FUNCTIONS(BOTS_VK_LOAD)
 #undef BOTS_VK_LOAD
     vkGetPhysicalDeviceFormatProperties = ifn.vkGetPhysicalDeviceFormatProperties;
+    if (device.extensions().ext_EXT_external_memory_host) {
+      vkGetMemoryHostPointerPropertiesEXT = reinterpret_cast<PFN_vkGetMemoryHostPointerPropertiesEXT>(
+          ifn.vkGetDeviceProcAddr(device.device(), "vkGetMemoryHostPointerPropertiesEXT"));
+    }
     return ok && vkGetPhysicalDeviceFormatProperties;
   }
 };

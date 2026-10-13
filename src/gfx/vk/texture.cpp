@@ -105,10 +105,16 @@ BcDecode BcDecodeFor(VkFormat format) {
   }
 }
 
-VkFormat BcDecodedFormat(BcDecode decode) {
+// `packed`: BC1 to 16-bit A1R5G5B5 (half the memory of RGBA8, at 5 bits a channel), where memory is tight.
+VkFormat BcDecodedFormat(BcDecode decode, bool packed) {
   return decode == BcDecode::kBC4 ? VK_FORMAT_R8_UNORM
          : decode == BcDecode::kBC5 ? VK_FORMAT_R8G8_UNORM
-                                    : VK_FORMAT_R8G8B8A8_UNORM;
+         : decode == BcDecode::kBC1 && packed ? VK_FORMAT_A1R5G5B5_UNORM_PACK16
+                                              : VK_FORMAT_R8G8B8A8_UNORM;
+}
+
+uint32_t BcDecodedBytesPerTexel(BcDecode decode, bool packed) {
+  return decode == BcDecode::kBC4 ? 1 : decode == BcDecode::kBC5 || (decode == BcDecode::kBC1 && packed) ? 2 : 4;
 }
 
 // A BC4 block (also BC3's alpha and each BC5 channel): 16 values written `stride` bytes apart.
@@ -155,15 +161,25 @@ void DecodeBc1(const uint8_t* block, uint8_t* out, bool four_colour) {
 }
 
 // `blocks_x` x `rows` blocks (rows of all slices back to back) into texels, `row_texels` = blocks_x * 4 wide.
-void DecodeBcBlocks(BcDecode decode, const uint8_t* blocks, uint32_t blocks_x, uint32_t rows, uint8_t* out) {
-  const uint32_t bpp = decode == BcDecode::kBC4 ? 1 : decode == BcDecode::kBC5 ? 2 : 4;
+void DecodeBcBlocks(BcDecode decode, bool packed, const uint8_t* blocks, uint32_t blocks_x, uint32_t rows,
+                    uint8_t* out) {
+  const uint32_t bpp = BcDecodedBytesPerTexel(decode, packed);
   const uint32_t block_bytes = decode == BcDecode::kBC1 || decode == BcDecode::kBC4 ? 8 : 16;
   const uint32_t row_bytes = blocks_x * 4 * bpp;
   uint8_t texels[16 * 4];
   for (uint32_t by = 0; by < rows; ++by) {
     for (uint32_t bx = 0; bx < blocks_x; ++bx, blocks += block_bytes) {
       switch (decode) {
-        case BcDecode::kBC1: DecodeBc1(blocks, texels, false); break;
+        case BcDecode::kBC1:
+          DecodeBc1(blocks, texels, false);
+          if (packed) {
+            for (uint32_t i = 0; i < 16; ++i) {
+              const uint8_t* t = texels + 4 * i;
+              const uint16_t v = uint16_t((t[3] >> 7) << 15 | (t[0] >> 3) << 10 | (t[1] >> 3) << 5 | t[2] >> 3);
+              std::memcpy(texels + 2 * i, &v, 2);  // in place: texel i's 2 bytes never overtake texel i's 4
+            }
+          }
+          break;
         case BcDecode::kBC2:
           DecodeBc1(blocks + 8, texels, true);
           for (uint32_t i = 0; i < 16; ++i) texels[4 * i + 3] = uint8_t(((blocks[i / 2] >> (4 * (i & 1))) & 15) * 17);
@@ -392,8 +408,8 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
     }
   }
   const BcDecode decode = bc_textures_ ? BcDecode::kNone : BcDecodeFor(host.format);
-  const VkFormat image_format = decode == BcDecode::kNone ? host.format : BcDecodedFormat(decode);
-  const uint32_t decoded_bpp = decode == BcDecode::kBC4 ? 1 : decode == BcDecode::kBC5 ? 2 : 4;
+  const VkFormat image_format = decode == BcDecode::kNone ? host.format : BcDecodedFormat(decode, pack_bc1_);
+  const uint32_t decoded_bpp = BcDecodedBytesPerTexel(decode, pack_bc1_);
   std::vector<uint8_t> blocks;  // the untiled BC blocks of one level, when they're decoded
   if (!CreateImage(texture.image, image_format, width, height, false, view_type, false, depth, mip_max + 1)) {
     std::fprintf(stderr, "native renderer: texture image %ux%ux%u format %d failed\n", width, height, depth,
@@ -467,7 +483,7 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
       }
     }
     if (decode != BcDecode::kNone) {
-      DecodeBcBlocks(decode, blocks.data(), blocks_x, blocks_y * level_depth * layers, staging);
+      DecodeBcBlocks(decode, pack_bc1_, blocks.data(), blocks_x, blocks_y * level_depth * layers, staging);
     } else {
       ApplyShuffle(host.shuffle, staging, bytes);
     }
