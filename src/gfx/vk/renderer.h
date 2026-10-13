@@ -275,6 +275,9 @@ class Renderer : public Pm4Sink {
                    uint32_t depth_or_layers = 1, uint32_t levels = 1);
   // host: mapped for CPU writes (sequential); otherwise GPU-only, filled by copies.
   bool CreateBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage, bool host = true);
+  // Makes guest physical memory itself the shared-memory buffer (VK_EXT_external_memory_host), so nothing is copied
+  // into a GPU copy of it. False where that isn't possible or wanted; InitDrawing then allocates the copy.
+  bool ImportGuestMemory();
   void Resolve(const rex::graphics::RegisterFile& regs);
   void Barrier();
   // Barriers only on a hazard: images written / read by GPU work recorded since the last Barrier(). Access()
@@ -514,6 +517,11 @@ class Renderer : public Pm4Sink {
   uint64_t system_constants_version_ = 0;  // bumped when they change
   uint32_t transient_sets_ = 0;  // allocated from transient_pool_ this submission
   bool shared_memory_uploaded_ = false;
+  // Apple GPUs (Apple silicon, iOS, tvOS) read guest memory in place: shared_memory_ is imported host
+  // memory and uploads to it are skipped. Saves the 512 MB copy, which the Apple TV's ~2.2 GB per-app limit can't fit
+  // alongside the game. BOTS_GFX_ZERO_COPY=0 turns it off, =1 tries it on any GPU (off by default elsewhere).
+  bool zero_copy_ = false;
+  VkDeviceMemory imported_memory_ = VK_NULL_HANDLE;
   uint32_t shared_memory_bindings_ = 1;
   VkDescriptorSetLayout set_layout_shared_ = VK_NULL_HANDLE, set_layout_constants_ = VK_NULL_HANDLE,
                         set_layout_empty_ = VK_NULL_HANDLE;
@@ -607,6 +615,14 @@ class Renderer : public Pm4Sink {
   std::unordered_map<TextureCacheKey, std::unique_ptr<GuestTexture>, WordsHash> guest_textures_;
   std::unordered_map<SamplerKey, VkSampler, WordsHash> samplers_;
   bool trace_textures_ = false;
+  // False on GPUs without BC (DXT) texture formats, such as Apple's before A16 (the A15 Apple TV 4K): those textures
+  // are decoded on the CPU instead. BOTS_GFX_DECODE_BC=1 forces the decoding anywhere.
+  bool bc_textures_ = true;
+  // Where the app's memory limit is tight (tvOS: ~2.2 GB per app, no entitlement to raise it): every image and buffer
+  // gets its own allocation instead of a share of VMA's large blocks (whose unused part still counts against the app
+  // on Apple GPUs; ~250 MB of it in gameplay), and decoded BC1 textures are 16-bit. BOTS_GFX_TIGHT_MEMORY=0/1.
+  bool tight_memory_ = false;
+  bool pack_bc1_ = false;  // tight_memory_ and the GPU samples A1R5G5B5
   uint64_t write_clock_ = 0;
   VkDescriptorSetLayout transfer_set_layout_ = VK_NULL_HANDLE;
   VkPipelineLayout transfer_layout_ = VK_NULL_HANDLE;

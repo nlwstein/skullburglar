@@ -15,6 +15,9 @@
 #endif
 #include <windows.h>
 #else
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #include <spawn.h>
 extern char** environ;
 #endif
@@ -152,6 +155,12 @@ bool Spawn(const std::vector<std::string>& args, const std::vector<std::string>&
   CloseHandle(pi.hThread);
   CloseHandle(pi.hProcess);
   return true;
+#elif TARGET_OS_IPHONE
+  // iOS and tvOS apps can't start processes (tvOS has no posix_spawn, the iOS sandbox refuses it).
+  (void)args;
+  (void)env;
+  REXLOG_ERROR("coop: split screen isn't available on this platform");
+  return false;
 #else
   std::vector<char*> argv, envp;
   for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));

@@ -1,0 +1,348 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9b3cdf5..5f3f286 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -12,6 +12,12 @@ project(ReXGlue
+     LANGUAGES ${REXGLUE_LANGUAGES}
+     DESCRIPTION "Xbox 360 Recompilation SDK"
+ )
++# iOS and tvOS (CMake sets IOS for iOS only; SDL tells the two apart, so this doesn't set it for tvOS).
++if(CMAKE_SYSTEM_NAME MATCHES "^(iOS|tvOS)$")
++    set(REX_APPLE_EMBEDDED ON)
++else()
++    set(REX_APPLE_EMBEDDED OFF)
++endif()
+ # Floor only: bump MAJOR.MINOR for API changes. Patch is derived from git tags
+ # in cmake/rex_version.cmake. See docs/RELEASING.md.
+ 
+@@ -167,6 +173,10 @@ elseif(UNIX AND NOT APPLE)
+         set(REX_PLATFORM "linux-${REX_TARGET_PROCESSOR}")
+     endif()
+     add_compile_definitions(REX_PLATFORM_LINUX=1)
++elseif(REX_APPLE_EMBEDDED)
++    # Shares the macOS code paths (REX_PLATFORM_MAC); REX_PLATFORM_IOS in rex/platform.h marks the differences.
++    string(TOLOWER "${CMAKE_SYSTEM_NAME}-arm64" REX_PLATFORM)
++    add_compile_definitions(REX_PLATFORM_MAC=1)
+ elseif(APPLE)
+     if(REX_TARGET_PROCESSOR MATCHES "AMD64|x86_64")
+         set(REX_PLATFORM "mac-amd64")
+@@ -188,7 +198,9 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/rex_pch.cmake)
+ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/rex_version.cmake)
+ rex_resolve_version(REXGLUE_FULL_VERSION
+     FLOOR_MAJOR ${PROJECT_VERSION_MAJOR}
+-    FLOOR_MINOR ${PROJECT_VERSION_MINOR})
++    FLOOR_MINOR ${PROJECT_VERSION_MINOR}
++    # This checkout's tags, not those of a project that adds the SDK as a subdirectory (the iOS / tvOS builds).
++    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+ 
+ # Strip the -id trailer (if any) for the numeric-only version.
+ string(REGEX REPLACE "-.*$" "" REXGLUE_NUMERIC_VERSION "${REXGLUE_FULL_VERSION}")
+@@ -260,7 +272,9 @@ add_subdirectory(src/graphics)
+ add_subdirectory(src/system)
+ add_subdirectory(src/kernel)
+ add_subdirectory(src/codegen)
+-add_subdirectory(src/rexglue)
++if(NOT REX_APPLE_EMBEDDED)  # the recompiler CLI is a host tool; iOS/tvOS builds take REXGLUE_HOST_CLI
++    add_subdirectory(src/rexglue)
++endif()
+ 
+ # Add tests subdirectory if tests are enabled
+ if(REXGLUE_BUILD_TESTS)
+@@ -286,7 +300,7 @@ message(STATUS "  Perf Counters: ${REXGLUE_ENABLE_PERF_COUNTERS}")
+ message(STATUS "===========================================")
+ 
+ # SDK install/export rules (skipped when consumed as a subdirectory)
+-if(PROJECT_IS_TOP_LEVEL)
++if(PROJECT_IS_TOP_LEVEL AND NOT REX_APPLE_EMBEDDED)
+     include(cmake/rexglue_devenv.cmake)
+     include(cmake/rexglue_install.cmake)
+ else()
+diff --git a/cmake/rexglue_helpers.cmake b/cmake/rexglue_helpers.cmake
+index 41e6dce..cf4fa66 100644
+--- a/cmake/rexglue_helpers.cmake
++++ b/cmake/rexglue_helpers.cmake
+@@ -166,7 +166,7 @@ function(rexglue_configure_target target_name)
+         unset(_plugin_target)
+     endforeach()
+ 
+-    if(APPLE AND REXGLUE_USE_VULKAN)
++    if(APPLE AND NOT CMAKE_SYSTEM_NAME MATCHES "^(iOS|tvOS)$" AND REXGLUE_USE_VULKAN)
+         _rexglue_stage_macos_vulkan_runtime(${target_name})
+     endif()
+ endfunction()
+diff --git a/include/rex/platform.h b/include/rex/platform.h
+index e90418d..3946123 100644
+--- a/include/rex/platform.h
++++ b/include/rex/platform.h
+@@ -47,6 +47,13 @@
+ #ifndef REX_PLATFORM_MAC
+ #define REX_PLATFORM_MAC 0
+ #endif
++// iOS and tvOS (TARGET_OS_IPHONE covers both) are REX_PLATFORM_MAC too (TARGET_OS_MAC covers every Apple OS);
++// this marks where they differ.
++#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
++#define REX_PLATFORM_IOS 1
++#else
++#define REX_PLATFORM_IOS 0
++#endif
+ #ifndef REX_PLATFORM_WIN32
+ #define REX_PLATFORM_WIN32 0
+ #endif
+diff --git a/src/core/memory_posix.cpp b/src/core/memory_posix.cpp
+index 2e4e4c3..2adc8a6 100644
+--- a/src/core/memory_posix.cpp
++++ b/src/core/memory_posix.cpp
+@@ -19,9 +19,13 @@
+ 
+ #include <fcntl.h>
+ 
++#include <rex/platform.h>
++
+ #if REX_PLATFORM_MAC
+ #include <mach/mach.h>
+-#include <mach/mach_vm.h>
++#if !REX_PLATFORM_IOS
++#include <mach/mach_vm.h>  // the iOS SDK marks it unsupported; vm_region_64/vm_map are the same calls there
++#endif
+ #include <mach/vm_region.h>
+ #endif  // REX_PLATFORM_MAC
+ 
+@@ -374,7 +378,29 @@ bool Protect(void* base_address, size_t length, PageAccess access, PageAccess* o
+ }
+ 
+ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_IOS
++  vm_address_t address = reinterpret_cast<vm_address_t>(base_address);
++  vm_size_t region_size = 0;
++  vm_region_basic_info_data_64_t info;
++  mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
++  mach_port_t object_name;
++  kern_return_t kr =
++      vm_region_64(mach_task_self(), &address, &region_size, VM_REGION_BASIC_INFO_64,
++                   reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
++  if (kr != KERN_SUCCESS || address > reinterpret_cast<vm_address_t>(base_address)) {
++    return false;
++  }
++  length = static_cast<size_t>((address + region_size) -
++                               reinterpret_cast<vm_address_t>(base_address));
++  if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE)) {
++    access_out = PageAccess::kReadWrite;
++  } else if (info.protection & VM_PROT_READ) {
++    access_out = PageAccess::kReadOnly;
++  } else {
++    access_out = PageAccess::kNoAccess;
++  }
++  return true;
++#elif REX_PLATFORM_MAC
+   mach_vm_address_t address = reinterpret_cast<mach_vm_address_t>(base_address);
+   mach_vm_size_t region_size = 0;
+   vm_region_basic_info_data_64_t info;
+@@ -429,9 +455,42 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
+ #endif
+ }
+ 
++#if REX_PLATFORM_IOS
++// The iOS sandbox refuses shm_open, so a file mapping is an anonymous named Mach memory entry
++// (a send right, kept in the handle) whose views are vm_map'ed. The memory is zero-filled on
++// first touch and freed with the last view and the port.
++static vm_prot_t ToMachProt(PageAccess access) {
++  switch (access) {
++    case PageAccess::kReadOnly:
++    case PageAccess::kExecuteReadOnly:
++      return VM_PROT_READ;
++    case PageAccess::kReadWrite:
++    case PageAccess::kExecuteReadWrite:
++      return VM_PROT_READ | VM_PROT_WRITE;
++    default:
++      return VM_PROT_NONE;
++  }
++}
++#endif
++
+ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, size_t length,
+                                           PageAccess access, bool commit) {
+-#if REX_PLATFORM_ANDROID
++#if REX_PLATFORM_IOS
++  (void)path;
++  (void)access;
++  (void)commit;
++  memory_object_size_t size = length;
++  mach_port_t entry = MACH_PORT_NULL;
++  kern_return_t kr = mach_make_memory_entry_64(
++      mach_task_self(), &size, 0, MAP_MEM_NAMED_CREATE | VM_PROT_READ | VM_PROT_WRITE, &entry,
++      MACH_PORT_NULL);
++  if (kr != KERN_SUCCESS || size < length) {
++    REXSYS_ERROR("mach_make_memory_entry_64(0x{:X}) failed: {} ({})", length, kr,
++                 mach_error_string(kr));
++    return kFileMappingHandleInvalid;
++  }
++  return static_cast<FileMappingHandle>(entry);
++#elif REX_PLATFORM_ANDROID
+   // TODO(Triang3l): Check if memfd can be used instead on API 30+.
+   if (android_ASharedMemory_create_) {
+     int sharedmem_fd = android_ASharedMemory_create_(path.c_str(), length);
+@@ -492,6 +551,11 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
+ }
+ 
+ void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::path& path) {
++#if REX_PLATFORM_IOS
++  (void)path;
++  mach_port_deallocate(mach_task_self(), static_cast<mach_port_t>(handle));
++  return;
++#endif
+   close(static_cast<int>(handle));
+ #if !REX_PLATFORM_ANDROID
+   auto full_path = MakeShmName(path);
+@@ -507,6 +571,24 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, P
+     return nullptr;
+   }
+ 
++#if REX_PLATFORM_IOS
++  {
++    vm_address_t address = reinterpret_cast<vm_address_t>(base_address);
++    const vm_prot_t prot = ToMachProt(access);
++    kern_return_t kr = vm_map(mach_task_self(), &address, length, 0,
++                              base_address ? (VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE) : VM_FLAGS_ANYWHERE,
++                              static_cast<mem_entry_name_port_t>(handle),
++                              static_cast<memory_object_offset_t>(file_offset), FALSE, prot,
++                              VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_NONE);
++    if (kr != KERN_SUCCESS) {
++      REXSYS_ERROR("vm_map({}, 0x{:X}, offset 0x{:X}) failed: {} ({})", base_address, length,
++                   file_offset, kr, mach_error_string(kr));
++      return nullptr;
++    }
++    return reinterpret_cast<void*>(address);
++  }
++#endif
++
+   int flags = MAP_SHARED;
+ 
+   // For file views, we need MAP_FIXED to replace existing reservations.
+diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
+index 63de9d3..b43060d 100644
+--- a/src/system/xmemory.cpp
++++ b/src/system/xmemory.cpp
+@@ -417,8 +417,17 @@ int Memory::MapViewsMac() {
+                                            map_info[n].virtual_address_start + 1);
+     size_t file_offset = static_cast<size_t>(map_info[n].target_address & granularity_mask);
+     void* target_address = mapping_base + map_info[n].virtual_address_start;
++#if REX_PLATFORM_IOS
++    // The mapping is a Mach memory entry there, not a descriptor (memory_posix.cpp).
++    void* result = rex::memory::MapFileView(mapping_, target_address, view_size,
++                                            rex::memory::PageAccess::kReadWrite, file_offset);
++    if (!result) {
++      result = MAP_FAILED;
++    }
++#else
+     void* result = mmap(target_address, view_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED,
+                         mapping_, file_offset);
++#endif
+     if (result == MAP_FAILED || result != target_address) {
+       int err = errno;
+       REXSYS_ERROR(
+diff --git a/src/ui/vulkan/vulkan_instance.cpp b/src/ui/vulkan/vulkan_instance.cpp
+index 5a325b6..9214c3b 100644
+--- a/src/ui/vulkan/vulkan_instance.cpp
++++ b/src/ui/vulkan/vulkan_instance.cpp
+@@ -18,6 +18,7 @@
+ #include <vector>
+ 
+ #include <rex/cvar.h>
++#include <rex/filesystem.h>
+ #include <rex/logging.h>
+ #include <rex/platform.h>
+ #include <rex/ui/vulkan/instance.h>
+@@ -48,10 +49,17 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
+   bool functions_loaded = true;
+   bool loader_loaded = false;
+ #if REX_PLATFORM_MAC
++#if REX_PLATFORM_IOS
++  // No ICD loader on iOS: MoltenVK is bundled with the app and used as the Vulkan implementation.
++  const std::filesystem::path exe_dir = rex::filesystem::GetExecutableFolder();
++  std::vector<std::filesystem::path> loader_candidates = {
++      exe_dir / "libMoltenVK.dylib", exe_dir / "Frameworks" / "libMoltenVK.dylib"};
++#else
+   const MacOSVulkanRuntimePaths macos_runtime_paths = DetectMacOSVulkanRuntimePaths();
+   ConfigureMacOSVulkanEnvironment(macos_runtime_paths);
+ 
+   std::vector<std::filesystem::path> loader_candidates = macos_runtime_paths.loader_candidates;
++#endif
+   loader_candidates.emplace_back(platform::lib_names::kVulkanLoader);
+   loader_candidates.emplace_back("libvulkan.dylib");
+   loader_candidates.emplace_back("libMoltenVK.dylib");
+diff --git a/src/ui/windowed_app_context_sdl.cpp b/src/ui/windowed_app_context_sdl.cpp
+index 9ef52f9..10c8d6a 100644
+--- a/src/ui/windowed_app_context_sdl.cpp
++++ b/src/ui/windowed_app_context_sdl.cpp
+@@ -41,7 +41,11 @@ bool SDLWindowedAppContext::Initialize() {
+   // Picked before SDL_InitSubSystem, long before a graphics instance can say
+   // which surface extensions it has, so the cvar is the escape hatch.
+   std::string requested_driver = REXCVAR_GET(video_driver);
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_IOS
++  if (requested_driver.empty()) {
++    requested_driver = "uikit";
++  }
++#elif REX_PLATFORM_MAC
+   // macOS presents via a CAMetalLayer surface obtained from the Cocoa driver.
+   if (requested_driver.empty()) {
+     requested_driver = "cocoa";
+diff --git a/src/ui/windowed_app_main_sdl.cpp b/src/ui/windowed_app_main_sdl.cpp
+index 77bb1dc..519178b 100644
+--- a/src/ui/windowed_app_main_sdl.cpp
++++ b/src/ui/windowed_app_main_sdl.cpp
+@@ -22,6 +22,12 @@
+ #include <rex/ui/windowed_app.h>
+ #include <rex/ui/windowed_app_context_sdl.h>
+ 
++#if REX_PLATFORM_IOS
++// Renames main() to SDL_main(); SDL's own main() starts UIApplicationMain and calls it once the
++// app has launched.
++#include <SDL3/SDL_main.h>
++#endif
++
+ #if REX_PLATFORM_WIN32
+ #ifndef WIN32_LEAN_AND_MEAN
+ #define WIN32_LEAN_AND_MEAN
+diff --git a/thirdparty/CMakeLists.txt b/thirdparty/CMakeLists.txt
+index f102b56..0b3434a 100644
+--- a/thirdparty/CMakeLists.txt
++++ b/thirdparty/CMakeLists.txt
+@@ -207,15 +207,31 @@ if(REXGLUE_USE_VULKAN)
+         # rexglue itself.
+         set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+         set(BUILD_WERROR OFF CACHE BOOL "" FORCE)
+-        set(LOADER_CODEGEN OFF CACHE BOOL "" FORCE)
+-        string(REGEX REPLACE "\\.[0-9]+$" "" VulkanHeaders_VERSION
+-            "${REXGLUE_VULKAN_SDK_VERSION}")
+-        add_subdirectory(vulkan-loader EXCLUDE_FROM_ALL)
+-        set_target_properties(vulkan PROPERTIES EXCLUDE_FROM_ALL FALSE)
++        if(NOT REX_APPLE_EMBEDDED)  # iOS/tvOS load MoltenVK directly (no ICD loader there)
++            set(LOADER_CODEGEN OFF CACHE BOOL "" FORCE)
++            string(REGEX REPLACE "\\.[0-9]+$" "" VulkanHeaders_VERSION
++                "${REXGLUE_VULKAN_SDK_VERSION}")
++            add_subdirectory(vulkan-loader EXCLUDE_FROM_ALL)
++            set_target_properties(vulkan PROPERTIES EXCLUDE_FROM_ALL FALSE)
++        endif()
+ 
+         set(MVK_BUILD_SHADER_CONVERTER_TOOL OFF CACHE BOOL "" FORCE)
+         set(MVK_EXCLUDE_SPIRV_TOOLS ON CACHE BOOL "" FORCE)
++        if(REX_APPLE_EMBEDDED)
++            # MoltenVK's CMake links AppKit; its sources use UIKit on iOS/tvOS. Finding UIKit under that variable
++            # name first turns its find_library(APPKIT_LIBRARY AppKit) into a no-op. AppKit also brought in
++            # CoreGraphics, which UIKit doesn't re-export.
++            find_library(APPKIT_LIBRARY UIKit REQUIRED)
++            find_library(REX_COREGRAPHICS_LIBRARY CoreGraphics REQUIRED)
++            if(CMAKE_SYSTEM_NAME STREQUAL "tvOS")
++                # tvOS has no IOKit (MoltenVK only uses it on macOS); any framework fills the required slot.
++                find_library(IOKIT_LIBRARY Foundation REQUIRED)
++            endif()
++        endif()
+         add_subdirectory(moltenvk)
++        if(REX_APPLE_EMBEDDED)
++            target_link_libraries(MoltenVK_Common PUBLIC ${REX_COREGRAPHICS_LIBRARY})
++        endif()
+     endif()
+ endif()
+ 

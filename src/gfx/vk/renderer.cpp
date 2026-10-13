@@ -6,6 +6,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 #include <iterator>
 
 #include <rex/graphics/registers.h>
@@ -176,6 +180,18 @@ Renderer::Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory m
   // warm warm-up 4.9 s -> 2.2 s. Other drivers keep it. BOTS_GFX_PIPELINE_CACHE=0/1 overrides.
   create_with_cache_ = device_->properties().driverID != VK_DRIVER_ID_MOLTENVK;
   if (const char* v = std::getenv("BOTS_GFX_PIPELINE_CACHE"); v && *v) create_with_cache_ = *v != '0';
+  VkFormatProperties bc{};
+  vk_.vkGetPhysicalDeviceFormatProperties(device_->physical_device(), VK_FORMAT_BC1_RGBA_UNORM_BLOCK, &bc);
+  bc_textures_ = (bc.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+  if (const char* v = std::getenv("BOTS_GFX_DECODE_BC"); v && *v == '1') bc_textures_ = false;
+  if (!bc_textures_) std::fprintf(stderr, "native renderer: no BC texture formats; decoding them on the CPU\n");
+#if defined(TARGET_OS_TV) && TARGET_OS_TV
+  tight_memory_ = true;
+#endif
+  if (const char* v = std::getenv("BOTS_GFX_TIGHT_MEMORY"); v && *v) tight_memory_ = *v != '0';
+  VkFormatProperties packed{};
+  vk_.vkGetPhysicalDeviceFormatProperties(device_->physical_device(), VK_FORMAT_A1R5G5B5_UNORM_PACK16, &packed);
+  pack_bc1_ = tight_memory_ && (packed.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
   if (const char* v = std::getenv("BOTS_GPU_TIMING"); v && (*v == '1' || *v == '2')) {
     gpu_draw_labels_ = *v == '2';
     VkPhysicalDeviceProperties props;
@@ -401,6 +417,7 @@ void Renderer::EndFrame() {
 }
 
 bool Renderer::UploadGuestMemory(uint32_t start, uint32_t length) {
+  if (zero_copy_) return true;  // the buffer is guest memory itself
   BeginCommands(kGpuUpload);
   EndRendering("upload");
   Barrier();
@@ -664,6 +681,7 @@ bool Renderer::CreateImage(Image& image, VkFormat format, uint32_t width, uint32
   info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   VmaAllocationCreateInfo alloc{};
   alloc.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+  if (tight_memory_) alloc.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
   if (vmaCreateImage(allocator_, &info, &alloc, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
     return false;
   }

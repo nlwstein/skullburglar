@@ -5,7 +5,8 @@
 
 Run by .gitlab-ci.yml's release job with its CI_* variables. GitLab creates the tag from CI_COMMIT_SHA along with the
 release. The notes list the releasable commits since LAST (empty for the first release); the packages stay in this
-project's package registry (skullburglar/<VERSION>) and are private like the project.
+project's package registry (skullburglar/<VERSION>) and are private like the project. The iOS and tvOS IPAs are
+linked when their (experimental, allowed-to-fail) jobs uploaded them.
 """
 import json
 import os
@@ -30,6 +31,11 @@ FILES = [
     ("Windows x86_64 debug symbols", f"skullburglar-{VERSION}-windows-x86_64-symbols.zip"),
     ("macOS arm64", f"skullburglar-{VERSION}-macos-arm64.dmg"),
     ("macOS arm64 debug symbols", f"skullburglar-{VERSION}-macos-arm64-symbols.zip"),
+]
+# Experimental builds, linked when their job uploaded them (they're allowed to fail without holding up a release).
+OPTIONAL = [
+    ("iOS / iPadOS (experimental, unsigned IPA)", f"skullburglar-{VERSION}-ios.ipa"),
+    ("tvOS (experimental, unsigned IPA)", f"skullburglar-{VERSION}-tvos.ipa"),
 ]
 SECTIONS = [("feat", "Features"), ("fix", "Fixes"), ("perf", "Performance")]
 
@@ -62,13 +68,14 @@ def main():
     missing = [name for _, name in FILES if name not in have]
     if missing:  # all there, or no release
         sys.exit(f"missing packages: {', '.join(missing)}")
+    files = FILES + [(label, name) for label, name in OPTIONAL if name in have]
     release = call("POST", "/releases", {
         "tag_name": f"v{VERSION}",
         "ref": SHA,
         "name": f"v{VERSION}",
         "description": notes(),
         "assets": {"links": [{"name": label, "url": f"{API}/projects/{PROJECT}{pkg}/{name}", "link_type": "package"}
-                             for label, name in FILES]},
+                             for label, name in files]},
     })
     print(f"released {release['tag_name']}: {release['_links']['self']}")
 

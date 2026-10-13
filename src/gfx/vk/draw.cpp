@@ -11,6 +11,10 @@
 #include <cstdlib>
 #include <cstring>
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
 #include <rex/graphics/pipeline/texture/util.h>
 #include <rex/graphics/registers.h>
 #include <rex/graphics/util/draw.h>
@@ -30,8 +34,13 @@ using Translator = rg::SpirvShaderTranslator;
 
 constexpr VkDeviceSize kSharedMemorySize = VkDeviceSize(512) << 20;
 // Per submission (kSubmissions of them, host-visible). Gameplay uses at most ~14 MB of one; loads fill it and flush
-// early, which costs nothing measurable (B-113: was 128 MB, 768 MB in all).
+// early, which costs nothing measurable (B-113: was 128 MB, 768 MB in all). The Apple TV's per-app memory limit
+// (about 2.2 GB on 4 GB models, with no entitlement to raise it) is tight enough that its rings are halved.
+#if defined(TARGET_OS_TV) && TARGET_OS_TV
+constexpr VkDeviceSize kRingSize = VkDeviceSize(16) << 20;
+#else
 constexpr VkDeviceSize kRingSize = VkDeviceSize(32) << 20;
+#endif
 // Constant buffers are dynamic uniform buffers over the ring with a fixed range each (one set per ring, only the
 // offsets change per draw). Float constants are packed to what the shader uses, at most 256 registers; the ring
 // has this much slack past kRingSize so a range starting near its end stays inside the buffer.
@@ -142,6 +151,7 @@ bool Renderer::CreateBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlag
   alloc.usage = !host ? VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE
                       : discrete ? VMA_MEMORY_USAGE_AUTO_PREFER_HOST : VMA_MEMORY_USAGE_AUTO;
   if (host) alloc.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+  if (tight_memory_) alloc.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
   VmaAllocationInfo mapped;
   if (vmaCreateBuffer(allocator_, &info, &alloc, &buffer.buffer, &buffer.allocation, &mapped) != VK_SUCCESS) {
     return false;
@@ -149,6 +159,61 @@ bool Renderer::CreateBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlag
   buffer.mapping = static_cast<uint8_t*>(mapped.pMappedData);
   buffer.size = size;
   return !host || buffer.mapping != nullptr;
+}
+
+bool Renderer::ImportGuestMemory() {
+  const VkDevice dev = device_->device();
+  const VkPhysicalDeviceProperties* physical = nullptr;
+  vmaGetPhysicalDeviceProperties(allocator_, &physical);
+  // On by default only on Apple GPUs (all unified memory), where it's been played; other integrated GPUs (Steam Deck,
+  // laptop graphics) can opt in with BOTS_GFX_ZERO_COPY=1 until it's been tested there.
+#ifdef __APPLE__
+  bool want = physical && physical->deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+#else
+  bool want = false;
+#endif
+  if (const char* v = std::getenv("BOTS_GFX_ZERO_COPY"); v && *v) want = *v != '0';
+  if (!want || !vk_.vkGetMemoryHostPointerPropertiesEXT) return false;
+  // Physical memory has to be one host range (it is in the game; a replay's snapshot may not be).
+  auto* host = const_cast<uint8_t*>(memory_(0));
+  if (!host || memory_(uint32_t(kSharedMemorySize) - 4096) != host + kSharedMemorySize - 4096) return false;
+
+  VkMemoryHostPointerPropertiesEXT host_props{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+  if (vk_.vkGetMemoryHostPointerPropertiesEXT(dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host,
+                                              &host_props) != VK_SUCCESS) {
+    return false;
+  }
+  VkExternalMemoryBufferCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
+  external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+  VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, &external};
+  info.size = kSharedMemorySize;
+  info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  if (vk_.vkCreateBuffer(dev, &info, nullptr, &shared_memory_.buffer) != VK_SUCCESS) return false;
+  VkMemoryRequirements requirements;
+  vk_.vkGetBufferMemoryRequirements(dev, shared_memory_.buffer, &requirements);
+  const uint32_t types = requirements.memoryTypeBits & host_props.memoryTypeBits;
+  bool ok = types != 0 && reinterpret_cast<uintptr_t>(host) % requirements.alignment == 0;
+  if (ok) {
+    VkImportMemoryHostPointerInfoEXT import{VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
+    import.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+    import.pHostPointer = host;
+    VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &import};
+    alloc.allocationSize = kSharedMemorySize;
+    alloc.memoryTypeIndex = uint32_t(std::countr_zero(types));
+    ok = vk_.vkAllocateMemory(dev, &alloc, nullptr, &imported_memory_) == VK_SUCCESS &&
+         vk_.vkBindBufferMemory(dev, shared_memory_.buffer, imported_memory_, 0) == VK_SUCCESS;
+  }
+  if (!ok) {
+    vk_.vkDestroyBuffer(dev, shared_memory_.buffer, nullptr);
+    if (imported_memory_) vk_.vkFreeMemory(dev, imported_memory_, nullptr);
+    shared_memory_.buffer = VK_NULL_HANDLE;
+    imported_memory_ = VK_NULL_HANDLE;
+    REXLOG_WARN("gfx native: couldn't import guest memory for the GPU; using a copy of it");
+    return false;
+  }
+  shared_memory_.size = kSharedMemorySize;
+  REXLOG_INFO("gfx native: the GPU reads guest memory in place (no copy)");
+  return true;
 }
 
 bool Renderer::InitDrawing() {
@@ -218,8 +283,10 @@ bool Renderer::InitDrawing() {
 
   // Guest physical memory, as the translated shaders address it (vertex fetch, index loads). GPU-only: it is filled
   // through the ring (UploadGuestMemory), so on a discrete GPU it lives in VRAM, not pinned system memory (B-113).
-  bool buffers = CreateBuffer(shared_memory_, kSharedMemorySize,
-                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
+  zero_copy_ = ImportGuestMemory();
+  bool buffers = zero_copy_ || CreateBuffer(shared_memory_, kSharedMemorySize,
+                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                            false);
   for (Buffer& ring : rings_) {
     buffers = buffers && CreateBuffer(ring, kRingSize + kRingSlack, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
                                                                         VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
@@ -293,7 +360,12 @@ void Renderer::DestroyDrawing() {
     if (submission.transient_pool) vk_.vkDestroyDescriptorPool(dev, submission.transient_pool, nullptr);
   }
   if (sampler_) vk_.vkDestroySampler(dev, sampler_, nullptr);
-  if (shared_memory_.buffer) vmaDestroyBuffer(allocator_, shared_memory_.buffer, shared_memory_.allocation);
+  if (zero_copy_) {
+    if (shared_memory_.buffer) vk_.vkDestroyBuffer(dev, shared_memory_.buffer, nullptr);
+    if (imported_memory_) vk_.vkFreeMemory(dev, imported_memory_, nullptr);
+  } else if (shared_memory_.buffer) {
+    vmaDestroyBuffer(allocator_, shared_memory_.buffer, shared_memory_.allocation);
+  }
   for (Buffer& ring : rings_) {
     if (ring.buffer) vmaDestroyBuffer(allocator_, ring.buffer, ring.allocation);
   }

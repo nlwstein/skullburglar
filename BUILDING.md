@@ -79,6 +79,48 @@ tools/win-cross/build.sh   # D3D12, clang + xwin -> ~/bots/win/dist/bots-win64.z
 Running the Linux build needs a Vulkan GPU passed into the container (`--gpus all` and
 `NVIDIA_DRIVER_CAPABILITIES=all` for NVIDIA) and a display.
 
+## iOS and tvOS (experimental)
+
+An iPhone, iPad or Apple TV build, with Xcode (not just its command line tools) and codegen output already in
+`generated/`. There's no launcher: the game boots straight away from the app's data folder. On iOS an on-screen
+controller, laid out like Xbox Cloud Gaming's touch controls, shows while no game controller is connected; tvOS needs
+a paired controller.
+
+**The iPhone build is experimental; the Apple TV build is very experimental.** The iPhone build plays (tested on an
+iPhone 15 Pro Max). The Apple TV build (tested on an Apple TV 4K, 3rd generation) plays, but close to tvOS's
+limit of about 2.2 GB per app (there is no entitlement to raise it). It runs in a tight-memory mode for that: the GPU
+reads guest memory in place, every image and buffer gets its own allocation, and decoded BC1 textures are stored at
+16 bits per texel (the A15 has no BC texture formats).
+
+```bash
+tools/ci/sdk.sh out/sdk                     # SDK with the patches, including 0023 (iOS/tvOS) and 0024
+PLATFORM=ios SDK=out/sdk tools/ios/build.sh build bundle ipa     # or PLATFORM=tvos
+```
+
+- **Signing and installing:** `TEAM=<team id> BUNDLE_ID=<bundle id> DEVICE=<udid>` with the steps
+  `profile sign install` signs with a development profile and installs over USB or the network (`xcrun devicectl`).
+  The profile step needs the device registered to the team. A sideloading tool can sign the unsigned IPA instead.
+- **Game files:** without them the app shows an import screen with a QR code, an address on port 8080 and a pairing
+  code. Open the page on a phone or computer on the same network and choose your own disc image (.iso); the page reads
+  the disc's file table in the browser and sends the game's files (about 6.8 GB; the device needs that much free), so
+  the disc image itself is never copied. An interrupted import carries on where it stopped. On iOS the screen also has
+  a Choose Disc Image button (the Files picker; the image is read in place, iCloud files are downloaded first), and an
+  .iso copied into the top of the app's folder (Files app, or Finder on a Mac) is installed by itself. The files go to
+  `Documents/game` on iOS (kept out of device backups) and `Library/Caches/game` on tvOS, whose apps get no persistent
+  storage, so tvOS may clear them when it runs short of space. App updates keep them. For development, the `data`
+  step copies `game/` over USB instead.
+- **Icons:** `tools/ios/make_icons.py` (a uv script; needs the cairo library) draws the iPhone icon and the layered
+  Apple TV icon and Top Shelf banners from `packaging/linux/skullburglar.svg` into `tools/ios/Assets.*.xcassets`; the
+  `bundle` step compiles them with `actool`. Rerun it after changing the SVG.
+- **Shader warm-up:** the bundle carries the macOS shader refs (`REFS`); iOS and tvOS share macOS's device class.
+- **Limits:** the game quits when it goes to the background (the renderer can't pause yet). Split-screen co-op isn't
+  available (it starts a second process). The guest memory needs one 4.5 GB stretch of address space: iOS asks for the
+  extended virtual addressing entitlement; on the Apple TV it fits only on models with more than 3 GB of memory.
+- **CI:** `build:ios` and `build:tvos` run on a Mac runner tagged `xcode`. On `main` they build with each release (or
+  with `BUILD=1`), and the release links their unsigned IPAs (`skullburglar-<version>-ios.ipa`, `-tvos.ipa`); they're
+  allowed to fail, and a release goes out without them then. On branches named for them (`apple`, `ios`, `tvos`) they
+  build on every push, into the package registry's `skullburglar-apple/apple-<commit>`.
+
 ## Release builds
 
 `tools/ci/` builds release packages from a clean checkout (CI does all three): `sdk.sh` clones the pinned SDK and
