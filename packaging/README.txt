@@ -96,6 +96,11 @@ Game files (installed by the launcher)
   Windows  %LOCALAPPDATA%\bots-recomp\game
   macOS    ~/Library/Application Support/bots-recomp/game
   Linux    ~/.local/share/bots-recomp/game
+  To keep them somewhere else (another drive, or the install folder), click "Choose another folder..." in the
+  launcher before installing. They go in a folder named game inside the folder you choose. If you already installed
+  them, click "Reinstall from a disc image...", then "Choose another folder...", or move the game folder there
+  yourself and choose the folder it's in. A game folder next to bots (bots.exe on Windows) is found on its own,
+  without choosing it. The macOS app and the Linux AppImage are read-only, so choose a folder for those instead.
 
 Saves, settings (bots.toml) and the shader cache
   Windows  Documents\bots

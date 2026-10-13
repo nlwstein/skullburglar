@@ -6,11 +6,10 @@
 
 namespace bots::setup {
 
-std::filesystem::path PickIsoFile() {
-  FILE* p = popen(
-      "zenity --file-selection --title='Choose your 50 Cent: Blood on the Sand disc image' "
-      "--file-filter='*.iso' 2>/dev/null",
-      "r");
+namespace {
+
+std::filesystem::path Zenity(const char* command) {
+  FILE* p = popen(command, "r");
   if (!p) return {};
   std::string out;
   char buf[512];
@@ -18,6 +17,18 @@ std::filesystem::path PickIsoFile() {
   pclose(p);
   while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
   return out;
+}
+
+}  // namespace
+
+std::filesystem::path PickIsoFile() {
+  return Zenity(
+      "zenity --file-selection --title='Choose your 50 Cent: Blood on the Sand disc image' "
+      "--file-filter='*.iso' 2>/dev/null");
+}
+
+std::filesystem::path PickFolder() {
+  return Zenity("zenity --file-selection --directory --title='Choose a folder for the game files' 2>/dev/null");
 }
 
 }  // namespace bots::setup

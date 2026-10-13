@@ -19,4 +19,19 @@ std::filesystem::path PickIsoFile() {
   return {};
 }
 
+std::filesystem::path PickFolder() {
+  @autoreleasepool {
+    NSOpenPanel* panel = [NSOpenPanel openPanel];
+    panel.title = @"Choose a folder for the game files";
+    panel.canChooseFiles = NO;
+    panel.canChooseDirectories = YES;
+    panel.canCreateDirectories = YES;
+    panel.allowsMultipleSelection = NO;
+    if ([panel runModal] == NSModalResponseOK && panel.URLs.count > 0) {
+      return std::filesystem::path(panel.URLs[0].fileSystemRepresentation);
+    }
+  }
+  return {};
+}
+
 }  // namespace bots::setup

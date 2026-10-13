@@ -51,4 +51,9 @@ bool ConfigHasKey(const std::filesystem::path& config_path, const std::string& k
 // the file).
 std::string ConfigString(const std::filesystem::path& config_path, const std::string& key);
 
+// Sets one string key in bots.toml, or removes it when `value` is empty, keeping the rest of the file. Returns an
+// error message, empty on success.
+std::string SetConfigString(const std::filesystem::path& config_path, const std::string& key,
+                            const std::string& value);
+
 }  // namespace bots::setup

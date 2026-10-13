@@ -1,9 +1,11 @@
 // Setup / launcher window (B-061). Shown before the game starts on every launch (BotsApp::
 // OnFinalizePaths has the exceptions). Without game files, the player points it at their own disc
-// image once and the files are copied to a per-user folder (app_paths.h). The window also edits
-// the player settings (settings.h). Play saves them and starts the game.
-// Test hooks: BOTS_SETUP_ISO=<path> prefills the image path; BOTS_SETUP_AUTO=1 installs (when a
-// path is set and nothing is installed) and presses Play, so the flow runs unattended.
+// image once and the files are copied to a per-user folder (app_paths.h), or on the desktop builds to a folder the
+// player chooses, kept in bots.toml as game_data_root. The window also edits the player settings (settings.h). Play
+// saves them and starts the game.
+// Test hooks: BOTS_SETUP_ISO=<path> prefills the image path; BOTS_SETUP_FOLDER=<path> chooses that folder for the
+// game files as "Choose another folder..." would (desktop builds); BOTS_SETUP_AUTO=1 installs (when a path is set and
+// nothing is installed) and presses Play, so the flow runs unattended.
 // Release builds also check for a newer version when the window opens (update_check.h).
 #pragma once
 
@@ -39,16 +41,26 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   using PlayFn = std::function<void(const std::filesystem::path& game_dir)>;
   using QuitFn = std::function<void()>;
 
-  SetupDialog(rex::ui::ImGuiDrawer* drawer, std::filesystem::path game_dir,
-              std::filesystem::path config_path, PlayFn play, QuitFn quit)
+  // default_game_dir: where the game files go when the player hasn't chosen a folder (AutoGameDir).
+  // game_dir_locked: the folder was given on the command line, so the window doesn't offer to change it.
+  SetupDialog(rex::ui::ImGuiDrawer* drawer, std::filesystem::path game_dir, std::filesystem::path default_game_dir,
+              bool game_dir_locked, std::filesystem::path config_path, PlayFn play, QuitFn quit)
       : ImGuiDialog(drawer),
         game_dir_(std::move(game_dir)),
+        default_game_dir_(std::move(default_game_dir)),
+        game_dir_locked_(game_dir_locked),
         config_path_(std::move(config_path)),
         play_(std::move(play)),
         quit_(std::move(quit)),
         settings_(LoadSettings()) {
     installed_ = IsGameDir(game_dir_);
+    if (installed_) old_game_dir_ = game_dir_;
     if (const char* iso = std::getenv("BOTS_SETUP_ISO"); iso && *iso) SetIsoPath(iso);
+#if !(defined(__APPLE__) && TARGET_OS_IPHONE)
+    if (const char* folder = std::getenv("BOTS_SETUP_FOLDER"); folder && *folder && !game_dir_locked_) {
+      UseGameDir(ChosenGameDir(folder, folder_error_));
+    }
+#endif
     const char* autorun = std::getenv("BOTS_SETUP_AUTO");
     auto_ = autorun && std::strcmp(autorun, "1") == 0;
     REXLOG_INFO("setup: window open (version {}, game files {} at {}, settings file {})", AppVersion(),
@@ -213,6 +225,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     ImGui::TextUnformatted("Game files");
     if (installed_ && !show_reinstall_) {
       ImGui::TextDisabled("Installed in %s", game_dir_.string().c_str());
+      DrawUnusedCopy();
       if (ImGui::SmallButton("Reinstall from a disc image...")) show_reinstall_ = true;
       return;
     }
@@ -220,8 +233,11 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       ImGui::TextWrapped(
           "This port runs on files from your own copy of the game. Choose a disc image (.iso) "
           "of the Xbox 360 disc. The files (about 7 GB) are copied once into:");
-      ImGui::TextDisabled("%s", game_dir_.string().c_str());
+    } else {
+      ImGui::TextUnformatted("Reinstall into:");
     }
+    ImGui::TextDisabled("%s", game_dir_.string().c_str());
+    DrawFolderChoice();
     ImGui::BeginDisabled(Extracting());
     ImGui::SetNextItemWidth(-110.0f);
     ImGui::InputTextWithHint("##iso", "Path to the .iso file", iso_path_, sizeof(iso_path_));
@@ -250,6 +266,62 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       ImGui::TextWrapped("%s", error_.c_str());
       ImGui::PopStyleColor();
     }
+  }
+
+  // Desktop builds: the player may put the game files in another folder (a roomier drive, the install folder). The
+  // choice is kept in bots.toml as game_data_root once that folder holds the game; until then the default stays.
+  // iOS and tvOS have no launcher, and keep the game files in the app container.
+  void DrawFolderChoice() {
+#if !(defined(__APPLE__) && TARGET_OS_IPHONE)
+    if (game_dir_locked_) {
+      ImGui::SameLine();
+      ImGui::TextDisabled("(set by a launch option)");
+      return;
+    }
+    ImGui::BeginDisabled(Extracting());
+    if (ImGui::SmallButton("Choose another folder...")) {
+      const std::filesystem::path chosen = PickFolder();
+      if (!chosen.empty()) UseGameDir(ChosenGameDir(chosen, folder_error_));
+    }
+    if (game_dir_ != default_game_dir_) {
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Use the default folder")) UseGameDir(default_game_dir_);
+    }
+    ImGui::EndDisabled();
+    if (!folder_error_.empty()) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.4f, 1.0f));
+      ImGui::TextWrapped("%s", folder_error_.c_str());
+      ImGui::PopStyleColor();
+    }
+#endif
+  }
+
+  // An installed copy that the chosen folder replaced: say it can go, never delete it.
+  void DrawUnusedCopy() {
+    if (old_game_dir_.empty() || old_game_dir_ == game_dir_ || !IsGameDir(old_game_dir_)) return;
+    ImGui::TextWrapped("The game files in %s aren't used any more: delete that folder to free about 7 GB.",
+                       old_game_dir_.string().c_str());
+  }
+
+  void UseGameDir(const std::filesystem::path& dir) {
+    if (dir.empty()) {  // refused; folder_error_ says why
+      if (!folder_error_.empty()) REXLOG_WARN("setup: {}", folder_error_);
+      return;
+    }
+    folder_error_.clear();
+    error_.clear();
+    game_dir_ = dir;
+    installed_ = IsGameDir(game_dir_);
+    REXLOG_INFO("setup: game folder {} ({})", game_dir_.string(), installed_ ? "installed" : "missing");
+    if (installed_ || game_dir_ == default_game_dir_) RememberGameDir();
+  }
+
+  // bots.toml names the folder only when it isn't the default, so a player who never chooses one keeps no entry.
+  void RememberGameDir() {
+    const std::string value = game_dir_ == default_game_dir_ ? std::string() : game_dir_.string();
+    if (value.empty() && !ConfigHasKey(config_path_, "game_data_root")) return;  // nothing to change
+    std::string err = SetConfigString(config_path_, "game_data_root", value);
+    if (!err.empty()) REXLOG_WARN("setup: {}", err);
   }
 
   void DrawSettings() {
@@ -458,6 +530,14 @@ class SetupDialog : public rex::ui::ImGuiDialog {
 
   void StartExtract() {
     error_.clear();
+    // Installing replaces the folder whole: never one that holds something else (only a chosen or configured folder
+    // could; the per-user default is ours).
+    std::error_code ec;
+    if (game_dir_ != DefaultGameDir() && !IsGameDir(game_dir_) && std::filesystem::exists(game_dir_, ec) &&
+        !(std::filesystem::is_directory(game_dir_, ec) && std::filesystem::is_empty(game_dir_, ec))) {
+      error_ = game_dir_.string() + " already exists and doesn't hold the game's files. Choose another folder.";
+      return;
+    }
     progress_ = std::make_shared<ExtractProgress>();
     result_ = std::make_shared<ExtractResult>();
     std::filesystem::path iso = iso_path_;
@@ -479,19 +559,20 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       installed_ = IsGameDir(game_dir_);
       show_reinstall_ = false;
       if (!installed_) error_ = "Extraction finished but default.xex or C1Game is missing.";
+      else if (!game_dir_locked_) RememberGameDir();
     } else {
       error_ = result_->error;
     }
   }
 
   void RunAuto() {
-    if (!installed_ && !Extracting() && iso_path_[0] && error_.empty()) StartExtract();
+    if (!installed_ && !Extracting() && iso_path_[0] && error_.empty() && folder_error_.empty()) StartExtract();
     if (installed_ && !Extracting()) {
       auto_ = false;
       Play();
     }
-    if (!error_.empty()) {
-      REXLOG_ERROR("setup: auto mode stopped: {}", error_);
+    if (!error_.empty() || !folder_error_.empty()) {
+      REXLOG_ERROR("setup: auto mode stopped: {}", error_.empty() ? folder_error_ : error_);
       auto_ = false;
     }
   }
@@ -507,6 +588,10 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   }
 
   std::filesystem::path game_dir_;
+  std::filesystem::path default_game_dir_;
+  bool game_dir_locked_ = false;
+  std::filesystem::path old_game_dir_;  // the installed copy when the window opened
+  std::string folder_error_;
   std::filesystem::path config_path_;
   PlayFn play_;
   QuitFn quit_;

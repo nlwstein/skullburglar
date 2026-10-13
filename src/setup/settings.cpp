@@ -167,16 +167,33 @@ std::vector<Setting> LoadSettings() {
   return settings;
 }
 
-std::string SaveSettings(const std::vector<Setting>& settings, const fs::path& config_path) {
-  toml::table table;
+namespace {
+
+toml::table ReadConfig(const fs::path& config_path) {
   std::error_code ec;
   if (fs::exists(config_path, ec)) {
     try {
-      table = toml::parse_file(config_path.string());
+      return toml::parse_file(config_path.string());
     } catch (const toml::parse_error& err) {
       REXLOG_WARN("setup: {} unreadable ({}), rewriting it", config_path.string(), err.what());
     }
   }
+  return {};
+}
+
+std::string WriteConfig(const toml::table& table, const fs::path& config_path) {
+  std::error_code ec;
+  fs::create_directories(config_path.parent_path(), ec);
+  std::ofstream out(config_path, std::ios::trunc);
+  if (!out) return "Can't write " + config_path.string();
+  out << "# bots settings (also editable in the launcher, which opens on start)\n" << table << "\n";
+  return {};
+}
+
+}  // namespace
+
+std::string SaveSettings(const std::vector<Setting>& settings, const fs::path& config_path) {
+  toml::table table = ReadConfig(config_path);
   for (const auto& s : settings) {
     if (s.locked) continue;
     for (const std::string& name : {s.cvar, s.also_cvar}) {
@@ -197,12 +214,9 @@ std::string SaveSettings(const std::vector<Setting>& settings, const fs::path& c
       }
     }
   }
-  fs::create_directories(config_path.parent_path(), ec);
-  std::ofstream out(config_path, std::ios::trunc);
-  if (!out) return "Can't write " + config_path.string();
-  out << "# bots settings (also editable in the launcher, which opens on start)\n" << table << "\n";
-  REXLOG_INFO("setup: settings saved to {}", config_path.string());
-  return {};
+  std::string err = WriteConfig(table, config_path);
+  if (err.empty()) REXLOG_INFO("setup: settings saved to {}", config_path.string());
+  return err;
 }
 
 bool ConfigHasKey(const fs::path& config_path, const std::string& key) {
@@ -223,6 +237,16 @@ std::string ConfigString(const fs::path& config_path, const std::string& key) {
   } catch (const toml::parse_error&) {
     return {};
   }
+}
+
+std::string SetConfigString(const fs::path& config_path, const std::string& key, const std::string& value) {
+  toml::table table = ReadConfig(config_path);
+  if (value.empty()) {
+    table.erase(key);
+  } else {
+    table.insert_or_assign(key, value);
+  }
+  return WriteConfig(table, config_path);
 }
 
 }  // namespace bots::setup
