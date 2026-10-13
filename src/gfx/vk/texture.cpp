@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 #include <rex/graphics/pipeline/texture/conversion.h>
 #include <rex/graphics/pipeline/texture/info.h>
@@ -85,6 +86,103 @@ void ApplyShuffle(Shuffle shuffle, uint8_t* data, size_t bytes) {
       default: break;
     }
     std::memcpy(data + i, &v, 2);
+  }
+}
+
+// BC (DXT) blocks to plain texels, for GPUs without the BC formats. Blocks are 4x4 texels in the standard little-endian
+// layout (after the endian swap). Signed BC4/BC5 decode as unsigned, which differs only where a block's two endpoints
+// straddle zero.
+enum class BcDecode { kNone, kBC1, kBC2, kBC3, kBC4, kBC5 };
+
+BcDecode BcDecodeFor(VkFormat format) {
+  switch (format) {
+    case VK_FORMAT_BC1_RGBA_UNORM_BLOCK: return BcDecode::kBC1;
+    case VK_FORMAT_BC2_UNORM_BLOCK: return BcDecode::kBC2;
+    case VK_FORMAT_BC3_UNORM_BLOCK: return BcDecode::kBC3;
+    case VK_FORMAT_BC4_UNORM_BLOCK: return BcDecode::kBC4;
+    case VK_FORMAT_BC5_UNORM_BLOCK: return BcDecode::kBC5;
+    default: return BcDecode::kNone;
+  }
+}
+
+VkFormat BcDecodedFormat(BcDecode decode) {
+  return decode == BcDecode::kBC4 ? VK_FORMAT_R8_UNORM
+         : decode == BcDecode::kBC5 ? VK_FORMAT_R8G8_UNORM
+                                    : VK_FORMAT_R8G8B8A8_UNORM;
+}
+
+// A BC4 block (also BC3's alpha and each BC5 channel): 16 values written `stride` bytes apart.
+void DecodeBc4(const uint8_t* block, uint8_t* out, uint32_t stride) {
+  uint8_t palette[8] = {block[0], block[1]};
+  const uint32_t a0 = block[0], a1 = block[1];
+  if (a0 > a1) {
+    for (uint32_t i = 1; i < 7; ++i) palette[i + 1] = uint8_t(((7 - i) * a0 + i * a1 + 3) / 7);
+  } else {
+    for (uint32_t i = 1; i < 5; ++i) palette[i + 1] = uint8_t(((5 - i) * a0 + i * a1 + 2) / 5);
+    palette[6] = 0;
+    palette[7] = 255;
+  }
+  uint64_t bits = 0;
+  for (uint32_t i = 0; i < 6; ++i) bits |= uint64_t(block[2 + i]) << (8 * i);
+  for (uint32_t i = 0; i < 16; ++i) out[i * stride] = palette[(bits >> (3 * i)) & 7];
+}
+
+// A BC1 colour block into 16 RGBA texels; BC2 and BC3 always use the four-colour mode.
+void DecodeBc1(const uint8_t* block, uint8_t* out, bool four_colour) {
+  const uint32_t c0 = block[0] | block[1] << 8, c1 = block[2] | block[3] << 8;
+  uint8_t palette[4][4];
+  for (uint32_t i = 0; i < 2; ++i) {
+    const uint32_t c = i ? c1 : c0;
+    palette[i][0] = uint8_t((c >> 11) * 255 / 31);
+    palette[i][1] = uint8_t(((c >> 5) & 63) * 255 / 63);
+    palette[i][2] = uint8_t((c & 31) * 255 / 31);
+    palette[i][3] = 255;
+  }
+  for (uint32_t ch = 0; ch < 3; ++ch) {
+    const uint32_t a = palette[0][ch], b = palette[1][ch];
+    if (four_colour || c0 > c1) {
+      palette[2][ch] = uint8_t((2 * a + b + 1) / 3);
+      palette[3][ch] = uint8_t((a + 2 * b + 1) / 3);
+    } else {
+      palette[2][ch] = uint8_t((a + b) / 2);
+      palette[3][ch] = 0;
+    }
+  }
+  palette[2][3] = 255;
+  palette[3][3] = four_colour || c0 > c1 ? 255 : 0;
+  const uint32_t indices = block[4] | block[5] << 8 | block[6] << 16 | uint32_t(block[7]) << 24;
+  for (uint32_t i = 0; i < 16; ++i) std::memcpy(out + 4 * i, palette[(indices >> (2 * i)) & 3], 4);
+}
+
+// `blocks_x` x `rows` blocks (rows of all slices back to back) into texels, `row_texels` = blocks_x * 4 wide.
+void DecodeBcBlocks(BcDecode decode, const uint8_t* blocks, uint32_t blocks_x, uint32_t rows, uint8_t* out) {
+  const uint32_t bpp = decode == BcDecode::kBC4 ? 1 : decode == BcDecode::kBC5 ? 2 : 4;
+  const uint32_t block_bytes = decode == BcDecode::kBC1 || decode == BcDecode::kBC4 ? 8 : 16;
+  const uint32_t row_bytes = blocks_x * 4 * bpp;
+  uint8_t texels[16 * 4];
+  for (uint32_t by = 0; by < rows; ++by) {
+    for (uint32_t bx = 0; bx < blocks_x; ++bx, blocks += block_bytes) {
+      switch (decode) {
+        case BcDecode::kBC1: DecodeBc1(blocks, texels, false); break;
+        case BcDecode::kBC2:
+          DecodeBc1(blocks + 8, texels, true);
+          for (uint32_t i = 0; i < 16; ++i) texels[4 * i + 3] = uint8_t(((blocks[i / 2] >> (4 * (i & 1))) & 15) * 17);
+          break;
+        case BcDecode::kBC3:
+          DecodeBc1(blocks + 8, texels, true);
+          DecodeBc4(blocks, texels + 3, 4);
+          break;
+        case BcDecode::kBC4: DecodeBc4(blocks, texels, 1); break;
+        case BcDecode::kBC5:
+          DecodeBc4(blocks, texels, 2);
+          DecodeBc4(blocks + 8, texels + 1, 2);
+          break;
+        default: return;
+      }
+      for (uint32_t y = 0; y < 4; ++y) {
+        std::memcpy(out + (by * 4 + y) * size_t(row_bytes) + bx * 4 * bpp, texels + y * 4 * bpp, 4 * bpp);
+      }
+    }
   }
 }
 
@@ -293,9 +391,13 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
       return;
     }
   }
-  if (!CreateImage(texture.image, host.format, width, height, false, view_type, false, depth, mip_max + 1)) {
+  const BcDecode decode = bc_textures_ ? BcDecode::kNone : BcDecodeFor(host.format);
+  const VkFormat image_format = decode == BcDecode::kNone ? host.format : BcDecodedFormat(decode);
+  const uint32_t decoded_bpp = decode == BcDecode::kBC4 ? 1 : decode == BcDecode::kBC5 ? 2 : 4;
+  std::vector<uint8_t> blocks;  // the untiled BC blocks of one level, when they're decoded
+  if (!CreateImage(texture.image, image_format, width, height, false, view_type, false, depth, mip_max + 1)) {
     std::fprintf(stderr, "native renderer: texture image %ux%ux%u format %d failed\n", width, height, depth,
-                 int(host.format));
+                 int(image_format));
     texture.image = {};
     ++stats_.unsupported_textures;
     return;
@@ -328,19 +430,22 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
     const uint32_t blocks_y = (level_height + format_info->block_height - 1) / format_info->block_height;
     const uint32_t pitch_blocks = guest.row_pitch_bytes / bpb;
     const VkDeviceSize bytes = VkDeviceSize(blocks_x) * blocks_y * level_depth * layers * bpb;
+    const VkDeviceSize upload_bytes =
+        decode == BcDecode::kNone ? bytes : VkDeviceSize(blocks_x) * blocks_y * 16 * level_depth * layers * decoded_bpp;
     VkDeviceSize offset;
-    uint8_t* staging = Upload(bytes, 16, offset);
+    uint8_t* staging = Upload(upload_bytes, 16, offset);
     if (!staging) {
       Flush();
       BeginCommands(kGpuTexture);
-      staging = Upload(bytes, 16, offset);
+      staging = Upload(upload_bytes, 16, offset);
       if (!staging) {
         ++stats_.unsupported_textures;
         return;
       }
     }
     // Block by block through the SDK's tiled-address functions: slow but exact for every layout (P5: GPU untile).
-    uint8_t* out = staging;
+    if (decode != BcDecode::kNone) blocks.resize(bytes);
+    uint8_t* out = decode == BcDecode::kNone ? staging : blocks.data();
     for (uint32_t layer = 0; layer < layers; ++layer) {
       const uint8_t* source = memory_(level_address + layer * guest.array_slice_stride_bytes);
       for (uint32_t z = 0; z < level_depth; ++z) {
@@ -361,7 +466,11 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
         }
       }
     }
-    ApplyShuffle(host.shuffle, staging, bytes);
+    if (decode != BcDecode::kNone) {
+      DecodeBcBlocks(decode, blocks.data(), blocks_x, blocks_y * level_depth * layers, staging);
+    } else {
+      ApplyShuffle(host.shuffle, staging, bytes);
+    }
     VkBufferImageCopy region{};
     region.bufferOffset = offset;
     region.bufferRowLength = blocks_x * format_info->block_width;
@@ -375,7 +484,7 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
   if (trace_textures_) {
     std::fprintf(stderr, "texture %08X: %ux%ux%u dim %u levels %u-%u format %u%s endian %u -> vk %d\n", base_page << 12,
                  width, height, depth, uint32_t(dimension), mip_min, mip_max, uint32_t(fetch.format),
-                 fetch.tiled ? " tiled" : "", uint32_t(fetch.endianness), int(host.format));
+                 fetch.tiled ? " tiled" : "", uint32_t(fetch.endianness), int(image_format));
   }
 }
 

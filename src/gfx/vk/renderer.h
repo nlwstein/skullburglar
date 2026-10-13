@@ -607,6 +607,9 @@ class Renderer : public Pm4Sink {
   std::unordered_map<TextureCacheKey, std::unique_ptr<GuestTexture>, WordsHash> guest_textures_;
   std::unordered_map<SamplerKey, VkSampler, WordsHash> samplers_;
   bool trace_textures_ = false;
+  // False on GPUs without BC (DXT) texture formats, such as Apple's before A16 (the A15 Apple TV 4K): those textures
+  // are decoded on the CPU instead. BOTS_GFX_DECODE_BC=1 forces the decoding anywhere.
+  bool bc_textures_ = true;
   uint64_t write_clock_ = 0;
   VkDescriptorSetLayout transfer_set_layout_ = VK_NULL_HANDLE;
   VkPipelineLayout transfer_layout_ = VK_NULL_HANDLE;
