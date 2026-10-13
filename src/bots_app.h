@@ -61,7 +61,9 @@ void InstallWindowsCrashLogger();  // src/crash_win.cpp
 #endif
 #if TARGET_OS_IPHONE  // iOS and tvOS
 #include "ios/ios_app.h"
-#if !TARGET_OS_TV
+#if TARGET_OS_TV
+#include <SDL3/SDL_hints.h>
+#else
 #include "ios/touch_input.h"
 #endif
 #endif
@@ -114,8 +116,8 @@ class BotsApp : public rex::ReXApp {
 #if TARGET_OS_TV
       // SDL lists the Siri Remote as a gamepad, and it connects first, so a real controller lands on the second
       // user slot, which has no signed-in profile ("no gamer profile is signed in" at the pay phones). The game
-      // needs a real controller anyway.
-      setenv("SDL_TV_REMOTE_AS_JOYSTICK", "0", 0);
+      // needs a real controller anyway. A hint, not setenv: SDL has already copied the environment by now.
+      SDL_SetHint(SDL_HINT_TV_REMOTE_AS_JOYSTICK, "0");
 #endif
       const fs::path docs = bots::ios::DataDir();
       if (paths.game_data_root.empty()) paths.game_data_root = docs / "game";
