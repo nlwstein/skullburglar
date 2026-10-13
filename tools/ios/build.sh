@@ -18,6 +18,7 @@
 #   data     copy game/ into the app's data folder on DEVICE (Documents/game on iOS, Library/Caches/game on tvOS;
 #            several GB; once)
 # TEAM and BUNDLE_ID are needed by profile and sign only; SDK by build and bundle.
+# VERSION (x.y.z, optional) is the app's version, as in tools/ci/build.sh.
 set -eu
 cd "$(dirname "$0")/../.."
 
@@ -71,7 +72,7 @@ do_build() {
   # The build can't run an iOS recompiler; codegen output is already there, so its step runs `true`.
   set -- -G Ninja -S . -B "$B" -DCMAKE_SYSTEM_NAME=$SYSTEM -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 -DCMAKE_BUILD_TYPE="$CONFIG" -DREXSDK_DIR="$SDK" \
-    -DREXGLUE_HOST_CLI=/usr/bin/true -DBOTS_NATIVE_GFX=ON
+    -DREXGLUE_HOST_CLI=/usr/bin/true -DBOTS_NATIVE_GFX=ON -DBOTS_VERSION="${VERSION:-dev}"
   if [ -n "${CCACHE_DIR:-}" ]; then
     # As in tools/ci/build.sh: the sloppiness lets ccache reuse objects built with the precompiled headers.
     export CCACHE_DIR CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime
@@ -103,7 +104,10 @@ do_bundle() {
   else
     echo "bundle: no shader refs ($refs), so the first boot compiles shaders as they appear" >&2
   fi
+  # CFBundleShortVersionString takes up to three numbers: the version's x.y.z, else 0.0.1 (branch and local builds).
+  appver=$(echo "${VERSION:-}" | sed -n 's/^\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
   sed -e "s/@BUNDLE_ID@/${BUNDLE_ID:-io.example.skullburglar}/" -e "s/@BUILD_NUMBER@/$(date +%s)/" \
+    -e "s/@VERSION@/${appver:-0.0.1}/" \
     "tools/ios/Info.$PLATFORM.plist.in" >"$APP/Info.plist"
   # Xcode adds these to every app it builds; the installer refuses a bundle without them.
   sdkver=$(xcrun --sdk $SDKNAME --show-sdk-version)

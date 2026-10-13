@@ -1,7 +1,8 @@
-# Checks on every push. On main: release builds (Linux AppImage + tarball, Windows setup, macOS DMG) when there are
-# releasable commits (feat/fix/perf; tools/ci/semantic-release.toml), published as a GitLab release whose packages stay in
-# this project's package registry. With DOWNLOADS_BUCKET set, the player packages also go to the private download site
-# (tools/ci/publish_downloads.py), which only invited players can open; nothing is public apart from its releases JSON.
+# Checks on every push. On main: release builds (Linux AppImage + tarball, Windows setup, macOS DMG; experimental iOS
+# and tvOS IPAs) when there are releasable commits (feat/fix/perf; tools/ci/semantic-release.toml), published as a
+# GitLab release whose packages stay in this project's package registry. With DOWNLOADS_BUCKET set, the player packages
+# also go to the private download site (tools/ci/publish_downloads.py), which only invited players can open; nothing is
+# public apart from its releases JSON.
 #
 # The build needs the game executable, which is never in this repo: tools/ci/gitlab_build.sh reads it from the private
 # assets project (ASSETS_PROJECT) with the job token, which only this project's jobs may use there (its job token
@@ -128,24 +129,35 @@ build:macos:
       fi
     - tools/ci/gitlab_build.sh macos
 
-# iOS and tvOS (experimental, tools/ios/build.sh): unsigned IPAs in the package registry as skullburglar-apple/<VERSION>,
-# signed when they're installed. On branches named for them (apple, ios, tvos), and on main with BUILD=1; not part of
-# releases. They need a Mac runner with Xcode and its iOS and tvOS platforms (the command line tools have no iOS SDKs),
-# tagged `xcode` as well as `macos`. DEVELOPER_DIR picks the full Xcode for these jobs only, so the runner's selected
-# developer directory can stay on the command line tools the macOS build uses.
+# iOS and tvOS (experimental, tools/ios/build.sh): unsigned IPAs, signed when they're installed. On main they build with
+# the others when there's a release (or BUILD=1) and go in it as skullburglar-<VERSION>-<ios|tvos>.ipa; they may fail
+# without holding up the release, which then leaves them out. On branches named for them (apple, ios, tvos) they build
+# on every push into skullburglar-apple/apple-<sha>. They need a Mac runner with Xcode and its iOS and tvOS platforms
+# (the command line tools have no iOS SDKs), tagged `xcode` as well as `macos`. DEVELOPER_DIR picks the full Xcode for
+# these jobs only, so the runner's selected developer directory can stay on the command line tools the macOS build uses.
 .apple:
   stage: build
   tags: [macos, xcode]
   variables:
     DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-  needs: []
+  needs:
+    - job: plan
+      optional: true
   interruptible: true
+  allow_failure: true
   timeout: 4h
   rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_COMMIT_BRANCH =~ /(^|\/)(apple|ios|tvos)/
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $BUILD == "1"
   script:
-    - VERSION=apple-$CI_COMMIT_SHORT_SHA tools/ci/gitlab_build.sh "$PLATFORM"
+    - |
+      if [ "$CI_COMMIT_BRANCH" != "$CI_DEFAULT_BRANCH" ]; then
+        VERSION=apple-$CI_COMMIT_SHORT_SHA PACKAGE=skullburglar-apple tools/ci/gitlab_build.sh "$PLATFORM"
+      elif [ "$RELEASE" = true ] || [ "${BUILD:-}" = 1 ]; then
+        tools/ci/gitlab_build.sh "$PLATFORM"
+      else
+        echo "Nothing to release: not building."
+      fi
 
 build:ios:
   extends: .apple
@@ -160,7 +172,7 @@ build:tvos:
 release:
   stage: release
   extends: [.main, .psr]
-  needs: [plan, build:linux, build:windows, build:macos]
+  needs: [plan, build:linux, build:windows, build:macos, build:ios, build:tvos]
   resource_group: release
   script:
     - |

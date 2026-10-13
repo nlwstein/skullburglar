@@ -114,9 +114,10 @@ PLATFORM=ios SDK=out/sdk tools/ios/build.sh build bundle ipa     # or PLATFORM=t
 - **Limits:** the game quits when it goes to the background (the renderer can't pause yet). Split-screen co-op isn't
   available (it starts a second process). The guest memory needs one 4.5 GB stretch of address space: iOS asks for the
   extended virtual addressing entitlement; on the Apple TV it fits only on models with more than 3 GB of memory.
-- **CI:** `build:ios` and `build:tvos` run on branches named for them (`apple`, `ios`, `tvos`) and on `main` with
-  `BUILD=1`, on a Mac runner tagged `xcode`. They upload unsigned IPAs to the package registry and aren't part of
-  releases.
+- **CI:** `build:ios` and `build:tvos` run on a Mac runner tagged `xcode`. On `main` they build with each release (or
+  with `BUILD=1`), and the release links their unsigned IPAs (`skullburglar-<version>-ios.ipa`, `-tvos.ipa`); they're
+  allowed to fail, and a release goes out without them then. On branches named for them (`apple`, `ios`, `tvos`) they
+  build on every push, into the package registry's `skullburglar-apple/apple-<commit>`.
 
 ## Release builds
 

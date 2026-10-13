@@ -3,12 +3,14 @@
 #   tools/ci/gitlab_build.sh <linux|windows|macos|ios|tvos>
 # Gets the game executable and shader refs from the private assets project, restores stored codegen output when there
 # is some for this tree (tools/ci/codegen_publish.sh), builds and packages, and uploads the packages to this project's
-# package registry as skullburglar/<VERSION>. iOS and tvOS (experimental) build an unsigned IPA instead
-# (tools/ios/build.sh; signed when it's installed), uploaded as skullburglar-apple/<VERSION>.
-# Env: the job's CI_* variables, VERSION, ASSETS_PROJECT (the assets project path); UPDATE_URL (optional, see build.sh).
+# package registry as <PACKAGE>/<VERSION> (PACKAGE defaults to skullburglar). iOS and tvOS (experimental) build an
+# unsigned IPA instead (tools/ios/build.sh; signed when it's installed): skullburglar-<VERSION>-<ios|tvos>.ipa.
+# Env: the job's CI_* variables, VERSION, ASSETS_PROJECT (the assets project path); PACKAGE, UPDATE_URL (optional, see
+# build.sh).
 set -eu
 PLATFORM=${1:?usage: tools/ci/gitlab_build.sh <linux|windows|macos|ios|tvos>}
 cd "$(dirname "$0")/../.."
+PACKAGE=${PACKAGE:-skullburglar}
 : "${CI_JOB_TOKEN:?}" "${CI_SERVER_HOST:?}" "${CI_API_V4_URL:?}" "${CI_PROJECT_ID:?}" "${VERSION:?}" "${ASSETS_PROJECT:?}"
 step() { echo "== $* ($(date -u +%H:%M:%S))"; }
 # The job token only reads the assets project because its allowlist names this project.
@@ -40,12 +42,13 @@ case $PLATFORM in ios|tvos)
   [ -f generated/default/sources.cmake ] || { echo "no stored codegen output for $KEY: run tools/ci/codegen_publish.sh" >&2; exit 1; }
   step build
   # iOS and tvOS are MoltenVK's device class 3, like macOS.
-  PLATFORM=$PLATFORM SDK=out/sdk REFS=out/assets/pipelines/class3.refs JOBS=$(sysctl -n hw.ncpu) \
+  PLATFORM=$PLATFORM SDK=out/sdk REFS=out/assets/pipelines/class3.refs JOBS=$(sysctl -n hw.ncpu) VERSION=$VERSION \
     tools/ios/build.sh build bundle ipa
   step upload
-  f=out/$PLATFORM/Skullburglar-$PLATFORM.ipa
-  get --upload-file "$f" "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/skullburglar-apple/$VERSION/${f##*/}" >/dev/null
-  echo "uploaded ${f##*/} as skullburglar-apple/$VERSION"
+  name=skullburglar-$VERSION-$PLATFORM.ipa
+  get --upload-file "out/$PLATFORM/Skullburglar-$PLATFORM.ipa" \
+    "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/$PACKAGE/$VERSION/$name" >/dev/null
+  echo "uploaded $name as $PACKAGE/$VERSION"
   exit 0
 esac
 
@@ -58,6 +61,6 @@ tools/ci/package.sh "$PLATFORM" out/ci
 
 step upload
 for f in out/ci/release/*; do
-  get --upload-file "$f" "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/skullburglar/$VERSION/${f##*/}" >/dev/null
+  get --upload-file "$f" "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/$PACKAGE/$VERSION/${f##*/}" >/dev/null
   echo "uploaded ${f##*/}"
 done
