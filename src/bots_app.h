@@ -41,6 +41,7 @@
 #include <rex/kernel/xam/module.h>
 #include <rex/cvar.h>
 #include <rex/ui/keybinds.h>
+#include <rex/ui/overlay/achievement_notification.h>
 #include <rex/runtime.h>
 
 #include "app_quit.h"
@@ -224,6 +225,14 @@ class BotsApp : public rex::ReXApp {
           return runtime() ? static_cast<rex::input::InputSystem*>(runtime()->input_system())
                            : nullptr;
         });
+  }
+
+  // The SDK's achievement toast keeps an ImGui dialog registered while it shows, which puts the presenter in
+  // vblank-paced UI-thread painting: the frame rate drops and stutters for the toast's few seconds. Off unless
+  // the player asks for it (achievement_popups); unlocks are still recorded and listed in the overlay.
+  std::unique_ptr<rex::ui::AchievementNotificationDialog> CreateAchievementNotificationDialog() override {
+    if (!rex::cvar::Query<bool>("achievement_popups")) return nullptr;
+    return rex::ReXApp::CreateAchievementNotificationDialog();
   }
 
   void OnPostLoadXexImage() override {
@@ -493,8 +502,6 @@ class BotsApp : public rex::ReXApp {
   // void OnPostSetup() override {}
   // void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {}
   // std::unique_ptr<rex::ui::ImGuiDialog> CreateAchievementsOverlay() override;
-  // std::unique_ptr<rex::ui::AchievementNotificationDialog>
-  // CreateAchievementNotificationDialog() override;
   // void OnShutdown() override {}
   // void OnConfigurePaths(rex::PathConfig& paths) override {}
 };

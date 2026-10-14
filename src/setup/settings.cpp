@@ -16,6 +16,9 @@
 
 // The app's own cvar (intro movies are a UE3 command-line switch, see BotsApp::OnPreSetup).
 REXCVAR_DEFINE_BOOL(intro_movies, false, "bots", "Play the Legal / THQ / Swordfish logo movies at launch");
+REXCVAR_DEFINE_BOOL(achievement_popups, false, "bots",
+                    "Show a popup when an achievement unlocks. Off by default: while one is on screen the frame rate "
+                    "drops and stutters. Unlocks are recorded either way");
 REXCVAR_DEFINE_BOOL(launcher, true, "bots",
                     "Show the launcher before starting the game (default: unless --game_data_root is given)");
 REXCVAR_DEFINE_BOOL(check_updates, true, "bots",
@@ -36,6 +39,8 @@ std::vector<Setting> Catalog() {
   std::vector<Setting> s;
   s.push_back({"fullscreen", "", "Fullscreen", "F11 toggles it in game.", {}});
   s.push_back({"intro_movies", "", "Play intro movies", "The logo movies before the title screen.", {}});
+  s.push_back({"achievement_popups", "", "Achievement popups",
+               "Can make the game stutter while one shows. Unlocks are recorded either way.", {}});
   s.push_back({"gpu_plugin", "", "Renderer", "Takes effect the next time the game starts.",
                {{"native", "Native (Vulkan, recommended)"}, {"xenos", "Emulated Xbox 360 GPU"}}});
   s.push_back({"render_scale", "", "Render resolution (native)",
