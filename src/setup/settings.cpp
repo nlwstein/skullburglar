@@ -24,8 +24,8 @@ REXCVAR_DEFINE_BOOL(launcher, true, "bots",
 REXCVAR_DEFINE_BOOL(check_updates, true, "bots",
                     "Release builds: the launcher checks online for a newer version and offers its download page");
 REXCVAR_DEFINE_STRING(render_scale, "auto", "bots",
-                      "Native renderer: render resolution as a multiple of 720p (auto, 3, 2, 1.5, 1, 0.75, 0.667, "
-                      "0.5); auto is 2/3 on Intel GPUs, else 1");
+                      "Native renderer: render resolution as a multiple of 720p (auto, 3, 2, 1.5, 1.25, 1, 0.75, "
+                      "0.667, 0.5); auto is 2/3 on Intel GPUs, else 1");
 REXCVAR_DEFINE_BOOL(present_vsync, true, "bots",
                     "Wait for the display's refresh to show each frame (Vulkan presentation): no tearing. Off presents "
                     "immediately, with the lowest latency, and can tear. (Not `vsync`, the emulated console's vblank.)");
@@ -47,7 +47,7 @@ std::vector<Setting> Catalog() {
                "Higher is sharper and costs GPU time; lower is faster on weak GPUs. Automatic is 720p, or 67% on "
                "Intel graphics.",
                {{"auto", "Automatic"}, {"3", "4K  (2160p)"}, {"2", "1440p"}, {"1.5", "1080p"},
-                {"1", "720p  (original)"}, {"0.75", "75%"}, {"0.667", "67%"}, {"0.5", "50%"}}});
+                {"1.25", "900p"}, {"1", "720p  (original)"}, {"0.75", "75%"}, {"0.667", "67%"}, {"0.5", "50%"}}});
   s.push_back({"draw_resolution_scale_x", "draw_resolution_scale_y", "Render resolution (emulated)",
                "Higher is sharper and costs GPU time. 3x needs a fast GPU.",
                {{"1", "1x  (720p, original)"}, {"2", "2x  (1440p)"}, {"3", "3x  (2160p / 4K)"}}});
