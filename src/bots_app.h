@@ -105,7 +105,8 @@ class BotsApp : public rex::ReXApp {
   // analysis (backlog B-011..B-013). Output is game data — keep it out of git.
   // First-run setup (B-061). Settings live in <user data root>/bots.toml, next to the saves, unless a
   // bots.toml sits next to the executable (dev). Without --game_data_root the game files are the
-  // ones the setup window installed: bots.toml's game_data_root, else the per-user default folder.
+  // ones the setup window installed: bots.toml's game_data_root, else a portable install's game folder next to the
+  // executable, else the per-user default folder.
   void OnConfigurePaths(rex::PathConfig& paths) override {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -145,8 +146,9 @@ class BotsApp : public rex::ReXApp {
     game_root_given_ = !paths.game_data_root.empty();
     if (paths.game_data_root.empty()) {
       std::string configured = bots::setup::ConfigString(config_path_, "game_data_root");
-      paths.game_data_root =
-          configured.empty() ? bots::setup::DefaultGameDir() : fs::path(configured);
+      paths.game_data_root = configured.empty()
+                                 ? bots::setup::AutoGameDir(rex::filesystem::GetExecutableFolder())
+                                 : fs::path(configured);
     }
   }
 
@@ -198,7 +200,8 @@ class BotsApp : public rex::ReXApp {
                 requested ? "requested" : "no game files");
     bool intro_before = rex::cvar::Query<bool>("intro_movies");
     new bots::setup::SetupDialog(
-        imgui_drawer(), defaults.game_data_root, config_path_,
+        imgui_drawer(), defaults.game_data_root,
+        bots::setup::AutoGameDir(rex::filesystem::GetExecutableFolder()), game_root_given_, config_path_,
         [defaults, resume, intro_before](const std::filesystem::path& dir) {
           // The UE3 command line was set in OnPreSetup; follow a changed intro-movies choice.
           bool intro = rex::cvar::Query<bool>("intro_movies");
