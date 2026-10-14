@@ -59,7 +59,7 @@ and that is where most of the work in this port has gone.
 
   Split-screen and two-window co-op are experimental only because they've had less play-testing than single-player:
   problems go in [#8](https://github.com/nlwstein/skullburglar/issues/8).
-- **Resolution and display options.** Render at the original 720p or at 1080p, 1440p or 4K, or below 720p for weak
+- **Resolution and display options.** Render at the original 720p or at 900p, 1080p, 1440p or 4K, or below 720p for weak
   GPUs (Intel graphics picks a lower scale automatically). VSync, frame-rate cap, fullscreen and windowed, all from
   the launcher.
 - **Ultrawide.** The launcher's "Aspect ratio" setting renders 21:9, 32:9 or the shape of your screen (Automatic)
