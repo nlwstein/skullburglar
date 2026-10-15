@@ -5,7 +5,9 @@
 # is some for this tree (tools/ci/codegen_publish.sh), builds and packages, and uploads the packages to this project's
 # package registry as <PACKAGE>/<VERSION> (PACKAGE defaults to skullburglar). iOS and tvOS (experimental) build an
 # unsigned IPA instead (tools/ios/build.sh; signed when it's installed): skullburglar-<VERSION>-<ios|tvos>.ipa. Android
-# (experimental) builds a debug-signed arm64 APK (tools/android/build.sh): skullburglar-<VERSION>-android.apk.
+# (experimental) builds an arm64 APK (tools/android/build.sh): skullburglar-<VERSION>-android.apk, signed with the
+# ANDROID_KEYSTORE file variable (the keystore, base64; password ANDROID_KEYSTORE_PASS) when the project has one, else
+# a throwaway debug key.
 # Env: the job's CI_* variables, VERSION, ASSETS_PROJECT (the assets project path); PACKAGE, UPDATE_URL (optional, see
 # build.sh).
 set -eu
@@ -41,8 +43,18 @@ fi
 case $PLATFORM in android)
   # Cross-compiled with the NDK, which can't run the recompiler either: stored codegen output only, as for iOS.
   [ -f generated/default/sources.cmake ] || { echo "no stored codegen output for $KEY: run tools/ci/codegen_publish.sh" >&2; exit 1; }
+  # Releases keep one signing key, so an installed copy updates in place (an uninstall deletes the game files).
+  if [ -n "${ANDROID_KEYSTORE:-}" ]; then
+    mkdir -p out/android
+    base64 -d "$ANDROID_KEYSTORE" > out/android/release.keystore
+    export KEYSTORE=out/android/release.keystore KEYSTORE_PASS=${ANDROID_KEYSTORE_PASS:?}
+  elif [ "$PACKAGE" = skullburglar ]; then
+    echo "no ANDROID_KEYSTORE: a release APK needs the release signing key" >&2
+    exit 1
+  fi
   step build
   SDK=out/sdk VERSION=$VERSION tools/android/build.sh build apk
+  rm -f out/android/release.keystore
   step upload
   name=skullburglar-$VERSION-android.apk
   get --upload-file out/android/Skullburglar.apk \

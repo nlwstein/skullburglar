@@ -5,8 +5,8 @@
 
 Run by .gitlab-ci.yml's release job with its CI_* variables. GitLab creates the tag from CI_COMMIT_SHA along with the
 release. The notes list the releasable commits since LAST (empty for the first release); the packages stay in this
-project's package registry (skullburglar/<VERSION>) and are private like the project. The iOS and tvOS IPAs are
-linked when their (experimental, allowed-to-fail) jobs uploaded them.
+project's package registry (skullburglar/<VERSION>) and are private like the project. The iOS and tvOS IPAs and the
+Android APK are linked when their (experimental, allowed-to-fail) jobs uploaded them.
 """
 import json
 import os
@@ -36,6 +36,7 @@ FILES = [
 OPTIONAL = [
     ("iOS / iPadOS (experimental, unsigned IPA)", f"skullburglar-{VERSION}-ios.ipa"),
     ("tvOS (experimental, unsigned IPA)", f"skullburglar-{VERSION}-tvos.ipa"),
+    ("Android arm64 (experimental, APK)", f"skullburglar-{VERSION}-android.apk"),
 ]
 SECTIONS = [("feat", "Features"), ("fix", "Fixes"), ("perf", "Performance")]
 

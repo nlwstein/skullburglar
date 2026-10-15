@@ -125,11 +125,12 @@ PLATFORM=ios SDK=out/sdk tools/ios/build.sh build bundle ipa     # or PLATFORM=t
 
 An arm64 APK for Android 10 (API 29) or later with Vulkan 1.1, cross-compiled with the Android NDK and packaged
 without Gradle (javac, d8, aapt2, zipalign, apksigner). It needs codegen output already in `generated/` (the NDK can't
-run the recompiler). Like iOS there's no launcher: the game boots straight away from the app's data folder.
+run the recompiler). Like iOS there's no launcher: the app's own first screen installs the game files, then the game
+boots straight away.
 
 **Very experimental.** It has only run in Google's arm64 Android emulator on an Apple silicon Mac (host GPU mode,
-Vulkan through MoltenVK): it reaches the menus and plays a mission on the native renderer. It hasn't run on a real
-device yet.
+Vulkan through MoltenVK): it installs from a disc image, reaches the menus and plays a mission on the native renderer.
+It hasn't run on a real device yet.
 
 ```bash
 docker build -t skullburglar-android docker/android          # NDK, build tools, platform, JDK
@@ -137,21 +138,29 @@ tools/ci/sdk.sh out/sdk                                      # SDK with the patc
 docker run --rm -v "$PWD:/w" -w /w skullburglar-android \
   sh -c 'SDK=out/sdk tools/android/build.sh build apk'       # -> out/android/Skullburglar.apk
 adb install -r out/android/Skullburglar.apk
-adb push game /sdcard/Android/data/sh.stz.skullburglar/files/
 ```
 
-- **Game files:** there's no import screen yet; copy `game/` to the app's data folder with `adb push` as above (about
-  6.8 GB). Settings, saves and logs go to `user/` and `logs/` in the same folder.
-- **Signing:** a debug key, made in `out/android/debug.keystore` on first use (`KEYSTORE=<file>` uses another). An
-  APK signed with a different key needs an uninstall first.
-- **Test switches:** `adb shell am start` can't set the game's environment, so the activity takes it as an extra:
-  `--es env "REX_GPU_PLUGIN=native;BOTS_INPUT=22:START"` (pairs separated by `;`), and the command line as
-  `--es args "..."`. The game's debug switches (`BOTS_INPUT`, `BOTS_EXEC`, `BOTS_CAPTURE_DIR`) work as on desktop.
-- **Limits:** no on-screen controls yet (a game controller is needed), and no crash handler of our own (the system's
-  crash report has the native backtrace). `ABIS="arm64-v8a x86_64"` adds x86_64 for x86 emulators, untested.
-- **CI:** `build:android` runs on the Docker runner. It isn't part of releases. On branches named `android` it builds
-  on every push, into the package registry's `skullburglar-android/android-<commit>`; on `main` it builds only with
-  `BUILD=1`. It's allowed to fail.
+- **Game files:** on first start the app asks for the player's disc image (the system file picker; `ImportActivity`)
+  and extracts it with the desktop launcher's `ExtractIso` into the app's data folder
+  (`Android/data/<package>/files/game`, about 6.8 GB). `adb push game /sdcard/Android/data/sh.stz.skullburglar/files/`
+  works too. Settings, saves and logs go to `user/` and `logs/` in the same folder. Uninstalling the app deletes them.
+- **Controls:** a game controller, or the on-screen controller (`TouchPadView`, a port of the iOS one) while none is
+  connected.
+- **Backgrounding:** as on iOS, leaving the game quits it; the renderer can't give up its surface and resume yet.
+- **Signing:** `KEYSTORE=<file>` (password `KEYSTORE_PASS`), else a debug key made in `out/android/debug.keystore` on
+  first use. An APK signed with a different key needs an uninstall first, which deletes the game files.
+- **Test switches:** `DEBUGGABLE=1` makes a debuggable build whose launcher passes the game's environment and command
+  line on from intent extras (`adb shell am start` can't set either):
+  `adb shell am start -n sh.stz.skullburglar/.ImportActivity --es env "REX_GPU_PLUGIN=native;BOTS_INPUT=22:START"`
+  (pairs separated by `;`), and `--es args "..."`. The game's debug switches (`BOTS_INPUT`, `BOTS_EXEC`,
+  `BOTS_CAPTURE_DIR`) work as on desktop. Release builds ignore the extras.
+- **Limits:** no crash handler of our own (the system's crash report has the native backtrace).
+  `ABIS="arm64-v8a x86_64"` adds x86_64 for x86 emulators, untested.
+- **CI:** `build:android` runs on the Docker runner. On `main` it builds with a release (or `BUILD=1`) and the release
+  includes `skullburglar-<version>-android.apk`, signed with the `ANDROID_KEYSTORE` project variable (a base64
+  keystore; password `ANDROID_KEYSTORE_PASS`), so installed copies update in place. Like iOS it's allowed to fail, and
+  the release then leaves it out. On branches named `android` it builds on every push, debug-signed, into the package
+  registry's `skullburglar-android/android-<commit>`.
 
 ## Release builds
 

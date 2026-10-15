@@ -9,10 +9,13 @@
 # Steps (default: build apk):
 #   build  configure and build (Ninja) each ABI into out/build/android-<abi>; CCACHE_DIR=<dir> compiles through ccache
 #   apk    package out/android/Skullburglar.apk: SDL's Java glue and tools/android/java (javac, d8), the manifest
-#          (aapt2), each ABI's libraries, zipalign, then a debug signature (apksigner; KEYSTORE, else a key made in
-#          out/android/debug.keystore on first use, so an install over one signed elsewhere needs an uninstall first)
+#          (aapt2), each ABI's libraries, zipalign, then a signature (apksigner): KEYSTORE=<file> (its first key;
+#          password KEYSTORE_PASS, default android), else a debug key made in out/android/debug.keystore on first use.
+#          An install over an APK signed with another key needs an uninstall, which deletes the game files.
 # ABIS defaults to arm64-v8a, the devices'; x86_64 runs in x86 emulators. PACKAGE overrides the application id.
-# The game files go in the app's data folder by hand (bots_app.h): adb push game /sdcard/Android/data/<package>/files/
+# DEBUGGABLE=1 makes a test build: debuggable, and the game takes its command line and environment from intent
+# extras (SkullburglarActivity). On first start the app asks for the player's disc image (ImportActivity); the game
+# files can also go in its data folder by hand: adb push game /sdcard/Android/data/<package>/files/
 set -eu
 cd "$(dirname "$0")/../.."
 
@@ -81,7 +84,7 @@ do_apk() {
   find "$SDK/thirdparty/sdl3/android-project/app/src/main/java" tools/android/java -name '*.java' >"$W/sources.txt"
   javac -nowarn -encoding UTF-8 --release 11 -classpath "$ANDROID_PLATFORM_JAR" -d "$W/classes" @"$W/sources.txt" \
     2>&1 | grep -v '^Note:' || true
-  [ -f "$W/classes/sh/stz/skullburglar/SkullburglarActivity.class" ] || { echo "javac failed" >&2; exit 1; }
+  [ -f "$W/classes/sh/stz/skullburglar/TouchPadView.class" ] || { echo "javac failed" >&2; exit 1; }
   "$ANDROID_BUILD_TOOLS/d8" --release --min-api $MIN_SDK --lib "$ANDROID_PLATFORM_JAR" --output "$W/dex" \
     $(find "$W/classes" -name '*.class')
   appver=$(echo "${VERSION:-}" | sed -n 's/^\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
@@ -90,7 +93,8 @@ do_apk() {
   [ "$code" -gt 0 ] || code=1
   "$ANDROID_BUILD_TOOLS/aapt2" link -o "$W/base.apk" -I "$ANDROID_PLATFORM_JAR" --manifest tools/android/AndroidManifest.xml \
     --min-sdk-version $MIN_SDK --target-sdk-version $TARGET_SDK --version-code "$code" \
-    --version-name "${VERSION:-dev}" --rename-manifest-package "$PACKAGE"
+    --version-name "${VERSION:-dev}" --rename-manifest-package "$PACKAGE" \
+    $([ "${DEBUGGABLE:-0}" = 1 ] && echo --debug-mode)
   cp "$W/dex/classes.dex" "$W/root/"
   for abi in $ABIS; do
     B=out/build/android-$abi
@@ -116,7 +120,9 @@ do_apk() {
     keytool -genkeypair -keystore "$ks" -storepass android -keypass android -alias androiddebugkey -keyalg RSA \
       -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" >/dev/null 2>&1
   fi
-  "$ANDROID_BUILD_TOOLS/apksigner" sign --ks "$ks" --ks-pass pass:android --key-pass pass:android \
+  # The password goes through the environment, never the command line.
+  KS_PASS=${KEYSTORE_PASS:-android} "$ANDROID_BUILD_TOOLS/apksigner" sign --ks "$ks" --ks-pass env:KS_PASS \
+    --key-pass env:KS_PASS \
     --out "$OUT/Skullburglar.apk" "$W/aligned.apk"
   echo "apk: $OUT/Skullburglar.apk ($(du -h "$OUT/Skullburglar.apk" | cut -f1); $ABIS)"
 }

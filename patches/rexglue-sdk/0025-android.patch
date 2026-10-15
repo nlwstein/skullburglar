@@ -491,6 +491,42 @@ index 0000000..d05bd0b
 +}
 +
 +}  // namespace rex::filesystem
+diff --git a/src/core/mapped_memory_posix.cpp b/src/core/mapped_memory_posix.cpp
+index 8ee8e34..f500868 100644
+--- a/src/core/mapped_memory_posix.cpp
++++ b/src/core/mapped_memory_posix.cpp
+@@ -20,6 +20,11 @@
+ #include <rex/memory/mapped_memory.h>
+ #include <rex/platform.h>
+ 
++#if REX_PLATFORM_ANDROID
++#include <cstdlib>
++#include <string>
++#endif
++
+ // macOS off_t is 64-bit and provides no *64 large-file variants; the base
+ // names already are the large-file interfaces. Linux still ships legacy 32-bit
+ // off_t on some distributions, so keep the explicit *64 forms there.
+@@ -105,6 +110,19 @@ class PosixMappedMemory : public MappedMemory {
+ 
+ std::unique_ptr<MappedMemory> MappedMemory::Open(const std::filesystem::path& path, Mode mode,
+                                                  size_t offset, size_t length) {
++#if REX_PLATFORM_ANDROID
++  // A document the player picked (Storage Access Framework) arrives as a descriptor the app holds, named
++  // /proc/self/fd/<n>: map a duplicate of it. Opening the link again would check storage permissions the app
++  // doesn't have.
++  if (const std::string& name = path.native(); name.starts_with("/proc/self/fd/")) {
++    const int held = std::atoi(name.c_str() + 14);
++    const int file_descriptor = held >= 0 ? dup(held) : -1;
++    if (file_descriptor < 0) {
++      return nullptr;
++    }
++    return PosixMappedMemory::WrapFileDescriptor(file_descriptor, mode, offset, length);
++  }
++#endif
+   int open_flags = 0;
+   switch (mode) {
+     case Mode::kRead:
 diff --git a/src/core/memory_posix.cpp b/src/core/memory_posix.cpp
 index 2adc8a6..3ace73b 100644
 --- a/src/core/memory_posix.cpp

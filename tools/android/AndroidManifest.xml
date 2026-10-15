@@ -23,17 +23,22 @@
         android:isGame="true"
         android:appCategory="game"
         android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+        <!-- The launcher: installs the game files from the player's disc image, then starts the game. -->
         <activity
-            android:name="sh.stz.skullburglar.SkullburglarActivity"
+            android:name="sh.stz.skullburglar.ImportActivity"
             android:exported="true"
-            android:launchMode="singleInstance"
-            android:screenOrientation="sensorLandscape"
-            android:preferMinimalPostProcessing="true"
-            android:configChanges="layoutDirection|locale|grammaticalGender|fontScale|fontWeightAdjustment|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation">
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name="sh.stz.skullburglar.SkullburglarActivity"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:screenOrientation="sensorLandscape"
+            android:preferMinimalPostProcessing="true"
+            android:configChanges="layoutDirection|locale|grammaticalGender|fontScale|fontWeightAdjustment|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation" />
     </application>
 </manifest>

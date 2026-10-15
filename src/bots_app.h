@@ -64,6 +64,7 @@ void InstallWindowsCrashLogger();  // src/crash_win.cpp
 #endif
 #if defined(__ANDROID__)
 #include <SDL3/SDL_system.h>
+#include "ios/touch_input.h"  // the iOS on-screen controller's input driver; src/android/android_app.cpp feeds it
 #endif
 #if TARGET_OS_IPHONE  // iOS and tvOS
 #include "ios/ios_app.h"
@@ -222,7 +223,8 @@ class BotsApp : public rex::ReXApp {
     return std::nullopt;
 #endif
 #if defined(__ANDROID__)
-    // No launcher on Android yet: the game files are copied into the app's data folder by hand (OnConfigurePaths).
+    // No launcher on Android: the app's import screen (tools/android ImportActivity) installs the game files into
+    // <data>/game before the game starts, or they are copied there by hand (OnConfigurePaths).
     return defaults;
 #endif
     bool requested = !game_root_given_;
@@ -500,6 +502,10 @@ class BotsApp : public rex::ReXApp {
     input->AddDriver(std::make_unique<bots::ios::TouchInputDriver>());
 #endif
     bots::ios::InstallAppUI();
+#endif
+#if defined(__ANDROID__)
+    // On-screen controller (tools/android TouchPadView), shown while no game controller is connected.
+    input->AddDriver(std::make_unique<bots::ios::TouchInputDriver>());
 #endif
   }
 

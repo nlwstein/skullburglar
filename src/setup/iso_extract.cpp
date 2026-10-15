@@ -112,7 +112,13 @@ uint32_t XexTitleId(const uint8_t* data, size_t size) {
 ExtractResult ExtractIso(const fs::path& iso, const fs::path& dest, ExtractProgress& progress) {
   ExtractResult result;
   std::error_code ec;
+#if defined(__ANDROID__)
+  // A disc image picked on Android (src/android/android_app.cpp) is a descriptor the app holds, /proc/self/fd/<n>,
+  // which stat may not be allowed to follow; the SDK maps the descriptor itself.
+  if (!iso.native().starts_with("/proc/self/fd/") && !fs::is_regular_file(iso, ec)) {
+#else
   if (!fs::is_regular_file(iso, ec)) {
+#endif
     result.error = "That file doesn't exist.";
     return result;
   }

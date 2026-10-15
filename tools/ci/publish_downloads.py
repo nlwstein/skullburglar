@@ -8,7 +8,7 @@ The bucket is a Cloudflare R2 bucket behind the private download site, which ser
 and the releases file (version.json) to anyone; the launcher reads that file (src/setup/update_check.h).
 
 The packages come from this project's package registry (skullburglar/<VERSION>); the experimental iOS and tvOS IPAs
-are published when their jobs built them. Only the newest KEEP versions stay
+and Android APK are published when their jobs built them. Only the newest KEEP versions stay
 downloadable: older packages are deleted from the bucket, but every version stays in the file's history.
 
 version.json:
@@ -56,6 +56,7 @@ PACKAGES = {
 OPTIONAL = {
     "ios": f"skullburglar-{VERSION}-ios.ipa",
     "tvos": f"skullburglar-{VERSION}-tvos.ipa",
+    "android": f"skullburglar-{VERSION}-android.apk",
 }
 TYPES = ("feat", "fix", "perf")
 

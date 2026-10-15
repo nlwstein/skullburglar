@@ -72,8 +72,9 @@ elseif(APPLE)
     enable_language(OBJCXX)
     list(APPEND BOTS_SOURCES src/setup/file_picker_mac.mm)
 elseif(ANDROID)
-    # Experimental Android build (tools/android/build.sh): no launcher, like iOS.
-    list(APPEND BOTS_SOURCES src/setup/file_picker_android.cpp)
+    # Experimental Android build (tools/android/build.sh): no launcher, like iOS; the app's Java screens call into
+    # src/android.
+    list(APPEND BOTS_SOURCES src/setup/file_picker_android.cpp src/android/android_app.cpp)
 else()
     list(APPEND BOTS_SOURCES src/setup/file_picker_linux.cpp)
 endif()

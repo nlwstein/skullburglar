@@ -1,7 +1,7 @@
 # Checks on every push. On main: release builds (Linux AppImage + tarball, Windows setup, macOS DMG; experimental iOS
-# and tvOS IPAs) when there are releasable commits (feat/fix/perf; tools/ci/semantic-release.toml), published as a
-# GitLab release whose packages stay in this project's package registry. With DOWNLOADS_BUCKET set, the player packages
-# also go to the private download site (tools/ci/publish_downloads.py), which only invited players can open; nothing is
+# and tvOS IPAs and Android APK) when there are releasable commits (feat/fix/perf; tools/ci/semantic-release.toml),
+# published as a GitLab release whose packages stay in this project's package registry. With DOWNLOADS_BUCKET set,
+# the player packages also go to the private download site (tools/ci/publish_downloads.py), which only invited players can open; nothing is
 # public apart from its releases JSON.
 #
 # The build needs the game executable, which is never in this repo: tools/ci/gitlab_build.sh reads it from the private
@@ -169,10 +169,11 @@ build:tvos:
   variables:
     PLATFORM: tvos
 
-# Android (experimental, tools/android/build.sh): a debug-signed arm64 APK, never part of a release (release doesn't
-# need this job, and gitlab_release.py doesn't list it). On branches named for it (android) it builds on every push into
-# skullburglar-android/android-<sha>; on main only in a BUILD=1 pipeline, next to that pipeline's other uploads. It may
-# fail without holding anything up. Runs on the Docker runner like the Linux and Windows builds (image docker/android).
+# Android (experimental, tools/android/build.sh): an arm64 APK. On main it builds with the others when there's a release
+# (or BUILD=1) and goes in it as skullburglar-<VERSION>-android.apk, signed with the ANDROID_KEYSTORE file variable; like
+# iOS it may fail without holding up the release, which then leaves it out. On branches named for it (android) it builds
+# on every push into skullburglar-android/android-<sha>, debug-signed. Runs on the Docker runner like the Linux and
+# Windows builds (image docker/android).
 build:android:
   stage: build
   needs:
@@ -185,12 +186,15 @@ build:android:
   variables:
     PLATFORM: android
   rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $BUILD == "1"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_COMMIT_BRANCH =~ /(^|\/)android/
   script:
     - |
       if [ "$CI_COMMIT_BRANCH" != "$CI_DEFAULT_BRANCH" ]; then
         VERSION=android-$CI_COMMIT_SHORT_SHA PACKAGE=skullburglar-android
+      elif [ "$RELEASE" != true ] && [ "${BUILD:-}" != 1 ]; then
+        echo "Nothing to release: not building."
+        exit 0
       fi
       PACKAGE=${PACKAGE:-skullburglar}
     - docker build -q -t skullburglar-ci-android docker/android
@@ -199,6 +203,7 @@ build:android:
     - >-
       docker run --rm --name "skullburglar-ci-$CI_JOB_ID" --volumes-from "$JOB" -w "$CI_PROJECT_DIR"
       -e CI_JOB_TOKEN -e CI_SERVER_HOST -e CI_API_V4_URL -e CI_PROJECT_ID -e VERSION -e PACKAGE -e ASSETS_PROJECT
+      -e ANDROID_KEYSTORE -e ANDROID_KEYSTORE_PASS
       -e CCACHE_DIR=/ccache -v "skullburglar-ccache-android:/ccache"
       skullburglar-ci-android tools/ci/gitlab_build.sh android
   after_script:
@@ -207,7 +212,7 @@ build:android:
 release:
   stage: release
   extends: [.main, .psr]
-  needs: [plan, build:linux, build:windows, build:macos, build:ios, build:tvos]
+  needs: [plan, build:linux, build:windows, build:macos, build:ios, build:tvos, build:android]
   resource_group: release
   script:
     - |
