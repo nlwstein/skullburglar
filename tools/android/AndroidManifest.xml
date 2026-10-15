@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Experimental Android build (tools/android/build.sh). The package name, version and SDK levels are set by aapt2. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="sh.stz.skullburglar"
+    android:installLocation="auto">
+
+    <!-- The native renderer is Vulkan only. -->
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x401000" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- System link (LAN co-op) and the launcher's update check. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- extractNativeLibs: the GPU plugins are loaded by path from the app's native library folder. -->
+    <application
+        android:label="Skullburglar"
+        android:allowBackup="false"
+        android:extractNativeLibs="true"
+        android:hardwareAccelerated="true"
+        android:isGame="true"
+        android:appCategory="game"
+        android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+        <activity
+            android:name="sh.stz.skullburglar.SkullburglarActivity"
+            android:exported="true"
+            android:launchMode="singleInstance"
+            android:screenOrientation="sensorLandscape"
+            android:preferMinimalPostProcessing="true"
+            android:configChanges="layoutDirection|locale|grammaticalGender|fontScale|fontWeightAdjustment|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

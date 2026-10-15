@@ -27,7 +27,9 @@
 #include <unistd.h>
 #elif defined(__linux__)
 #include <dlfcn.h>
+#if !defined(__ANDROID__)
 #include <execinfo.h>
+#endif
 #include <sys/resource.h>
 #include <unistd.h>
 #endif
@@ -59,6 +61,9 @@ void InstallWindowsCrashLogger();  // src/crash_win.cpp
 #endif
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
+#endif
+#if defined(__ANDROID__)
+#include <SDL3/SDL_system.h>
 #endif
 #if TARGET_OS_IPHONE  // iOS and tvOS
 #include "ios/ios_app.h"
@@ -140,6 +145,33 @@ class BotsApp : public rex::ReXApp {
       return;
     }
 #endif
+#if defined(__ANDROID__)
+    // Android (experimental): everything lives in the app's own storage, and there is no launcher. <data> is the app's
+    // external files folder (Android/data/<package>/files), which a computer can write over USB (adb push): the game
+    // files go in <data>/game, saves in <data>/user, logs in <data>/logs; the shader cache in the internal storage.
+    {
+      const char* external = SDL_GetAndroidExternalStoragePath();
+      const char* internal = SDL_GetAndroidInternalStoragePath();
+      const fs::path data = external ? fs::path(external) : fs::path(internal ? internal : ".");
+      if (paths.game_data_root.empty()) paths.game_data_root = data / "game";
+      if (rex::cvar::Query<std::string>("user_data_root").empty()) paths.user_data_root = data / "user";
+      if (rex::cvar::Query<std::string>("cache_root").empty())
+        paths.cache_root = fs::path(internal ? internal : data.c_str()) / "cache";
+      paths.config_path = paths.user_data_root / "bots.toml";
+      config_path_ = paths.config_path;
+      game_root_given_ = true;
+      fs::create_directories(paths.user_data_root, ec);
+      fs::create_directories(paths.cache_root, ec);
+      if (rex::cvar::Query<std::string>("log_file").empty()) {
+        fs::create_directories(data / "logs", ec);
+        char stamp[32];
+        const std::time_t now = std::time(nullptr);
+        std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", std::localtime(&now));
+        rex::cvar::SetFlagByName("log_file", (data / "logs" / ("bots-" + std::string(stamp) + ".log")).string());
+      }
+      return;
+    }
+#endif
     if (!fs::exists(paths.config_path, ec)) paths.config_path = paths.user_data_root / "bots.toml";
     config_path_ = paths.config_path;
     UseBundleLogDir();
@@ -188,6 +220,10 @@ class BotsApp : public rex::ReXApp {
     }
     bots::ios::ImportGame(defaults.game_data_root, [defaults, resume] { resume(defaults); });
     return std::nullopt;
+#endif
+#if defined(__ANDROID__)
+    // No launcher on Android yet: the game files are copied into the app's data folder by hand (OnConfigurePaths).
+    return defaults;
 #endif
     bool requested = !game_root_given_;
     if (rex::cvar::GetFlagSource("launcher") != rex::cvar::Source::kDefault)
@@ -255,8 +291,9 @@ class BotsApp : public rex::ReXApp {
   //   macOS: atos -o out/build/mac-arm64-relwithdebinfo/bots -l <load addr> <addrs...>
   //   Linux: frames print as module(+offset); addr2line -f -C -e <module> <offset>
   // Recompiled frames resolve to sub_XXXXXXXX, i.e. this doubles as a guest call stack.
-  // Windows: the SDK's own unhandled-exception path.
-#if defined(__APPLE__) || defined(__linux__)
+  // Windows: the SDK's own unhandled-exception path. Android: none (no backtrace() before API 33); the system's
+  // crash report (logcat, tombstones) has the native backtrace.
+#if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
   static void CrashHandler(int sig) {
     void* frames[96];
     int n = backtrace(frames, 96);
