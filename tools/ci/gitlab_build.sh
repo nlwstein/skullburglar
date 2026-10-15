@@ -1,14 +1,15 @@
 #!/bin/sh
 # One platform's release build in GitLab CI, inside its build image or on the macOS runner (.gitlab-ci.yml):
-#   tools/ci/gitlab_build.sh <linux|windows|macos|ios|tvos>
+#   tools/ci/gitlab_build.sh <linux|windows|macos|ios|tvos|android>
 # Gets the game executable and shader refs from the private assets project, restores stored codegen output when there
 # is some for this tree (tools/ci/codegen_publish.sh), builds and packages, and uploads the packages to this project's
 # package registry as <PACKAGE>/<VERSION> (PACKAGE defaults to skullburglar). iOS and tvOS (experimental) build an
-# unsigned IPA instead (tools/ios/build.sh; signed when it's installed): skullburglar-<VERSION>-<ios|tvos>.ipa.
+# unsigned IPA instead (tools/ios/build.sh; signed when it's installed): skullburglar-<VERSION>-<ios|tvos>.ipa. Android
+# (experimental) builds a debug-signed arm64 APK (tools/android/build.sh): skullburglar-<VERSION>-android.apk.
 # Env: the job's CI_* variables, VERSION, ASSETS_PROJECT (the assets project path); PACKAGE, UPDATE_URL (optional, see
 # build.sh).
 set -eu
-PLATFORM=${1:?usage: tools/ci/gitlab_build.sh <linux|windows|macos|ios|tvos>}
+PLATFORM=${1:?usage: tools/ci/gitlab_build.sh <linux|windows|macos|ios|tvos|android>}
 cd "$(dirname "$0")/../.."
 PACKAGE=${PACKAGE:-skullburglar}
 : "${CI_JOB_TOKEN:?}" "${CI_SERVER_HOST:?}" "${CI_API_V4_URL:?}" "${CI_PROJECT_ID:?}" "${VERSION:?}" "${ASSETS_PROJECT:?}"
@@ -36,6 +37,19 @@ then
 else
   echo "codegen: nothing stored for $KEY, so codegen runs here (store it with tools/ci/codegen_publish.sh)"
 fi
+
+case $PLATFORM in android)
+  # Cross-compiled with the NDK, which can't run the recompiler either: stored codegen output only, as for iOS.
+  [ -f generated/default/sources.cmake ] || { echo "no stored codegen output for $KEY: run tools/ci/codegen_publish.sh" >&2; exit 1; }
+  step build
+  SDK=out/sdk VERSION=$VERSION tools/android/build.sh build apk
+  step upload
+  name=skullburglar-$VERSION-android.apk
+  get --upload-file out/android/Skullburglar.apk \
+    "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/$PACKAGE/$VERSION/$name" >/dev/null
+  echo "uploaded $name as $PACKAGE/$VERSION"
+  exit 0
+esac
 
 case $PLATFORM in ios|tvos)
   # The recompiler doesn't run on iOS, so these builds need stored codegen output for this tree.

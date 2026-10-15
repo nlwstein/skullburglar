@@ -40,7 +40,7 @@ checks:
   interruptible: true
   script:
     - python3 tools/leak_scan.py tree
-    - for f in tools/ci/*.sh tools/ios/build.sh packaging/linux/AppRun; do sh -n "$f"; done
+    - for f in tools/ci/*.sh tools/ios/build.sh tools/android/build.sh packaging/linux/AppRun; do sh -n "$f"; done
     - python3 -m py_compile tools/ci/gitlab_release.py tools/ci/publish_downloads.py
     - SUBMODULES=0 tools/ci/sdk.sh "$(mktemp -d)/sdk"
 
@@ -168,6 +168,41 @@ build:tvos:
   extends: .apple
   variables:
     PLATFORM: tvos
+
+# Android (experimental, tools/android/build.sh): a debug-signed arm64 APK, never part of a release (release doesn't
+# need this job, and gitlab_release.py doesn't list it). On branches named for it (android) it builds on every push into
+# skullburglar-android/android-<sha>; on main only in a BUILD=1 pipeline, next to that pipeline's other uploads. It may
+# fail without holding anything up. Runs on the Docker runner like the Linux and Windows builds (image docker/android).
+build:android:
+  stage: build
+  needs:
+    - job: plan
+      optional: true
+  image: docker:29-cli
+  interruptible: true
+  allow_failure: true
+  timeout: 4h
+  variables:
+    PLATFORM: android
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $BUILD == "1"
+    - if: $CI_COMMIT_BRANCH =~ /(^|\/)android/
+  script:
+    - |
+      if [ "$CI_COMMIT_BRANCH" != "$CI_DEFAULT_BRANCH" ]; then
+        VERSION=android-$CI_COMMIT_SHORT_SHA PACKAGE=skullburglar-android
+      fi
+      PACKAGE=${PACKAGE:-skullburglar}
+    - docker build -q -t skullburglar-ci-android docker/android
+    - JOB=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.job.id=$CI_JOB_ID" --filter "label=com.gitlab.gitlab-runner.type=build")
+    - test -n "$JOB"
+    - >-
+      docker run --rm --name "skullburglar-ci-$CI_JOB_ID" --volumes-from "$JOB" -w "$CI_PROJECT_DIR"
+      -e CI_JOB_TOKEN -e CI_SERVER_HOST -e CI_API_V4_URL -e CI_PROJECT_ID -e VERSION -e PACKAGE -e ASSETS_PROJECT
+      -e CCACHE_DIR=/ccache -v "skullburglar-ccache-android:/ccache"
+      skullburglar-ci-android tools/ci/gitlab_build.sh android
+  after_script:
+    - docker rm -f "skullburglar-ci-$CI_JOB_ID" >/dev/null 2>&1 || true
 
 release:
   stage: release
