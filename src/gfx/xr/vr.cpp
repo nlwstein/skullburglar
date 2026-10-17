@@ -13,8 +13,13 @@
 #include <rex/logging.h>
 #include <rex/platform.h>
 
-REXCVAR_DEFINE_STRING(vr, "auto", "bots/VR",
-                      "Headset mode: auto (on when a headset with an OpenXR runtime is attached), on, off");
+// Off by default: headset mode is shelved until the pipeline warm-up stops making it look broken (the game
+// builds every pipeline on demand inside the frame in a headset, half a second each on an Adreno 740, so it
+// stutters and stalls until they are all warm). Opt in per run with `--vr=on`, or per device with `vr=on` in
+// bots.toml.
+REXCVAR_DEFINE_STRING(vr, "off", "bots/VR",
+                      "Headset mode: off (the default - flat), auto (on when a headset with an OpenXR runtime is "
+                      "attached), on");
 
 #if REX_PLATFORM_ANDROID
 

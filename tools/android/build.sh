@@ -18,6 +18,9 @@
 # next to the desktop executables): the launcher screen unpacks it beside the game files and the game warms from it.
 # It is per device class and refs for another class are ignored at run time, so the class must be the device's.
 # ABIS defaults to arm64-v8a, the devices'; x86_64 runs in x86 emulators. PACKAGE overrides the application id.
+# VR=1 adds the headset intent filter (com.oculus.intent.category.VR, org.khronos.openxr...IMMERSIVE_HMD). Leave it
+# off for a play-flat build: a headset launcher that sees the filter starts the activity as an immersive app, and
+# in that mode an app with no composition layers is a black screen with the game's audio.
 # DEBUGGABLE=1 makes a test build: debuggable, and the game takes its command line and environment from intent
 # extras (SkullburglarActivity). On first start the app asks for the player's disc image (ImportActivity); the game
 # files can also go in its data folder by hand: adb push game /sdcard/Android/data/<package>/files/
@@ -106,7 +109,15 @@ do_apk() {
   # versionCode: x*10000 + y*100 + z for a release, else 1 (dev builds).
   code=$(echo "${appver:-0.0.0}" | awk -F. '{print $1*10000 + $2*100 + $3}')
   [ "$code" -gt 0 ] || code=1
-  "$ANDROID_BUILD_TOOLS/aapt2" link -o "$W/base.apk" -I "$ANDROID_PLATFORM_JAR" --manifest tools/android/AndroidManifest.xml \
+  # VR=1 keeps the headset intent filter (manifest). Without it the app is a panel app everywhere: a headset
+  # launcher that sees the filter starts the activity as an immersive app, which is a black screen with audio
+  # unless the game submits composition layers - so a play-flat build must not carry it.
+  if [ -n "${VR:-}" ]; then
+    cp tools/android/AndroidManifest.xml "$W/AndroidManifest.xml"
+  else
+    sed '/VR-ONLY-BEGIN/,/VR-ONLY-END/d' tools/android/AndroidManifest.xml >"$W/AndroidManifest.xml"
+  fi
+  "$ANDROID_BUILD_TOOLS/aapt2" link -o "$W/base.apk" -I "$ANDROID_PLATFORM_JAR" --manifest "$W/AndroidManifest.xml" \
     --min-sdk-version $MIN_SDK --target-sdk-version $TARGET_SDK --version-code "$code" \
     --version-name "${VERSION:-dev}" --rename-manifest-package "$PACKAGE" \
     $([ "${DEBUGGABLE:-0}" = 1 ] && echo --debug-mode)

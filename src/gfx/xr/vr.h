@@ -20,9 +20,9 @@ namespace bots::gfx::vr {
 // cannot be reached from an app's linker namespace the way Meta's system copy can be from a shell.
 void SetAndroidActivity(void* java_vm, void* activity);
 
-// Decides from the cvar `vr` (auto|on|off, default auto) and the device whether the game runs in a headset, and
-// prepares for the Vulkan instance and device the runtime will create. False: the game runs flat, which is what
-// auto returns on anything that is not a headset.
+// Decides from the cvar `vr` (off|auto|on, default off) and the device whether the game runs in a headset, and
+// prepares for the Vulkan instance and device the runtime will create. False: the game runs flat - always,
+// unless the cvar asks for a headset.
 bool Init();
 
 // True once the runtime owns the instance, device and session. The present path then draws into the headset

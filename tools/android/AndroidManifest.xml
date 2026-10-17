@@ -47,13 +47,19 @@
             android:preferMinimalPostProcessing="true"
             android:configChanges="layoutDirection|locale|grammaticalGender|fontScale|fontWeightAdjustment|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation">
             <!-- Headset launchers look for these to know the app can go on the head instead of a flat panel:
-                 Meta's own, and the one Khronos' runtime samples use. Nothing reads them off a headset, and the
-                 game decides at run time anyway (the `vr` cvar, on by default only where a headset answers). -->
+                 Meta's own, and the one Khronos' runtime samples use. build.sh leaves them out unless VR=1, and
+                 that is not cosmetic: with them Horizon OS starts the activity as an *immersive* app ("Switching
+                 to immersive app ... SkullburglarActivity" in logcat, uiModeFlags IMMERSIVE), and an app that
+                 shows no composition layers in that mode is a black screen with the game's audio playing. Without
+                 them the same APK is an ordinary panel app and plays exactly as before. Use VR=1 for a build that
+                 means to go in a headset. -->
+            <!-- VR-ONLY-BEGIN -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="com.oculus.intent.category.VR" />
                 <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
             </intent-filter>
+            <!-- VR-ONLY-END -->
         </activity>
     </application>
 </manifest>

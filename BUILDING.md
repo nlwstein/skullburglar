@@ -153,18 +153,19 @@ none of them, which is minutes instead of seconds on a headset. Headset mode's h
   connected. A headset's own controllers are not one: each hand arrives as a separate game controller holding half
   the buttons (a Quest 3's left and right Touch controllers, for instance), which no single-pad game can use. A
   Bluetooth gamepad (an Xbox Series X one, say) is mapped by SDL itself and needs nothing from us.
-- **Headset mode (OpenXR):** with a headset attached and an OpenXR runtime installed, the game presents a flat
-  virtual screen into it instead of the device's window - the same renderer, the same frames, on a quad layer in
-  front of the player. The `vr` cvar picks it: `auto` (the default) uses a headset when it finds one, `off` stays
-  flat, `on` insists (and warns when there is nothing to present to). The Khronos OpenXR loader is bundled in the
-  APK, and the game only reaches a headset through it, so the Android build must be arm64 (`ABIS=arm64-v8a`).
-  `adb shell am start ... --es args "--vr=off"` on a test build, or `vr=off` in `bots.toml`, turns it off. The
-  runtime has to create the Vulkan instance and device itself (it refuses any it did not make), which is what the
-  SDK patch in `patches/rexglue-sdk/0026-vulkan-external-instance-device.patch` adds.
-  In headset mode the shader warm-up never holds the game: the "Compiling shaders" panel is drawn into the device
-  window, which nobody can see from inside a headset, so the game starts straight away and the pipelines finish in
-  the background. That matters on this hardware - an Adreno 740 takes about half a second a pipeline and the refs
-  hold 2,301 of them.
+- **Headset mode (OpenXR, shelved):** with a headset attached and an OpenXR runtime installed, the game can
+  present a flat virtual screen into it instead of the device's window - the same renderer, the same frames, on a
+  quad layer in front of the player. It is **off by default** and needs opting into: `--vr=on` (`adb shell am
+  start ... --es args "--vr=on"` on a test build) or `vr=on` in `bots.toml`. `auto` uses a headset when it finds
+  one, `off` is flat, `on` insists (and warns when there is nothing to present to). It is shelved because the
+  pipeline warm-up makes it look broken: a headset frame is never held for the warm-up (the "Compiling shaders"
+  panel is drawn into the device window, which nobody can see from inside a headset), so those pipelines are
+  built on demand *inside* the frame - about half a second each on an Adreno 740, and the refs hold 2,301 of
+  them - and the game stutters and stalls until they are warm. Fixing that is the performance work, not more VR.
+  The Khronos OpenXR loader is bundled in the APK, and the game only reaches a headset through it, so the Android
+  build must be arm64 (`ABIS=arm64-v8a`). The runtime has to create the Vulkan instance and device itself (it
+  refuses any it did not make), which is what the SDK patch in
+  `patches/rexglue-sdk/0026-vulkan-external-instance-device.patch` adds.
 
 - **Backgrounding:** as on iOS, leaving the game quits it; the renderer can't give up its surface and resume yet.
 - **Signing:** `KEYSTORE=<file>` (password `KEYSTORE_PASS`), else a debug key made in `out/android/debug.keystore` on
