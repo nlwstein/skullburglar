@@ -291,6 +291,11 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   // and the warm-up gets the whole CPU: on a 4-core laptop the game and a background warm-up starve each other
   // (B-098). Ends when the warm-up does or the player sends the panel to the background.
   void HoldForWarmup() {
+    // Never in a headset. The panel that explains the wait is drawn by the presenter into the window, and in
+    // headset mode the game's frame goes to the quad layer instead - nobody sees the window, so holding is
+    // minutes of unexplained black in front of the player with no button to press out of it (the warm-up on an
+    // Adreno 740 is ~0.5 s a pipeline, minutes in all). The warm-up still runs, in the background.
+    if (vr::active()) return;
     if (!shader_precompile_foreground_.load(std::memory_order_relaxed) ||
         renderer_->warmup_done() >= renderer_->warmup_total()) {
       return;

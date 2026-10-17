@@ -161,6 +161,10 @@ none of them, which is minutes instead of seconds on a headset. Headset mode's h
   `adb shell am start ... --es args "--vr=off"` on a test build, or `vr=off` in `bots.toml`, turns it off. The
   runtime has to create the Vulkan instance and device itself (it refuses any it did not make), which is what the
   SDK patch in `patches/rexglue-sdk/0026-vulkan-external-instance-device.patch` adds.
+  In headset mode the shader warm-up never holds the game: the "Compiling shaders" panel is drawn into the device
+  window, which nobody can see from inside a headset, so the game starts straight away and the pipelines finish in
+  the background. That matters on this hardware - an Adreno 740 takes about half a second a pipeline and the refs
+  hold 2,301 of them.
 
 - **Backgrounding:** as on iOS, leaving the game quits it; the renderer can't give up its surface and resume yet.
 - **Signing:** `KEYSTORE=<file>` (password `KEYSTORE_PASS`), else a debug key made in `out/android/debug.keystore` on
