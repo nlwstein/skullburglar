@@ -24,8 +24,8 @@ Linux    Either the .AppImage (make it executable and run it) or the .tar.xz (un
          Needs Vulkan graphics drivers.
 
 Steam Deck  Copy the .AppImage to the Deck, make it executable (Properties > Permissions in the file manager) and
-            add it to Steam with "Add a Non-Steam Game". It runs in Game Mode. The launcher is a mouse window: use
-            the touchscreen or the right trackpad (R2 clicks).
+            add it to Steam with "Add a Non-Steam Game". It runs in Game Mode. The launcher works with the
+            controls (see below); typing the disc image's path needs the on-screen keyboard (STEAM + X).
 
 
 The launcher
@@ -34,6 +34,9 @@ The launcher
 Every start opens the launcher. The first time it asks for your disc image or extracted disc and installs the
 game files (a few minutes). After that it holds the settings: resolution, VSync, frame cap, fullscreen, intro
 movies, renderer, mouse sensitivity and key bindings. Play saves them and starts the game.
+
+To go straight in, press START on a controller (OPTIONS on a PlayStation pad) or Enter on the keyboard. The launcher
+also works with a controller throughout: the d-pad or left stick moves, A (Cross) selects and B (Circle) goes back.
 
 When a newer version is out, the launcher says so and its Download button opens the download page (turn
 "Check for new versions" off to stop it looking).

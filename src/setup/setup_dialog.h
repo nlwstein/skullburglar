@@ -7,6 +7,8 @@
 // game files as "Choose another folder..." would (desktop builds); BOTS_SETUP_AUTO=1 installs (when a path is set and
 // nothing is installed) and presses Play, so the flow runs unattended.
 // Release builds also check for a newer version when the window opens (update_check.h).
+// Controllers work too (pad_nav.h): focus starts on Play (or Browse... without game files). Start on a controller or
+// Enter on the keyboard plays from anywhere in the window.
 #pragma once
 
 #include <algorithm>
@@ -30,6 +32,7 @@
 #include "app_paths.h"
 #include "file_picker.h"
 #include "iso_extract.h"
+#include "pad_nav.h"
 #include "settings.h"
 #include "firewall.h"
 #include "update_check.h"
@@ -52,7 +55,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
         config_path_(std::move(config_path)),
         play_(std::move(play)),
         quit_(std::move(quit)),
-        settings_(LoadSettings()) {
+        settings_(LoadSettings()),
+        pad_(std::make_unique<PadNav>()) {
     installed_ = IsGameDir(game_dir_);
     if (installed_) old_game_dir_ = game_dir_;
     if (const char* iso = std::getenv("BOTS_SETUP_ISO"); iso && *iso) SetIsoPath(iso);
@@ -80,6 +84,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
 
  protected:
   void OnDraw(ImGuiIO& io) override {
+    if (pad_) pad_->Update(io);
+    capturing_ = capture_ >= 0;  // as the frame starts: a key binding may take Enter this frame
     PollWorker();
     if (auto_) RunAuto();
 
@@ -246,6 +252,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       auto picked = PickIsoFile();
       if (!picked.empty()) SetIsoPath(picked.string());
     }
+    if (!installed_) ImGui::SetItemDefaultFocus();
     ImGui::BeginDisabled(iso_path_[0] == 0);
     if (ImGui::Button(installed_ ? "Reinstall" : "Install", ImVec2(160, 0))) StartExtract();
     ImGui::EndDisabled();
@@ -488,6 +495,11 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       capture_armed_ = true;
       return;
     }
+    // A controller can't press a key: B gives up, as Cancel does.
+    if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
+      capture_ = -1;
+      return;
+    }
     std::string name;
     for (int k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_NamedKey_END && name.empty(); ++k) {
       if (ImGui::IsKeyPressed(ImGuiKey(k), false)) name = KeyName(ImGuiKey(k));
@@ -509,14 +521,40 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     capture_ = -1;
   }
 
+  // Start on a controller or Enter on the keyboard plays from anywhere in the window, except while a path is typed, a
+  // list is open or a key binding waits for its key.
+  bool QuickPlayPressed() const {
+    if (!installed_ || Extracting() || capturing_ || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) return false;
+    if (pad_ && ImGui::IsKeyPressed(ImGuiKey_GamepadStart, false)) return true;
+    return !ImGui::GetIO().WantTextInput &&
+           (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false));
+  }
+
   void DrawButtons() {
-    ImGui::BeginDisabled(!installed_ || Extracting());
-    if (ImGui::Button("Play", ImVec2(160, 0))) Play();
+    const bool pad = pad_ && pad_->Connected();
+    const bool ps = pad && pad_->PlayStation();
+    char play[48];
+    std::snprintf(play, sizeof(play), "Play  (%s)##play", pad ? (ps ? "Options" : "Start") : "Enter");
+    const bool can_play = installed_ && !Extracting();
+    // The way in, so it stands out from the other buttons.
+    const ImVec4* colors = ImGui::GetStyle().Colors;
+    ImGui::PushStyleColor(ImGuiCol_Button, colors[ImGuiCol_ButtonHovered]);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, colors[ImGuiCol_ButtonActive]);
+    ImGui::BeginDisabled(!can_play);
+    const bool pressed = ImGui::Button(play, ImVec2(220, ImGui::GetFrameHeight() * 1.5f));
+    if (can_play) ImGui::SetItemDefaultFocus();
     ImGui::EndDisabled();
+    ImGui::PopStyleColor(2);
+    if (pressed || QuickPlayPressed()) {
+      Play();
+      return;
+    }
     ImGui::SameLine();
-    if (ImGui::Button("Quit", ImVec2(120, 0))) {
+    if (ImGui::Button("Quit", ImVec2(120, ImGui::GetFrameHeight() * 1.5f))) {
       if (Extracting()) progress_->cancel = true;
+      pad_.reset();
       quit_();
+      return;
     }
     if (!installed_) {
       ImGui::SameLine();
@@ -526,6 +564,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     std::snprintf(version, sizeof(version), "Version %s", AppVersion());
     ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - ImGui::CalcTextSize(version).x);
     ImGui::TextDisabled("%s", version);
+    if (pad) ImGui::TextDisabled(ps ? "Controller: Cross selects, Circle goes back." : "Controller: A selects, B goes back.");
   }
 
   void StartExtract() {
@@ -583,6 +622,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     REXLOG_INFO("setup: play with game files in {}", game_dir_.string());
     auto play = play_;
     auto dir = game_dir_;
+    pad_.reset();  // the controllers are the game's from here
     Close();  // deletes this dialog; only locals below
     play(dir);
   }
@@ -596,11 +636,13 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   PlayFn play_;
   QuitFn quit_;
   std::vector<Setting> settings_;
+  std::unique_ptr<PadNav> pad_;  // null once Play or Quit is pressed
   bool installed_ = false;
   bool show_reinstall_ = false;
   bool auto_ = false;
   int capture_ = -1;  // settings_ index of the binding waiting for a key, or -1
   bool capture_append_ = false, capture_armed_ = false;
+  bool capturing_ = false;  // a key binding was waiting when this frame started
   char iso_path_[1024] = {};
   std::string error_;
   std::thread worker_;
