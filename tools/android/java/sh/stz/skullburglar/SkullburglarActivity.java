@@ -43,6 +43,10 @@ public class SkullburglarActivity extends SDLActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // Headset mode needs the activity before anything else: the game asks OpenXR for a headset when its
+        // graphics provider comes up, which is on the thread super.onCreate starts (src/gfx/xr/vr.h). On a device
+        // with no headset this costs one failed OpenXR call and the game runs flat.
+        VrNative.setActivity(this);
         // Before the game's library loads: the game reads its debug switches with getenv.
         String env = debuggable() ? getIntent().getStringExtra("env") : null;
         if (env != null) {

@@ -126,10 +126,15 @@ class Renderer : public Pm4Sink {
   // Live: after each guest frame's Flush. Evicts guest textures no draw used for a while.
   void EndFrame();
   // Native present: the front buffer resolved to `address` (else the latest resolve), through the 256-entry
-  // gamma ramp (10:10:10 per entry, red highest), into `target`: the presenter's guest output image
-  // (A2B10G10R10), left in SHADER_READ_ONLY_OPTIMAL as the presenter expects. Submits and waits.
+  // gamma ramp (10:10:10 per entry, red highest), into `target`. With the defaults that is the presenter's guest
+  // output image (A2B10G10R10), left in SHADER_READ_ONLY_OPTIMAL as the presenter expects. VR passes its own
+  // target instead: an image of the OpenXR swapchain, in whatever format the runtime offered (vr.cpp prefers a
+  // plain _UNORM one; an _SRGB one it linearises for, since an _SRGB attachment is written through the
+  // hardware's linear-to-sRGB encoding), left in COLOR_ATTACHMENT_OPTIMAL as the runtime expects of a released
+  // image. Submits and waits.
   bool Present(uint32_t address, VkImage target, VkImageView target_view, uint32_t width, uint32_t height,
-               const uint32_t* gamma_ramp);
+               const uint32_t* gamma_ramp, VkFormat target_format = VK_FORMAT_UNDEFINED,
+               VkImageLayout final_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
   // Guest address of the last resolve destination (the frame ends with a resolve into the front buffer).
   uint32_t last_resolve_address() const { return last_resolve_address_; }
@@ -397,8 +402,10 @@ class Renderer : public Pm4Sink {
   VkShaderModule CreateShaderModule(int stage, const std::string& source);
   VkPipeline TransferPipeline(uint32_t source_format, uint32_t dest_format, VkFormat host_format);
   // A full-screen triangle (transfer_vs_) into one colour attachment, dynamic viewport and scissor.
-  VkPipeline FullscreenPipeline(VkShaderModule fs, VkFormat format, VkPipelineLayout layout);
+  VkPipeline FullscreenPipeline(VkShaderModule fs, VkFormat format, VkPipelineLayout layout,
+                                const VkSpecializationInfo* specialization = nullptr);
   bool InitPresent();
+  VkPipeline PresentPipeline(VkFormat format, bool linearise);
   void Transfer(Image& source, uint32_t source_format, Image& dest, uint32_t dest_format,
                 const VkRect2D* rect = nullptr, float scale = 1.0f);
 
@@ -631,7 +638,10 @@ class Renderer : public Pm4Sink {
   std::map<std::tuple<uint32_t, uint32_t, VkFormat>, VkPipeline> transfer_pipelines_;
   VkDescriptorSetLayout present_set_layout_ = VK_NULL_HANDLE;
   VkPipelineLayout present_layout_ = VK_NULL_HANDLE;
-  VkPipeline present_pipeline_ = VK_NULL_HANDLE;
+  // Keyed by (target format << 1) | linearise: the 2D presenter's guest output image and each XR swapchain format
+  // the runtime hands us need their own pipeline, and the _SRGB ones need the shader's linearise variant.
+  std::map<uint64_t, VkPipeline> present_pipelines_;
+  std::vector<VkShaderModule> present_shader_modules_;
 };
 
 }  // namespace bots::gfx::vk

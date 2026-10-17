@@ -34,6 +34,7 @@
 #include "upk.h"
 #include "vk/memory_sync.h"
 #include "vk/renderer.h"
+#include "xr/vr.h"
 
 namespace bots::gfx {
 namespace {
@@ -58,32 +59,42 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     static const bool no_present = std::getenv("BOTS_GFX_NO_PRESENT") != nullptr;
     rex::ui::Presenter* presenter = no_present ? nullptr : graphics_system_->presenter();
     const uint64_t presents = renderer_->stats().presents;
-    if (presenter) {
-      rex::system::X_VIDEO_MODE video_mode;
-      rex::kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
-      const uint32_t width = frontbuffer_width ? frontbuffer_width : uint32_t(video_mode.display_width);
-      const uint32_t height = frontbuffer_height ? frontbuffer_height : uint32_t(video_mode.display_height);
-      // Above render scale 1 the guest output is the rendered size (e.g. 2560x1440 at 2); the presenter scales it to
-      // the window with the display's aspect ratio either way.
-      const float output_scale = renderer_->output_scale();
-      const uint32_t out_width = uint32_t(float(width) * output_scale + 0.5f);
-      const uint32_t out_height = uint32_t(float(height) * output_scale + 0.5f);
+    rex::system::X_VIDEO_MODE video_mode;
+    rex::kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
+    const uint32_t width = frontbuffer_width ? frontbuffer_width : uint32_t(video_mode.display_width);
+    const uint32_t height = frontbuffer_height ? frontbuffer_height : uint32_t(video_mode.display_height);
+    // Above render scale 1 the guest output is the rendered size (e.g. 2560x1440 at 2); the presenter scales it to
+    // the window with the display's aspect ratio either way.
+    const float output_scale = renderer_->output_scale();
+    const uint32_t out_width = uint32_t(float(width) * output_scale + 0.5f);
+    const uint32_t out_height = uint32_t(float(height) * output_scale + 0.5f);
+    const auto* ramp = reinterpret_cast<const uint32_t*>(gamma_ramp_256_entry_table());
+    const uint32_t frontbuffer_address = frontbuffer_ptr & 0x1FFFFFFF;
+    // In a headset the frame goes to an OpenXR swapchain image on a quad layer instead of the window (xr/vr.h).
+    // An invalid target means the runtime wants no frame this time, or nobody is wearing the headset; the window
+    // path then still runs, so the headset's own screen shows the game until it is put on. EndFrame closes the
+    // headset frame either way, and does nothing when BeginFrame didn't open one.
+    const vr::Target headset = vr::active() ? vr::BeginFrame(out_width, out_height) : vr::Target{};
+    if (headset.valid()) {
+      renderer_->Present(frontbuffer_address, headset.image, headset.view, headset.width, headset.height, ramp,
+                         headset.format, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    } else if (presenter) {
       // The presenter fits the output to the window at the display's aspect ratio. A frame wider than that is the
       // ultrawide back buffer (src/widescreen.h, e.g. 1280x548): fit it at its own shape instead of squeezing it.
       uint32_t aspect_w = std::max(1u, uint32_t(video_mode.display_width));
       uint32_t aspect_h = std::max(1u, uint32_t(video_mode.display_height));
       if (uint64_t(width) * aspect_h > uint64_t(aspect_w) * height) aspect_w = width, aspect_h = height;
-      const auto* ramp = reinterpret_cast<const uint32_t*>(gamma_ramp_256_entry_table());
       presenter->RefreshGuestOutput(
           out_width, out_height, aspect_w, aspect_h,
           [&](rex::ui::Presenter::GuestOutputRefreshContext& context) -> bool {
             auto& vulkan_context =
                 static_cast<rex::ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext&>(context);
             context.SetIs8bpc(true);
-            return renderer_->Present(frontbuffer_ptr & 0x1FFFFFFF, vulkan_context.image(),
+            return renderer_->Present(frontbuffer_address, vulkan_context.image(),
                                       vulkan_context.image_view(), out_width, out_height, ramp);
           });
     }
+    vr::EndFrame();
     // Present submits the frame. When it didn't run - no presenter, or the presenter skipped the refresh (window
     // hidden or minimised, display asleep) - submit here, or the next frames pile into one command buffer and the
     // GPU work arrives in bursts.
@@ -176,6 +187,11 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     const auto exe_dir = rex::filesystem::GetExecutableFolder();
     std::vector<std::filesystem::path> refs_dirs{exe_dir / "pipelines"};
     if (exe_dir.filename() == "MacOS") refs_dirs.push_back(exe_dir.parent_path() / "Resources" / "pipelines");
+#if defined(__ANDROID__)
+    // The executable folder is the app's read-only library directory on Android and no package ships refs there,
+    // so they come out of the APK: the launcher screen unpacks them beside the game files (ImportActivity).
+    refs_dirs.push_back(kernel_state_->emulator()->game_data_root().parent_path() / "pipelines");
+#endif
     renderer_->SetShaderRefs(
         std::move(refs_dirs),
         [this, package](const std::string& source, uint32_t offset, uint32_t size, std::vector<uint8_t>& out) {
@@ -388,6 +404,10 @@ class NativeGraphicsSystem final : public rg::GraphicsSystem {
 
  protected:
   void CreateProvider(bool with_presentation) override {
+    // Headset mode first: the OpenXR runtime creates the Vulkan instance and device itself and refuses any it did
+    // not make, so it has to be asked before the provider asks Vulkan for them (xr/vr.h). No headset - the usual
+    // case - leaves the game flat, and the provider runs as it always has.
+    vr::Init();
     provider_ = rex::ui::vulkan::VulkanProvider::Create(true, with_presentation);
   }
 

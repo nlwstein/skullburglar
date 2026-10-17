@@ -23,6 +23,10 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.Locale;
 
 // The app's launcher. With the game files installed it starts the game straight away; otherwise it asks for the
@@ -53,11 +57,41 @@ public class ImportActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        installAssets();
         if (isGameDir(new File(dataDir(this), "game"))) {
             startGame();
             return;
         }
         buildUi();
+    }
+
+    // The APK's assets/pipelines holds the shader refs for this build (tools/android/build.sh REFS=..., the same
+    // first-boot warm-up the desktop packages ship next to the executable - the game's own folder is a read-only
+    // library directory on Android, so they come out of the APK instead). Copied next to the game files, where the
+    // game looks for them (gfx/native.cpp). Rewritten every start, so an update replaces them; they are small.
+    private void installAssets() {
+        File dir = new File(dataDir(this), "pipelines");
+        try {
+            String[] names = getAssets().list("pipelines");
+            if (names == null || names.length == 0) {
+                return;
+            }
+            if (!dir.isDirectory() && !dir.mkdirs()) {
+                return;
+            }
+            for (String name : names) {
+                File out = new File(dir, name);
+                try (InputStream in = getAssets().open("pipelines/" + name);
+                     OutputStream to = new FileOutputStream(out)) {
+                    byte[] buffer = new byte[1 << 16];
+                    for (int n; (n = in.read(buffer)) > 0; ) {
+                        to.write(buffer, 0, n);
+                    }
+                }
+            }
+        } catch (IOException e) {
+            Log.w(TAG, "shader refs: " + e);
+        }
     }
 
     private void startGame() {

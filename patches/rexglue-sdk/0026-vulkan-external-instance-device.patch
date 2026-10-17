@@ -1,0 +1,129 @@
+--- a/include/rex/ui/vulkan/instance.h
++++ b/include/rex/ui/vulkan/instance.h
+@@ -10,6 +10,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <functional>
+ #include <memory>
+ #include <vector>
+ 
+@@ -24,6 +25,16 @@
+ 
+ class VulkanInstance {
+  public:
++  // Some runtimes only accept a Vulkan instance they created themselves - OpenXR's Vulkan binding, for one,
++  // rejects any instance that did not come from xrCreateVulkanInstanceKHR. An app using one installs a callback
++  // here before Create(); it is then called instead of vkCreateInstance, and may add the extensions the runtime
++  // requires to `create_info` (which is only valid for the duration of the call) before creating the instance.
++  // Return the VkResult of the runtime's own creation, or create the instance with the loader.
++  using ExternalCreateCallback = std::function<VkResult(VkInstanceCreateInfo& create_info,
++                                                        const VkAllocationCallbacks* allocator,
++                                                        VkInstance* instance_out)>;
++  static void SetExternalCreateCallback(ExternalCreateCallback callback);
++
+   static std::unique_ptr<VulkanInstance> Create(bool with_surface, bool try_enable_validation);
+ 
+   VulkanInstance(const VulkanInstance&) = delete;
+--- a/include/rex/ui/vulkan/device.h
++++ b/include/rex/ui/vulkan/device.h
+@@ -22,6 +22,15 @@
+ 
+ class VulkanDevice {
+  public:
++  // The counterpart of VulkanInstance::SetExternalCreateCallback - an OpenXR runtime rejects a logical device
++  // it did not create either. Called instead of vkCreateDevice, with the physical device the runtime is expected
++  // to have named (xrGetVulkanGraphicsDevice2KHR).
++  using ExternalCreateCallback = std::function<VkResult(VkPhysicalDevice physical_device,
++                                                        VkDeviceCreateInfo& create_info,
++                                                        const VkAllocationCallbacks* allocator,
++                                                        VkDevice* device_out)>;
++  static void SetExternalCreateCallback(ExternalCreateCallback callback);
++
+   static std::unique_ptr<VulkanDevice> CreateIfSupported(const VulkanInstance* vulkan_instance,
+                                                          VkPhysicalDevice physical_device,
+                                                          bool with_gpu_emulation,
+--- a/src/ui/vulkan/vulkan_instance.cpp
++++ b/src/ui/vulkan/vulkan_instance.cpp
+@@ -32,7 +32,18 @@
+ namespace rex {
+ namespace ui {
+ namespace vulkan {
++
++namespace {
++
++// See SetExternalCreateCallback. One instance at a time is created, so one callback is enough.
++VulkanInstance::ExternalCreateCallback external_create_callback;
++
++}  // namespace
+ 
++void VulkanInstance::SetExternalCreateCallback(ExternalCreateCallback callback) {
++  external_create_callback = std::move(callback);
++}
++
+ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
+                                                        const bool try_enable_validation) {
+   std::unique_ptr<VulkanInstance> vulkan_instance(new VulkanInstance());
+@@ -362,9 +373,16 @@
+   instance_create_info.ppEnabledLayerNames = enabled_layers.data();
+   instance_create_info.enabledExtensionCount = uint32_t(enabled_extensions.size());
+   instance_create_info.ppEnabledExtensionNames = enabled_extensions.data();
+-  VkResult instance_create_result =
+-      ifn.vkCreateInstance(&instance_create_info, nullptr, &vulkan_instance->instance_);
++  // An external creator (an OpenXR runtime, which rejects an instance it did not create) takes over here.
++  auto create_instance = [&vulkan_instance, &ifn](VkInstanceCreateInfo& create_info) {
++    if (external_create_callback) {
++      return external_create_callback(create_info, nullptr, &vulkan_instance->instance_);
++    }
++    return ifn.vkCreateInstance(&create_info, nullptr, &vulkan_instance->instance_);
++  };
+ 
++  VkResult instance_create_result = create_instance(instance_create_info);
++
+   if (instance_create_result == VK_ERROR_LAYER_NOT_PRESENT ||
+       instance_create_result == VK_ERROR_EXTENSION_NOT_PRESENT) {
+     // A layer was possibly removed. Try without layers.
+@@ -376,8 +394,7 @@
+     }
+     instance_create_info.enabledLayerCount = 0;
+     instance_create_info.enabledExtensionCount = uint32_t(enabled_implementation_extension_count);
+-    instance_create_result =
+-        ifn.vkCreateInstance(&instance_create_info, nullptr, &vulkan_instance->instance_);
++    instance_create_result = create_instance(instance_create_info);
+   }
+ 
+   if (instance_create_result != VK_SUCCESS) {
+--- a/src/ui/vulkan/vulkan_device.cpp
++++ b/src/ui/vulkan/vulkan_device.cpp
+@@ -45,6 +45,17 @@
+ namespace ui {
+ namespace vulkan {
+ 
++namespace {
++
++// See VulkanDevice::SetExternalCreateCallback.
++VulkanDevice::ExternalCreateCallback external_create_callback;
++
++}  // namespace
++
++void VulkanDevice::SetExternalCreateCallback(ExternalCreateCallback callback) {
++  external_create_callback = std::move(callback);
++}
++
+ template <typename Structure, VkStructureType StructureType>
+ struct VulkanFeatures {
+   Structure supported = {StructureType};
+@@ -740,8 +751,12 @@
+ 
+   // Create the device.
+ 
++  // An external creator (an OpenXR runtime, which rejects a device it did not create) takes over here.
+   const VkResult device_create_result =
+-      ifn.vkCreateDevice(physical_device, &device_create_info, nullptr, &device->device_);
++      external_create_callback ? external_create_callback(physical_device, device_create_info, nullptr,
++                                                          &device->device_)
++                               : ifn.vkCreateDevice(physical_device, &device_create_info, nullptr,
++                                                    &device->device_);
+   if (device_create_result != VK_SUCCESS) {
+     REXLOG_ERROR(
+         "Failed to create a Vulkan logical device from the physical device "

@@ -128,24 +128,40 @@ without Gradle (javac, d8, aapt2, zipalign, apksigner). It needs codegen output 
 run the recompiler). Like iOS there's no launcher: the app's own first screen installs the game files, then the game
 boots straight away.
 
-**Very experimental.** It has only run in Google's arm64 Android emulator on an Apple silicon Mac (host GPU mode,
-Vulkan through MoltenVK): it installs from a disc image, reaches the menus and plays a mission on the native renderer.
-It hasn't run on a real device yet.
+**Very experimental.** It has run in Google's arm64 Android emulator on an Apple silicon Mac (host GPU mode,
+Vulkan through MoltenVK) and on a Meta Quest 3 (Adreno 740, Vulkan 1.3, flat by default and optionally in headset
+mode): it installs from a disc image, reaches the menus and plays a mission on the native renderer.
 
 ```bash
 docker build -t skullburglar-android docker/android          # NDK, build tools, platform, JDK
 tools/ci/sdk.sh out/sdk                                      # SDK with the patches, including 0025 (Android)
 docker run --rm -v "$PWD:/w" -w /w skullburglar-android \
-  sh -c 'SDK=out/sdk tools/android/build.sh build apk'       # -> out/android/Skullburglar.apk
+  sh -c 'SDK=out/sdk REFS=out/assets/pipelines/class7.refs tools/android/build.sh build apk'
 adb install -r out/android/Skullburglar.apk
 ```
+
+`REFS=<file>` stages shader refs of a device class into the APK (`assets/pipelines`, unpacked next to the game
+files on first start): without them the first boot of every device rebuilds those pipelines from the disc and warms
+none of them, which is minutes instead of seconds on a headset. Headset mode's headers and loader are fetched by
+`tools/android/openxr.sh`, which `build.sh` runs itself.
 
 - **Game files:** on first start the app asks for the player's disc image (the system file picker; `ImportActivity`)
   and extracts it with the desktop launcher's `ExtractIso` into the app's data folder
   (`Android/data/<package>/files/game`, about 6.8 GB). `adb push game /sdcard/Android/data/sh.stz.skullburglar/files/`
   works too. Settings, saves and logs go to `user/` and `logs/` in the same folder. Uninstalling the app deletes them.
 - **Controls:** a game controller, or the on-screen controller (`TouchPadView`, a port of the iOS one) while none is
-  connected.
+  connected. A headset's own controllers are not one: each hand arrives as a separate game controller holding half
+  the buttons (a Quest 3's left and right Touch controllers, for instance), which no single-pad game can use. A
+  Bluetooth gamepad (an Xbox Series X one, say) is mapped by SDL itself and needs nothing from us.
+- **Headset mode (OpenXR):** with a headset attached and an OpenXR runtime installed, the game presents a flat
+  virtual screen into it instead of the device's window - the same renderer, the same frames, on a quad layer in
+  front of the player. The `vr` cvar picks it: `auto` (the default) uses a headset when it finds one, `off` stays
+  flat, `on` insists (and warns when there is nothing to present to). The Khronos OpenXR loader is bundled in the
+  APK, and the game only reaches a headset through it, so the Android build must be arm64 (`ABIS=arm64-v8a`).
+  `adb shell am start ... --es args "--vr=off"` on a test build, or `vr=off` in `bots.toml`, turns it off. The
+  runtime has to create the Vulkan instance and device itself (it refuses any it did not make), which is what the
+  SDK patch in `patches/rexglue-sdk/0026-vulkan-external-instance-device.patch` adds.
+
 - **Backgrounding:** as on iOS, leaving the game quits it; the renderer can't give up its surface and resume yet.
 - **Signing:** `KEYSTORE=<file>` (password `KEYSTORE_PASS`), else a debug key made in `out/android/debug.keystore` on
   first use. An APK signed with a different key needs an uninstall first, which deletes the game files.

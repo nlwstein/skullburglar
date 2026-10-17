@@ -13,9 +13,19 @@ namespace {
 
 // std140 packs the 256 ramp entries as 64 uvec4s.
 constexpr const char* kPresentShader = R"(#version 450
+layout(constant_id = 0) const uint linearise = 0u;
 layout(set = 0, binding = 0) uniform sampler2DArray source;
 layout(set = 0, binding = 1) uniform Gamma { uvec4 ramp[64]; vec4 render_scale; };
 layout(location = 0) out vec4 result;
+
+// The gamma ramp produces the value the display shows as an sRGB-encoded level. Writing that into the presenter's
+// UNORM guest output passes it through untouched. An _SRGB target is not written untouched: the hardware encodes
+// the fragment's output (treating it as linear) on the way in, and the OpenXR compositor decodes on the way out,
+// so an _SRGB target would come out washed out unless the value is linearised here first (and then the encode
+// undoes it exactly).
+vec3 Linearise(vec3 c) {
+  return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+}
 
 uint Ramp(float v) {
   uint i = uint(round(clamp(v, 0.0, 1.0) * 255.0));
@@ -50,18 +60,49 @@ void main() {
   vec2 position = gl_FragCoord.xy * render_scale.x;
   vec3 c = render_scale.z != 0.0 ? CatmullRom(position, size)
                                  : textureLod(source, vec3(position / size, 0.0), 0.0).rgb;
-  result = vec4(float((Ramp(c.r) >> 20) & 0x3FFu), float((Ramp(c.g) >> 10) & 0x3FFu), float(Ramp(c.b) & 0x3FFu),
-                1023.0) / 1023.0;
+  vec3 ramped = vec3(float((Ramp(c.r) >> 20) & 0x3FFu), float((Ramp(c.g) >> 10) & 0x3FFu),
+                     float((Ramp(c.b) & 0x3FFu))) /
+                1023.0;
+  if (linearise != 0u) ramped = Linearise(ramped);
+  result = vec4(ramped, 1.0);
 }
 )";
 
 constexpr VkFormat kGuestOutputFormat = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
 constexpr VkDeviceSize kRampBytes = 256 * 4 + 16;  // + render_scale
 
+// _SRGB formats have the hardware encode the fragment's output on the way in, so the shader has to undo that
+// (Linearise) to land the gamma-ramped value in the image the compositor decodes back out of it.
+bool IsSrgbFormat(VkFormat format) {
+  switch (format) {
+    case VK_FORMAT_R8G8B8A8_SRGB:
+    case VK_FORMAT_B8G8R8A8_SRGB:
+    case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+      return true;
+    default:
+      return false;
+  }
+}
+
 }  // namespace
 
+// One pipeline per target format: the 2D presenter's guest output image, and each format an OpenXR swapchain
+// hands us (rerun after a session restart with a different format).
+VkPipeline Renderer::PresentPipeline(VkFormat format, bool linearise) {
+  VkPipeline& pipeline = present_pipelines_[(uint64_t(format) << 1) | (linearise ? 1 : 0)];
+  if (pipeline) return pipeline;
+  const VkSpecializationMapEntry entry{0, 0, sizeof(uint32_t)};
+  const uint32_t value = linearise ? 1u : 0u;
+  const VkSpecializationInfo specialization{1, &entry, sizeof(value), &value};
+  const VkShaderModule fs = CreateShaderModule(EShLangFragment, kPresentShader);
+  if (!fs) return VK_NULL_HANDLE;
+  // Specialised at pipeline creation, so it is done with; DestroyTransfers frees it.
+  present_shader_modules_.push_back(fs);
+  pipeline = FullscreenPipeline(fs, format, present_layout_, &specialization);
+  return pipeline;
+}
+
 bool Renderer::InitPresent() {
-  if (present_pipeline_) return true;
   const VkDevice dev = device_->device();
   if (!present_set_layout_) {
     const VkDescriptorSetLayoutBinding bindings[2] = {
@@ -79,13 +120,11 @@ bool Renderer::InitPresent() {
     layout_info.pSetLayouts = &present_set_layout_;
     if (vk_.vkCreatePipelineLayout(dev, &layout_info, nullptr, &present_layout_) != VK_SUCCESS) return false;
   }
-  const VkShaderModule fs = CreateShaderModule(EShLangFragment, kPresentShader);
-  if (fs) present_pipeline_ = FullscreenPipeline(fs, kGuestOutputFormat, present_layout_);
-  return present_pipeline_ != VK_NULL_HANDLE;
+  return PresentPipeline(VK_FORMAT_A2B10G10R10_UNORM_PACK32, false) != VK_NULL_HANDLE;
 }
 
 bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view, uint32_t width, uint32_t height,
-                       const uint32_t* gamma_ramp) {
+                       const uint32_t* gamma_ramp, VkFormat target_format, VkImageLayout final_layout) {
   auto it = texture_at_.find(address);
   if (it == texture_at_.end()) it = texture_at_.find(last_resolve_address_);
   if (it == texture_at_.end()) {
@@ -96,12 +135,24 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
     }
     return false;
   }
-  if (!InitPresent()) {
+  if (!present_layout_ && !InitPresent()) {
     static bool warned = false;
     if (!warned) {
       warned = true;
       REXLOG_ERROR("gfx native: couldn't create the present pipeline (layout {}, pipeline layout {})",
                    present_set_layout_ != VK_NULL_HANDLE, present_layout_ != VK_NULL_HANDLE);
+    }
+    return false;
+  }
+  // VR presents into an OpenXR swapchain image, whose format the runtime picks; the 2D presenter's guest output
+  // image is the default.
+  const VkFormat format = target_format != VK_FORMAT_UNDEFINED ? target_format : kGuestOutputFormat;
+  const VkPipeline pipeline = PresentPipeline(format, IsSrgbFormat(format));
+  if (!pipeline) {
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      REXLOG_ERROR("gfx native: couldn't create the present pipeline for format {}", uint32_t(format));
     }
     return false;
   }
@@ -170,8 +221,8 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
   rendering.colorAttachmentCount = 1;
   rendering.pColorAttachments = &color;
   BeginRendering(rendering, "present");
-  vk_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, present_pipeline_);
-  bound_pipeline_ = present_pipeline_;
+  vk_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+  bound_pipeline_ = pipeline;
   dynamic_valid_ = false;
   vk_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout_, 0, 1, &set, 0, nullptr);
   const VkViewport vp{0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f};
@@ -180,12 +231,16 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
   vk_.vkCmdDraw(cmd_, 3, 1, 0, 0);
   vk_.vkCmdEndRendering(cmd_);
 
-  barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-  barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-  barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-  barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-  vk_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                           0, 0, nullptr, 0, nullptr, 1, &barrier);
+  // The presenter samples the guest output image, so it is left SHADER_READ_ONLY. An OpenXR swapchain image is
+  // handed back the way the runtime expects it: COLOR_ATTACHMENT_OPTIMAL, with the write remembered.
+  if (final_layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+    barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    barrier.newLayout = final_layout;
+    vk_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+  }
   Flush();
   ++stats_.presents;
   return true;

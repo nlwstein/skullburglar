@@ -6,6 +6,12 @@
 
     <!-- The native renderer is Vulkan only. -->
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x401000" android:required="true" />
+    <!-- Headset mode (src/gfx/xr) is optional: it turns itself on only where an OpenXR runtime with a head-mounted
+         display answers, so the same APK installs and plays flat on a phone or tablet. Declaring the handheld
+         hardware as not required keeps it installable everywhere. -->
+    <uses-feature android:name="oculus.hardware.standalone_vr" android:required="false" />
+    <!-- required=false so the runtime does not hold the launch behind its hand-tracking permission dialog. -->
+    <uses-feature android:name="oculus.software.handtracking" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
@@ -39,6 +45,15 @@
             android:launchMode="singleInstance"
             android:screenOrientation="sensorLandscape"
             android:preferMinimalPostProcessing="true"
-            android:configChanges="layoutDirection|locale|grammaticalGender|fontScale|fontWeightAdjustment|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation" />
+            android:configChanges="layoutDirection|locale|grammaticalGender|fontScale|fontWeightAdjustment|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation">
+            <!-- Headset launchers look for these to know the app can go on the head instead of a flat panel:
+                 Meta's own, and the one Khronos' runtime samples use. Nothing reads them off a headset, and the
+                 game decides at run time anyway (the `vr` cvar, on by default only where a headset answers). -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="com.oculus.intent.category.VR" />
+                <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
+            </intent-filter>
+        </activity>
     </application>
 </manifest>

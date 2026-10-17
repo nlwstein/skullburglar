@@ -206,7 +206,10 @@ void Renderer::DestroyTransfers() {
   for (auto& [k, pipeline] : transfer_pipelines_) vk_.vkDestroyPipeline(dev, pipeline, nullptr);
   for (VkShaderModule module : transfer_modules_) vk_.vkDestroyShaderModule(dev, module, nullptr);
   if (transfer_layout_) vk_.vkDestroyPipelineLayout(dev, transfer_layout_, nullptr);
-  if (present_pipeline_) vk_.vkDestroyPipeline(dev, present_pipeline_, nullptr);
+  for (auto& [k, pipeline] : present_pipelines_) vk_.vkDestroyPipeline(dev, pipeline, nullptr);
+  present_pipelines_.clear();
+  for (VkShaderModule module : present_shader_modules_) vk_.vkDestroyShaderModule(dev, module, nullptr);
+  present_shader_modules_.clear();
   if (present_layout_) vk_.vkDestroyPipelineLayout(dev, present_layout_, nullptr);
   if (present_set_layout_) vk_.vkDestroyDescriptorSetLayout(dev, present_set_layout_, nullptr);
   if (transfer_set_layout_) vk_.vkDestroyDescriptorSetLayout(dev, transfer_set_layout_, nullptr);
@@ -222,12 +225,13 @@ VkPipeline Renderer::TransferPipeline(uint32_t source_format, uint32_t dest_form
   return pipeline;
 }
 
-VkPipeline Renderer::FullscreenPipeline(VkShaderModule fs, VkFormat format, VkPipelineLayout layout) {
+VkPipeline Renderer::FullscreenPipeline(VkShaderModule fs, VkFormat format, VkPipelineLayout layout,
+                                        const VkSpecializationInfo* specialization) {
   const VkPipelineShaderStageCreateInfo stages[2] = {
       {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, transfer_vs_,
        "main", nullptr},
       {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main",
-       nullptr},
+       specialization},
   };
   VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
   VkPipelineInputAssemblyStateCreateInfo input_assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};

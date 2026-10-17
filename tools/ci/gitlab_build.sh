@@ -53,7 +53,10 @@ case $PLATFORM in android)
     exit 1
   fi
   step build
-  SDK=out/sdk VERSION=$VERSION tools/android/build.sh build apk
+  # Shader refs are per device class and refs for another class are ignored at run time, so this is the class most
+  # likely to match; a device of another class warms nothing on its first boot, as before. Class 7 is what the
+  # headsets' Adreno drivers report (depth clamp, clip and cull distances).
+  SDK=out/sdk VERSION=$VERSION REFS=out/assets/pipelines/class7.refs tools/android/build.sh build apk
   rm -f out/android/release.keystore
   step upload
   name=skullburglar-$VERSION-android.apk

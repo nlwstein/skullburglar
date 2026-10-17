@@ -61,6 +61,10 @@ set(BOTS_UPDATE_URL "" CACHE STRING "Address of the releases JSON the launcher c
 set_source_files_properties(src/setup/update_check.cpp PROPERTIES
     COMPILE_DEFINITIONS "BOTS_VERSION=\"${BOTS_VERSION}\";BOTS_UPDATE_URL=\"${BOTS_UPDATE_URL}\""
     SKIP_PRECOMPILE_HEADERS ON)
+# Headset mode's OpenXR headers and loader (src/gfx/xr), Android only. tools/android/openxr.sh fetches them from the
+# Khronos release; the loader is bundled into the APK rather than linked.
+set(OPENXR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/out/android/openxr" CACHE PATH
+    "OpenXR headers (include/) and loader (lib/), from tools/android/openxr.sh")
 # First-run setup window's native file picker (B-061).
 if(WIN32)
     list(APPEND BOTS_SOURCES src/setup/file_picker_win.cpp src/setup/firewall_win.cpp)
@@ -222,6 +226,8 @@ if(REXSDK_DIR AND (NOT WIN32 OR REXGLUE_USE_VULKAN))
         add_library(rexgpu-native SHARED
             src/gfx/native.cpp
             src/gfx/vk/memory_sync.cpp
+            # Headset mode (src/gfx/xr): only the plugin presents, so only the plugin compiles it.
+            src/gfx/xr/vr.cpp
             src/upk.cpp
             ${BOTS_NATIVE_GFX_SOURCES}
             ${REX_GRAPHICS_SRC}/shared_memory.cpp
@@ -236,6 +242,14 @@ if(REXSDK_DIR AND (NOT WIN32 OR REXGLUE_USE_VULKAN))
             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})  # a Windows DLL is a runtime output
         target_include_directories(rexgpu-native PRIVATE src ${REXSDK_DIR}/thirdparty/renderdoc)
         target_link_libraries(rexgpu-native PRIVATE rex::runtime ${BOTS_NATIVE_GFX_LIBS})
+        if(ANDROID)
+            # The OpenXR headers (the loader itself is dlopen-ed at runtime, and shipped in the APK by
+            # tools/android/build.sh). tools/android/openxr.sh puts both under OPENXR_DIR.
+            if(NOT EXISTS "${OPENXR_DIR}/include/openxr/openxr.h")
+                message(FATAL_ERROR "OpenXR headers not found under OPENXR_DIR=${OPENXR_DIR} - run tools/android/openxr.sh")
+            endif()
+            target_include_directories(rexgpu-native PRIVATE ${OPENXR_DIR}/include)
+        endif()
         if(APPLE)
             # Export only the plugin entry points. Otherwise dyld coalesces the plugin's weak glslang template
             # instances with the game's copies (it links glslang too), and the plugin's parser runs the game's

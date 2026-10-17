@@ -7,11 +7,16 @@
 #   [ABIS="arm64-v8a x86_64"] [SDK=<sdk path>] [VERSION=x.y.z] tools/android/build.sh [steps]
 #
 # Steps (default: build apk):
+#   openxr fetch the OpenXR headers and the Khronos loader (tools/android/openxr.sh) into OPENXR_DIR, default
+#          out/android/openxr; headset mode (src/gfx/xr) needs both, and `build` and `apk` run it themselves
 #   build  configure and build (Ninja) each ABI into out/build/android-<abi>; CCACHE_DIR=<dir> compiles through ccache
 #   apk    package out/android/Skullburglar.apk: SDL's Java glue and tools/android/java (javac, d8), the manifest
 #          (aapt2), each ABI's libraries, zipalign, then a signature (apksigner): KEYSTORE=<file> (its first key;
 #          password KEYSTORE_PASS, default android), else a debug key made in out/android/debug.keystore on first use.
 #          An install over an APK signed with another key needs an uninstall, which deletes the game files.
+# REFS=<file> ships a shader-refs master in the APK's assets (the first-boot warm-up, as pipelines/<title>.refs does
+# next to the desktop executables): the launcher screen unpacks it beside the game files and the game warms from it.
+# It is per device class and refs for another class are ignored at run time, so the class must be the device's.
 # ABIS defaults to arm64-v8a, the devices'; x86_64 runs in x86 emulators. PACKAGE overrides the application id.
 # DEBUGGABLE=1 makes a test build: debuggable, and the game takes its command line and environment from intent
 # extras (SkullburglarActivity). On first start the app asks for the player's disc image (ImportActivity); the game
@@ -32,8 +37,15 @@ if [ $# -eq 0 ]; then set -- build apk; fi
 step() { echo "== $* ($(date +%H:%M:%S))"; }
 need() { for v; do eval "[ -n \"\${$v:-}\" ]" || { echo "set $v (docker/android sets it)" >&2; exit 1; }; done; }
 
+# Headset mode's headers and loader (src/gfx/xr). Fetched once, kept under out/.
+OPENXR_DIR=${OPENXR_DIR:-$PWD/out/android/openxr}
+do_openxr() {
+  tools/android/openxr.sh "$OPENXR_DIR"
+}
+
 do_build() {
   need ANDROID_NDK
+  do_openxr
   : "${SDK:?set SDK to an SDK checkout with the patches applied (tools/ci/sdk.sh)}"
   [ -f generated/default/sources.cmake ] || { echo "no codegen output in generated/" >&2; exit 1; }
   for abi in $ABIS; do
@@ -42,8 +54,8 @@ do_build() {
     # The build can't run the recompiler for Android; codegen output is already there, so its step runs `true`.
     set -- -G Ninja -S . -B "$B" -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake" \
       -DANDROID_ABI="$abi" -DANDROID_PLATFORM=android-$MIN_SDK -DANDROID_STL=c++_shared \
-      -DCMAKE_BUILD_TYPE=$CONFIG -DREXSDK_DIR="$SDK" -DREXGLUE_HOST_CLI=/bin/true -DBOTS_NATIVE_GFX=ON \
-      -DBOTS_VERSION="${VERSION:-dev}"
+      -DCMAKE_BUILD_TYPE=$CONFIG -DREXSDK_DIR="$SDK" -DREXGLUE_HOST_CLI=/usr/bin/true -DBOTS_NATIVE_GFX=ON \
+      -DBOTS_VERSION="${VERSION:-dev}" -DOPENXR_DIR="$OPENXR_DIR"
     if [ -n "${CCACHE_DIR:-}" ]; then
       # As in tools/ci/build.sh: the sloppiness lets ccache reuse objects built with the precompiled headers.
       export CCACHE_DIR CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime
@@ -76,6 +88,9 @@ sdkarch() {
 
 do_apk() {
   need ANDROID_NDK ANDROID_BUILD_TOOLS ANDROID_PLATFORM_JAR
+  do_openxr
+  # The NDK's host folder (linux-x86_64, darwin-x86_64, ...) follows the machine running the build.
+  PREBUILT=$ANDROID_NDK/toolchains/llvm/prebuilt/$(ls "$ANDROID_NDK/toolchains/llvm/prebuilt" | head -1)
   : "${SDK:?set SDK to the SDK checkout the build used}"
   step apk
   W=$OUT/apk
@@ -96,6 +111,14 @@ do_apk() {
     --version-name "${VERSION:-dev}" --rename-manifest-package "$PACKAGE" \
     $([ "${DEBUGGABLE:-0}" = 1 ] && echo --debug-mode)
   cp "$W/dex/classes.dex" "$W/root/"
+  # Shader refs (B-098) go in the APK as assets: the game's own folder is a read-only library directory here.
+  if [ -n "${REFS:-}" ]; then
+    mkdir -p "$W/root/assets/pipelines"
+    cp "$REFS" "$W/root/assets/pipelines/5451083B.refs"
+    echo "shader refs: $REFS ($(du -h "$REFS" | cut -f1))"
+  else
+    echo "no REFS: this APK warms no pipelines on its first boot" >&2
+  fi
   for abi in $ABIS; do
     B=out/build/android-$abi
     L=$W/root/lib/$abi
@@ -108,9 +131,14 @@ do_apk() {
       [ -n "$f" ] || { echo "no $lib for $abi" >&2; exit 1; }
       cp "$f" "$L/"
     done
-    cp "$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/$(triple "$abi")/libc++_shared.so" "$L/"
+    cp "$PREBUILT/sysroot/usr/lib/$(triple "$abi")/libc++_shared.so" "$L/"
+    # Headset mode: libopenxr_loader.so is the only OpenXR loader the app can dlopen (Meta's own copy is outside
+    # the app's linker namespace), so it ships in the APK. Already stripped, and already signed-compatible.
+    xr_lib=$OPENXR_DIR/lib/$abi/libopenxr_loader.so
+    [ -f "$xr_lib" ] || { echo "no OpenXR loader for $abi ($xr_lib)" >&2; exit 1; }
+    cp "$xr_lib" "$L/"
     # Keep the symbols (crash backtraces print names), drop the line tables.
-    "$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-debug "$L"/*.so
+    "$PREBUILT/bin/llvm-strip" --strip-debug "$L"/*.so
   done
   (cd "$W/root" && zip -qr ../base.apk .)
   # 16 KB alignment for the uncompressed parts: devices with 16 KB pages need it.
