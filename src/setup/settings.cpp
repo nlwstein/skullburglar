@@ -63,6 +63,9 @@ std::vector<Setting> Catalog() {
                "Wider than 16:9 fills an ultrawide screen and shows more at the sides; the HUD and menus stretch. "
                "Automatic matches the screen in fullscreen, or the window. Native renderer only.",
                {{"16:9", "16:9 (original)"}, {"auto", "Automatic"}, {"21:9", "21:9"}, {"32:9", "32:9"}}});
+  s.push_back({"motion_blur", "", "Motion blur",
+               "The smear when the camera turns or things move fast. Off keeps every other effect.",
+               {}});
   s.push_back({"framerate_limit", "", "Frame rate limit", "",
                {{"30", "30 fps"}, {"60", "60 fps (recommended)"}, {"0", "Unlimited"}}});
   s.push_back({"present_vsync", "", "VSync", "Off has the lowest latency but can tear.", {}});

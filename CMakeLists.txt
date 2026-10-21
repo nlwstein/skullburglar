@@ -47,6 +47,7 @@ set(BOTS_SOURCES
     src/game_hooks.cpp
     src/aim_assist.cpp
     src/mnk_input.cpp
+    src/motion_blur.cpp
     src/widescreen.cpp
     src/gfx/d3d_hooks.cpp
     src/gfx/capture.cpp
