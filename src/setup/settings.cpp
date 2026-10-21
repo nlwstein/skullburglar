@@ -72,6 +72,10 @@ std::vector<Setting> Catalog() {
                "Which buttons the game shows. Automatic matches the controller you used last. Native renderer only.",
                {{"auto", "Automatic"}, {"xbox", "Xbox"}, {"ps4", "PlayStation 4"}, {"ps5", "PlayStation 5"}}});
   s.back().section = "Controller";
+  s.push_back({"aim_assist", "", "Aim assist",
+               "The game slows the crosshair and pulls it toward enemies near it while you move (even through walls, "
+               "as on the Xbox 360). Turn off for raw aiming. Applies to the mouse too.",
+               {}});
   s.push_back({"user_signin_live", "", "LAN co-op",
                "Play the story with another computer on your network. One player starts a story; the other picks "
                "Play Game, then Join COOP, and chooses it from the list. Both computers need this on. On Windows, "
