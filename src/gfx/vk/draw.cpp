@@ -1449,6 +1449,14 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   bias_constant *= depth_info.depth_format == xe::DepthRenderTargetFormat::kD24S8
                        ? du::kD3D10PolygonOffsetFactorUnorm24
                        : du::kD3D10PolygonOffsetFactorFloat24;
+  // BOTS_GFX_DEPTH_BIAS_SCALE=f: multiplies the constant depth bias (decals on walls: +2e-5 guest units, about 335
+  // float32 ULPs at the primitive's depth). A test knob for decal flicker reports: if a larger value (16) stops it,
+  // the decal and its wall don't get the same depth on that GPU; if 0 changes nothing, they do and the bias is unused.
+  static const float bias_scale = [] {
+    const char* v = std::getenv("BOTS_GFX_DEPTH_BIAS_SCALE");
+    return v && *v ? float(std::atof(v)) : 1.0f;
+  }();
+  bias_constant *= bias_scale;
   const auto ref_front = regs.Get<reg::RB_STENCILREFMASK>();
   const auto ref_back = polygonal && depth_control.backface_enable
                             ? regs.Get<reg::RB_STENCILREFMASK>(rg::XE_GPU_REG_RB_STENCILREFMASK_BF)
