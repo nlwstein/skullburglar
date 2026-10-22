@@ -5,13 +5,17 @@
 // Textures are cached by the fetch constant fields that describe their memory. With a memory tracker (live) the
 // memory they came from is watched, and a texture the CPU wrote over is reloaded on its next use.
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <vector>
 
+#include <fmt/format.h>
+
 #include <rex/graphics/pipeline/texture/conversion.h>
 #include <rex/graphics/pipeline/texture/info.h>
 #include <rex/graphics/pipeline/texture/util.h>
+#include <rex/memory/utils.h>
 
 #include "renderer.h"
 
@@ -25,6 +29,17 @@ namespace rg = rex::graphics;
 namespace xe = rex::graphics::xenos;
 
 enum class Shuffle { kNone, kSwapRB565, kSwapRB1555, kRotate4444 };
+
+// The SDK's CopySwapBlock, except that k16in32 swaps length / 4 words: the SDK passes it the length in bytes as the
+// count of 32-bit words, so it read and wrote 4x the length: the bytes in range came out right, but each copy also
+// wrote 3x its length past its end, which for a texture's last row is past the end of the upload.
+void CopySwap(xe::Endian endian, void* output, const void* input, size_t length) {
+  if (endian == xe::Endian::k16in32) {
+    rex::memory::copy_and_swap_16_in_32_unaligned(output, input, length / 4);
+  } else {
+    rg::texture_conversion::CopySwapBlock(endian, output, input, length);
+  }
+}
 
 struct HostFormat {
   VkFormat format = VK_FORMAT_UNDEFINED;
@@ -265,12 +280,14 @@ VkImageView Renderer::TextureView(const rg::xenos::xe_gpu_texture_fetch_t& fetch
   auto& slot = guest_textures_[key];
   if (!slot) {
     slot = std::make_unique<GuestTexture>();
-    LoadTexture(fetch, *slot);
+    ++stats_.texture_loads;
+    if (!evicted_keys_.empty() && evicted_keys_.erase(key)) ++stats_.texture_loads_evicted;
+    LoadGuestTexture(fetch, *slot);
   } else if (slot->dirty || (slot->prompt_atlas && bots::FindPromptState() &&
                               slot->prompt_generation != bots::FindPromptState()->generation.load())) {
-    Retire(slot->image);  // earlier draws of this submission still sample the old contents
+    DropGuestTexture(*slot);  // earlier draws of this submission still sample the old contents
     *slot = GuestTexture{};
-    LoadTexture(fetch, *slot);
+    LoadGuestTexture(fetch, *slot);
     ++stats_.texture_reloads;
   }
   GuestTexture& texture = *slot;
@@ -278,6 +295,31 @@ VkImageView Renderer::TextureView(const rg::xenos::xe_gpu_texture_fetch_t& fetch
   if (!texture.image.image) return VK_NULL_HANDLE;
   host_swizzle = HostSwizzle(fetch.swizzle, texture.host_format_swizzle);
   return SwizzledView(texture.image, host_swizzle, is_signed);
+}
+
+// LoadTexture, timed (TakeTextureLoadMaxUs) and counted in texture_bytes_.
+void Renderer::LoadGuestTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, GuestTexture& texture) {
+  const auto start = std::chrono::steady_clock::now();
+  texture_load_request_us_ = 0, texture_load_create_us_ = 0;
+  LoadTexture(fetch, texture);
+  const auto us = uint64_t(
+      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+  if (us >= texture_load_max_us_) {
+    texture_load_max_us_ = us;
+    uint32_t width_m1, height_m1, depth_m1, base_page, mip_page, mip_min, mip_max;
+    rg::texture_util::GetSubresourcesFromFetchConstant(fetch, &width_m1, &height_m1, &depth_m1, &base_page, &mip_page,
+                                                       &mip_min, &mip_max);
+    texture_load_max_what_ =
+        fmt::format("{}x{}x{} format {} mips {}-{}{}; of it {:.1f} ms creating the image, {:.1f} ms in memory sync",
+                    width_m1 + 1, height_m1 + 1, depth_m1 + 1, uint32_t(fetch.format), mip_min, mip_max,
+                    fetch.tiled ? " tiled" : "", texture_load_create_us_ / 1000.0, texture_load_request_us_ / 1000.0);
+  }
+  if (texture.image.allocation) {
+    VmaAllocationInfo info;
+    vmaGetAllocationInfo(allocator_, texture.image.allocation, &info);
+    texture.bytes = info.size;
+    texture_bytes_ += texture.bytes;
+  }
 }
 
 Renderer::Image* Renderer::ResolvedTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch) {
@@ -411,7 +453,13 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
   const VkFormat image_format = decode == BcDecode::kNone ? host.format : BcDecodedFormat(decode, pack_bc1_);
   const uint32_t decoded_bpp = BcDecodedBytesPerTexel(decode, pack_bc1_);
   std::vector<uint8_t> blocks;  // the untiled BC blocks of one level, when they're decoded
-  if (!CreateImage(texture.image, image_format, width, height, false, view_type, false, depth, mip_max + 1)) {
+  bool created;
+  {
+    ScopedMicros create_time(texture_load_create_us_);
+    created = CreateImage(texture.image, image_format, width, height, false, view_type, false, depth, mip_max + 1,
+                          texture_pool_);
+  }
+  if (!created) {
     std::fprintf(stderr, "native renderer: texture image %ux%ux%u format %d failed\n", width, height, depth,
                  int(image_format));
     texture.image = {};
@@ -424,6 +472,7 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
   if (tracker_) {
     // Requesting the pages is what puts a write watch on them (and keeps the shared-memory copy right where a
     // page is shared with a buffer).
+    ScopedMicros request_time(texture_load_request_us_);
     for (const auto& [start, end] : texture.ranges) {
       if (end > start) tracker_->Request(start, end - start);
     }
@@ -459,25 +508,40 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
         return;
       }
     }
-    // Block by block through the SDK's tiled-address functions: slow but exact for every layout (P5: GPU untile).
+    // Through the SDK's tiled-address functions, a run of blocks at a time: a linear row is one run, and the 2D tiled
+    // layout keeps 16 bytes (8 for 1-byte blocks) of a row together, so one address and one swap per 16 bytes. 3D
+    // textures go block by block. (Steam Deck, 2048x2048: 32-bit 40 ms block by block, 19 ms in runs; DXT1 2.5 ms,
+    // 1.4 ms; DXT5's blocks are 16 bytes, so no change.)
     if (decode != BcDecode::kNone) blocks.resize(bytes);
     uint8_t* out = decode == BcDecode::kNone ? staging : blocks.data();
+    const bool runs = bpb == 1u << bpb_log2;
+    const uint32_t run_blocks = bpb_log2 ? std::max(16u >> bpb_log2, 1u) : 8;
     for (uint32_t layer = 0; layer < layers; ++layer) {
       const uint8_t* source = memory_(level_address + layer * guest.array_slice_stride_bytes);
       for (uint32_t z = 0; z < level_depth; ++z) {
         for (uint32_t y = 0; y < blocks_y; ++y) {
-          for (uint32_t x = 0; x < blocks_x; ++x, out += bpb) {
-            const int32_t bx = int32_t(x + offset_x), by = int32_t(y + offset_y), bz = int32_t(z + offset_z);
-            int32_t at;
-            if (!fetch.tiled) {
-              at = (bz * int32_t(guest.z_slice_stride_block_rows) + by) * int32_t(guest.row_pitch_bytes) + bx * int32_t(bpb);
-            } else if (is_3d) {
-              at = rg::texture_util::GetTiledOffset3D(bx, by, bz, pitch_blocks, guest.z_slice_stride_block_rows,
-                                                      bpb_log2);
-            } else {
-              at = rg::texture_util::GetTiledOffset2D(bx, by, pitch_blocks, bpb_log2);
+          const int32_t by = int32_t(y + offset_y), bz = int32_t(z + offset_z);
+          if (!fetch.tiled) {
+            const int32_t at = (bz * int32_t(guest.z_slice_stride_block_rows) + by) * int32_t(guest.row_pitch_bytes) +
+                               int32_t(offset_x * bpb);
+            CopySwap(fetch.endianness, out, source + at, size_t(blocks_x) * bpb);
+            out += size_t(blocks_x) * bpb;
+          } else if (!is_3d && runs) {
+            for (uint32_t x = 0; x < blocks_x;) {
+              const uint32_t bx = x + offset_x;
+              const uint32_t n = std::min(run_blocks - (bx & (run_blocks - 1)), blocks_x - x);
+              const int32_t at = rg::texture_util::GetTiledOffset2D(int32_t(bx), by, pitch_blocks, bpb_log2);
+              CopySwap(fetch.endianness, out, source + at, size_t(n) * bpb);
+              out += size_t(n) * bpb, x += n;
             }
-            rg::texture_conversion::CopySwapBlock(fetch.endianness, out, source + at, bpb);
+          } else {
+            for (uint32_t x = 0; x < blocks_x; ++x, out += bpb) {
+              const int32_t bx = int32_t(x + offset_x);
+              const int32_t at = is_3d ? rg::texture_util::GetTiledOffset3D(bx, by, bz, pitch_blocks,
+                                                                            guest.z_slice_stride_block_rows, bpb_log2)
+                                       : rg::texture_util::GetTiledOffset2D(bx, by, pitch_blocks, bpb_log2);
+              CopySwap(fetch.endianness, out, source + at, bpb);
+            }
           }
         }
       }

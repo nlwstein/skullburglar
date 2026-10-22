@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -27,6 +28,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -79,10 +81,11 @@ class Renderer : public Pm4Sink {
   void SetMemoryTracker(GuestMemoryTracker* tracker) { tracker_ = tracker; }
   // Pipelines persist in a VkPipelineCache file (the driver checks it was made by the same GPU and driver, and
   // ignores it otherwise). Load merges the file into the cache in use; Save writes it when pipelines were created
-  // since the last save.
+  // since the last save. Save runs on a thread of its own unless `wait`: on AMD's Windows driver getting the cache
+  // data of ~2,600 pipelines and writing it took 150-190 ms, a visible freeze when it ran on this thread (#12).
   // Also loads the pipeline manifest next to it (manifest.cpp).
   void LoadPipelineCache(const std::filesystem::path& path);
-  void SavePipelineCache();
+  void SavePipelineCache(bool wait = false);
   // Pipeline precompile (manifest.cpp). Every draw pipeline created live is appended to a manifest (its shaders'
   // microcode, their translation modifications, the binding counts and the fixed-function state); a later launch
   // creates the recorded pipelines again in the background, a few jobs at a time behind live work, so gameplay finds
@@ -103,6 +106,17 @@ class Renderer : public Pm4Sink {
   // Warm-up progress: pipelines recorded in the manifest, and how many of them are created (ready or failed).
   size_t warmup_total() const { return warm_.size(); }
   size_t warmup_done() const { return warm_done_; }
+  // Warm-up outcome so far: pipelines built, and finished without one: the driver failed it, a shader missing from
+  // the manifest and refs, a translation failed, or no pipeline layout.
+  struct WarmupResult {
+    size_t built = 0, failed = 0, no_shader = 0, no_translation = 0, no_layout = 0;
+  };
+  const WarmupResult& warmup_result() const { return warm_result_; }
+  // Whether the device could do VK_EXT_graphics_pipeline_library (not used yet: B-116 would compile vertex and pixel
+  // shaders ahead of time on their own and fast-link them at draw time), for the startup log.
+  std::string PipelineLibrarySupport() const;
+  // Pipelines the driver failed to create (any thread, warm-up and live).
+  uint32_t pipeline_failures() const { return pipeline_failures_.load(std::memory_order_relaxed); }
   // Feeds the warm-up queue and builds the pipelines whose translations finished (manifest.cpp). EndFrame does this
   // every frame; a guest held for the warm-up calls it directly.
   void PumpWarmup();
@@ -141,10 +155,20 @@ class Renderer : public Pm4Sink {
     uint64_t render_passes = 0, pipelines = 0, failed_shaders = 0, unsupported_primitives = 0;
     uint64_t textures = 0, unsupported_textures = 0, transfers = 0;
     uint64_t uploaded_bytes = 0, invalidations = 0, texture_reloads = 0, texture_evictions = 0;  // live
+    // Live: guest textures loaded into a new cache entry, and those of them whose key was evicted earlier (the same
+    // texture loaded again, issue #12). texture_reloads above are entries the CPU wrote over.
+    uint64_t texture_loads = 0, texture_loads_evicted = 0;
     uint64_t presents = 0, barriers = 0;  // native
     uint64_t constant_reuses = 0;  // constant buffers bound from an earlier draw's upload
     uint64_t index_reuses = 0, index_converts = 0;  // DMA index buffers bound from an earlier conversion / converted
     uint64_t pending_draws = 0;  // live: skipped while their shaders or pipeline were still being made
+    // Live: draws dropped because their pipeline failed to build (the driver refused it; every frame it's drawn).
+    uint64_t failed_pipeline_draws = 0;
+    // Live: pipelines first built during play (not by the warm-up), by why the warm-up didn't have them: a shader
+    // the manifest and refs don't know, a known shader pair in a combination they don't have, a known pair with
+    // other state (blend, depth, formats, ...), or one on the warm-up's list it hadn't reached yet.
+    uint64_t live_pipelines = 0, live_pipelines_new_shader = 0, live_pipelines_new_pair = 0,
+             live_pipelines_queued = 0;
     // Occlusion queries ended, and those answered "visible" without counting (occlusion_hidden(): counted 0).
     uint64_t occlusion_queries = 0, occlusion_inexact = 0;
     uint64_t draw_phase_ns[12] = {};  // BOTS_DRAW_PROFILE=1: IssueDraw's time by phase (kDrawPhaseNames)
@@ -154,6 +178,15 @@ class Renderer : public Pm4Sink {
     uint64_t gpu_ns[7] = {};  // BOTS_GPU_TIMING=1: GPU time per GpuCat
   };
   const Stats& stats() const { return stats_; }
+  // The longest single guest-texture load (untile + upload) since the last call, in microseconds.
+  uint64_t TakeTextureLoadMaxUs() { return std::exchange(texture_load_max_us_, 0); }
+  // What that texture was: size, guest format, mips.
+  const std::string& texture_load_max_what() const { return texture_load_max_what_; }
+  // Guest textures held: entries and their image bytes; the budget above which unused ones are evicted (0: evicted by
+  // age alone, the behaviour before issue #12).
+  size_t texture_count() const { return guest_textures_.size(); }
+  uint64_t texture_bytes() const { return texture_bytes_; }
+  uint64_t texture_budget() const { return texture_budget_; }
 
  private:
   // Adds the scope's duration in microseconds to `total`.
@@ -223,6 +256,7 @@ class Renderer : public Pm4Sink {
     std::array<std::pair<uint32_t, uint32_t>, 2> ranges{};
     bool dirty = false;  // the CPU wrote that memory since (tracked memory)
     uint64_t last_used = 0;  // frame_
+    uint64_t bytes = 0;      // the image's allocation, counted in texture_bytes_
     // The controller-button atlas (B-105): reloaded when the prompt device changes (PromptState generation).
     bool prompt_atlas = false;
     uint32_t prompt_generation = 0;
@@ -272,7 +306,7 @@ class Renderer : public Pm4Sink {
   // depth_or_layers: Z size of 3D images, array layers otherwise (6 for cubes).
   bool CreateImage(Image& image, VkFormat format, uint32_t width, uint32_t height, bool depth,
                    VkImageViewType view_type = VK_IMAGE_VIEW_TYPE_2D, bool attachment = true,
-                   uint32_t depth_or_layers = 1, uint32_t levels = 1);
+                   uint32_t depth_or_layers = 1, uint32_t levels = 1, VmaPool pool = VK_NULL_HANDLE);
   // host: mapped for CPU writes (sequential); otherwise GPU-only, filled by copies.
   bool CreateBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage, bool host = true);
   // Makes guest physical memory itself the shared-memory buffer (VK_EXT_external_memory_host), so nothing is copied
@@ -378,11 +412,24 @@ class Renderer : public Pm4Sink {
     uint32_t blend[4], write_mask[4];
   };
   VkPipeline CreateDrawPipeline(const PipelineKey& key) const;
+  mutable std::atomic<uint32_t> pipeline_failures_{0};
   // The previous draw's pipeline is checked first (consecutive draws mostly share it). Not yet created: created now
   // (sync), or queued on a worker and null with `pending` set. `background`: queued behind live work (warm-up).
   VkPipeline GetPipeline(const PipelineKey& key, bool sync, bool& pending, bool background = false);
   // Manifest (manifest.cpp): append a newly created live pipeline.
   void RecordPipeline(const PipelineKey& key);
+  // The manifest record for a pipeline (shader hashes and modifications, layout, state).
+  std::string PipelineRecord(const PipelineKey& key) const;
+  // A pipeline about to be built live: counts it in stats_ by why the warm-up didn't have it, and logs the first
+  // kLivePipelineLines (hashes only).
+  void NoteLivePipeline(const PipelineKey& key);
+  static constexpr uint32_t kLivePipelineLines = 100;
+  uint32_t live_pipelines_logged_ = 0;
+  // From the warm-up list as loaded (empty with BOTS_GFX_PRECOMPILE=0): its shader pairs (vs, vs_mod, ps, ps_mod)
+  // and shaders.
+  std::unordered_set<std::string> warm_pairs_;
+  std::unordered_set<uint64_t> warm_shaders_;
+  bool warm_known_built_ = false;
 
   // EDRAM ownership transfers (transfer.cpp).
   static constexpr uint32_t kTransferDepth = 100;       // Transfer source format for D24S8 depth/stencil
@@ -542,7 +589,10 @@ class Renderer : public Pm4Sink {
   void LogSkip(const char* why, uint64_t vs, uint64_t ps, const Attachments* attachments);
   std::vector<std::unique_ptr<Image>> dummy_depths_;
   std::filesystem::path pipeline_cache_path_;
-  uint64_t pipelines_saved_ = 0;
+  std::atomic<uint64_t> pipelines_saved_{0};
+  void WritePipelineCache(uint64_t pipelines);  // the saver thread, or the caller of a waited save
+  std::thread cache_saver_;
+  std::atomic<bool> cache_saver_done_{true};
   // Occlusion queries (occlusion.cpp).
   void ResolveOcclusion();  // the resolver thread
   void WriteOcclusionResult(uint32_t address, uint64_t generation, uint32_t samples);  // occlusion_mutex_ held
@@ -579,6 +629,7 @@ class Renderer : public Pm4Sink {
   std::unordered_map<std::string, bool> manifest_records_;         // all known records -> in this machine's file
   std::vector<WarmPipeline> warm_;
   size_t warm_next_ = 0, warm_done_ = 0;
+  WarmupResult warm_result_;
   std::chrono::steady_clock::time_point warm_start_;
   bool warm_enabled_ = true, warm_logged_ = false;
   std::vector<std::filesystem::path> refs_dirs_;
@@ -613,6 +664,29 @@ class Renderer : public Pm4Sink {
   VkExtent2D open_area_{};  // the open pass's render area (from the origin)
   bool rendering_ = false;
   std::unordered_map<TextureCacheKey, std::unique_ptr<GuestTexture>, WordsHash> guest_textures_;
+  // Texture cache budget (issue #12). Evicting every texture unused for ~10 s made each object that came back into
+  // view load its textures again on this thread (untile + upload, several ms each), a hitch every time an enemy
+  // reappeared. Now unused textures are evicted while the cache is over texture_budget_, oldest first, or once
+  // they have gone unused for texture_idle_frames_.
+  // BOTS_GFX_TEXTURE_CACHE_MB sets the budget (0 = by age alone, as before); BOTS_GFX_TEXTURE_EVICT_FRAMES the
+  // frames a texture must go unused before it may be evicted (default 600); BOTS_GFX_TEXTURE_IDLE_FRAMES the frames
+  // after which an unused texture is evicted even under budget (default 18000, ~5 minutes; 0 = never).
+  uint64_t texture_bytes_ = 0, texture_budget_ = 0, texture_unused_frames_ = 600, texture_load_max_us_ = 0;
+  uint64_t texture_idle_frames_ = 18000;
+  std::string texture_load_max_what_;
+  // The current load's time in CreateImage (allocation) and tracker_->Request (page uploads, the lock).
+  uint64_t texture_load_create_us_ = 0, texture_load_request_us_ = 0;
+  std::unordered_set<TextureCacheKey, WordsHash> evicted_keys_;  // for texture_loads_evicted; cleared when large
+  void InitTextureBudget();
+  // Guest textures' own memory (not on tight or unified memory): 64 MB blocks, part of the budget made up front and kept. In
+  // VMA's default blocks a texture load sometimes took ~29 ms creating its image on the Deck (issue #12).
+  static constexpr VkDeviceSize kTextureBlockBytes = 64ull << 20;
+  VmaPool texture_pool_ = VK_NULL_HANDLE;
+  uint32_t texture_pool_type_ = 0;
+  void InitTexturePool();
+  size_t TexturePoolBlocks() const;  // made up front and kept: half the budget, 1-8 blocks
+  void LoadGuestTexture(const rex::graphics::xenos::xe_gpu_texture_fetch_t& fetch, GuestTexture& texture);
+  void DropGuestTexture(GuestTexture& texture);
   std::unordered_map<SamplerKey, VkSampler, WordsHash> samplers_;
   bool trace_textures_ = false;
   // False on GPUs without BC (DXT) texture formats, such as Apple's before A16 (the A15 Apple TV 4K): those textures
@@ -623,6 +697,15 @@ class Renderer : public Pm4Sink {
   // on Apple GPUs; ~250 MB of it in gameplay), and decoded BC1 textures are 16-bit. BOTS_GFX_TIGHT_MEMORY=0/1.
   bool tight_memory_ = false;
   bool pack_bc1_ = false;  // tight_memory_ and the GPU samples A1R5G5B5
+  // Where the CPU and GPU share one memory and the OS kills an app for its footprint (Android, the Quest, iOS, tvOS):
+  // no texture budget (textures unused for 600 frames are evicted, as before issue #12) and no texture pool made up
+  // front. Elsewhere the budget is up to 1.5 GB and the pool 512 MB. BOTS_GFX_UNIFIED_MEMORY=0/1.
+  // Apple silicon Macs share one memory too but keep the budget on purpose: macOS compresses and swaps instead of
+  // killing the app, and the hitches are theirs too (M2 Pro, 35-minute tour: frames over 25 ms 6,515 -> 2,313,
+  // over 100 ms 15 -> 2) for ~250-400 MB more footprint (2.26 -> 2.52 GB peak; textures at most 348 MB with the
+  // 5-minute idle eviction). The gate is by platform, not by heap flags: integrated PC GPUs (the issue's Radeon
+  // 680M, the Deck) look the same in Vulkan and need the budget.
+  bool unified_memory_ = false;
   uint64_t write_clock_ = 0;
   VkDescriptorSetLayout transfer_set_layout_ = VK_NULL_HANDLE;
   VkPipelineLayout transfer_layout_ = VK_NULL_HANDLE;

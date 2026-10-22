@@ -31,6 +31,13 @@ class MemorySync final : public rex::graphics::SharedMemory, public GuestMemoryT
   bool Request(uint32_t start, uint32_t length) override;
   void TakeInvalidated(std::vector<std::pair<uint32_t, uint32_t>>& ranges) override;
 
+  // Diagnostics: requests, ones that took the lock and ones of those that uploaded (command-processor thread), and
+  // invalidations: CPU writes to watched memory reported by the SDK (any thread; each one a write fault).
+  uint64_t requests() const { return requests_; }
+  uint64_t locked() const { return locked_; }
+  uint64_t uploaded() const { return uploaded_; }
+  uint64_t invalidations() const { return invalidations_.load(std::memory_order_relaxed); }
+
  protected:
   bool UploadRanges(const std::vector<std::pair<uint32_t, uint32_t>>& page_ranges) override;
 
@@ -49,6 +56,7 @@ class MemorySync final : public rex::graphics::SharedMemory, public GuestMemoryT
   void SetValidBits(uint32_t page_first, uint32_t page_last, bool valid);
   // Command-processor thread only: requests, ones that took the lock, and ones of those that uploaded.
   uint64_t requests_ = 0, locked_ = 0, uploaded_ = 0;
+  std::atomic<uint64_t> invalidations_{0};
   bool uploading_ = false;
 };
 

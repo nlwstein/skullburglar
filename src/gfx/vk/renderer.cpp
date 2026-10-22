@@ -14,6 +14,7 @@
 
 #include <rex/graphics/registers.h>
 #include <rex/graphics/xenos.h>
+#include <rex/logging.h>
 
 namespace bots::gfx::vk {
 namespace {
@@ -189,9 +190,14 @@ Renderer::Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory m
   tight_memory_ = true;
 #endif
   if (const char* v = std::getenv("BOTS_GFX_TIGHT_MEMORY"); v && *v) tight_memory_ = *v != '0';
+#if defined(__ANDROID__) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
+  unified_memory_ = true;
+#endif
+  if (const char* v = std::getenv("BOTS_GFX_UNIFIED_MEMORY"); v && *v) unified_memory_ = *v != '0';
   VkFormatProperties packed{};
   vk_.vkGetPhysicalDeviceFormatProperties(device_->physical_device(), VK_FORMAT_A1R5G5B5_UNORM_PACK16, &packed);
   pack_bc1_ = tight_memory_ && (packed.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+  InitTextureBudget();
   if (const char* v = std::getenv("BOTS_GPU_TIMING"); v && (*v == '1' || *v == '2')) {
     gpu_draw_labels_ = *v == '2';
     VkPhysicalDeviceProperties props;
@@ -254,6 +260,7 @@ VkImageView Renderer::DummyDepth(uint32_t width, uint32_t height) {
 }
 
 void Renderer::LoadPipelineCache(const std::filesystem::path& path) {
+  if (cache_saver_.joinable()) cache_saver_.join();  // it reads the path, and the merge below needs the cache alone
   pipeline_cache_path_ = path;
   if (device_) LoadManifest(std::filesystem::path(path).replace_extension().replace_extension(".manifest.bin"));
   std::vector<char> data;
@@ -277,10 +284,29 @@ void Renderer::LoadPipelineCache(const std::filesystem::path& path) {
   std::fprintf(stderr, "native renderer: pipeline cache %s (%zu KB)\n", path.string().c_str(), data.size() / 1024);
 }
 
-void Renderer::SavePipelineCache() {
-  if (!pipeline_cache_ || pipeline_cache_path_.empty() || stats_.pipelines == pipelines_saved_) return;
-  // Pipeline workers keep adding to the cache, so it can outgrow the size just queried (VK_INCOMPLETE, and MoltenVK
-  // then writes nothing): query with some headroom and retry.
+void Renderer::SavePipelineCache(bool wait) {
+  if (cache_saver_.joinable()) {
+    if (!wait && !cache_saver_done_.load(std::memory_order_acquire)) return;  // still writing the last one
+    cache_saver_.join();
+  }
+  const uint64_t pipelines = stats_.pipelines;
+  if (!pipeline_cache_ || pipeline_cache_path_.empty() || pipelines == pipelines_saved_.load()) return;
+  if (wait) {
+    WritePipelineCache(pipelines);
+    return;
+  }
+  cache_saver_done_.store(false, std::memory_order_relaxed);
+  cache_saver_ = std::thread([this, pipelines] {
+    WritePipelineCache(pipelines);
+    cache_saver_done_.store(true, std::memory_order_release);
+  });
+}
+
+void Renderer::WritePipelineCache(uint64_t pipelines) {
+  // vkGetPipelineCacheData needs no external synchronisation. Pipeline workers (and the renderer's thread) keep adding
+  // to the cache meanwhile, so it can outgrow the size just queried (VK_INCOMPLETE, and MoltenVK then writes
+  // nothing): query with some headroom and retry.
+  const auto start = std::chrono::steady_clock::now();
   std::vector<char> data;
   size_t size = 0;
   VkResult result = VK_INCOMPLETE;
@@ -296,10 +322,29 @@ void Renderer::SavePipelineCache() {
   const std::filesystem::path temp = pipeline_cache_path_.string() + ".tmp";
   FILE* f = std::fopen(temp.string().c_str(), "wb");
   if (!f) return;
-  const bool written = std::fwrite(data.data(), 1, size, f) == size;
-  std::fclose(f);
-  if (written) std::filesystem::rename(temp, pipeline_cache_path_, ec);
-  pipelines_saved_ = stats_.pipelines;
+  // BOTS_GFX_CACHE_SAVE_SLEEP_MS (tests): stop halfway through the write for that long, to quit or kill a run
+  // mid-save.
+  static const long sleep_ms = [] {
+    const char* v = std::getenv("BOTS_GFX_CACHE_SAVE_SLEEP_MS");
+    return v ? std::strtol(v, nullptr, 10) : 0L;
+  }();
+  bool written = std::fwrite(data.data(), 1, size / 2, f) == size / 2;
+  if (sleep_ms > 0) {
+    std::fflush(f);
+    REXLOG_INFO("gfx native: pipeline cache save: half written, sleeping {} ms (BOTS_GFX_CACHE_SAVE_SLEEP_MS)",
+                sleep_ms);
+    std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+  }
+  written = written && std::fwrite(data.data() + size / 2, 1, size - size / 2, f) == size - size / 2;
+  written = std::fclose(f) == 0 && written;
+  if (!written) {  // a full disk: keep the last complete file
+    std::filesystem::remove(temp, ec);
+    return;
+  }
+  std::filesystem::rename(temp, pipeline_cache_path_, ec);
+  pipelines_saved_.store(pipelines);
+  REXLOG_INFO("gfx native: pipeline cache saved: {} pipelines, {:.1f} MB in {:.0f} ms", pipelines, size / 1048576.0,
+              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
 }
 
 void Renderer::UseSubmission(uint32_t index) {
@@ -392,7 +437,6 @@ void Renderer::ProcessInvalidations() {
 }
 
 void Renderer::EndFrame() {
-  constexpr uint64_t kUnusedFrames = 600;  // ~10 s at 60 fps
   // Frames in flight: frame N - 2 must be done before frame N is presented, as when kFramesInFlight slots with one
   // submission per frame were the only limit.
   frame_ends_.push_back(stats_.flushes);
@@ -405,15 +449,100 @@ void Renderer::EndFrame() {
   }
   PumpWarmup();
   if (++frame_ % 64) return;
-  for (auto it = guest_textures_.begin(); it != guest_textures_.end();) {
-    if (frame_ - it->second->last_used > kUnusedFrames) {
-      Retire(it->second->image);
-      it = guest_textures_.erase(it);
-      ++stats_.texture_evictions;
-    } else {
-      ++it;
+  // Under budget, a texture stays until it has gone unused for texture_idle_frames_ (~5 minutes): a texture's memory
+  // is watched, so one the CPU wrote over is reloaded anyway, and keeping it costs only memory, but the levels already
+  // left would otherwise pile up to the budget (1 GB after a 35-minute tour of 16 checkpoints on an M2 Pro). Over
+  // budget, the textures unused longest go first, down to 90% of it.
+  const bool over = !texture_budget_ || texture_bytes_ > texture_budget_;
+  if (!over && (!texture_idle_frames_ || frame_ % 640)) return;
+  const uint64_t min_unused = over ? texture_unused_frames_ : texture_idle_frames_;
+  std::vector<std::pair<uint64_t, TextureCacheKey>> unused;
+  for (const auto& [key, texture] : guest_textures_) {
+    if (frame_ - texture->last_used > min_unused) unused.emplace_back(texture->last_used, key);
+  }
+  if (texture_budget_) std::sort(unused.begin(), unused.end());
+  if (evicted_keys_.size() + unused.size() > 65536) evicted_keys_.clear();
+  for (const auto& [last_used, key] : unused) {
+    const bool idle = texture_idle_frames_ && frame_ - last_used > texture_idle_frames_;
+    if (texture_budget_ && texture_bytes_ <= texture_budget_ / 10 * 9 && !idle) break;
+    auto it = guest_textures_.find(key);
+    DropGuestTexture(*it->second);
+    guest_textures_.erase(it);
+    evicted_keys_.insert(key);
+    ++stats_.texture_evictions;
+  }
+}
+
+void Renderer::InitTextureBudget() {
+  // A quarter of the largest device-local heap's budget, 256 MB to 1.5 GB (tight memory: 256 MB). Gameplay holds
+  // ~100-400 MB of guest textures, so on most GPUs nothing is evicted until a level's textures pile up on the last's.
+  // Unified memory (phones, the headset, Apple TV): no budget, so textures unused for 600 frames go as before.
+  const VkPhysicalDeviceMemoryProperties* props = nullptr;
+  vmaGetMemoryProperties(allocator_, &props);
+  std::vector<VmaBudget> budgets(props->memoryHeapCount);
+  vmaGetHeapBudgets(allocator_, budgets.data());
+  uint64_t device = 0;
+  for (uint32_t i = 0; i < props->memoryHeapCount; ++i) {
+    if (props->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+      device = std::max<uint64_t>(device, budgets[i].budget);
     }
   }
+  constexpr uint64_t kMB = 1048576;
+  texture_budget_ = unified_memory_ ? 0
+                   : tight_memory_ ? 256 * kMB
+                                   : std::clamp<uint64_t>(device / 4, 256 * kMB, 1536 * kMB);
+  if (const char* v = std::getenv("BOTS_GFX_TEXTURE_CACHE_MB"); v && *v) {
+    texture_budget_ = std::strtoull(v, nullptr, 10) * kMB;
+  }
+  if (const char* v = std::getenv("BOTS_GFX_TEXTURE_EVICT_FRAMES"); v && *v) {
+    texture_unused_frames_ = std::strtoull(v, nullptr, 10);
+  }
+  if (const char* v = std::getenv("BOTS_GFX_TEXTURE_IDLE_FRAMES"); v && *v) {
+    texture_idle_frames_ = std::strtoull(v, nullptr, 10);
+  }
+  InitTexturePool();
+  REXLOG_INFO("gfx native: texture budget {} MB{}, texture pool {} MB up front", texture_budget_ / kMB,
+              unified_memory_ ? " (unified memory: evicted by age)" : "",
+              texture_pool_ ? uint64_t(kTextureBlockBytes / kMB) * TexturePoolBlocks() : 0);
+}
+
+size_t Renderer::TexturePoolBlocks() const {
+  return size_t(std::clamp<uint64_t>((texture_budget_ ? texture_budget_ : 512ull << 20) / 2 / kTextureBlockBytes, 1, 8));
+}
+
+void Renderer::InitTexturePool() {
+  if (tight_memory_ || unified_memory_ || std::getenv("BOTS_GFX_NO_TEXTURE_POOL")) return;  // (A/B: textures in VMA's default blocks)
+  // The memory type of a typical texture (CreateImage's usage; RGBA8 is mutable-format there).
+  VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+  info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+  info.imageType = VK_IMAGE_TYPE_2D;
+  info.format = VK_FORMAT_R8G8B8A8_UNORM;
+  info.extent = {256, 256, 1};
+  info.mipLevels = 1;
+  info.arrayLayers = 1;
+  info.samples = VK_SAMPLE_COUNT_1_BIT;
+  info.tiling = VK_IMAGE_TILING_OPTIMAL;
+  info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+  VmaAllocationCreateInfo alloc{};
+  alloc.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+  if (vmaFindMemoryTypeIndexForImageInfo(allocator_, &info, &alloc, &texture_pool_type_) != VK_SUCCESS) return;
+  VmaPoolCreateInfo pool{};
+  pool.memoryTypeIndex = texture_pool_type_;
+  pool.blockSize = kTextureBlockBytes;
+  // Half the budget (at most 512 MB) is made up front and kept: VMA frees an empty block on the next free, and
+  // freeing and remaking blocks as the textures change is what stalls.
+  pool.minBlockCount = TexturePoolBlocks();
+  if (vmaCreatePool(allocator_, &pool, &texture_pool_) != VK_SUCCESS) {
+    texture_pool_ = VK_NULL_HANDLE;
+    return;
+  }
+  vmaSetPoolName(allocator_, texture_pool_, "guest textures");
+}
+
+void Renderer::DropGuestTexture(GuestTexture& texture) {
+  texture_bytes_ -= std::min(texture_bytes_, texture.bytes);
+  texture.bytes = 0;
+  Retire(texture.image);
 }
 
 bool Renderer::UploadGuestMemory(uint32_t start, uint32_t length) {
@@ -452,6 +581,8 @@ void Renderer::DestroyFrameState() {
   textures_.clear();
   crops_.clear();
   guest_textures_.clear();
+  texture_bytes_ = 0;
+  evicted_keys_.clear();
   texture_at_.clear();
   depth_texture_at_.clear();
 }
@@ -467,6 +598,32 @@ void Renderer::ResetFrame() {
   stats_ = {};
 }
 
+std::string Renderer::PipelineLibrarySupport() const {
+  const auto& ifn = device_->vulkan_instance()->functions();
+  const VkPhysicalDevice physical = device_->physical_device();
+  uint32_t count = 0;
+  ifn.vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, nullptr);
+  std::vector<VkExtensionProperties> extensions(count);
+  ifn.vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, extensions.data());
+  const bool has = std::ranges::any_of(extensions, [](const VkExtensionProperties& e) {
+    return std::strcmp(e.extensionName, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) == 0;
+  });
+  if (!has) return "no (extension not offered)";
+  if (!ifn.vkGetPhysicalDeviceFeatures2 || !ifn.vkGetPhysicalDeviceProperties2) return "offered (features unknown)";
+  VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT features{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
+  VkPhysicalDeviceFeatures2 features2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &features};
+  ifn.vkGetPhysicalDeviceFeatures2(physical, &features2);
+  VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT props{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT};
+  VkPhysicalDeviceProperties2 props2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &props};
+  ifn.vkGetPhysicalDeviceProperties2(physical, &props2);
+  if (!features.graphicsPipelineLibrary) return "offered, feature off";
+  return fmt::format("yes (fast linking {}, independent interpolation {})",
+                     props.graphicsPipelineLibraryFastLinking ? "yes" : "no",
+                     props.graphicsPipelineLibraryIndependentInterpolationDecoration ? "yes" : "no");
+}
+
 Renderer::~Renderer() {
   if (!device_) return;
   if (shaders_) shaders_->StopWorkers();  // their jobs use the pipeline cache and shader modules
@@ -474,7 +631,7 @@ Renderer::~Renderer() {
   const VkDevice dev = device_->device();
   if (vk_.vkDeviceWaitIdle) vk_.vkDeviceWaitIdle(dev);
   StopOcclusion();  // after the GPU is idle: its fence waits all return
-  SavePipelineCache();
+  SavePipelineCache(true);
   if (pipeline_cache_) vk_.vkDestroyPipelineCache(dev, pipeline_cache_, nullptr);
   DestroyFrameState();
   for (Image& image : retired_) DestroyImage(image);
@@ -491,6 +648,7 @@ Renderer::~Renderer() {
     if (submission.timing_pool) vk_.vkDestroyQueryPool(dev, submission.timing_pool, nullptr);
     if (submission.occlusion_pool) vk_.vkDestroyQueryPool(dev, submission.occlusion_pool, nullptr);
   }
+  if (texture_pool_) vmaDestroyPool(allocator_, texture_pool_);
   if (allocator_) vmaDestroyAllocator(allocator_);
 }
 
@@ -661,7 +819,8 @@ void Renderer::Finish() {
 }
 
 bool Renderer::CreateImage(Image& image, VkFormat format, uint32_t width, uint32_t height, bool depth,
-                           VkImageViewType view_type, bool attachment, uint32_t depth_or_layers, uint32_t levels) {
+                           VkImageViewType view_type, bool attachment, uint32_t depth_or_layers, uint32_t levels,
+                           VmaPool pool) {
   const bool cube = view_type == VK_IMAGE_VIEW_TYPE_CUBE;
   const bool is_3d = view_type == VK_IMAGE_VIEW_TYPE_3D;
   VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -682,8 +841,13 @@ bool Renderer::CreateImage(Image& image, VkFormat format, uint32_t width, uint32
   VmaAllocationCreateInfo alloc{};
   alloc.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
   if (tight_memory_) alloc.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+  alloc.pool = pool;
   if (vmaCreateImage(allocator_, &info, &alloc, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
-    return false;
+    // Not in the pool's memory type, or the pool is out of memory: anywhere else.
+    alloc.pool = VK_NULL_HANDLE;
+    if (!pool || vmaCreateImage(allocator_, &info, &alloc, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
+      return false;
+    }
   }
   image.format = format;
   image.aspect = depth ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_COLOR_BIT;

@@ -69,6 +69,7 @@ bool MemorySync::UploadRanges(const std::vector<std::pair<uint32_t, uint32_t>>& 
 void MemorySync::OnInvalidated(const std::unique_lock<std::recursive_mutex>&, void* context, uint32_t address_first,
                                uint32_t address_last, bool) {
   auto* self = static_cast<MemorySync*>(context);
+  self->invalidations_.fetch_add(1, std::memory_order_relaxed);
   self->SetValidBits(address_first >> self->page_size_log2(), address_last >> self->page_size_log2(), false);
   std::lock_guard lock(self->mutex_);
   if (!self->invalidated_.empty() && self->invalidated_.back().second + 1 == address_first) {
