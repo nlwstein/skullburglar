@@ -1135,6 +1135,8 @@ float pointer_x = 0, pointer_y = 0;
 void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32_t vp, float dt, std::vector<bool>& enter) {
   static uint32_t seen_moves = 0, dragging = 0;
   static bool click_taken = false;  // the current click went to a toggle/slider: its release is ours too
+  static uint32_t tick = 0, hover_tick = 0;  // frames, and the last one that hit-tested a menu's widgets
+  ++tick;
   const Names* n = GetNames(base);
   uint32_t focused = 0;
   const uint32_t scene = n ? MenuScene(base, *n, focused) : 0;
@@ -1180,6 +1182,27 @@ void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32
   // while the pointer stays on that widget. Not longer: pad/keyboard navigation must be able to move focus away.
   static uint32_t want = 0;
   static float want_age = 0;
+  // Only a deliberate move within this menu moves the focus. A menu opens with the pointer wherever it was left (the
+  // window's first motion event, a launcher click, a Steam Deck trackpad or touchscreen), and its first frame took
+  // that stale position as a move: the main menu opened on whatever row the pointer happened to rest on (Music Player
+  // under a centred pointer; in a Steam Deck report it opened on Quit, and the next A, meant for Play Game, quit the
+  // game: GitHub #14). Small motion (a resting thumb on a trackpad, a warp when the pointer is freed) doesn't count.
+  static uint32_t menu_scene = 0;
+  static float anchor_x = 0, anchor_y = 0;
+  static bool armed = false;
+  constexpr float kDeliberate = 12.0f;  // UI pixels from where the pointer was when the menu opened
+  if (scene != menu_scene || hover_tick + 1 != tick) {  // a new menu, or one that was closed and has reopened
+    menu_scene = scene;
+    anchor_x = x, anchor_y = y;
+    armed = false;
+    seen_moves = moves;
+    want = 0;
+  }
+  if (moves != seen_moves && !armed) {
+    if (std::abs(x - anchor_x) + std::abs(y - anchor_y) < kDeliberate) seen_moves = moves;
+    else armed = true;
+  }
+  hover_tick = tick;
   if (moves != seen_moves) {
     seen_moves = moves;
     want = hovered ? hovered->object : 0;
@@ -1464,20 +1487,19 @@ void TakeEnter(uint8_t* base, std::vector<bool>& enter) {
 // An XInputGetState result (big-endian buttons at +4): A / START while the main menu's Quit has focus, or B on the
 // press-start screen, quit; those buttons are hidden from the game meanwhile.
 void FilterPad(uint8_t* base, uint32_t state) {
-  static std::atomic<bool> held{true};  // a press that began before Quit was there doesn't count
-  const uint16_t mask = focused ? (kA | kStart) : title::active ? kB : 0;
-  if (!mask) {
-    held = true;
-    return;
-  }
+  // A press that began before Quit was there doesn't count: track every button, not only the ones that quit on this
+  // screen. (Tracking just the mask let the START that opened the main menu from the press-start screen, where only B
+  // was watched, count as a fresh press if the menu opened with Quit in focus.)
+  static std::atomic<uint16_t> held{0xFFFF};
   uint8_t* s = Raw(base, state);
   const uint16_t buttons = uint16_t(s[4] << 8 | s[5]);
-  const bool pressed = buttons & mask;
-  if (pressed && !held) {
+  const uint16_t was = held.exchange(buttons);
+  const uint16_t mask = focused ? (kA | kStart) : title::active ? kB : 0;
+  if (!mask) return;
+  if (buttons & mask & ~was) {
     REXLOG_INFO("{}: Quit chosen (controller)", focused ? "main menu" : "press start");
     bots::RequestQuit();
   }
-  held = pressed;
   const uint16_t rest = buttons & ~mask;
   s[4] = uint8_t(rest >> 8), s[5] = uint8_t(rest);
 }
