@@ -223,6 +223,7 @@ if(REXSDK_DIR AND (NOT WIN32 OR REXGLUE_USE_VULKAN))
         # REX_GPU_PLUGIN=native selects it.
         add_library(rexgpu-native SHARED
             src/gfx/native.cpp
+            src/gfx/host_stats.cpp
             src/gfx/vk/memory_sync.cpp
             src/upk.cpp
             ${BOTS_NATIVE_GFX_SOURCES}
@@ -238,6 +239,9 @@ if(REXSDK_DIR AND (NOT WIN32 OR REXGLUE_USE_VULKAN))
             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})  # a Windows DLL is a runtime output
         target_include_directories(rexgpu-native PRIVATE src ${REXSDK_DIR}/thirdparty/renderdoc)
         target_link_libraries(rexgpu-native PRIVATE rex::runtime ${BOTS_NATIVE_GFX_LIBS})
+        if(WIN32)
+            target_link_libraries(rexgpu-native PRIVATE powrprof)  # host_stats.cpp: CPU clocks, power plan
+        endif()
         if(APPLE)
             # Export only the plugin entry points. Otherwise dyld coalesces the plugin's weak glslang template
             # instances with the game's copies (it links glslang too), and the plugin's parser runs the game's

@@ -516,17 +516,22 @@ VkPipeline Renderer::CreateDrawPipeline(const PipelineKey& key) const {
   info.layout = key.layout;
   VkPipeline pipeline = VK_NULL_HANDLE;
   const VkPipelineCache cache = create_with_cache_ ? pipeline_cache_ : VK_NULL_HANDLE;
+  auto hash = [](const void* t) {
+    return t ? static_cast<const ShaderCache::Translation*>(t)->shader().ucode_data_hash() : uint64_t(0);
+  };
   const auto start = std::chrono::steady_clock::now();
-  if (vk_.vkCreateGraphicsPipelines(device_->device(), cache, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
-    std::fprintf(stderr, "native renderer: pipeline creation failed\n");
+  if (const VkResult result = vk_.vkCreateGraphicsPipelines(device_->device(), cache, 1, &info, nullptr, &pipeline);
+      result != VK_SUCCESS) {
+    // Its draws are dropped every frame (an object or effect missing), so the log should say (first 50).
+    if (pipeline_failures_.fetch_add(1, std::memory_order_relaxed) < 50) {
+      REXLOG_ERROR("gfx native: the driver failed to create a pipeline (VkResult {}): vs {:016X} ps {:016X}",
+                   int(result), hash(key.vs), hash(key.ps));
+    }
     return VK_NULL_HANDLE;
   }
   // A slow driver compile is a skipped (async) or stalled (sync) draw for as long; name the pair.
   const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
   if (ms >= 250) {
-    auto hash = [](const void* t) {
-      return t ? static_cast<const ShaderCache::Translation*>(t)->shader().ucode_data_hash() : uint64_t(0);
-    };
     REXLOG_WARN("gfx native: pipeline took {:.0f} ms: vs {:016X} ps {:016X}", ms, hash(key.vs), hash(key.ps));
   }
   return pipeline;
@@ -541,11 +546,12 @@ VkPipeline Renderer::GetPipeline(const PipelineKey& key, bool sync, bool& pendin
   PipelineSlot& slot = *it->second;
   // Recorded on first live use, so a pipeline the warm-up made from the master lands in this machine's manifest too
   // once the game draws with it (the manifest is then everything this machine ran, e.g. a coverage playthrough).
+  Async state = slot.state.load(std::memory_order_acquire);
+  if (!background && state == Async::kNone) NoteLivePipeline(key);  // before RecordPipeline makes it known
   if (!background && !slot.recorded) {
     slot.recorded = true;
     RecordPipeline(key);
   }
-  Async state = slot.state.load(std::memory_order_acquire);
   if (state == Async::kNone) {
     Workers* workers = shaders_->workers();
     if (sync || !workers) {
@@ -1350,6 +1356,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   const VkPipeline pipeline = GetPipeline(key, sync, pending);
   if (!pipeline) {
     ++(pending ? stats_.pending_draws : stats_.skipped_draws);
+    if (!pending) ++stats_.failed_pipeline_draws;
     if (pending && log_skips_) {
       LogSkip("pipeline", vshader->ucode_data_hash(), pshader ? pshader->ucode_data_hash() : 0, &attachments);
     }

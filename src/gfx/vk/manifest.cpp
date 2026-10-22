@@ -236,8 +236,7 @@ void Renderer::LoadShaderRefs(const std::filesystem::path& file, const void* hea
               failed.empty() ? std::string() : fmt::format(", failed: {}", fmt::join(failed, " ")));
 }
 
-void Renderer::RecordPipeline(const PipelineKey& key) {
-  if (!manifest_) return;
+std::string Renderer::PipelineRecord(const PipelineKey& key) const {
   const auto* vt = static_cast<const ShaderCache::Translation*>(key.vs);
   const auto* pt = static_cast<const ShaderCache::Translation*>(key.ps);
   LayoutKey layout{};
@@ -252,6 +251,50 @@ void Renderer::RecordPipeline(const PipelineKey& key) {
   std::string record(reinterpret_cast<const char*>(&head), sizeof(head));
   record.append(reinterpret_cast<const char*>(&key) + offsetof(PipelineKey, topology),
                 sizeof(PipelineKey) - offsetof(PipelineKey, topology));
+  return record;
+}
+
+void Renderer::NoteLivePipeline(const PipelineKey& key) {
+  // Against the warm-up list as loaded (manifest_records_ and manifest_shaders_ also gain what's built live).
+  if (!warm_known_built_) {
+    warm_known_built_ = true;
+    for (const WarmPipeline& w : warm_) {
+      RecordHeader h;
+      std::memcpy(&h, w.record.data(), sizeof(h));
+      warm_pairs_.insert(w.record.substr(0, offsetof(RecordHeader, layout)));
+      warm_shaders_.insert(h.vs);
+      if (h.ps) warm_shaders_.insert(h.ps);
+    }
+  }
+  const std::string record = PipelineRecord(key);
+  RecordHeader head;
+  std::memcpy(&head, record.data(), sizeof(head));
+  const char* why;
+  ++stats_.live_pipelines;
+  if (!warm_shaders_.contains(head.vs) || (head.ps && !warm_shaders_.contains(head.ps))) {
+    ++stats_.live_pipelines_new_shader;
+    why = "new shader";
+  } else if (!warm_pairs_.contains(record.substr(0, offsetof(RecordHeader, layout)))) {
+    ++stats_.live_pipelines_new_pair;
+    why = "known shaders, new pair";
+  } else if (manifest_records_.contains(record)) {
+    ++stats_.live_pipelines_queued;
+    why = "on the warm-up list, not reached yet";
+  } else {
+    why = "known pair, other state";
+  }
+  if (live_pipelines_logged_ < kLivePipelineLines) {
+    ++live_pipelines_logged_;
+    REXLOG_INFO("gfx native: pipeline built during play ({}): vs {:016X}/{:X} ps {:016X}/{:X}", why, head.vs,
+                head.vs_mod, head.ps, head.ps_mod);
+  }
+}
+
+void Renderer::RecordPipeline(const PipelineKey& key) {
+  if (!manifest_) return;
+  const auto* vt = static_cast<const ShaderCache::Translation*>(key.vs);
+  const auto* pt = static_cast<const ShaderCache::Translation*>(key.ps);
+  const std::string record = PipelineRecord(key);
   bool& in_file = manifest_records_[record];
   if (in_file) return;
   in_file = true;
@@ -308,6 +351,7 @@ void Renderer::PumpWarmup() {
     ShaderCache::Shader* vs = shader_of(head.vs);
     ShaderCache::Shader* ps = head.ps ? shader_of(head.ps) : nullptr;
     if (!vs || (head.ps && !ps)) {
+      ++warm_result_.no_shader;
       finish();
       continue;
     }
@@ -315,6 +359,7 @@ void Renderer::PumpWarmup() {
     const Async vstate = shaders_->Request(*vs, head.vs_mod, vt, false, true);
     const Async pstate = ps ? shaders_->Request(*ps, head.ps_mod, pt, false, true) : Async::kReady;
     if (vstate == Async::kFailed || pstate == Async::kFailed) {
+      ++warm_result_.no_translation;
       finish();
       continue;
     }
@@ -322,6 +367,7 @@ void Renderer::PumpWarmup() {
     const LayoutKey layout_key{head.layout[0], head.layout[1], head.layout[2], head.layout[3]};
     const PipelineLayout* layout = GetPipelineLayout(layout_key);
     if (!layout) {
+      ++warm_result_.no_layout;
       finish();
       continue;
     }
@@ -333,13 +379,19 @@ void Renderer::PumpWarmup() {
     std::memcpy(reinterpret_cast<char*>(&key) + offsetof(PipelineKey, topology), warm.record.data() + sizeof(head),
                 sizeof(PipelineKey) - offsetof(PipelineKey, topology));
     bool pending = false;
-    GetPipeline(key, false, pending, true);
-    if (!pending) finish();  // ready, failed, or created live meanwhile
+    const VkPipeline pipeline = GetPipeline(key, false, pending, true);
+    if (!pending) {  // ready, failed, or created live meanwhile
+      ++(pipeline ? warm_result_.built : warm_result_.failed);
+      finish();
+    }
   }
   if (warm_done_ >= warm_.size() && !warm_logged_) {
     warm_logged_ = true;
-    REXLOG_INFO("gfx native: pipeline warm-up done: {} pipelines in {:.1f} s", warm_.size(),
-                std::chrono::duration<double>(std::chrono::steady_clock::now() - warm_start_).count());
+    const WarmupResult& r = warm_result_;
+    REXLOG_INFO("gfx native: pipeline warm-up done: {} pipelines in {:.1f} s: {} built, {} failed in the driver, {} "
+                "missing a shader, {} failed translation, {} without a layout",
+                warm_.size(), std::chrono::duration<double>(std::chrono::steady_clock::now() - warm_start_).count(),
+                r.built, r.failed, r.no_shader, r.no_translation, r.no_layout);
   }
 }
 

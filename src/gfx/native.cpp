@@ -30,6 +30,7 @@
 #include <rex/ui/vulkan/presenter.h>
 #include <rex/ui/vulkan/provider.h>
 
+#include "host_stats.h"
 #include "pm4.h"
 #include "upk.h"
 #include "vk/memory_sync.h"
@@ -48,6 +49,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
 
   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width, uint32_t frontbuffer_height) override {
     if (!renderer_) return;
+    TrackFrame();
     renderer_->EndFrame();
     PublishWarmup();
     HoldForWarmup();
@@ -132,6 +134,16 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
         REXLOG_INFO("gfx native: CP idle {:.2f} ms per frame, {:.2f} ms of it after submitting queries",
                     double(idle_us_ - last_idle_us_) / 1000.0 / n,
                     double(query_idle_us_ - last_query_idle_us_) / 1000.0 / n);
+        ReportFrameTimes(frames_ - last_.frames);
+        REXLOG_INFO("gfx native: textures {} held, {:.0f} MB (budget {}); over {} frames: {} loaded ({} of them "
+                    "evicted earlier), {} reloaded after CPU writes, {} evicted",
+                    renderer_->texture_count(), renderer_->texture_bytes() / 1048576.0,
+                    renderer_->texture_budget() ? fmt::format("{:.0f} MB", renderer_->texture_budget() / 1048576.0)
+                                                : std::string("none, evicted by age"),
+                    frames_ - last_.frames, st.texture_loads - last_.texture_loads,
+                    st.texture_loads_evicted - last_.texture_loads_evicted, st.texture_reloads - last_.texture_reloads,
+                    st.texture_evictions - last_.texture_evictions);
+        ReportHost(now);
       }
       REXLOG_INFO("gfx native: memory: {}", renderer_->TakeMemoryReport());
       last_idle_us_ = idle_us_, last_query_idle_us_ = query_idle_us_;
@@ -140,18 +152,23 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
       last_.pending_draws = st.pending_draws;
       last_.index_reuses = st.index_reuses, last_.index_converts = st.index_converts;
       last_.invalidations = st.invalidations;
+      last_.texture_loads = st.texture_loads, last_.texture_loads_evicted = st.texture_loads_evicted;
+      last_.texture_reloads = st.texture_reloads, last_.texture_evictions = st.texture_evictions;
       renderer_->SavePipelineCache();  // runs are often killed rather than shut down
       std::copy(std::begin(st.gpu_ns), std::end(st.gpu_ns), last_.gpu_ns);
       std::copy(std::begin(st.draw_phase_ns), std::end(st.draw_phase_ns), last_.draw_phase_ns);
       REXLOG_INFO(
           "gfx native: frame {}: {} draws, {} resolves, {} presents, {} failed shaders, {} unsupported prims, "
           "{} unsupported textures, {:.1f} MB uploaded, {} invalidations, {} texture reloads, {} evictions, {} indirect draws skipped, "
-          "{} draws skipped for pipelines, {}/{} pipelines warmed, {} occlusion queries ({} uncounted, {} hidden) "
-          "(totals)",
+          "{} draws skipped for pipelines, {}/{} pipelines warmed, {} built during play ({} new shader, {} new pair, "
+          "{} other state, {} not warmed yet), {} failed in the driver ({} draws dropped), {} occlusion queries ({} "
+          "uncounted, {} hidden) (totals)",
           frames_, st.draws, st.resolves, st.presents, st.failed_shaders, st.unsupported_primitives,
           st.unsupported_textures, st.uploaded_bytes / 1048576.0, st.invalidations, st.texture_reloads,
           st.texture_evictions, indirect_draws_, st.pending_draws, renderer_->warmup_done(),
-          renderer_->warmup_total(), st.occlusion_queries, st.occlusion_inexact, renderer_->occlusion_hidden());
+          renderer_->warmup_total(), st.live_pipelines, st.live_pipelines_new_shader, st.live_pipelines_new_pair,
+          st.live_pipelines - st.live_pipelines_new_shader - st.live_pipelines_new_pair - st.live_pipelines_queued,
+          st.live_pipelines_queued, renderer_->pipeline_failures(), st.failed_pipeline_draws, st.occlusion_queries, st.occlusion_inexact, renderer_->occlusion_hidden());
     }
   }
 
@@ -200,6 +217,10 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
       renderer_->EnableOcclusionQueries(1000);  // "visible": the SDK's fake count
     }
     REXLOG_INFO("gfx native: occlusion queries {}", renderer_->occlusion_queries() ? "on" : "off");
+    REXLOG_INFO("gfx native: texture cache budget {}",
+                renderer_->texture_budget() ? fmt::format("{} MB", renderer_->texture_budget() / 1048576)
+                                            : std::string("none (evicted by age)"));
+    REXLOG_INFO("gfx native: graphics pipeline library: {}", renderer_->PipelineLibrarySupport());
     REXLOG_INFO("gfx native: renderer up");
     return true;
   }
@@ -274,6 +295,115 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   // While the panel is in the foreground (the player is waiting on it, not playing) the guest stays at this swap
   // and the warm-up gets the whole CPU: on a 4-core laptop the game and a background warm-up starve each other
   // (B-098). Ends when the warm-up does or the player sends the panel to the background.
+  struct FrameMark {
+    std::chrono::steady_clock::time_point time;
+    vk::Renderer::Stats stats;
+    uint64_t idle_us = 0, query_idle_us = 0, sync_requests = 0, sync_locked = 0, sync_uploaded = 0, write_faults = 0;
+  };
+
+  FrameMark MarkFrame() const {
+    FrameMark m{std::chrono::steady_clock::now(), renderer_->stats(), idle_us_, query_idle_us_};
+    if (sync_) {
+      m.sync_requests = sync_->requests(), m.sync_locked = sync_->locked(), m.sync_uploaded = sync_->uploaded();
+      m.write_faults = sync_->invalidations();
+    }
+    return m;
+  }
+
+  void TrackFrame() {
+    static const double hitch_ms = [] {
+      const char* v = std::getenv("BOTS_HITCH_MS");
+      return v && *v ? std::atof(v) : 25.0;
+    }();
+    FrameMark now = MarkFrame();
+    const std::string load_max_what = renderer_->texture_load_max_what();  // before the take: read with it
+    const uint64_t load_max_us = renderer_->TakeTextureLoadMaxUs();
+    if (frame_marked_) {
+      const double ms = std::chrono::duration<double, std::milli>(now.time - frame_mark_.time).count();
+      static constexpr double kEdges[] = {20, 25, 33.4, 50, 100, 250};
+      size_t bucket = 0;
+      while (bucket < std::size(kEdges) && ms > kEdges[bucket]) ++bucket;
+      ++frame_hist_[bucket];
+      frame_max_ms_ = std::max(frame_max_ms_, ms);
+      // Slow against the recent frames too: a scene that runs at a steady 30 fps (videos, some menus) isn't hitching.
+      if (hitch_ms > 0 && ms > hitch_ms && ms > frame_avg_ms_ * 1.5) {
+        if (hitch_lines_ < kHitchLines) {
+          ++hitch_lines_;
+          LogHitch(ms, now, load_max_us, load_max_what);
+        } else {
+          ++hitches_unlogged_;
+        }
+      }
+      frame_avg_ms_ = frame_avg_ms_ ? frame_avg_ms_ * 0.9 + std::min(ms, 100.0) * 0.1 : ms;
+    }
+    frame_mark_ = std::move(now);
+    frame_marked_ = true;
+  }
+
+  // One slow frame: where this thread's time went (draw recording, of it texture loads, GPU fence waits, idle
+  // waiting for the guest's commands; the rest is PM4 parsing, present and the frame limiter) and what it did.
+  void LogHitch(double ms, const FrameMark& now, uint64_t load_max_us, const std::string& load_max_what) const {
+    const auto& a = frame_mark_.stats;
+    const auto& b = now.stats;
+    auto t = [](uint64_t from, uint64_t to) { return double(to - from) / 1000.0; };
+    const uint64_t loads = b.texture_loads - a.texture_loads;
+    const uint64_t evicted = b.texture_loads_evicted - a.texture_loads_evicted;
+    REXLOG_INFO(
+        "gfx hitch: frame {} took {:.1f} ms: draws {:.1f} ms (textures {:.1f} ms: {} new, {} evicted earlier, {} "
+        "rewritten, longest {:.1f} ms{}), GPU wait {:.1f} ms, CP idle {:.1f} ms ({:.1f} after queries); {} draws, {} "
+        "flushes, {:.2f} MB uploaded, {} ranges invalidated, {} write faults, {} memory syncs ({} locked, {} "
+        "uploaded), {} draws waiting on shaders or pipelines, {} new pipelines started, {} draws dropped for failed "
+        "pipelines",
+        frames_, ms, t(a.draw_us, b.draw_us), t(a.texture_us, b.texture_us), loads - evicted, evicted,
+        b.texture_reloads - a.texture_reloads, load_max_us / 1000.0,
+        loads + b.texture_reloads - a.texture_reloads ? fmt::format(": {}", load_max_what) : std::string(),
+        t(a.wait_us, b.wait_us),
+        t(frame_mark_.idle_us, now.idle_us), t(frame_mark_.query_idle_us, now.query_idle_us), b.draws - a.draws,
+        b.flushes - a.flushes, double(b.uploaded_bytes - a.uploaded_bytes) / 1048576.0,
+        b.invalidations - a.invalidations, now.write_faults - frame_mark_.write_faults,
+        now.sync_requests - frame_mark_.sync_requests, now.sync_locked - frame_mark_.sync_locked,
+        now.sync_uploaded - frame_mark_.sync_uploaded, b.pending_draws - a.pending_draws,
+        b.live_pipelines - a.live_pipelines, b.failed_pipeline_draws - a.failed_pipeline_draws);
+  }
+
+  void ReportFrameTimes(uint64_t frames) {
+    uint32_t over[7] = {};  // frames above each edge: over[i] = frames in buckets > i
+    for (int i = 5; i >= 0; --i) over[i] = over[i + 1] + frame_hist_[i + 1];
+    REXLOG_INFO("gfx native: frame times over {} frames: max {:.0f} ms; >20 ms {}, >25 ms {}, >33 ms {}, >50 ms {}, "
+                ">100 ms {}, >250 ms {}{}",
+                frames, frame_max_ms_, over[0], over[1], over[2], over[3], over[4], over[5],
+                hitches_unlogged_ ? fmt::format("; {} slow frames not itemised", hitches_unlogged_) : std::string());
+    std::fill(std::begin(frame_hist_), std::end(frame_hist_), 0);
+    frame_max_ms_ = 0;
+    hitch_lines_ = 0, hitches_unlogged_ = 0;
+  }
+
+  // CPU time of the whole process (all threads, in % of one core), clocks, a fixed-work probe, power, overlays.
+  void ReportHost(std::chrono::steady_clock::time_point now) {
+    const auto start = std::chrono::steady_clock::now();
+    const host::CpuTimes cpu = host::ProcessCpuTimes();
+    const host::CpuClock clock = host::CpuClockMhz();
+    const double probe = host::CpuProbeMicros();
+    if (last_cpu_time_.time_since_epoch().count()) {
+      const double wall_us = std::chrono::duration<double, std::micro>(now - last_cpu_time_).count();
+      REXLOG_INFO("gfx native: host: process CPU {:.0f}% user + {:.0f}% kernel (of one core, {} cores), CPU clock "
+                  "{} MHz of {} (limit {}), probe {:.0f} us",
+                  double(cpu.user_us - last_cpu_.user_us) / wall_us * 100,
+                  double(cpu.kernel_us - last_cpu_.kernel_us) / wall_us * 100, std::thread::hardware_concurrency(),
+                  clock.current_mhz, clock.max_mhz, clock.limit_mhz, probe);
+    }
+    last_cpu_ = cpu, last_cpu_time_ = now;
+    // Overlays once a minute: listing the process's modules is the slow part (/proc/self/maps on Linux).
+    std::string power = host::PowerState(), overlays = host_reports_++ % 6 ? last_overlays_ : host::OverlayModules();
+    if (power != last_power_) REXLOG_INFO("gfx native: host power: {}", power.empty() ? "unknown" : power);
+    if (overlays != last_overlays_) {
+      REXLOG_INFO("gfx native: overlay modules: {}", overlays.empty() ? "none" : overlays);
+    }
+    last_power_ = std::move(power), last_overlays_ = std::move(overlays);
+    REXLOG_INFO("gfx native: host report took {:.1f} ms",
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+  }
+
   void HoldForWarmup() {
     if (!shader_precompile_foreground_.load(std::memory_order_relaxed) ||
         renderer_->warmup_done() >= renderer_->warmup_total()) {
@@ -293,6 +423,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
                     renderer_->warmup_total());
       }
     }
+    frame_marked_ = false, frame_avg_ms_ = 0;  // not a hitch: the next frame interval starts after the hold
     REXLOG_INFO("gfx native: guest held {:.1f} s for the pipeline warm-up ({} pipelines, {}/{} done)",
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
                 renderer_->warmup_done() - from, renderer_->warmup_done(), renderer_->warmup_total());
@@ -375,7 +506,21 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     uint64_t draw_us = 0, texture_us = 0, wait_us = 0, flushes = 0, draws = 0, resolves = 0;
     uint64_t render_passes = 0, transfers = 0, barriers = 0, pending_draws = 0, gpu_ns[7] = {}, draw_phase_ns[12] = {};
     uint64_t index_reuses = 0, index_converts = 0, invalidations = 0;
+    uint64_t texture_loads = 0, texture_loads_evicted = 0, texture_reloads = 0, texture_evictions = 0;
   } last_;
+  // Frame-time diagnostics (issue #12): the interval between swaps on this thread, what each slow one did (a "gfx
+  // hitch" line, at most kHitchLines per stats interval), and a histogram per interval. BOTS_HITCH_MS sets the
+  // threshold (default 25 ms; 0 turns the lines off).
+  static constexpr uint32_t kHitchLines = 40;
+  FrameMark frame_mark_;
+  bool frame_marked_ = false;
+  uint32_t frame_hist_[7] = {};  // <=20, 20-25, 25-33, 33-50, 50-100, 100-250, >250 ms
+  double frame_max_ms_ = 0, frame_avg_ms_ = 0;  // frame_avg_ms_: moving average, slow frames capped at 100 ms
+  uint32_t hitch_lines_ = 0, hitches_unlogged_ = 0;
+  host::CpuTimes last_cpu_;
+  std::chrono::steady_clock::time_point last_cpu_time_;
+  std::string last_power_ = "-", last_overlays_ = "-";  // "-": not reported yet
+  uint32_t host_reports_ = 0;
   uint32_t indirect_depth_ = 0;
   bool query_wait_ = false;
   std::chrono::steady_clock::time_point wait_start_;
