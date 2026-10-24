@@ -94,9 +94,9 @@ inline std::filesystem::path AutoGameDir(const std::filesystem::path& exe_dir) {
 }
 
 // The game folder for a folder the player chose in the launcher: the folder itself when it already holds the game's
-// files, else its game subfolder. Installing replaces the target folder whole (ExtractIso), so the chosen folder is
-// never the target itself, and a game subfolder that holds something else is refused: the result is empty and
-// `error` says why.
+// files, else its game subfolder. The game's files are never spread into a folder that holds something else, so the
+// chosen folder is the target only when it already holds the game, and a game subfolder that holds something else is
+// refused: the result is empty and `error` says why. A reinstall replaces only the game's own entries (game_swap.h).
 inline std::filesystem::path ChosenGameDir(const std::filesystem::path& chosen, std::string& error) {
   namespace fs = std::filesystem;
   error.clear();

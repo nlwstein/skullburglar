@@ -1,5 +1,6 @@
 // See iso_extract.h.
 #include "iso_extract.h"
+#include "game_swap.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -170,21 +171,10 @@ ExtractResult ExtractIso(const fs::path& iso, const fs::path& dest, ExtractProgr
     REXLOG_WARN("setup: extraction stopped: {}", result.error);
     return result;
   }
-  // Swap in the finished tree; an older install is replaced only now.
-  if (fs::exists(dest, ec)) {
-    fs::path old = dest;
-    old += ".old";
-    fs::remove_all(old, ec);
-    fs::rename(dest, old, ec);
-    if (ec) {
-      result.error = fmt::format("Can't replace the old {}: {}", dest.string(), ec.message());
-      return result;
-    }
-    fs::remove_all(old, ec);
-  }
-  fs::rename(partial, dest, ec);
-  if (ec) {
-    result.error = fmt::format("Can't finish installing to {}: {}", dest.string(), ec.message());
+  // Swap in the finished tree; an older install's files are replaced only now, and only those (B-181).
+  if (!SwapInGameFiles(partial, dest, result.error)) {
+    fs::remove_all(partial, ec);
+    REXLOG_WARN("setup: install stopped: {}", result.error);
     return result;
   }
   REXLOG_INFO("setup: extraction done ({} files)", progress.files_done.load());
