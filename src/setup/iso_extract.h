@@ -1,7 +1,8 @@
 // Extract the game's files from the player's own Xbox 360 disc image (B-061).
 // Reads the XDVDFS/GDFX filesystem with the SDK's DiscImageDevice, checks that default.xex is
 // 50 Cent: Blood on the Sand (title id 5451083B), and copies every file into <dest>.partial,
-// renamed to <dest> only when complete, so an interrupted extraction never looks installed.
+// moved into <dest> only when complete, so an interrupted extraction never looks installed. A reinstall
+// replaces only the disc's own entries in <dest> (game_swap.h); other files there are kept.
 #pragma once
 
 #include <atomic>

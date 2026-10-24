@@ -67,6 +67,9 @@ class SetupDialog : public rex::ui::ImGuiDialog {
 #endif
     const char* autorun = std::getenv("BOTS_SETUP_AUTO");
     auto_ = autorun && std::strcmp(autorun, "1") == 0;
+    // Test runs: auto mode reinstalls over a game that's already there.
+    const char* reinstall = std::getenv("BOTS_SETUP_REINSTALL");
+    auto_reinstall_ = auto_ && reinstall && std::strcmp(reinstall, "1") == 0;
     REXLOG_INFO("setup: window open (version {}, game files {} at {}, settings file {})", AppVersion(),
                 installed_ ? "installed" : "missing", game_dir_.string(), config_path_.string());
     if (UpdateCheckAvailable() && Value("check_updates") == "true") StartUpdateCheck();
@@ -569,8 +572,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
 
   void StartExtract() {
     error_.clear();
-    // Installing replaces the folder whole: never one that holds something else (only a chosen or configured folder
-    // could; the per-user default is ours).
+    // Never spread the game's files into a folder that holds something else (only a chosen or configured folder
+    // could; the per-user default is ours). A reinstall over the game replaces only the game's own entries.
     std::error_code ec;
     if (game_dir_ != DefaultGameDir() && !IsGameDir(game_dir_) && std::filesystem::exists(game_dir_, ec) &&
         !(std::filesystem::is_directory(game_dir_, ec) && std::filesystem::is_empty(game_dir_, ec))) {
@@ -605,7 +608,10 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   }
 
   void RunAuto() {
-    if (!installed_ && !Extracting() && iso_path_[0] && error_.empty() && folder_error_.empty()) StartExtract();
+    if ((!installed_ || auto_reinstall_) && !Extracting() && iso_path_[0] && error_.empty() && folder_error_.empty()) {
+      auto_reinstall_ = false;
+      StartExtract();
+    }
     if (installed_ && !Extracting()) {
       auto_ = false;
       Play();
@@ -640,6 +646,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   bool installed_ = false;
   bool show_reinstall_ = false;
   bool auto_ = false;
+  bool auto_reinstall_ = false;
   int capture_ = -1;  // settings_ index of the binding waiting for a key, or -1
   bool capture_append_ = false, capture_armed_ = false;
   bool capturing_ = false;  // a key binding was waiting when this frame started
