@@ -52,7 +52,12 @@ rg::SpirvShaderTranslator::Features TranslatorFeatures(const rex::ui::vulkan::Vu
   return features;
 }
 
-// For background-only workers: below the game's threads, so they use idle cores only.
+// Host render targets: no fragment shader interlock, no 2x MSAA tricks (the game renders without MSAA).
+#define BOTS_TRANSLATOR_ARGS(device) TranslatorFeatures(device), false, false, false
+
+}  // namespace
+
+// Below the game's threads, so these use idle cores only.
 void LowerThreadPriority() {
 #if defined(_WIN32)
   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
@@ -62,11 +67,6 @@ void LowerThreadPriority() {
   setpriority(PRIO_PROCESS, pid_t(syscall(SYS_gettid)), 10);  // Linux nice is per thread
 #endif
 }
-
-// Host render targets: no fragment shader interlock, no 2x MSAA tricks (the game renders without MSAA).
-#define BOTS_TRANSLATOR_ARGS(device) TranslatorFeatures(device), false, false, false
-
-}  // namespace
 
 float RenderScale(const rex::ui::vulkan::VulkanDevice* device) {
   static const float scale = [device] {

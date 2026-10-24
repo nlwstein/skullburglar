@@ -30,17 +30,6 @@ namespace xe = rex::graphics::xenos;
 
 enum class Shuffle { kNone, kSwapRB565, kSwapRB1555, kRotate4444 };
 
-// The SDK's CopySwapBlock, except that k16in32 swaps length / 4 words: the SDK passes it the length in bytes as the
-// count of 32-bit words, so it read and wrote 4x the length: the bytes in range came out right, but each copy also
-// wrote 3x its length past its end, which for a texture's last row is past the end of the upload.
-void CopySwap(xe::Endian endian, void* output, const void* input, size_t length) {
-  if (endian == xe::Endian::k16in32) {
-    rex::memory::copy_and_swap_16_in_32_unaligned(output, input, length / 4);
-  } else {
-    rg::texture_conversion::CopySwapBlock(endian, output, input, length);
-  }
-}
-
 struct HostFormat {
   VkFormat format = VK_FORMAT_UNDEFINED;
   // Where the guest's R, G, B, A come from in the host format (XE_GPU_TEXTURE_SWIZZLE components).
@@ -524,14 +513,14 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
           if (!fetch.tiled) {
             const int32_t at = (bz * int32_t(guest.z_slice_stride_block_rows) + by) * int32_t(guest.row_pitch_bytes) +
                                int32_t(offset_x * bpb);
-            CopySwap(fetch.endianness, out, source + at, size_t(blocks_x) * bpb);
+            rg::texture_conversion::CopySwapBlock(fetch.endianness, out, source + at, size_t(blocks_x) * bpb);
             out += size_t(blocks_x) * bpb;
           } else if (!is_3d && runs) {
             for (uint32_t x = 0; x < blocks_x;) {
               const uint32_t bx = x + offset_x;
               const uint32_t n = std::min(run_blocks - (bx & (run_blocks - 1)), blocks_x - x);
               const int32_t at = rg::texture_util::GetTiledOffset2D(int32_t(bx), by, pitch_blocks, bpb_log2);
-              CopySwap(fetch.endianness, out, source + at, size_t(n) * bpb);
+              rg::texture_conversion::CopySwapBlock(fetch.endianness, out, source + at, size_t(n) * bpb);
               out += size_t(n) * bpb, x += n;
             }
           } else {
@@ -540,7 +529,7 @@ void Renderer::LoadTexture(const rg::xenos::xe_gpu_texture_fetch_t& fetch, Guest
               const int32_t at = is_3d ? rg::texture_util::GetTiledOffset3D(bx, by, bz, pitch_blocks,
                                                                             guest.z_slice_stride_block_rows, bpb_log2)
                                        : rg::texture_util::GetTiledOffset2D(bx, by, pitch_blocks, bpb_log2);
-              CopySwap(fetch.endianness, out, source + at, bpb);
+              rg::texture_conversion::CopySwapBlock(fetch.endianness, out, source + at, bpb);
             }
           }
         }
