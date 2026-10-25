@@ -29,9 +29,11 @@
 #include <string>
 #include <thread>
 
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 #include <rex/ppc/func.h>
+#include <rex/runtime.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
 
@@ -1263,8 +1265,8 @@ void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32
 // Quit on the main menu (PC convention; on the console you quit from the dashboard). The menu is authored in the
 // front-end package, so the option is added to the live scene: a copy of its last option (UUIScreenObject::CreateWidget
 // with that option as the archetype, so it looks and animates the same) one row lower, linked into the menu's up/down
-// wrap-around, labelled "Quit". Choosing it (A / START, Enter, a click) quits the app; those presses are kept from the
-// game, since the copy also carries its archetype's actions.
+// wrap-around, labelled with the game's own "Quit Game" (QuitText). Choosing it (A / START, Enter, a click) quits the
+// app; those presses are kept from the game, since the copy also carries its archetype's actions.
 // Layout (live UProperty data, see menu_pointer): UIScreenObject +0x3C Position (UIScreenValue_Bounds: Value[4], the
 // left and top then extents whose meaning follows ScaleType[4] after them), UIObject +0x1A4 NavigationTargets {Targets[4], ForcedTargets[4]} (left, up,
 // right, down), C1UIScene_Menu +0x2EC MenuOptions (TArray), C1UI_MenuOption +0x450 MyJitter (its label, a
@@ -1315,6 +1317,30 @@ void SetLabel(PPCContext& ctx, uint8_t* base, uint32_t label, const char* text) 
   rex::runtime::ResolveIndirectFunction(LoadU32(base, LoadU32(base, label) + 0x2C8))(ctx, base);
 }
 
+// The game's own "Quit Game" in its language (B-128): Action_Quit from the language's coalesced loc file, read off the
+// player's disc. The game takes its language from user_language (XLanguage: 3 German, 4 French; the disc has only
+// those and English, which everything else gets). Strings there are 8-bit (Latin-1) and NUL-terminated, which is what
+// SetLabel takes. "Quit" if it isn't found.
+const std::string& QuitText() {
+  static const std::string text = [] {
+    const uint32_t language = rex::cvar::Query<uint32_t>("user_language");
+    const char* ext = language == 3 ? "DEU" : language == 4 ? "FRA" : "INT";
+    const std::filesystem::path file = rex::system::kernel_state()->emulator()->game_data_root() / "C1Game" /
+                                       "Localization" / (std::string("Coalesced.") + ext);
+    std::ifstream in(file, std::ios::binary);
+    const std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    constexpr std::string_view kKey = "Action_Quit=";
+    std::string value;
+    if (const size_t at = data.find(kKey); at != std::string::npos) {
+      for (size_t i = at + kKey.size(); i < data.size() && uint8_t(data[i]) >= 0x20 && value.size() < 40; ++i)
+        value.push_back(data[i]);
+    }
+    REXLOG_INFO("main menu: Quit label from {}: {}", file.filename().string(), value.empty() ? "(not found)" : "found");
+    return value.empty() ? std::string("Quit") : value;
+  }();
+  return text;
+}
+
 uint32_t Add(PPCContext& ctx, uint8_t* base, const menu_pointer::Names& n, uint32_t scene) {
   const uint32_t options = LoadU32(base, scene + kMenuOptions);
   const int32_t count = int32_t(LoadU32(base, scene + kMenuOptions + 4));
@@ -1349,7 +1375,7 @@ uint32_t Add(PPCContext& ctx, uint8_t* base, const menu_pointer::Names& n, uint3
   ctx.r5.s64 = -1;
   ctx.r6.u64 = 0;
   rex::runtime::ResolveIndirectFunction(LoadU32(base, LoadU32(base, scene) + 0x130))(ctx, base);
-  SetLabel(ctx, base, LoadU32(base, widget + kMyJitter), "Quit");
+  SetLabel(ctx, base, LoadU32(base, widget + kMyJitter), QuitText().c_str());
   REXLOG_INFO("main menu: added Quit ({:08X}, below {:08X})", widget, last);
   return widget;
 }
@@ -1363,9 +1389,10 @@ bool Focused(uint8_t* base) {
 
 // The press-start screen (C1TitleScreen) has no menu, so it gets a "Quit" label in the bottom-right corner: a copy of
 // the screen's own ESRB-notice label (OnlinePlayMessage, a HudWidget_Label, whose SetText is also vtable +0x2C8). It
-// reads "Quit" with keyboard and mouse, where clicking it quits (the pointer is free there), and "Press B to quit" with a
-// pad. B quits on either (on the keyboard, the keys bound to B). Off while the attract movie plays over the screen
-// (C1TitleScreen +0x260 bInMovie), where B stops the movie as before.
+// reads the game's "Quit Game" (QuitText) with keyboard and mouse, where clicking it quits (the pointer is free there),
+// and "Press B to quit" with a pad (in German and French, the game's words and the button). B quits on either (on the
+// keyboard, the keys bound to B). Off while the attract movie plays over the screen (C1TitleScreen +0x260 bInMovie),
+// where B stops the movie as before.
 namespace title {
 constexpr uint32_t kInMovie = 0x80000000;
 constexpr float kBounds[4] = {0.78f, 0.9f, 0.98f, 0.97f};  // left top right bottom, fraction of the viewport
@@ -1437,10 +1464,15 @@ void Tick(PPCContext& ctx, uint8_t* base, const menu_pointer::Names& n, bool men
   const bots::PromptDevice device = prompts ? prompts->Device() : bots::PromptDevice::kXbox;
   if (int(device) != shown) {
     shown = int(device);
-    SetLabel(ctx, base, label,
-             device == bots::PromptDevice::kKeyboardMouse ? "Quit"
-             : bots::IsPlayStation(device)                ? "Press CIRCLE to quit"
-                                                          : "Press B to quit");
+    // English keeps its sentence; the other languages get the game's own words and the button.
+    const std::string& quit = quit_option::QuitText();
+    const uint32_t language = rex::cvar::Query<uint32_t>("user_language");
+    const bool english = language != 3 && language != 4;
+    const char* button = bots::IsPlayStation(device) ? "CIRCLE" : "B";
+    const std::string text = device == bots::PromptDevice::kKeyboardMouse ? quit
+                             : english ? std::string("Press ") + button + " to quit"
+                                       : quit + " (" + button + ")";
+    SetLabel(ctx, base, label, text.c_str());
   }
 }
 
