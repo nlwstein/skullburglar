@@ -45,10 +45,12 @@ set -e
 c=${CPUS:-$(nproc)}
 cd ~/bots/$N
 docker build -q -t $I image >/dev/null
-# Guest memory is POSIX shm (SDK memory_posix.cpp): the Docker default 64 MB /dev/shm = SIGBUS at boot.
+# Guest memory is POSIX shm (SDK memory_posix.cpp): the Docker default 64 MB /dev/shm = SIGBUS at boot. Host
+# networking, so LAN co-op tests between containers see the broadcasts of one another (a bridged joiner never does).
 if ! docker ps --format "{{.Names}}" | grep -qx $C; then
   docker rm -f $C 2>/dev/null || true
-  docker run -d --name $C --cpus $c --memory 40g --shm-size 8g --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all \
+  docker run -d --name $C --network host --cpus $c --memory 40g --shm-size 8g --gpus all \
+    -e NVIDIA_DRIVER_CAPABILITIES=all \
     -v ~/bots/$N:/w -v ~/bots/game:/g:ro $I sleep infinity
 fi
 # x86-64-v2 (SSSE3/SSE4) is the SDK minimum, as in its presets: reconfigure a build dir made without it or a higher
