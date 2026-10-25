@@ -2,8 +2,8 @@
 // The 360 game always uses a 1280x720 back buffer. With --aspect_ratio wider than 16:9 the back buffer keeps its
 // width and gets shorter (1280x548 for 21:9; the Xenia game patch fixes it at 1280x550), the camera keeps its vertical
 // field of view and sees more at the sides (Hor+), and constrained-aspect cameras use the full frame. Most UI is laid out
-// in fractions of the screen and stretches; the few screens laid out in 720-line pixels (the Music Player) lose their
-// bottom. Pre-rendered movies (the story cutscenes) stay 16:9, pillarboxed. Native renderer only.
+// in fractions of the screen and stretches; the Music Player, laid out in 720-line pixels, is drawn scaled down to fit
+// (game_hooks.cpp easel_fit). Pre-rendered movies (the story cutscenes) stay 16:9, pillarboxed. Native renderer only.
 #pragma once
 
 #include <cstdint>
