@@ -915,6 +915,21 @@ uint16_t ButtonAt(float x, float y) {
   return 0;
 }
 
+// Ultrawide fit (B-164, see easel_fit): the scale the music player `w` is drawn at, 1 at 720 lines.
+float Fit(uint8_t* base, uint32_t w) {
+  const uint32_t height = bots::GuestHeight();
+  if (height >= 720) return 1;
+  const menu_pointer::Names* n = menu_pointer::GetNames(base);
+  return n && menu_pointer::IsA(base, w, n->music_player) ? float(height) / 720.0f : 1;
+}
+
+// A pointer position in UI pixels -> the music player's own 720-line layout, undoing its fit.
+void FitPointer(uint8_t* base, uint32_t w, float& x, float& y) {
+  const float fit = Fit(base, w);
+  x = 640.0f + (x - 640.0f) / fit;
+  y /= fit;
+}
+
 // Per frame while the music player has focus. `enter` as for menu_pointer::Tick: click edges on a row or a button
 // become pad taps; the rest pass through.
 void Tick(uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32_t w, float x, float y, float dt, bool moved,
@@ -1155,7 +1170,9 @@ void Tick(PPCContext& ctx, uint8_t* base, bots::MouseKeyboardDriver& kbm, uint32
   if (!n) return;
   if (focused && IsA(base, focused, n->music_player)) {
     dragging = 0;
-    music_player::Tick(base, kbm, focused, pointer_x, pointer_y, dt, moves != seen_moves, enter);
+    float mx = pointer_x, my = pointer_y;
+    music_player::FitPointer(base, focused, mx, my);
+    music_player::Tick(base, kbm, focused, mx, my, dt, moves != seen_moves, enter);
     seen_moves = moves;
     return;
   }
@@ -2910,7 +2927,9 @@ thread_local bool tracing_easel = false;
 thread_local bool own_positions = false;      // a widget drawing from positions of its own (jitter labels)
 void EaselOrigin(PPCContext& ctx, uint8_t* base) {
   if (!easel && !own_positions) return;
-  if (tracing_easel) REXLOG_INFO("traceeasel:   draw at {} {} + {} {}", ctx.f1.f64, ctx.f2.f64, draw_dx, draw_dy);
+  if (tracing_easel)
+    REXLOG_INFO("traceeasel:   draw at {} {} (f3 {} f4 {}: DrawTile size, DrawString scale) + {} {}", ctx.f1.f64,
+                ctx.f2.f64, ctx.f3.f64, ctx.f4.f64, draw_dx, draw_dy);
   ctx.f1.f64 = double(float(ctx.f1.f64) + draw_dx);
   ctx.f2.f64 = double(float(ctx.f2.f64) + draw_dy);
 }
@@ -2946,6 +2965,42 @@ extern "C" void sub_82844190(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_82844190(ctx, base);
   REXLOG_INFO("traceeasel:   face {}: {}", face, ctx.f1.f64);
 }
+// Ultrawide (B-164): the Music Player (C1UI_MusicPlayer, front end and pause menu) lays itself out in 720-line pixels,
+// so on a shorter back buffer (548 lines at 21:9) its bottom, the button bar included, was cut off. While it draws,
+// the FCanvas's top transform is scaled by GuestHeight / 720 about the screen's middle, so the whole panel (frame,
+// lists, text, prompts) shows at its own proportions; music_player::FitPointer maps the pointer back for its hit
+// tests. FCanvas +0x24 TransformStack: TArray of {FMatrix Matrix (row vectors); DWORD MatrixCRC}, 0x50 bytes each.
+// Draws are batched under the top entry and a new batch starts when its CRC changes, so the CRC changes with it.
+namespace easel_fit {
+constexpr uint32_t kTransformStack = 0x24, kEntry = 0x50;  // FMatrix is 16-byte aligned: 0x44 padded
+
+// Scales the top transform of FCanvas `canvas` by `fit`; returns the entry (0 if none) and its old words in `saved`.
+uint32_t Apply(uint8_t* base, uint32_t canvas, float fit, uint32_t (&saved)[17]) {
+  const uint32_t data = LoadU32(base, canvas + kTransformStack);
+  const uint32_t count = LoadU32(base, canvas + kTransformStack + 4);
+  if (!menu_pointer::Readable(data) || count == 0 || count > 64) return 0;
+  const uint32_t top = data + (count - 1) * kEntry;
+  for (uint32_t i = 0; i < 17; ++i) saved[i] = LoadU32(base, top + 4 * i);
+  float m[16];
+  for (uint32_t i = 0; i < 16; ++i) m[i] = std::bit_cast<float>(saved[i]);
+  // S * M with S = rows (fit,0,0,0) (0,fit,0,0) (0,0,1,0) (640 (1 - fit),0,0,1): x' = 640 + (x - 640) fit, y' = y fit.
+  const float dx = 640.0f * (1.0f - fit);
+  for (uint32_t c = 0; c < 4; ++c) {
+    const float row0 = m[c], row1 = m[4 + c];
+    m[12 + c] += dx * row0;
+    m[c] = fit * row0;
+    m[4 + c] = fit * row1;
+  }
+  for (uint32_t i = 0; i < 16; ++i) StoreU32(base, top + 4 * i, std::bit_cast<uint32_t>(m[i]));
+  StoreU32(base, top + 64, saved[16] ^ 0xB1640000u);
+  return top;
+}
+
+void Restore(uint8_t* base, uint32_t top, const uint32_t (&saved)[17]) {
+  for (uint32_t i = 0; i < 17; ++i) StoreU32(base, top + 4 * i, saved[i]);
+}
+}  // namespace easel_fit
+
 extern "C" void __imp__sub_82DDAE08(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_82DDAE08(PPCContext& __restrict ctx, uint8_t* base) {
   const uint32_t w = ctx.r3.u32;
@@ -2957,7 +3012,11 @@ extern "C" void sub_82DDAE08(PPCContext& __restrict ctx, uint8_t* base) {
   }
   const uint32_t outer = std::exchange(split_screen::easel, w);
   const bool was = std::exchange(split_screen::tracing_easel, trace);
+  const float fit = menu_pointer::music_player::Fit(base, w);
+  uint32_t saved[17];
+  const uint32_t fitted = fit != 1 ? easel_fit::Apply(base, ctx.r4.u32, fit, saved) : 0;
   __imp__sub_82DDAE08(ctx, base);
+  if (fitted) easel_fit::Restore(base, fitted, saved);
   split_screen::tracing_easel = was;
   split_screen::easel = outer;
 }
