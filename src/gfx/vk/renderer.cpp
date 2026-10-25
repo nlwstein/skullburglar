@@ -281,6 +281,10 @@ void Renderer::LoadPipelineCache(const std::filesystem::path& path) {
   if (vk_.vkCreatePipelineCache(device_->device(), &info, nullptr, &loaded) != VK_SUCCESS) return;
   vk_.vkMergePipelineCaches(device_->device(), pipeline_cache_, 1, &loaded);
   vk_.vkDestroyPipelineCache(device_->device(), loaded, nullptr);
+  size_t merged = 0;
+  if (vk_.vkGetPipelineCacheData(device_->device(), pipeline_cache_, &merged, nullptr) == VK_SUCCESS) {
+    cache_bytes_saved_.store(merged);
+  }
   std::fprintf(stderr, "native renderer: pipeline cache %s (%zu KB)\n", path.string().c_str(), data.size() / 1024);
 }
 
@@ -297,6 +301,7 @@ void Renderer::SavePipelineCache(bool wait) {
   }
   cache_saver_done_.store(false, std::memory_order_relaxed);
   cache_saver_ = std::thread([this, pipelines] {
+    LowerThreadPriority();  // a save after new pipelines made the game's next frame slow on the Deck
     WritePipelineCache(pipelines);
     cache_saver_done_.store(true, std::memory_order_release);
   });
@@ -312,6 +317,10 @@ void Renderer::WritePipelineCache(uint64_t pipelines) {
   VkResult result = VK_INCOMPLETE;
   for (int attempt = 0; attempt < 4 && result == VK_INCOMPLETE; ++attempt) {
     if (vk_.vkGetPipelineCacheData(device_->device(), pipeline_cache_, &size, nullptr) != VK_SUCCESS || !size) return;
+    if (attempt == 0 && size == cache_bytes_saved_.load()) {  // the pipelines were all in the cache already
+      pipelines_saved_.store(pipelines);
+      return;
+    }
     size += size / 8;
     data.resize(size);
     result = vk_.vkGetPipelineCacheData(device_->device(), pipeline_cache_, &size, data.data());
@@ -343,6 +352,7 @@ void Renderer::WritePipelineCache(uint64_t pipelines) {
   }
   std::filesystem::rename(temp, pipeline_cache_path_, ec);
   pipelines_saved_.store(pipelines);
+  cache_bytes_saved_.store(size);
   REXLOG_INFO("gfx native: pipeline cache saved: {} pipelines, {:.1f} MB in {:.0f} ms", pipelines, size / 1048576.0,
               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
 }
@@ -449,13 +459,22 @@ void Renderer::EndFrame() {
   }
   PumpWarmup();
   if (++frame_ % 64) return;
-  // Under budget, a texture stays until it has gone unused for texture_idle_frames_ (~5 minutes): a texture's memory
+  const auto now = std::chrono::steady_clock::now();
+  const std::chrono::seconds idle_time(texture_idle_seconds_);
+  frame_samples_.emplace_back(now, frame_);
+  while (frame_samples_.size() > 1 && now - frame_samples_[1].first >= idle_time) frame_samples_.pop_front();
+  // Under budget, a texture stays until it has gone unused for texture_idle_seconds_ (5 minutes): a texture's memory
   // is watched, so one the CPU wrote over is reloaded anyway, and keeping it costs only memory, but the levels already
   // left would otherwise pile up to the budget (1 GB after a 35-minute tour of 16 checkpoints on an M2 Pro). Over
   // budget, the textures unused longest go first, down to 90% of it.
   const bool over = !texture_budget_ || texture_bytes_ > texture_budget_;
-  if (!over && (!texture_idle_frames_ || frame_ % 640)) return;
-  const uint64_t min_unused = over ? texture_unused_frames_ : texture_idle_frames_;
+  if (!over && (!texture_idle_seconds_ || frame_ % 640)) return;
+  // The frames since texture_idle_seconds_ ago (none yet in the first 5 minutes): counting frames made it 10 minutes
+  // at 30 fps.
+  const uint64_t idle_frames = texture_idle_seconds_ && now - frame_samples_.front().first >= idle_time
+                                   ? frame_ - frame_samples_.front().second
+                                   : UINT64_MAX;
+  const uint64_t min_unused = over ? texture_unused_frames_ : idle_frames;
   std::vector<std::pair<uint64_t, TextureCacheKey>> unused;
   for (const auto& [key, texture] : guest_textures_) {
     if (frame_ - texture->last_used > min_unused) unused.emplace_back(texture->last_used, key);
@@ -463,7 +482,7 @@ void Renderer::EndFrame() {
   if (texture_budget_) std::sort(unused.begin(), unused.end());
   if (evicted_keys_.size() + unused.size() > 65536) evicted_keys_.clear();
   for (const auto& [last_used, key] : unused) {
-    const bool idle = texture_idle_frames_ && frame_ - last_used > texture_idle_frames_;
+    const bool idle = frame_ - last_used > idle_frames;
     if (texture_budget_ && texture_bytes_ <= texture_budget_ / 10 * 9 && !idle) break;
     auto it = guest_textures_.find(key);
     DropGuestTexture(*it->second);
@@ -497,8 +516,8 @@ void Renderer::InitTextureBudget() {
   if (const char* v = std::getenv("BOTS_GFX_TEXTURE_EVICT_FRAMES"); v && *v) {
     texture_unused_frames_ = std::strtoull(v, nullptr, 10);
   }
-  if (const char* v = std::getenv("BOTS_GFX_TEXTURE_IDLE_FRAMES"); v && *v) {
-    texture_idle_frames_ = std::strtoull(v, nullptr, 10);
+  if (const char* v = std::getenv("BOTS_GFX_TEXTURE_IDLE_SECONDS"); v && *v) {
+    texture_idle_seconds_ = std::strtoull(v, nullptr, 10);
   }
   InitTexturePool();
   REXLOG_INFO("gfx native: texture budget {} MB{}, texture pool {} MB up front", texture_budget_ / kMB,

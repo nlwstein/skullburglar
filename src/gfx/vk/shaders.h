@@ -29,6 +29,9 @@ enum class Async : uint8_t { kNone, kPending, kReady, kFailed };
 // Decided on the first call (the renderer makes it before translating anything).
 float RenderScale(const rex::ui::vulkan::VulkanDevice* device);
 
+// For background-only threads (warm-up workers, the pipeline-cache saver): below the game's threads.
+void LowerThreadPriority();
+
 // Worker threads, each with its own translator (translators are not thread-safe). Jobs run in submission order.
 // `count` workers take live work first, then background work; `background` more run background work only, at low OS
 // priority, so a cold warm-up can use the idle cores without taking CPU from the game.

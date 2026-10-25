@@ -590,6 +590,9 @@ class Renderer : public Pm4Sink {
   std::vector<std::unique_ptr<Image>> dummy_depths_;
   std::filesystem::path pipeline_cache_path_;
   std::atomic<uint64_t> pipelines_saved_{0};
+  // Size of the driver's cache data when last loaded or saved: a save with no growth writes nothing (each launch's
+  // first report found pipelines_saved_ at 0 and rewrote the whole file, 53 MB on a GTX 1070).
+  std::atomic<size_t> cache_bytes_saved_{0};
   void WritePipelineCache(uint64_t pipelines);  // the saver thread, or the caller of a waited save
   std::thread cache_saver_;
   std::atomic<bool> cache_saver_done_{true};
@@ -667,12 +670,14 @@ class Renderer : public Pm4Sink {
   // Texture cache budget (issue #12). Evicting every texture unused for ~10 s made each object that came back into
   // view load its textures again on this thread (untile + upload, several ms each), a hitch every time an enemy
   // reappeared. Now unused textures are evicted while the cache is over texture_budget_, oldest first, or once
-  // they have gone unused for texture_idle_frames_.
+  // they have gone unused for texture_idle_seconds_.
   // BOTS_GFX_TEXTURE_CACHE_MB sets the budget (0 = by age alone, as before); BOTS_GFX_TEXTURE_EVICT_FRAMES the
-  // frames a texture must go unused before it may be evicted (default 600); BOTS_GFX_TEXTURE_IDLE_FRAMES the frames
-  // after which an unused texture is evicted even under budget (default 18000, ~5 minutes; 0 = never).
+  // frames a texture must go unused before it may be evicted (default 600); BOTS_GFX_TEXTURE_IDLE_SECONDS the time
+  // after which an unused texture is evicted even under budget (default 300; 0 = never).
   uint64_t texture_bytes_ = 0, texture_budget_ = 0, texture_unused_frames_ = 600, texture_load_max_us_ = 0;
-  uint64_t texture_idle_frames_ = 18000;
+  uint64_t texture_idle_seconds_ = 300;
+  // (time, frame_) every 64 frames, back to texture_idle_seconds_ ago: the idle time in frames at any frame rate.
+  std::deque<std::pair<std::chrono::steady_clock::time_point, uint64_t>> frame_samples_;
   std::string texture_load_max_what_;
   // The current load's time in CreateImage (allocation) and tracker_->Request (page uploads, the lock).
   uint64_t texture_load_create_us_ = 0, texture_load_request_us_ = 0;
