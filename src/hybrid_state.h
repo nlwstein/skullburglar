@@ -47,6 +47,50 @@ struct HybridCamera {
 // Fill 4 (n1, hybrid_fill.cpp): the static meshes UE3 has attached to its scene, read from the live engine objects
 // on the game thread (scene_feed.cpp) and drawn by an external renderer library. Assets are named by UE3 path; the
 // strings are interned by the game and never freed, so the renderer may key its caches on the pointers.
+// B-188: the lighting feed as fixed-layout binary records (no JSON). The layouts are the same as lightfeed::bin in the
+// renderer and N1Feed* in n1ffi.h (sizes asserted on both sides); the game fills them straight from guest memory.
+inline constexpr uint32_t kHybridNone = 0xFFFFFFFFu;
+struct HybridLight {  // 80 bytes
+  uint32_t kind;      // 0 point, 1 spot, 2 directional, 3 spherical harmonic, 4 sky
+  uint32_t flags;     // 1 enabled, 2 baked, 4 casts dynamic shadows, 8 lights static, 16 lights dynamic
+  uint32_t env;       // index in HybridLighting::paths (the owner's DynamicLightEnvironmentComponent) or kHybridNone
+  float radius, falloff, inner_deg, outer_deg;
+  float pos[3];       // LightToWorld translation (UE3 axes)
+  float axis[3];      // LightToWorld Z row
+  float color[3];     // LightColor / 255 * Brightness
+  float lower[3];     // LowerColor / 255 * LowerBrightness
+  int32_t sh;         // index of its 27 floats (R, G, B x 9) in HybridLighting::sh, or -1
+};
+struct HybridFog {  // 32 bytes
+  uint32_t present;
+  float color[3];
+  float density, height, start, extinction;
+};
+struct HybridPost {  // 152 bytes; NaN = property absent
+  uint32_t present, flags, material_effect;
+  float uber_bloom_scale, uber_bloom_threshold, ls_bloom_scale, ls_bloom_threshold;
+  float balance[9];
+  float desaturation, shadows[3], midtones[3], highlights[3];
+  float tone_min, tone_max, tone_scale;
+  float god[9];
+};
+static_assert(sizeof(HybridLight) == 80 && sizeof(HybridFog) == 32 && sizeof(HybridPost) == 152);
+struct HybridLighting {
+  bool has_fog_post = false;  // this update carries fog and post (sent only when they change)
+  std::vector<HybridLight> lights;
+  std::vector<float> sh;
+  std::vector<const char*> paths;  // interned, stable
+  HybridFog fog = {};
+  HybridPost post = {};
+  const char* post_material = nullptr;  // the post chain's material effect (interned), not in `paths`
+  void Clear() {
+    has_fog_post = false;
+    lights.clear();
+    sh.clear();
+    paths.clear();
+  }
+};
+
 struct HybridScene {
   struct Instance {
     float transform[16];  // LocalToWorld, UE3 FMatrix as stored
@@ -84,11 +128,15 @@ struct HybridScene {
   std::vector<Skel> skeletal;
   std::vector<float> bones;
   std::vector<const char*> materials;
-  // The frame's lights, fog and post chain as the scene feed's JSON ({"lights":[..],"fog":[..],"post":{..}}, only the
-  // light properties n1 reads; fog and post on every 16th build, absent = unchanged); rebuilt every
-  // BOTS_N1_FEED_EVERY frames, empty when unchanged since the renderer last took it.
+  // The frame's lights, fog and post chain (B-188). `light` is set when the game built a new lighting state that
+  // differs from the last one it published (every BOTS_N1_FEED_EVERY frames at most; fog and post only when they
+  // changed); the renderer takes it (clears `light_pending`) and the game keeps an unconsumed update across frames.
+  // `lighting` is the same data as the scene feed's JSON, built only with BOTS_N1_FEED=json (the pre-B-188 path, kept
+  // for A/B measurement) or BOTS_N1_FEED_VERIFY=1 (the renderer checks both against each other).
+  bool light_pending = false;
+  HybridLighting light;
   std::string lighting;
-  float lighting_ms = 0;  // game-thread cost of building `lighting`
+  float lighting_ms = 0;  // game-thread cost of building the lighting update
   float build_ms = 0;  // game-thread cost of this frame's walk
   uint32_t walked = 0;  // primitives looked at
 };

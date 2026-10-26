@@ -48,6 +48,7 @@
 #include "scene_feed.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cctype>
 #include <chrono>
@@ -1208,7 +1209,20 @@ struct LiveState {
   }();
   float last_real_time = -1;
   uint64_t frame = 0;
-  uint32_t lighting_builds = 0;
+  uint32_t lighting_builds = 0, env_stamp = 0;
+  bool json_feed = [] {
+    const char* v = std::getenv("BOTS_N1_FEED");
+    return v && !std::strcmp(v, "json");
+  }();
+  bool verify_feed = [] {
+    const char* v = std::getenv("BOTS_N1_FEED_VERIFY");
+    return v && v[0] == '1';
+  }();
+  HybridLighting next_light, last_light;  // the build in progress; the last state the renderer was given
+  HybridFog last_fog = {};
+  HybridPost last_post = {};
+  const char* last_material = nullptr;
+  bool have_fog_post = false;
   uint32_t feed_every = [] {
     const char* v = std::getenv("BOTS_N1_FEED_EVERY");
     return uint32_t(v && *v ? std::max(0, std::atoi(v)) : 2);
@@ -1239,6 +1253,284 @@ std::string MaterialPath(uint32_t m) {
     m = PropU32(m, "Parent");
   }
   return {};
+}
+}  // namespace
+
+namespace {
+// B-188: the lighting feed as binary records (hybrid_state.h HybridLighting), read from the same guest objects
+// CompactLightJson / LightsPostJson walk, with the same per-field defaults the renderer applies to a missing JSON
+// property. Property records are looked up once per class.
+struct FieldEx {
+  uint32_t offset = 0xFFFFFFFF, mask = 0, sub = 0;  // sub: the struct class of a struct property, the enum of a byte one
+  bool ok() const { return offset != 0xFFFFFFFF; }
+};
+
+FieldEx FindEx(uint32_t cls, const char* name) {
+  for (int depth = 0; Readable(cls) && depth < 16; cls = U32(cls + 0x3C), ++depth)
+    for (uint32_t f = U32(cls + 0x50), n = 0; Readable(f) && n < 4096; f = U32(f + 0x40), ++n)
+      if (!std::strcmp(NameText(U32(f + 0x2C)), name)) {
+        FieldEx out{U32(f + 0x64), 0, U32(f + kBoolMask)};
+        if (!std::strcmp(ClassName(f), "BoolProperty")) out.mask = out.sub;
+        return out;
+      }
+  return {};
+}
+
+// A member of a struct property: the struct's class is the property's `sub`.
+FieldEx Member(const FieldEx& prop, const char* name) { return prop.ok() ? FindEx(prop.sub, name) : FieldEx{}; }
+
+float FieldF(uint32_t base, const FieldEx& f, float fallback) { return f.ok() ? F32(base + f.offset) : fallback; }
+bool FieldB(uint32_t base, const FieldEx& f) { return f.ok() && (U32(base + f.offset) & f.mask); }
+
+// A Color struct's R, G, B members (bytes).
+struct ColorLayout {
+  FieldEx r, g, b;
+  void Init(const FieldEx& prop) { r = Member(prop, "R"), g = Member(prop, "G"), b = Member(prop, "B"); }
+  void Bytes(uint32_t base, const FieldEx& prop, float out[3]) const {
+    const uint32_t at = base + prop.offset;
+    out[0] = r.ok() ? float(*Raw(at + r.offset)) : 0.f;
+    out[1] = g.ok() ? float(*Raw(at + g.offset)) : 0.f;
+    out[2] = b.ok() ? float(*Raw(at + b.offset)) : 0.f;
+  }
+};
+
+constexpr uint32_t kLfEnabled = 1, kLfBaked = 2, kLfCast = 4, kLfStatic = 8, kLfDynamic = 16;
+
+struct LightLayout {
+  int kind = -1;  // HybridLight::kind, -1: not a class the renderer reads
+  FieldEx l2w, brightness, color, affects, channels, direct, lower_b, lower_c, wsil, env, enabled, radius, falloff,
+      inner, outer, cast, ch_static, ch_dynamic;
+  ColorLayout color_l, lower_l;
+  FieldEx sh_r, sh_g, sh_b, sh_rv, sh_gv, sh_bv;
+};
+
+const LightLayout& LayoutFor(uint32_t light) {
+  static std::unordered_map<uint32_t, LightLayout> layouts;
+  const uint32_t cls = U32(light + 0x34);
+  auto [it, fresh] = layouts.try_emplace(cls);
+  LightLayout& L = it->second;
+  if (!fresh) return L;
+  const std::string_view name = ClassName(light);
+  L.kind = name == "PointLightComponent"                  ? 0
+           : name == "SpotLightComponent"                 ? 1
+           : name == "DirectionalLightComponent"          ? 2
+           : name == "SphericalHarmonicLightComponent"    ? 3
+           : name == "SkyLightComponent"                  ? 4
+                                                          : -1;
+  if (L.kind < 0) return L;
+  L.l2w = FindEx(cls, "LightToWorld"), L.brightness = FindEx(cls, "Brightness"), L.color = FindEx(cls, "LightColor");
+  L.affects = FindEx(cls, "LightAffectsClassification"), L.channels = FindEx(cls, "LightingChannels");
+  L.direct = FindEx(cls, "UseDirectLightMap"), L.lower_b = FindEx(cls, "LowerBrightness");
+  L.lower_c = FindEx(cls, "LowerColor"), L.wsil = FindEx(cls, "WorldSpaceIncidentLighting");
+  L.env = FindEx(cls, "LightEnvironment"), L.enabled = FindEx(cls, "bEnabled"), L.radius = FindEx(cls, "Radius");
+  L.falloff = FindEx(cls, "FalloffExponent"), L.inner = FindEx(cls, "InnerConeAngle");
+  L.outer = FindEx(cls, "OuterConeAngle"), L.cast = FindEx(cls, "CastDynamicShadows");
+  L.ch_static = Member(L.channels, "Static"), L.ch_dynamic = Member(L.channels, "Dynamic");
+  L.color_l.Init(L.color), L.lower_l.Init(L.lower_c);
+  L.sh_r = Member(L.wsil, "R"), L.sh_g = Member(L.wsil, "G"), L.sh_b = Member(L.wsil, "B");
+  L.sh_rv = Member(L.sh_r, "V"), L.sh_gv = Member(L.sh_g, "V"), L.sh_bv = Member(L.sh_b, "V");
+  return L;
+}
+
+// A DynamicLightEnvironmentComponent's path, cached per object (re-read when the slot's name or outer changes).
+struct DleInfo {
+  uint32_t name = 0, outer = 0;
+  const char* path = nullptr;
+  uint32_t stamp = 0, index = 0;
+};
+std::unordered_map<uint32_t, DleInfo> g_dle;
+
+uint32_t EnvIndex(HybridLighting& out, uint32_t dle, uint32_t stamp) {
+  DleInfo& d = g_dle[dle];
+  if (!d.path || d.name != U32(dle + 0x2C) || d.outer != U32(dle + 0x28)) {
+    d.name = U32(dle + 0x2C), d.outer = U32(dle + 0x28);
+    d.path = Intern(Path(dle));
+    d.stamp = 0;
+  }
+  if (d.stamp != stamp) {
+    d.stamp = stamp;
+    d.index = uint32_t(out.paths.size());
+    out.paths.push_back(d.path);
+  }
+  return d.index;
+}
+
+// The renderer's cut of the feed's lights (see LightsPostJson): baked or disabled level point and spot lights are
+// the lightmaps' business and left out.
+void LightsBin(HybridLighting& out, uint32_t stamp) {
+  for (uint32_t l : g_extras.lights) {
+    if (!IsObject(l)) continue;
+    const LightLayout& L = LayoutFor(l);
+    if (L.kind < 0) continue;
+    const uint32_t dle = L.env.ok() ? U32(l + L.env.offset) : 0;
+    const bool has_env = IsObject(dle);
+    const bool baked = FieldB(l, L.direct) || (L.affects.ok() && *Raw(l + L.affects.offset) == 2);
+    if (!has_env && (L.kind == 0 || L.kind == 1) && (!FieldB(l, L.enabled) || baked)) continue;
+    HybridLight& h = out.lights.emplace_back();
+    std::memset(&h, 0, sizeof(h));
+    h.kind = uint32_t(L.kind);
+    h.flags = (FieldB(l, L.enabled) ? kLfEnabled : 0) | (baked ? kLfBaked : 0) | (FieldB(l, L.cast) ? kLfCast : 0) |
+              (!L.channels.ok() || (L.ch_static.ok() && (U32(l + L.channels.offset + L.ch_static.offset) & L.ch_static.mask))
+                   ? kLfStatic
+                   : 0) |
+              (!L.channels.ok() || (L.ch_dynamic.ok() && (U32(l + L.channels.offset + L.ch_dynamic.offset) & L.ch_dynamic.mask))
+                   ? kLfDynamic
+                   : 0);
+    h.env = has_env ? EnvIndex(out, dle, stamp) : kHybridNone;
+    h.radius = FieldF(l, L.radius, 0.f), h.falloff = FieldF(l, L.falloff, 2.f);
+    h.inner_deg = FieldF(l, L.inner, 0.f), h.outer_deg = FieldF(l, L.outer, 44.f);
+    if (L.l2w.ok()) {
+      const uint32_t m = l + L.l2w.offset;
+      for (int k = 0; k < 3; ++k) h.pos[k] = F32(m + 4 * (12 + k)), h.axis[k] = F32(m + 4 * (8 + k));
+    }
+    const float brightness = FieldF(l, L.brightness, 1.f);
+    float c[3] = {0, 0, 0};
+    if (L.color.ok()) L.color_l.Bytes(l, L.color, c);
+    for (int k = 0; k < 3; ++k) h.color[k] = (c[k] / 255.f) * brightness;
+    const float lower_b = FieldF(l, L.lower_b, 0.f);
+    float lc[3] = {0, 0, 0};
+    if (L.lower_c.ok()) L.lower_l.Bytes(l, L.lower_c, lc);
+    for (int k = 0; k < 3; ++k) h.lower[k] = (lc[k] / 255.f) * lower_b;
+    h.sh = -1;
+    if (L.wsil.ok() && L.sh_rv.ok() && L.sh_gv.ok() && L.sh_bv.ok()) {
+      const uint32_t w = l + L.wsil.offset;
+      h.sh = int32_t(out.sh.size() / 27);
+      for (const auto& [m, v] : {std::pair{&L.sh_r, &L.sh_rv}, {&L.sh_g, &L.sh_gv}, {&L.sh_b, &L.sh_bv}})
+        for (int k = 0; k < 9; ++k) out.sh.push_back(F32(w + m->offset + v->offset + 4 * k));
+    }
+  }
+}
+
+void FogBin(HybridFog& fog) {
+  std::memset(&fog, 0, sizeof(fog));
+  for (uint32_t f : g_extras.fog) {
+    if (!IsObject(f) || std::strcmp(ClassName(f), "HeightFogComponent")) continue;
+    const uint32_t cls = U32(f + 0x34);
+    static std::unordered_map<uint32_t, std::array<FieldEx, 7>> layouts;
+    auto [it, fresh] = layouts.try_emplace(cls);
+    auto& L = it->second;
+    if (fresh) {
+      const char* names[7] = {"bEnabled", "LightColor", "LightBrightness", "Density", "Height", "StartDistance",
+                              "ExtinctionDistance"};
+      for (int i = 0; i < 7; ++i) L[i] = FindEx(cls, names[i]);
+    }
+    if (!FieldB(f, L[0])) return;  // the first height fog decides, enabled or not
+    fog.present = 1;
+    float c[3] = {0, 0, 0};
+    if (L[1].ok()) {
+      ColorLayout cl;
+      cl.Init(L[1]);
+      cl.Bytes(f, L[1], c);
+    }
+    const float k = FieldF(f, L[2], 1.f);
+    for (int i = 0; i < 3; ++i) fog.color[i] = (c[i] / 255.f) * k;
+    fog.density = FieldF(f, L[3], 0.f), fog.height = FieldF(f, L[4], 0.f), fog.start = FieldF(f, L[5], 0.f);
+    fog.extinction = FieldF(f, L[6], 1e8f);
+    return;
+  }
+}
+
+// Three numbers of a Color (bytes), Vector or LinearColor struct property, as the JSON writes them.
+void Triple(uint32_t base, const FieldEx& prop, float out[3]) {
+  out[0] = out[1] = out[2] = std::nanf("");
+  if (!prop.ok()) return;
+  const std::string_view type = NameText(U32(prop.sub + 0x2C));
+  const uint32_t at = base + prop.offset;
+  if (type == "Color") {
+    const char* m[3] = {"R", "G", "B"};
+    for (int i = 0; i < 3; ++i)
+      if (const FieldEx f = FindEx(prop.sub, m[i]); f.ok()) out[i] = float(*Raw(at + f.offset));
+  } else {
+    const bool vec = type == "Vector";
+    const char* m[3] = {vec ? "X" : "R", vec ? "Y" : "G", vec ? "Z" : "B"};
+    for (int i = 0; i < 3; ++i)
+      if (const FieldEx f = FindEx(prop.sub, m[i]); f.ok()) out[i] = F32(at + f.offset);
+  }
+}
+
+enum : uint32_t { kPfUber = 1, kPfGod = 2, kPfLsBloom = 4, kPfLsBalance = 8, kPfLsScene = 16, kPfLsTone = 32, kPfLast = 64 };
+
+// The player's post chain and blended settings (LightsPostJson's `post`), as raw numbers.
+void PostBin(HybridLighting& out) {
+  HybridPost& p = out.post;
+  std::memset(&p, 0, sizeof(p));
+  const float nan = std::nanf("");
+  p.material_effect = kHybridNone;
+  p.uber_bloom_scale = p.uber_bloom_threshold = p.ls_bloom_scale = p.ls_bloom_threshold = nan;
+  p.desaturation = p.tone_min = p.tone_max = p.tone_scale = nan;
+  for (float& v : p.balance) v = 255.f;
+  for (int i = 0; i < 3; ++i) p.shadows[i] = p.midtones[i] = p.highlights[i] = nan;
+  for (float& v : p.god) v = nan;
+  p.present = 1;
+  out.post_material = nullptr;
+  const uint32_t engine = Engine();
+  const uint32_t players = IsObject(engine) ? PropRecord(engine, "GamePlayers") : 0;
+  const uint32_t lp = players && U32(engine + U32(players + 0x64) + 4) ? U32(U32(engine + U32(players + 0x64))) : 0;
+  const uint32_t chain = IsObject(lp) ? PropU32(lp, "PlayerPostProcess") : 0;
+  if (IsObject(chain)) {
+    const Field effects = Prop(chain, "Effects");
+    const uint32_t data = effects.ok() ? U32(chain + effects.offset) : 0, n = effects.ok() ? U32(chain + effects.offset + 4) : 0;
+    for (uint32_t i = 0; Readable(data) && i < n && i < 32; ++i) {
+      const uint32_t e = U32(data + 4 * i);
+      if (!IsObject(e)) continue;
+      const uint32_t cls = U32(e + 0x34);
+      const std::string_view name = ClassName(e);
+      if (name == "SfUberPostProcessEffect") {
+        p.flags |= kPfUber;
+        p.uber_bloom_scale = FieldF(e, FindEx(cls, "BloomScale"), nan);
+        p.uber_bloom_threshold = FieldF(e, FindEx(cls, "BloomThreshold"), nan);
+      } else if (name == "MaterialEffect") {
+        const FieldEx m = FindEx(cls, "Material");
+        const uint32_t mat = m.ok() ? U32(e + m.offset) : 0;
+        out.post_material = IsObject(mat) ? Intern(Path(mat)) : nullptr;
+      } else if (name == "SfGodRaysEffect") {
+        if (!FieldB(e, FindEx(cls, "Enabled"))) continue;
+        p.flags |= kPfGod;
+        p.god[0] = FieldF(e, FindEx(cls, "Exposure"), nan);
+        p.god[1] = FieldF(e, FindEx(cls, "DecayPerSample"), nan);
+        p.god[2] = FieldF(e, FindEx(cls, "RayMagnitude"), nan);
+        float c[3];
+        Triple(e, FindEx(cls, "ModulateRayColour"), c);
+        for (int k = 0; k < 3; ++k) p.god[3 + k] = std::isnan(c[k]) ? 255.f : c[k];
+        p.god[6] = FieldF(e, FindEx(cls, "vTextureSpaceLightPointX"), nan);
+        p.god[7] = FieldF(e, FindEx(cls, "vTextureSpaceLightPointY"), nan);
+      }
+    }
+  }
+  if (!IsObject(lp)) return;
+  const FieldEx cur = FindEx(U32(lp + 0x34), "CurrentPPInfo");
+  const FieldEx last = Member(cur, "LastSettings");
+  if (!last.ok()) return;
+  const uint32_t s = lp + cur.offset + last.offset, sc = last.sub;
+  p.flags |= kPfLast;
+  if (FieldB(s, FindEx(sc, "bEnableBloom"))) p.flags |= kPfLsBloom;
+  p.ls_bloom_scale = FieldF(s, FindEx(sc, "Bloom_Scale"), nan);
+  p.ls_bloom_threshold = FieldF(s, FindEx(sc, "Bloom_Threshold"), nan);
+  if (FieldB(s, FindEx(sc, "bEnableColourBalanceEffect"))) {
+    p.flags |= kPfLsBalance;
+    const char* names[3] = {"ColourBalance_Shadows", "ColourBalance_Midtones", "ColourBalance_Highlights"};
+    for (int i = 0; i < 3; ++i) {
+      float c[3];
+      Triple(s, FindEx(sc, names[i]), c);
+      for (int k = 0; k < 3; ++k) p.balance[3 * i + k] = std::isnan(c[k]) ? 255.f : c[k];
+    }
+  }
+  if (FieldB(s, FindEx(sc, "bEnableSceneEffect"))) {
+    p.flags |= kPfLsScene;
+    p.desaturation = FieldF(s, FindEx(sc, "Scene_Desaturation"), nan);
+    Triple(s, FindEx(sc, "Scene_Shadows"), p.shadows);
+    Triple(s, FindEx(sc, "Scene_MidTones"), p.midtones);
+    Triple(s, FindEx(sc, "Scene_HighLights"), p.highlights);
+  }
+  if (FieldB(s, FindEx(sc, "bEnableToneMappingEffect"))) p.flags |= kPfLsTone;
+  p.tone_min = FieldF(s, FindEx(sc, "ToneMapping_MinLuminosity"), nan);
+  p.tone_max = FieldF(s, FindEx(sc, "ToneMapping_MaxLuminosity"), nan);
+  p.tone_scale = FieldF(s, FindEx(sc, "ToneMapping_BrightnessScale"), nan);
+}
+
+bool SameLights(const HybridLighting& a, const HybridLighting& b) {
+  return a.lights.size() == b.lights.size() && a.sh == b.sh && a.paths == b.paths &&
+         (a.lights.empty() || !std::memcmp(a.lights.data(), b.lights.data(), a.lights.size() * sizeof(HybridLight)));
 }
 }  // namespace
 
@@ -1436,21 +1728,57 @@ void Live(uint8_t* base) {
     LiveParticles(st, out);
     out.particles_ms = float(Ms(tp, std::chrono::steady_clock::now()));
   }
-  // Lights, fog and post for n1 (properties read live; the component list comes from the last walk).
+  // Lights, fog and post for n1 (properties read live; the component list comes from the last walk). Binary records
+  // (B-188) unless BOTS_N1_FEED=json; both with BOTS_N1_FEED_VERIFY=1.
   out.lighting.clear();
   out.lighting_ms = 0;
+  out.light_pending = false;
   if (st.feed_every && st.frame % st.feed_every == 0) {
     const auto tl = std::chrono::steady_clock::now();
-    out.lighting = "{\"v\":1";
-    LightsPostJson(out.lighting, world_info, true, st.lighting_builds++ % 16 == 0);
-    out.lighting += '}';
+    const bool fp = st.lighting_builds++ % 16 == 0;
+    if (st.json_feed || st.verify_feed) {
+      out.lighting = "{\"v\":1";
+      LightsPostJson(out.lighting, world_info, true, fp);
+      out.lighting += '}';
+    }
+    if (!st.json_feed) {
+      HybridLighting& nl = st.next_light;
+      nl.Clear();
+      LightsBin(nl, ++st.env_stamp);
+      bool post_changed = false;
+      if (fp) {
+        FogBin(nl.fog);
+        PostBin(nl);
+        post_changed = st.verify_feed || !st.have_fog_post || std::memcmp(&nl.fog, &st.last_fog, sizeof(HybridFog)) ||
+                       std::memcmp(&nl.post, &st.last_post, sizeof(HybridPost)) || nl.post_material != st.last_material;
+      }
+      if (st.verify_feed || !SameLights(nl, st.last_light) || post_changed) {
+        nl.has_fog_post = post_changed;
+        if (post_changed) st.last_fog = nl.fog, st.last_post = nl.post, st.last_material = nl.post_material;
+        st.have_fog_post |= post_changed;
+        st.last_light.lights = nl.lights, st.last_light.sh = nl.sh, st.last_light.paths = nl.paths;
+        out.light = nl;
+        out.light_pending = true;
+      }
+    }
     out.lighting_ms = float(Ms(tl, std::chrono::steady_clock::now()));
   }
   out.frame = ++st.frame;
   out.build_ms = float(Ms(t0, std::chrono::steady_clock::now()));
   std::lock_guard lock(hs->scene_mutex);
-  // Keep a lighting update the renderer has not taken yet when this frame brings none.
+  // Keep a lighting update the renderer has not taken yet when this frame brings none, and fold an unconsumed fog and
+  // post update into a newer lights-only one.
   if (out.lighting.empty() && !hs->scene.lighting.empty()) std::swap(out.lighting, hs->scene.lighting);
+  if (hs->scene.light_pending) {
+    if (!out.light_pending) {
+      std::swap(out.light, hs->scene.light);
+      out.light_pending = true;
+    } else if (hs->scene.light.has_fog_post && !out.light.has_fog_post && !st.verify_feed) {  // (verify: JSON is not merged)
+      out.light.has_fog_post = true;
+      out.light.fog = hs->scene.light.fog, out.light.post = hs->scene.light.post;
+      out.light.post_material = hs->scene.light.post_material;
+    }
+  }
   std::swap(hs->scene, out);
 }
 
