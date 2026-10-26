@@ -171,6 +171,9 @@ struct ClassInfo {
   Kind kind = Kind::kNone;  // kNone: not a PrimitiveComponent
   Extra extra = Extra::kNone;
   const char* name = "";
+  // Per-class property offsets the per-frame walk reads, looked up on first use (the same FindProp a Prop() call does).
+  mutable Field attached, light_env;
+  mutable bool attached_done = false, light_env_done = false;
 };
 
 // Offsets, resolved from the first instance of each class family seen.
@@ -188,7 +191,23 @@ Offsets g_off;
 
 std::unordered_map<uint32_t, ClassInfo> g_classes;
 
+const ClassInfo& ClassifySlow(uint32_t cls);
+// The class map lookup sits on the per-frame walk (every tracked component, every frame, plus the safety-net slice):
+// a small direct-mapped memo in front of it. Map entries never move or go away, so the pointers stay valid.
 const ClassInfo& Classify(uint32_t cls) {
+  struct Slot {
+    uint32_t cls = 0;
+    const ClassInfo* info = nullptr;
+  };
+  static Slot memo[4096];
+  Slot& slot = memo[((cls >> 2) ^ (cls >> 14)) & 4095];
+  if (slot.info && slot.cls == cls) return *slot.info;
+  const ClassInfo& info = ClassifySlow(cls);
+  slot.cls = cls, slot.info = &info;
+  return info;
+}
+
+const ClassInfo& ClassifySlow(uint32_t cls) {
   auto it = g_classes.find(cls);
   if (it != g_classes.end()) return it->second;
   ClassInfo info;
@@ -366,10 +385,35 @@ bool ReadCamera(Camera& cam, uint32_t& world_info_out) {
   return true;
 }
 
+struct LiveComponent;
 struct Primitive {
   uint32_t component;
   Kind kind;
+  // Caches for the per-frame walk: the class last seen on the component and its ClassInfo (Classify), and the
+  // component's LiveState::components entry (that map is never erased from, so the pointer stays valid).
+  uint32_t cls = 0;
+  const ClassInfo* info = nullptr;
+  LiveComponent* live = nullptr;
 };
+
+// The component's class, refreshed when the class pointer changed (a freed component's memory reused).
+const ClassInfo& PrimClass(Primitive& p) {
+  const uint32_t cls = U32(p.component + 0x34);
+  if (cls != p.cls || !p.info) p.cls = cls, p.info = &Classify(cls);
+  return *p.info;
+}
+
+// Remove the entries <gone> says to, keeping order (std::erase_if, but the predicate may update the entry's caches).
+template <typename T, typename F>
+void DropIf(std::vector<T>& v, F gone) {
+  size_t n = 0;
+  for (size_t i = 0; i < v.size(); ++i)
+    if (!gone(v[i])) {
+      if (n != i) v[n] = v[i];
+      ++n;
+    }
+  v.resize(n);
+}
 
 struct Times {
   double enumerate = 0, extract = 0, json = 0, write = 0;
@@ -382,12 +426,13 @@ struct Extras {
 };
 Extras g_extras;
 
+bool Attached(uint32_t component, const ClassInfo& info, uint32_t cls) {
+  if (!info.attached_done) info.attached_done = true, info.attached = FindProp(cls, "bAttached");
+  return info.attached.ok() && (U32(component + info.attached.offset) & info.attached.mask);
+}
 bool Attached(uint32_t component) {
-  static std::unordered_map<uint32_t, Field> by_class;
   const uint32_t cls = U32(component + 0x34);
-  auto it = by_class.find(cls);
-  if (it == by_class.end()) it = by_class.emplace(cls, FindProp(cls, "bAttached")).first;
-  return it->second.ok() && (U32(component + it->second.offset) & it->second.mask);
+  return Attached(component, Classify(cls), cls);
 }
 
 // Every attached primitive component in the object table.
@@ -1729,19 +1774,24 @@ bool BeyondDrawDistance(uint32_t c, const Camera& cam) {
 // checked every frame exactly as before (still readable, same class kind, still attached) and dropped when it fails,
 // so a detached or freed component leaves the lists on the next frame. The lists are kept in object-table order (by
 // UObject Index), the order the full walk produced. The first frame does one full walk.
+bool Trackable(const LiveState& st, Kind kind) {
+  return kind == Kind::kStatic || kind == Kind::kSkeletal || (kind == Kind::kParticle && st.particles) ||
+         (kind == Kind::kSpeedTree && st.trees_on);
+}
+
 bool TrackAdd(LiveState& st, uint32_t o) {
   if (!IsObject(o) || st.known.count(o)) return false;
-  const ClassInfo& ci = Classify(U32(o + 0x34));
+  const uint32_t cls = U32(o + 0x34);
+  const ClassInfo& ci = Classify(cls);
   if (ci.extra != Extra::kNone) {
-    if (!Attached(o)) return false;
+    if (!Attached(o, ci, cls)) return false;
     (ci.extra == Extra::kLight ? st.lights : st.fog).push_back(o);
-  } else if (ci.kind == Kind::kStatic || ci.kind == Kind::kSkeletal || (ci.kind == Kind::kParticle && st.particles) ||
-             (ci.kind == Kind::kSpeedTree && st.trees_on)) {
+  } else if (Trackable(st, ci.kind)) {
     if (!g_off.scene_info.ok() || !U32(o + g_off.scene_info.offset)) return false;
     (ci.kind == Kind::kParticle    ? st.particle_prims
      : ci.kind == Kind::kSpeedTree ? st.tree_prims
                                    : st.prims)
-        .push_back({o, ci.kind});
+        .push_back({o, ci.kind, cls, &ci});
   } else {
     return false;
   }
@@ -1766,17 +1816,21 @@ void Track(LiveState& st) {
     g_added.clear();
   }
   // Drop what was detached, freed or reused since the last frame.
-  auto gone = [&st](const Primitive& p) {
-    const bool g = !Readable(p.component) || Classify(U32(p.component + 0x34)).kind != p.kind ||
-                   !U32(p.component + g_off.scene_info.offset);
+  auto gone = [&st](Primitive& p) {
+    const bool g = !Readable(p.component) || PrimClass(p).kind != p.kind || !U32(p.component + g_off.scene_info.offset);
     if (g) st.known.erase(p.component);
     return g;
   };
-  std::erase_if(st.prims, gone);
-  std::erase_if(st.particle_prims, gone);
-  std::erase_if(st.tree_prims, gone);
+  DropIf(st.prims, gone);
+  DropIf(st.particle_prims, gone);
+  DropIf(st.tree_prims, gone);
   auto gone_extra = [&st](uint32_t o) {
-    const bool g = !IsObject(o) || Classify(U32(o + 0x34)).extra == Extra::kNone || !Attached(o);
+    bool g = !IsObject(o);
+    if (!g) {
+      const uint32_t cls = U32(o + 0x34);
+      const ClassInfo& info = Classify(cls);
+      g = info.extra == Extra::kNone || !Attached(o, info, cls);
+    }
     if (g) st.known.erase(o);
     return g;
   };
@@ -1844,7 +1898,11 @@ void Track(LiveState& st) {
     uint32_t found = 0;
     for (uint32_t i = st.walk_pos; i < end; ++i) {
       const uint32_t o = U32(data + 4 * i);
-      if (o && !st.known.count(o) && TrackAdd(st, o)) ++found;
+      if (!Readable(o)) continue;
+      // Most of the table is not a component TrackAdd would take: skip those on the class before the set lookup.
+      const ClassInfo& info = Classify(U32(o + 0x34));
+      if (info.extra == Extra::kNone && !Trackable(st, info.kind)) continue;
+      if (!st.known.count(o) && TrackAdd(st, o)) ++found;
     }
     st.walk_pos = end;
     if (found) {
@@ -2004,20 +2062,19 @@ void Live(uint8_t* base) {
     std::erase_if(st.prims, [](const Primitive& p) { return p.kind != Kind::kStatic && p.kind != Kind::kSkeletal; });
     st.age = 0;
   } else {
-    auto gone = [](const Primitive& p) {
-      return !Readable(p.component) || Classify(U32(p.component + 0x34)).kind != p.kind ||
-             !U32(p.component + g_off.scene_info.offset);
+    auto gone = [](Primitive& p) {
+      return !Readable(p.component) || PrimClass(p).kind != p.kind || !U32(p.component + g_off.scene_info.offset);
     };
-    std::erase_if(st.prims, gone);
-    std::erase_if(st.particle_prims, gone);
-    std::erase_if(st.tree_prims, gone);
+    DropIf(st.prims, gone);
+    DropIf(st.particle_prims, gone);
+    DropIf(st.tree_prims, gone);
   }
   HybridScene& out = st.building;
   out.instances.clear();
   out.skeletal.clear();
   out.bones.clear();
   out.materials.clear();
-  for (const Primitive& p : st.prims) {
+  for (Primitive& p : st.prims) {
     const uint32_t c = p.component;
     const bool skel = p.kind == Kind::kSkeletal;
     const Field& ref = skel ? g_off.skeletal_mesh_ref : g_off.static_mesh_ref;
@@ -2040,7 +2097,8 @@ void Live(uint8_t* base) {
       mat_count = std::min<uint32_t>(U32(c + g_off.materials.offset + 4), 64);
       if (!Readable(mats)) mats = 0, mat_count = 0;
     }
-    LiveComponent& lc = st.components[c];
+    if (!p.live) p.live = &st.components[c];
+    LiveComponent& lc = *p.live;
     if (lc.name != U32(c + 0x2C) || lc.outer != U32(c + 0x28) || lc.mesh != mesh || lc.mats != mats ||
         lc.mat_count != mat_count) {
       lc.name = U32(c + 0x2C), lc.outer = U32(c + 0x28), lc.mesh = mesh, lc.mats = mats, lc.mat_count = mat_count;
@@ -2078,7 +2136,9 @@ void Live(uint8_t* base) {
       }
     }
     // The owner's light environment (characters, movers, pickups): lit by its composite lights in n1.
-    const uint32_t dle = PropU32(c, "LightEnvironment");
+    const ClassInfo& info = PrimClass(p);
+    if (!info.light_env_done) info.light_env_done = true, info.light_env = FindProp(p.cls, "LightEnvironment");
+    const uint32_t dle = info.light_env.ok() ? U32(c + info.light_env.offset) : 0;
     if (dle != lc.dle) lc.dle = dle, lc.env_path = IsObject(dle) ? Intern(Path(dle)) : nullptr;
     if (!lc.mesh_path) continue;
     if (skel) {  // culled by bounds in n1 (the feed's `rendered` flag flickers)
