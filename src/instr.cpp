@@ -24,17 +24,27 @@
 //   burst <dir> <count>        <count> consecutive presented frames (native renderer; PPM + TSV, as BOTS_CAPTURE_BURST)
 //   dualshot <tag>             hybrid dual render: NNNN-<tag>.port.png / .n1.png in BOTS_HYBRID_DUAL_DIR (needs
 //                              BOTS_HYBRID_DUAL=1, which changes what is drawn: not for benchmarks)
-//   macro move_to x y [z] [ms] [radius] | aim_at x y z [ms] | aim_nearest [ms] | turn <yaw deg> [ms]
-//         | fire [ms] | stop    high-level actions steered every frame from the player state (see docs)
-//   enemies [n]                nearest pawns now (position, distance, bearing, health, class)
-//   inspect pawn|weapon|pc|world|game|camera|engine [filter]   an object's properties (discovery aid)
+//   macro move_to x y [z] [ms] [radius] | path_to x y z|objective|hotspot [ms] [radius] [exact] | aim_at x y z [ms]
+//         | aim_nearest [ms] | turn <yaw deg> [ms] | fire [ms] | stop
+//                              high-level actions steered every frame from the player state (see docs). path_to plans
+//                              a route over the game's collision (a grid search, a few ms per frame), then walks it,
+//                              pressing B when it stands still (weak planks) and replanning around what blocks it. An
+//                              unreachable goal walks to the nearest reachable point (`found` with partial, ends
+//                              `near`) unless `exact`. `path` events: planning, found, smash, replan, arrived, near,
+//                              no_path, stuck, stopped, timeout
+//   enemies [n]                nearest pawns now (position, distance, bearing, health, class, foe, line of sight)
+//   trace x1 y1 z1 x2 y2 z2 [extent] | floor x y [z]    one world collision trace / the floor under a point
+//   pathdrop [uu] | pathflags [N]                   path_to's deepest planned drop (260) / its trace flags
+//   inspect pawn|weapon|pc|world|game|camera|engine|0xADDR [filter]   an object's properties (discovery aid)
+//   objs CLASS [n] | elems 0xOBJ PROP [stride] [n]      live objects of a class / an array's elements
 //   log [n] [filter]           the last log lines
 //   quit                       quit the game cleanly;  close: close this connection;  help
 //
 // Status line (type "status", v 1): t (s since start), pid, phase (boot, precompile, loading, hung, dialog, paused,
-// movie, cutscene, front_end, in_play, menu), phase_s, game {...}, precompile {...}, render {..., n1 {...}}, health {...},
-// input {...}, cpu [...]. Events (type "event"): phase changes, loads, LoadChapter, presenter failures, hitches, builds
-// in play, errors, macro ends, captures. docs: the project's instrumentation notes.
+// movie, cutscene, front_end, in_play, dead, menu), phase_s, game {..., objective {...}, hotspot {...}, prompt {...}}, precompile
+// {...}, render {..., n1 {...}}, health {...}, input {..., human, path {...}}, cpu [...]. Events (type "event"): phase
+// changes, loads, LoadChapter, presenter failures, hitches, builds in play, errors, macro ends, path progress,
+// human_input (keyboard / mouse events the channel didn't send), captures. docs: the project's instrumentation notes.
 #include "instr.h"
 
 #ifdef _WIN32
@@ -72,18 +82,27 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <array>
+#include <unordered_map>
 #include <vector>
 
 #include <rex/cvar.h>
 #include <rex/input/input_driver.h>
 #include <rex/logging.h>
+#include <rex/ppc/context.h>
 #include <rex/system/interfaces/graphics.h>
 #include <rex/ui/presenter.h>
 #include <spdlog/sinks/base_sink.h>
 
 #include "app_quit.h"
 #include "instr_state.h"
+#include "mnk_input.h"
 #include "thread_stats.h"
+
+// UWorld::SingleLineCheck(FCheckResult& Hit, AActor* Source, const FVector& End, const FVector& Start, DWORD
+// TraceFlags, const FVector& Extent, ...): the collision query behind Actor.FastTrace / Trace (called from
+// AActor::execFastTrace at 0x82665AF4). Game thread only.
+extern "C" void sub_82677C00(PPCContext& __restrict ctx, uint8_t* base);
 
 namespace bots::instr {
 using rex::X_RESULT;
@@ -256,6 +275,100 @@ bool PropVec(uint32_t o, const char* name, float* v) {
   for (int i = 0; i < 3; ++i) v[i] = F32(o + f.offset + 4 * i);
   return true;
 }
+// A member of a struct type (UStructProperty +0x84 is the struct), e.g. C1SeqVar_Objective.Objective.WaypointActor.
+Field StructMember(uint32_t object, const char* struct_prop, const char* member) {
+  const Field s = Prop(object, struct_prop);
+  if (!s.ok() || std::strcmp(ClassName(s.prop), "StructProperty")) return {};
+  static std::map<std::pair<uint32_t, std::string>, Field> cache;
+  const uint32_t st = U32(s.prop + 0x84);
+  auto key = std::make_pair(st, std::string(member));
+  auto it = cache.find(key);
+  if (it == cache.end()) it = cache.emplace(key, FindProp(st, member)).first;
+  Field f = it->second;
+  if (f.ok()) f.offset += s.offset;
+  return f;
+}
+// An FString (TArray<TCHAR>, big-endian UTF-16) at `at`, as ASCII-ish text.
+std::string FStr(uint32_t at, size_t max = 120) {
+  const uint32_t data = U32(at), count = U32(at + 4);
+  std::string s;
+  for (uint32_t i = 0; Readable(data & ~3u) && i + 1 < count && i < max; ++i) {
+    const uint8_t* c = Raw(data + 2 * i);
+    s += c[0] ? '?' : char(c[1]);
+  }
+  return s;
+}
+void W32(uint32_t a, uint32_t v) {
+  v = __builtin_bswap32(v);
+  std::memcpy(Raw(a), &v, 4);
+}
+void WF32(uint32_t a, float f) {
+  uint32_t v;
+  std::memcpy(&v, &f, 4);
+  W32(a, v);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Collision traces: a call into the game's own UWorld::SingleLineCheck, on the game thread, from inside the input
+// poll hook whose guest context GameTick receives. The call runs on a frame carved below the current guest stack
+// pointer, and the whole context is restored afterwards.
+
+constexpr uint32_t kGWorld = 0x8381D238;  // GWorld (UWorld*), as AActor::execFastTrace loads it
+// FastTrace's flags: movers, volumes, level geometry, stop at any hit, terrain; no pawns.
+constexpr uint32_t kTraceWorld = 0x2286;
+
+PPCContext* g_ctx = nullptr;  // set while GameTick runs (game thread)
+std::atomic<uint64_t> g_traces{0};
+
+struct Hit {
+  bool hit = false;
+  float loc[3] = {}, normal[3] = {}, time = 1;
+  uint32_t actor = 0;
+};
+
+// False when no trace could be made (not on the game thread inside GameTick, or no world).
+bool Trace(const float start[3], const float end[3], const float extent[3], uint32_t source, Hit& out,
+           uint32_t flags = kTraceWorld) {
+  if (!g_ctx || !g_base) return false;
+  const uint32_t world = U32(kGWorld);
+  if (!Readable(world)) return false;
+  PPCContext& ctx = *g_ctx;
+  const PPCContext saved = ctx;
+  const uint32_t sp = (saved.r1.u32 - 0x1000) & ~0xFu;  // callee frames go below sp; our buffers sit above it
+  const uint32_t hit = sp + 0x400, v_end = sp + 0x480, v_start = sp + 0x490, v_ext = sp + 0x4A0;
+  for (uint32_t i = 0; i < 0x80; i += 4) W32(hit + i, 0);
+  WF32(hit + 0x20, 1.0f);  // Time
+  W32(hit + 0x24, 0xFFFFFFFFu);  // Item
+  W32(hit + 0x34, 0xFFFFFFFFu);
+  W32(hit + 0x50, 0xFFFFFFFFu);
+  for (int i = 0; i < 3; ++i)
+    WF32(v_end + 4 * i, end[i]), WF32(v_start + 4 * i, start[i]), WF32(v_ext + 4 * i, extent ? extent[i] : 0.0f);
+  ctx.r1.u64 = sp;
+  ctx.r3.u64 = world;
+  ctx.r4.u64 = hit;
+  ctx.r5.u64 = source;
+  ctx.r6.u64 = v_end;
+  ctx.r7.u64 = v_start;
+  ctx.r8.u64 = flags;
+  ctx.r9.u64 = v_ext;
+  ctx.r10.u64 = 0;
+  sub_82677C00(ctx, g_base);
+  ++g_traces;
+  out.actor = U32(hit + 4);
+  out.hit = out.actor != 0;
+  for (int i = 0; i < 3; ++i) out.loc[i] = F32(hit + 8 + 4 * i), out.normal[i] = F32(hit + 0x14 + 4 * i);
+  out.time = F32(hit + 0x20);
+  ctx = saved;
+  return true;
+}
+
+// The floor under (x, y), searching from z_from down to z_to. NaN when there is none (or no trace could be made).
+float Ground(float x, float y, float z_from, float z_to, uint32_t source) {
+  const float a[3] = {x, y, z_from}, b[3] = {x, y, z_to};
+  Hit h;
+  if (!Trace(a, b, nullptr, source, h) || !h.hit) return std::nanf("");
+  return h.loc[2];
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // The game-thread snapshot
@@ -267,6 +380,31 @@ struct Enemy {
   std::string cls;
   bool player;
   int team;  // 1 the player's team, 0 another team (enemy), -1 no team found
+  bool foe;  // worth shooting: another team, or no team but a turret / insurgent (team -1 is mostly scenery)
+  int los = -1;  // line of sight from the camera: 1 clear, 0 blocked, -1 not checked
+};
+
+// Team -1 pawns are mostly scenery (helicopter drop-offs, props with health); turrets and insurgents are the
+// exceptions seen so far.
+bool IsFoe(const Enemy& e) {
+  if (e.player || e.team == 1) return false;
+  return e.team == 0 || e.cls.find("Turret") != std::string::npos || e.cls.find("Insurgent") != std::string::npos;
+}
+
+struct Objective {
+  bool present = false;
+  float pos[3] = {};
+  std::string label, actor, source;  // source: list (ObjectiveList) or marker (ObjectiveMarkers only)
+  int priority = 0, state = 0, open = 0;  // EObjectivePriority (1 primary), EObjectiveState (1 incomplete)
+};
+
+// The nearest G-Unit hot spot (GUnitMarker): the glowing spots where the Action button (A) climbs down, kicks a door,
+// boosts a partner... `kind` is its material without "_MIC" (DropDown, ...). Level progress often needs one.
+struct Hotspot {
+  bool present = false;
+  float pos[3] = {};
+  std::string actor, kind;
+  int count = 0;  // activatable hot spots in the world
 };
 
 struct Snap {
@@ -290,6 +428,11 @@ struct Snap {
   int levels_pending = 0;        // streaming levels asked for but not loaded / shown yet
   int objectives = 0;
   bool checkpoint_pending = false;
+  Objective objective;
+  Hotspot hotspot;
+  int32_t clip = -1, clip_max = -1, reserve = -1;  // the primary fire mode's AmmoInClip / MaxAmmoInClip; carried ammo
+  bool dead = false;                                // the death screen is up (C1PlayerController.DeathScreenActive)
+  bool prompt_counterkill = false, prompt_tutorial = false;  // the counter-kill button prompt / a tutorial box
 };
 
 std::mutex g_snap_mutex;
@@ -362,10 +505,97 @@ void ReadEnemies(Snap& s, uint32_t world_info, uint32_t own_pawn) {
     e.player = controller && ClassChainHas(controller, "PlayerController");
     const uint32_t team = TeamOf(p);
     e.team = !team ? -1 : team == own_team ? 1 : 0;
+    e.foe = IsFoe(e);
     s.enemies.push_back(std::move(e));
   }
   std::sort(s.enemies.begin(), s.enemies.end(), [](const Enemy& a, const Enemy& b) { return a.dist < b.dist; });
   if (s.enemies.size() > 16) s.enemies.resize(16);
+  // Line of sight from the camera to the nearest few foes (one world trace each; pawns don't block).
+  int checked = 0;
+  for (auto& e : s.enemies) {
+    if (!e.foe || checked == 4) continue;
+    ++checked;
+    Hit h;
+    if (Trace(from, e.pos, nullptr, own_pawn, h)) e.los = h.hit ? 0 : 1;
+  }
+}
+
+// The objective the HUD's marker points at: the first incomplete entry of C1PlayerController.ObjectiveList with a
+// waypoint (primary first), else the first ObjectiveMarkers actor. The list stays empty until the level's script adds
+// one (in 11010: after the counter-kill tutorial).
+void ReadObjective(Snap& s, uint32_t pc) {
+  Objective& ob = s.objective;
+  if (const Field list = Prop(pc, "ObjectiveList"); list.ok()) {
+    const uint32_t data = U32(pc + list.offset), count = U32(pc + list.offset + 4);
+    int best = 1 << 20;
+    for (uint32_t i = 0; Readable(data) && i < count && i < 64; ++i) {
+      const uint32_t o = U32(data + 4 * i);
+      const Field st = Prop(o, "ObjectiveState");
+      if (!Readable(o) || !st.ok()) continue;
+      const int state = *Raw(o + st.offset);
+      if (state != 1) continue;  // OBJECTIVE_Incomplete
+      ++ob.open;
+      const uint32_t var = PropObj(o, "ObjectiveVar");
+      if (!var) continue;
+      const Field wa = StructMember(var, "Objective", "WaypointActor");
+      const Field pr = StructMember(var, "Objective", "ObjectivePriority");
+      const uint32_t actor = wa.ok() ? U32(var + wa.offset) : 0;
+      const int prio = pr.ok() ? *Raw(var + pr.offset) : 0;
+      float pos[3] = {};
+      const bool located = Readable(actor) && PropVec(actor, "Location", pos);
+      const int rank = (located ? 0 : 100) + (prio == 1 ? 0 : 10 + prio) + int(i);
+      if (rank >= best) continue;
+      best = rank;
+      ob.present = located;
+      std::memcpy(ob.pos, pos, sizeof(pos));
+      ob.priority = prio, ob.state = state;
+      ob.actor = located ? ObjName(actor) : "";
+      ob.source = "list";
+      if (const Field d = StructMember(var, "Objective", "Description"); d.ok()) ob.label = FStr(var + d.offset);
+    }
+  }
+  if (ob.present) return;
+  if (const Field m = Prop(pc, "ObjectiveMarkers"); m.ok() && U32(pc + m.offset + 4)) {
+    const uint32_t actor = U32(U32(pc + m.offset));  // HighlightedObject {Actor Actor; HighlightInfo Info}
+    if (Readable(actor) && PropVec(actor, "Location", ob.pos)) ob.present = true, ob.actor = ObjName(actor), ob.source = "marker";
+  }
+}
+
+template <typename Fn>
+void ForEachObject(const char* cls, Fn&& fn);
+
+// GUnitMarker actors are found by a walk of the object table (a few ms), so the list is cached and refreshed every
+// 5 s or on a map change; the per-sample work is only reading the cached actors.
+void ReadHotspot(Snap& s) {
+  static std::vector<uint32_t> markers;
+  static uint64_t next_scan = 0;
+  static std::string scanned_map;
+  if (s.at_us >= next_scan || s.map != scanned_map) {
+    markers.clear();
+    ForEachObject("GUnitMarker", [](uint32_t o) {
+      const std::string n = ObjName(o);
+      if (n.rfind("Default__", 0) != 0 && n.find("Arc") == std::string::npos) markers.push_back(o);
+    });
+    next_scan = s.at_us + 5000000;
+    scanned_map = s.map;
+  }
+  Hotspot& h = s.hotspot;
+  float best = 0;
+  for (const uint32_t o : markers) {
+    float p[3];
+    if (!Readable(o) || std::strcmp(ClassName(o), "GUnitMarker") || !PropBool(o, "bIsActivatable") || PropBool(o, "bHidden") ||
+        PropBool(o, "bDestroyed") || !PropVec(o, "Location", p))
+      continue;
+    ++h.count;
+    const float dx = p[0] - s.pos[0], dy = p[1] - s.pos[1], dz = p[2] - s.pos[2];
+    const float d = dx * dx + dy * dy + dz * dz;
+    if (h.present && d >= best) continue;
+    h.present = true, best = d;
+    std::memcpy(h.pos, p, sizeof(p));
+    h.actor = ObjName(o);
+    h.kind = ObjName(PropObj(o, "SharedMaterialInstance_base"));
+    if (const size_t k = h.kind.rfind("_MIC"); k != std::string::npos) h.kind.resize(k);
+  }
 }
 
 uint32_t LocalController() {
@@ -407,6 +637,17 @@ void Sample(Snap& s, bool enemies) {
     }
   }
   s.checkpoint_pending = PropBool(pc, "pending_load_checkpoint");
+  ReadObjective(s, pc);
+  s.dead = PropBool(pc, "DeathScreenActive");
+  if (const uint32_t hud = PropObj(pc, "myHUD")) {
+    float opacity = 0;
+    const uint32_t button = PropObj(hud, "CounterKillButton");
+    s.prompt_counterkill = button && !PropBool(button, "bHidden") && PropFloat(button, "Opacity", opacity) && opacity > 0.05f;
+    // The tutorial box (HudWidget_Tutorial) fades in and out by Opacity; its bActive stays false.
+    const uint32_t tut = PropObj(hud, "TutorialWindow");
+    opacity = 0;
+    s.prompt_tutorial = tut && !PropBool(tut, "bHidden") && PropFloat(tut, "Opacity", opacity) && opacity > 0.05f;
+  }
   if (const Field list = Prop(pc, "ObjectiveList"); list.ok()) s.objectives = int32_t(U32(pc + list.offset + 4));
   s.cinematic = PropBool(pc, "bCinematicMode");
   if (const uint32_t camera = PropObj(pc, "PlayerCamera")) {
@@ -436,9 +677,25 @@ void Sample(Snap& s, bool enemies) {
           s.ammo_prop = name;
           break;
         }
+      // Clip and carried ammo: the primary fire mode's AmmoInClip, and the inventory items of its AmmoType class
+      // (CurrentAmount). The HUD shows them as "clip|reserve".
+      const Field modes = Prop(weapon, "FireModeList");
+      const uint32_t mode = modes.ok() && U32(weapon + modes.offset + 4) ? U32(U32(weapon + modes.offset)) : 0;
+      if (Readable(mode) && PropInt(mode, "AmmoInClip", s.clip)) {
+        PropInt(mode, "MaxAmmoInClip", s.clip_max);
+        if (const uint32_t ammo_class = PropObj(mode, "AmmoType")) {
+          s.reserve = 0;
+          uint32_t item = PropObj(PropObj(pawn, "InvManager"), "InventoryChain");
+          for (int n = 0; item && n < 64; ++n, item = PropObj(item, "Inventory")) {
+            int32_t amount = 0;
+            if (U32(item + 0x34) == ammo_class && PropInt(item, "CurrentAmount", amount)) s.reserve += amount;
+          }
+        }
+      }
     }
   }
   if (enemies && world_info) ReadEnemies(s, world_info, pawn);
+  if (enemies && pawn) ReadHotspot(s);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -607,13 +864,51 @@ void RunJobs() {
   g_job_cv.notify_all();
 }
 
+// UObject::GObjObjects, a TArray<UObject*> in the image's data whose entries' Index (+0x04) equal their position (as
+// in scene_feed.cpp). Found on first use: only discovery commands and the navigation graph walk the table.
+uint32_t ObjectTable() {
+  static uint32_t table = 0;
+  if (table) return table;
+  for (uint32_t a = 0x83000000; a + 12 <= 0x839C0000; a += 4) {
+    const uint32_t data = U32(a), count = U32(a + 4), max = U32(a + 8);
+    if (!Readable(data) || count < 1000 || count > 4000000 || max < count || max > 8000000) continue;
+    int good = 0;
+    for (uint32_t i = 1; i < 64 && good >= 0; ++i)
+      if (const uint32_t o = U32(data + 4 * i)) good = Readable(o) && U32(o + 4) == i ? good + 1 : -1;
+    if (good >= 32) return table = a;
+  }
+  return 0;
+}
+
+// Calls fn(object) for every live object whose class chain has a class named exactly `cls`.
+template <typename Fn>
+void ForEachObject(const char* cls, Fn&& fn) {
+  const uint32_t t = ObjectTable();
+  if (!t) return;
+  const uint32_t data = U32(t), count = U32(t + 4);
+  std::unordered_map<uint32_t, bool> is;  // class object -> matches
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint32_t o = U32(data + 4 * i), c = Readable(o) ? U32(o + 0x34) : 0;
+    if (!Readable(c)) continue;
+    auto it = is.find(c);
+    if (it == is.end()) {
+      bool m = false;
+      for (uint32_t k = c, d = 0; Readable(k) && d < 32 && !m; k = U32(k + 0x3C), ++d) m = !std::strcmp(NameText(U32(k + 0x2C)), cls);
+      it = is.emplace(c, m).first;
+    }
+    if (it->second) fn(o);
+  }
+}
+
 // Properties of an object: name, type and (for scalar types) value.
-std::string Inspect(uint32_t o, const std::string& filter) {
-  if (!Readable(o)) return "{\"ok\":false,\"error\":\"no such object\"}";
-  std::string out = "{\"ok\":true,\"object\":\"" + Escape(ObjName(o)) + "\",\"class\":\"" + Escape(ClassName(o)) +
-                    "\",\"props\":[";
+// `cls` is the object's class, or for a struct value at `o`, the struct (UStructProperty +0x84 Struct).
+std::string Inspect(uint32_t o, const std::string& filter, uint32_t cls = 0) {
+  if (!Readable(o & ~3u)) return "{\"ok\":false,\"error\":\"no such object\"}";
+  const bool is_struct = cls != 0;
+  std::string out = "{\"ok\":true,\"object\":\"" + Escape(is_struct ? std::string(NameText(U32(cls + 0x2C))) : ObjName(o)) +
+                    "\",\"class\":\"" + Escape(is_struct ? "struct" : ClassName(o)) + "\",\"props\":[";
   bool first = true;
-  uint32_t cls = U32(o + 0x34);
+  if (!cls) cls = U32(o + 0x34);
   for (int depth = 0; Readable(cls) && depth < 16; cls = U32(cls + 0x3C), ++depth)
     for (uint32_t f = U32(cls + 0x50), n = 0; Readable(f) && n < 4096; f = U32(f + 0x40), ++n) {
       const std::string type = ClassName(f);
@@ -636,7 +931,9 @@ std::string Inspect(uint32_t o, const std::string& filter) {
         value = std::to_string(*Raw(at));
       } else if (type == "ObjectProperty" || type == "ClassProperty" || type == "ComponentProperty") {
         const uint32_t v = U32(at);
-        value = Readable(v) ? "\"" + Escape(ObjName(v)) + ":" + Escape(ClassName(v)) + "\"" : "null";
+        char addr[16];
+        std::snprintf(addr, sizeof(addr), "@%08X", v);
+        value = Readable(v) ? "\"" + Escape(ObjName(v)) + ":" + Escape(ClassName(v)) + addr + "\"" : "null";
       } else if (type == "NameProperty") {
         value = "\"" + Escape(NameText(U32(at))) + "\"";
       } else if (type == "StrProperty") {
@@ -655,6 +952,346 @@ std::string Inspect(uint32_t o, const std::string& filter) {
       out += "[\"" + Escape(name) + "\",\"" + type + "\"" + (value.empty() ? "" : "," + value) + "]";
     }
   return out + "]}";
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// path_to. The game's AI walks its own navmeshes, and the UE3 path network is empty (NavigationPoints without edges),
+// so paths come from a grid search over the game's collision: A* on 100-unit cells whose nodes are floor points (a
+// downward trace), joined when the step up is climbable and a pawn-sized box sweeps between them. The search runs on
+// the game thread for a few ms per frame (BOTS_INSTR_PATH_MS). The pad then walks the waypoints, skips ahead whenever
+// a later one is in clear reach, and replans (avoiding the step that failed) when it stops making progress.
+
+constexpr float kCell = 100, kZBucket = 80, kMaxRise = 110, kBodyZ = 90, kReach = 80;
+// The deepest step down a path takes (`pathdrop N`). Long drops cost extra, so stairs win when there are any.
+std::atomic<float> g_max_drop{260};
+constexpr float kBodyExtent[3] = {22, 22, 40};
+// Walkability traces: the world plus volumes and blocking volumes (stairs are often a BlockingVolume ramp over a mesh
+// without collision). Floor traces take the nearest hit, not the first one found (no StopAtAnyHit, 0x200).
+std::atomic<uint32_t> g_walk_flags{kTraceWorld | 0x08 | 0x40};
+uint32_t FloorFlags() { return g_walk_flags.load(std::memory_order_relaxed) & ~0x200u; }
+constexpr int kMaxExpansions = 30000, kMaxReplans = 3;
+constexpr uint64_t kPlanLimitUs = 20000000, kStuckUs = 2500000, kSkipUs = 150000;
+
+// The floor under (x, y) between z_from and z_to; NaN for none, a start inside geometry, or a slope too steep.
+float Floor(float x, float y, float z_from, float z_to, uint32_t source) {
+  const float a[3] = {x, y, z_from}, b[3] = {x, y, z_to};
+  Hit h;
+  if (!Trace(a, b, nullptr, source, h, FloorFlags()) || !h.hit || h.time < 0.01f || h.normal[2] < 0.6f)
+    return std::nanf("");
+  return h.loc[2];
+}
+
+// A pawn-sized box from floor point a to floor point b, at body height above the higher of the two: true when clear.
+bool Sweep(const float a[3], const float b[3], uint32_t source) {
+  const float z = std::max(a[2], b[2]) + kBodyZ;
+  const float s[3] = {a[0], a[1], z}, e[3] = {b[0], b[1], z};
+  Hit h;
+  return Trace(s, e, kBodyExtent, source, h, g_walk_flags.load(std::memory_order_relaxed)) && !h.hit;
+}
+
+float Dist(const float a[3], const float b[3]) {
+  const float dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+  return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+float DistXY(const float a[3], const float b[3]) {
+  const float dx = a[0] - b[0], dy = a[1] - b[1];
+  return std::sqrt(dx * dx + dy * dy);
+}
+
+struct PathState {
+  // The request (macro)
+  bool active = false;
+  bool near_ok = true;  // when the goal can't be reached, walk to the reachable point nearest it ("near")
+  float goal[3] = {}, radius = 150;
+  uint64_t gen = 0;
+  // Progress, for the status and events
+  std::string state = "idle";  // planning, following; then arrived, near, no_path, stuck, timeout, stopped
+  bool partial = false;        // following a path to the nearest reachable point, not to the goal
+  bool done = false;           // reached a final state: the macro ends
+  std::vector<std::array<float, 3>> wps;
+  size_t i = 0;
+  int replans = 0, expansions = 0;
+  int no_floor = 0, too_high = 0, swept_out = 0;  // rejected steps, this search
+  float left = 0;  // units along the remaining waypoints
+  // The search (game thread)
+  struct Node {
+    float p[3];
+    uint64_t parent;
+    float g;
+    bool closed;
+  };
+  std::unordered_map<uint64_t, Node> nodes;
+  std::unordered_map<uint64_t, float> floors;  // (cell, z bucket searched from) -> floor z
+  std::vector<std::pair<float, uint64_t>> open;  // a heap on f
+  uint64_t start_key = 0, plan_start_us = 0;
+  float goal_floor = 0, start_floor = 0;
+  std::vector<uint64_t> blocked;  // cell pairs (xy) whose step failed when walked
+  // Following
+  float check_pos[3] = {};
+  uint64_t check_us = 0, skip_us = 0;
+  bool smashed = false;      // already tried melee (B) at this standstill: weak planks and crates break to it
+  uint64_t smash_until = 0;  // Steer holds B until then
+};
+std::mutex g_path_mutex;
+PathState g_path;
+
+uint64_t CellXY(int ix, int iy) { return uint64_t(uint32_t(ix + (1 << 20)) & 0x1FFFFF) << 21 | (uint32_t(iy + (1 << 20)) & 0x1FFFFF); }
+uint64_t NodeKey(int ix, int iy, float z) {
+  return CellXY(ix, iy) << 20 | (uint32_t(int(std::lround(z / kZBucket)) + (1 << 19)) & 0xFFFFF);
+}
+int CellOf(float v) { return int(std::lround(v / kCell)); }
+uint64_t EdgeKey(int ax, int ay, int bx, int by) {
+  const uint64_t a = CellXY(ax, ay), b = CellXY(bx, by);
+  return std::min(a, b) * 0x9E3779B97F4A7C15ull ^ std::max(a, b);
+}
+
+std::string PathEvent(const PathState& ps, const char* state, std::string extra = {}) {
+  char buf[160];
+  std::snprintf(buf, sizeof(buf), "\"state\":\"%s\",\"replans\":%d,\"expansions\":%d,\"goal\":[%.0f,%.0f,%.0f]", state,
+                ps.replans, ps.expansions, ps.goal[0], ps.goal[1], ps.goal[2]);
+  return buf + (extra.empty() ? "" : "," + extra);
+}
+
+void PathFinish(PathState& ps, const char* state, std::string extra = {}) {
+  ps.state = state;
+  ps.done = true;
+  Event("path", PathEvent(ps, state, std::move(extra)));
+}
+
+void PathBeginPlan(PathState& ps, const float pos[3], uint32_t pawn) {
+  ps.nodes.clear();
+  ps.floors.clear();
+  ps.open.clear();
+  ps.wps.clear();
+  ps.i = 0;
+  ps.expansions = ps.no_floor = ps.too_high = ps.swept_out = 0;
+  ps.partial = false;
+  ps.state = "planning";
+  ps.plan_start_us = NowUs();
+  ps.start_floor = Floor(pos[0], pos[1], pos[2], pos[2] - 400, pawn);
+  if (std::isnan(ps.start_floor)) ps.start_floor = pos[2] - kBodyZ;
+  ps.goal_floor = Floor(ps.goal[0], ps.goal[1], ps.goal[2] + 60, ps.goal[2] - 600, pawn);
+  if (std::isnan(ps.goal_floor)) ps.goal_floor = ps.goal[2];
+  const float p[3] = {pos[0], pos[1], ps.start_floor};
+  ps.start_key = NodeKey(CellOf(p[0]), CellOf(p[1]), p[2]);
+  ps.nodes[ps.start_key] = {{p[0], p[1], p[2]}, 0, 0, false};
+  const float goal[3] = {ps.goal[0], ps.goal[1], ps.goal_floor};
+  ps.open.push_back({Dist(p, goal), ps.start_key});
+  Event("path", PathEvent(ps, "planning"));
+}
+
+// Waypoints from the start to node `key` (then `last`, if given); starts following them.
+void PathAdopt(PathState& ps, uint64_t key, const float* last) {
+  std::vector<std::array<float, 3>> back;
+  if (last) back.push_back({last[0], last[1], last[2]});
+  for (uint64_t k = key; k && k != ps.start_key; k = ps.nodes[k].parent) {
+    const auto& n = ps.nodes[k];
+    back.push_back({n.p[0], n.p[1], n.p[2]});
+  }
+  ps.wps.assign(back.rbegin(), back.rend());
+  ps.i = 0;
+  ps.state = "following";
+  ps.check_us = 0;
+  ps.smashed = false;
+}
+
+// One frame's share of the search. True when it ended (found or not).
+bool PathSearch(PathState& ps, uint32_t pawn, uint64_t budget_us) {
+  const uint64_t t0 = NowUs();
+  const float goal[3] = {ps.goal[0], ps.goal[1], ps.goal_floor};
+  const auto cmp = [](const auto& a, const auto& b) { return a.first > b.first; };
+  while (NowUs() - t0 < budget_us) {
+    if (ps.open.empty() || ps.expansions >= kMaxExpansions || NowUs() - ps.plan_start_us > kPlanLimitUs) {
+      // What the search reached, for debugging: the explored floor points nearest the goal.
+      std::vector<std::array<float, 3>> seen;
+      for (const auto& [k, n] : ps.nodes)
+        if (n.closed) seen.push_back({n.p[0], n.p[1], n.p[2]});
+      std::sort(seen.begin(), seen.end(),
+                [&](const auto& x, const auto& y) { return Dist(x.data(), goal) < Dist(y.data(), goal); });
+      std::string pts = "[";
+      for (size_t k = 0; k < seen.size() && k < 12; ++k) {
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), "%s[%.0f,%.0f,%.0f]", k ? "," : "", seen[k][0], seen[k][1], seen[k][2]);
+        pts += buf;
+      }
+      char extra[160];
+      std::snprintf(extra, sizeof(extra), "\"no_floor\":%d,\"too_high\":%d,\"blocked\":%d,\"nearest\":", ps.no_floor,
+                    ps.too_high, ps.swept_out);
+      const std::string why = (ps.open.empty() ? Str("why", "exhausted") : Str("why", "limit")) + "," + extra + pts + "]";
+      // The goal is out of reach (another floor with no way found, behind a door the script hasn't opened): head for
+      // the explored point nearest it instead, if that gets us anywhere.
+      uint64_t best = 0;
+      float best_d = 0;
+      for (const auto& [k, n] : ps.nodes)
+        if (n.closed && (!best || Dist(n.p, goal) < best_d)) best = k, best_d = Dist(n.p, goal);
+      const auto& start = ps.nodes[ps.start_key];
+      if (!ps.near_ok || !best || best == ps.start_key || Dist(ps.nodes[best].p, start.p) < kReach) {
+        PathFinish(ps, "no_path", why);
+        return true;
+      }
+      PathAdopt(ps, best, nullptr);
+      ps.partial = true;
+      Event("path", PathEvent(ps, "found", "\"partial\":true,\"n\":" + std::to_string(ps.wps.size()) + "," + why));
+      return true;
+    }
+    std::pop_heap(ps.open.begin(), ps.open.end(), cmp);
+    const uint64_t key = ps.open.back().second;
+    ps.open.pop_back();
+    auto& node = ps.nodes[key];
+    if (node.closed) continue;
+    node.closed = true;
+    ++ps.expansions;
+    const float a[3] = {node.p[0], node.p[1], node.p[2]};
+    const float ag = node.g;
+    // Done: within reach of the goal and the step to it is clear.
+    if (DistXY(a, goal) <= std::max(ps.radius, kCell * 0.8f) && std::fabs(a[2] - goal[2]) < 120 &&
+        (DistXY(a, goal) < 40 || Sweep(a, goal, pawn))) {
+      PathAdopt(ps, key, goal);
+      std::string pts = "[";
+      for (const auto& w : ps.wps) {
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), "%s[%.0f,%.0f,%.0f]", pts.size() > 1 ? "," : "", w[0], w[1], w[2]);
+        pts += buf;
+      }
+      char extra[96];
+      std::snprintf(extra, sizeof(extra), "\"n\":%zu,\"ms\":%.0f,\"traces\":%llu,", ps.wps.size(),
+                    double(NowUs() - ps.plan_start_us) / 1000, static_cast<unsigned long long>(g_traces.load()));
+      Event("path", PathEvent(ps, "found", extra + std::string("\"waypoints\":") + pts + "]"));
+      return true;
+    }
+    const int ax = CellOf(a[0]), ay = CellOf(a[1]);
+    const int az = int(std::lround(a[2] / kZBucket));
+    for (int d = 0; d < 8; ++d) {
+      static constexpr int kDx[8] = {1, -1, 0, 0, 1, 1, -1, -1}, kDy[8] = {0, 0, 1, -1, 1, -1, 1, -1};
+      const int bx = ax + kDx[d], by = ay + kDy[d];
+      if (std::find(ps.blocked.begin(), ps.blocked.end(), EdgeKey(ax, ay, bx, by)) != ps.blocked.end()) continue;
+      const float x = bx * kCell, y = by * kCell;
+      const uint64_t fkey = CellXY(bx, by) << 20 | uint32_t(az + (1 << 19));
+      float fz;
+      if (auto it = ps.floors.find(fkey); it != ps.floors.end()) {
+        fz = it->second;
+      } else {
+        fz = Floor(x, y, a[2] + kMaxRise + 20, a[2] - g_max_drop.load(std::memory_order_relaxed), pawn);
+        ps.floors[fkey] = fz;
+      }
+      if (std::isnan(fz) || fz - a[2] > kMaxRise) {
+        ++(std::isnan(fz) ? ps.no_floor : ps.too_high);
+        continue;
+      }
+      const uint64_t bkey = NodeKey(bx, by, fz);
+      auto it = ps.nodes.find(bkey);
+      const float b[3] = {x, y, fz};
+      const float g = ag + Dist(a, b) + std::max(0.0f, a[2] - fz - kMaxRise) * 2;
+      if (it != ps.nodes.end() && (it->second.closed || it->second.g <= g)) continue;
+      if (!Sweep(a, b, pawn)) {
+        ++ps.swept_out;
+        continue;
+      }
+      ps.nodes[bkey] = {{x, y, fz}, key, g, false};
+      ps.open.push_back({g + 1.2f * Dist(b, goal), bkey});
+      std::push_heap(ps.open.begin(), ps.open.end(), cmp);
+    }
+  }
+  return false;
+}
+
+// Game thread, every frame while a path_to macro runs.
+void PathTick(uint64_t now) {
+  std::lock_guard lock(g_path_mutex);
+  PathState& ps = g_path;
+  if (!ps.active || ps.done) return;
+  const uint32_t pc = LocalController();
+  const uint32_t pawn = pc ? PropObj(pc, "Pawn") : 0;
+  float pos[3];
+  if (!pawn || !PropVec(pawn, "Location", pos)) return;  // no pawn (cutscene, death): wait
+  static const uint64_t budget = [] {
+    const char* v = std::getenv("BOTS_INSTR_PATH_MS");
+    return uint64_t(std::clamp(v && *v ? std::atof(v) : 4.0, 0.5, 50.0) * 1000);
+  }();
+  if (ps.state == "planning" && ps.nodes.empty()) PathBeginPlan(ps, pos, pawn);
+  if (ps.state == "planning") {
+    PathSearch(ps, pawn, budget);
+    return;
+  }
+  if (ps.state != "following") return;
+  const float feet[3] = {pos[0], pos[1], pos[2] - kBodyZ};
+  const float goal[3] = {ps.goal[0], ps.goal[1], ps.goal_floor};
+  if (DistXY(pos, ps.goal) <= ps.radius && std::fabs(feet[2] - goal[2]) < 160) return PathFinish(ps, "arrived");
+  while (ps.i < ps.wps.size() && DistXY(pos, ps.wps[ps.i].data()) < kReach && std::fabs(feet[2] - ps.wps[ps.i][2]) < 160)
+    ++ps.i;
+  // Skip ahead to the farthest of the next few waypoints that is in clear reach.
+  if (now - ps.skip_us > kSkipUs && ps.i + 1 < ps.wps.size()) {
+    ps.skip_us = now;
+    const float here = Floor(pos[0], pos[1], pos[2], pos[2] - 400, pawn);
+    const float from[3] = {pos[0], pos[1], std::isnan(here) ? feet[2] : here};
+    for (size_t j = std::min(ps.wps.size() - 1, ps.i + 5); j > ps.i; --j) {
+      const float* w = ps.wps[j].data();
+      if (std::fabs(w[2] - from[2]) > kMaxRise) continue;
+      const float mid[2] = {(from[0] + w[0]) / 2, (from[1] + w[1]) / 2};
+      const float mz = Floor(mid[0], mid[1], std::max(from[2], w[2]) + kMaxRise, std::min(from[2], w[2]) - 120, pawn);
+      if (std::isnan(mz) || !Sweep(from, w, pawn)) continue;
+      ps.i = j;
+      break;
+    }
+  }
+  if (ps.i >= ps.wps.size() && ps.partial) return PathFinish(ps, "near");
+  if (ps.i >= ps.wps.size()) {
+    // Out of waypoints short of the goal (a moved goal, or a drop): plan again from here.
+    if (ps.replans >= kMaxReplans) return PathFinish(ps, "stuck", Str("why", "end of path"));
+    ++ps.replans;
+    Event("path", PathEvent(ps, "replan", Str("why", "end of path")));
+    ps.nodes.clear();
+    ps.state = "planning";
+    return;
+  }
+  float left = DistXY(pos, ps.wps[ps.i].data());
+  for (size_t j = ps.i + 1; j < ps.wps.size(); ++j) left += Dist(ps.wps[j - 1].data(), ps.wps[j].data());
+  ps.left = left;
+  if (!ps.check_us) {
+    ps.check_us = now;
+    std::memcpy(ps.check_pos, pos, sizeof(pos));
+  } else if (now - ps.check_us > kStuckUs) {
+    if (DistXY(pos, ps.check_pos) < 30 && !ps.smashed) {
+      // Standing still: first try melee, which breaks weak planks and crates in the way.
+      ps.smashed = true;
+      ps.smash_until = now + 250000;
+      ps.check_us = now;
+      Event("path", PathEvent(ps, "smash"));
+      return;
+    }
+    if (DistXY(pos, ps.check_pos) < 30) {
+      const float* w = ps.wps[ps.i].data();
+      ps.blocked.push_back(EdgeKey(CellOf(pos[0]), CellOf(pos[1]), CellOf(w[0]), CellOf(w[1])));
+      if (ps.replans >= kMaxReplans) return PathFinish(ps, "stuck", Str("why", "no progress"));
+      ++ps.replans;
+      Event("path", PathEvent(ps, "replan", Str("why", "no progress")));
+      ps.nodes.clear();
+      ps.state = "planning";
+      ps.check_us = 0;
+      return;
+    }
+    ps.check_us = now;
+    ps.smashed = false;
+    std::memcpy(ps.check_pos, pos, sizeof(pos));
+  }
+}
+
+void PathStart(const float goal[3], float radius, bool near_ok) {
+  std::lock_guard lock(g_path_mutex);
+  PathState& ps = g_path;
+  ps = PathState{};
+  ps.active = true;
+  ps.near_ok = near_ok;
+  std::memcpy(ps.goal, goal, sizeof(ps.goal));
+  ps.radius = radius;
+  ps.state = "planning";
+}
+
+void PathStop(const char* how) {
+  std::lock_guard lock(g_path_mutex);
+  PathState& ps = g_path;
+  if (ps.active && !ps.done) PathFinish(ps, how);
+  ps.active = false;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -678,13 +1315,14 @@ bool ParseButtons(const std::string& text, uint16_t& mask) {
   return mask != 0;
 }
 
-enum class MacroKind { kNone, kMoveTo, kAimAt, kAimNearest, kTurn };
+enum class MacroKind { kNone, kMoveTo, kAimAt, kAimNearest, kTurn, kPathTo };
 const char* MacroName(MacroKind k) {
   switch (k) {
     case MacroKind::kMoveTo: return "move_to";
     case MacroKind::kAimAt: return "aim_at";
     case MacroKind::kAimNearest: return "aim_nearest";
     case MacroKind::kTurn: return "turn";
+    case MacroKind::kPathTo: return "path_to";
     default: return "none";
   }
 }
@@ -730,10 +1368,13 @@ constexpr double kYawSign = 1, kPitchSign = 1;  // right stick +x turns right (y
 
 void EndMacro(PadState& p, const char* how) {
   if (p.macro == MacroKind::kNone) return;
+  if (p.macro == MacroKind::kPathTo) PathStop(how);
   Event("macro", Str("name", MacroName(p.macro)) + "," + Str("end", how));
   p.macro = MacroKind::kNone;
   g.macro_active = p.fire_until != 0;
 }
+
+uint16_t g_steer_buttons = 0;  // buttons a macro presses this poll (path_to's melee at a standstill)
 
 void Steer(PadState& p, uint64_t now, float out_stick[4]) {
   Snap s;
@@ -744,11 +1385,11 @@ void Steer(PadState& p, uint64_t now, float out_stick[4]) {
     std::memcpy(s.cam_rot, g_snap.cam_rot, sizeof(s.cam_rot));
     std::memcpy(s.pos, g_snap.pos, sizeof(s.pos));
     s.enemies_valid = g_snap.enemies_valid;
+    // aim_nearest's target: the nearest foe in sight, else the nearest foe.
+    const Enemy* pick = nullptr;
     for (const auto& e : g_snap.enemies)
-      if (!e.player && e.team != 1) {
-        s.enemies.push_back(e);
-        break;
-      }
+      if (e.foe && (!pick || (e.los == 1 && pick->los != 1))) pick = &e;
+    if (pick) s.enemies.push_back(*pick);
   }
   if (p.macro_until && now >= p.macro_until) {
     EndMacro(p, p.macro == MacroKind::kAimNearest ? "done" : "timeout");
@@ -791,6 +1432,27 @@ void Steer(PadState& p, uint64_t now, float out_stick[4]) {
     case MacroKind::kTurn:
       if (aim(p.yaw_target, 0, false)) EndMacro(p, "done");
       break;
+    case MacroKind::kPathTo: {
+      float w[3];
+      std::string ended;
+      {
+        std::lock_guard lock(g_path_mutex);
+        const PathState& ps = g_path;
+        if (ps.done || !ps.active) ended = ps.state;
+        else if (ps.state != "following" || ps.i >= ps.wps.size()) break;  // planning: stand still
+        else std::memcpy(w, ps.wps[ps.i].data(), sizeof(w));
+        if (now < ps.smash_until) g_steer_buttons |= 0x2000;  // B
+      }
+      if (!ended.empty()) return EndMacro(p, ended.c_str());  // outside the lock: EndMacro takes it
+      const double dx = w[0] - s.pos[0], dy = w[1] - s.pos[1];
+      const double want = std::atan2(dy, dx) * 180 / kPi;
+      const double rel = (want - yaw) * kPi / 180;
+      out_stick[0] = float(std::sin(rel));
+      out_stick[1] = float(std::cos(rel));
+      // Face the way we walk (the game moves slower sideways and backwards); leave small errors alone.
+      if (std::fabs(Wrap180(want - yaw)) > 12) aim(want, 0, false);
+      break;
+    }
     default:
       break;
   }
@@ -846,7 +1508,9 @@ class InstrInputDriver final : public rex::input::InputDriver {
     float tr[2] = {p.trig[0], p.trig[1]};
     for (int i = 0; i < 2; ++i)
       if (p.trig_until[i] && now >= p.trig_until[i]) p.trig[i] = 0, p.trig_until[i] = 0;
+    g_steer_buttons = 0;
     if (p.macro != MacroKind::kNone) Steer(p, now, st);
+    buttons |= g_steer_buttons;
     if (p.fire_until) {
       if (now < p.fire_until) {
         tr[1] = 1;
@@ -1053,6 +1717,7 @@ std::string ComputePhase(const Snap& s, const PrecompileInfo& pc, uint64_t now, 
   if (g.paused || s.world_paused) return "paused";
   if (s.title_movie) return "movie";
   if (s.title || FrontEndMap(s.map) || s.game_class.find("Entry") != std::string::npos) return "front_end";
+  if (s.dead) return "dead";
   if (!s.has_pawn) return "menu";
   if (s.cinematic) return "cutscene";
   if (hud_age < 500000) return "in_play";
@@ -1167,8 +1832,34 @@ std::string BuildStatus(bool window, std::map<std::string, std::string>* flat) {
     j.Num("speed", std::sqrt(s.vel[0] * s.vel[0] + s.vel[1] * s.vel[1]), "%.0f");
     j.Num("yaw", UnrealDeg(s.rot[1]), "%.1f").Int("health", s.health).Int("health_max", s.health_max);
     j.Str("pawn", s.pawn_class).Str("weapon", s.weapon).Int("ammo", s.ammo);
+    j.Int("clip", s.clip).Int("clip_max", s.clip_max).Int("reserve", s.reserve);
   }
+  j.Bool("dead", s.dead);
   j.End();
+  // The current objective (the HUD marker's target). dist / dz from the player, bearing from the camera's view.
+  {
+    const Objective& ob = s.objective;
+    j.Obj("objective").Bool("present", ob.present).Int("open", ob.open).Str("label", ob.label);
+    if (ob.present) {
+      const double dx = ob.pos[0] - s.pos[0], dy = ob.pos[1] - s.pos[1];
+      const double yaw = s.cam_ok ? UnrealDeg(s.cam_rot[1]) : UnrealDeg(s.rot[1]);
+      j.Num("x", ob.pos[0], "%.0f").Num("y", ob.pos[1], "%.0f").Num("z", ob.pos[2], "%.0f");
+      j.Num("dist", std::sqrt(dx * dx + dy * dy), "%.0f").Num("dz", ob.pos[2] - s.pos[2], "%.0f");
+      j.Num("bearing", Wrap180(std::atan2(dy, dx) * 180 / kPi - yaw), "%.1f");
+      j.Str("actor", ob.actor).Str("source", ob.source).Int("priority", ob.priority);
+    }
+    j.End();
+  }
+  if (s.hotspot.count) {
+    const Hotspot& h = s.hotspot;
+    const double dx = h.pos[0] - s.pos[0], dy = h.pos[1] - s.pos[1];
+    const double yaw = s.cam_ok ? UnrealDeg(s.cam_rot[1]) : UnrealDeg(s.rot[1]);
+    j.Obj("hotspot").Int("n", h.count).Str("kind", h.kind).Str("actor", h.actor);
+    j.Num("x", h.pos[0], "%.0f").Num("y", h.pos[1], "%.0f").Num("z", h.pos[2], "%.0f");
+    j.Num("dist", std::sqrt(dx * dx + dy * dy), "%.0f").Num("dz", h.pos[2] - s.pos[2], "%.0f");
+    j.Num("bearing", Wrap180(std::atan2(dy, dx) * 180 / kPi - yaw), "%.1f").End();
+  }
+  j.Obj("prompt").Bool("counterkill", s.prompt_counterkill).Bool("tutorial", s.prompt_tutorial).End();
   if (s.cam_ok)
     j.Obj("camera")
         .Num("x", s.cam[0], "%.1f")
@@ -1183,12 +1874,12 @@ std::string BuildStatus(bool window, std::map<std::string, std::string>* flat) {
     int n = 0;
     for (const auto& en : s.enemies) {
       if (n++ == 6) break;
-      char buf[200];
+      char buf[240];
       std::snprintf(buf, sizeof(buf),
                     "%s{\"x\":%.0f,\"y\":%.0f,\"z\":%.0f,\"dist\":%.0f,\"bearing\":%.1f,\"pitch\":%.1f,\"health\":%d,"
-                    "\"player\":%s,\"team\":%d,\"class\":\"",
+                    "\"player\":%s,\"team\":%d,\"foe\":%s,\"los\":%d,\"class\":\"",
                     n > 1 ? "," : "", en.pos[0], en.pos[1], en.pos[2], en.dist, en.bearing, en.pitch, en.health,
-                    en.player ? "true" : "false", en.team);
+                    en.player ? "true" : "false", en.team, en.foe ? "true" : "false", en.los);
       e += buf + Escape(en.cls) + "\"}";
     }
     j.Value("enemies", e + "]");
@@ -1297,7 +1988,22 @@ std::string BuildStatus(bool window, std::map<std::string, std::string>* flat) {
         .Bool("firing", p.fire_until != 0)
         .Int("queued_presses", int64_t(p.presses.size()))
         .Int("polls", int64_t(p.polls))
-        .End();
+        .Int("human", int64_t(MouseKeyboardDriver::HumanEvents()))
+        .Int("traces", int64_t(g_traces.load()));
+  }
+  {
+    std::lock_guard pl(g_path_mutex);
+    const PathState& ps = g_path;
+    j.Obj("path")
+        .Str("state", ps.state)
+        .Int("i", int64_t(ps.i))
+        .Int("n", int64_t(ps.wps.size()))
+        .Num("left_m", ps.left / 100.0, "%.1f")
+        .Int("replans", ps.replans)
+        .Int("expansions", ps.expansions);
+    if (ps.i < ps.wps.size())
+      j.Num("wx", ps.wps[ps.i][0], "%.0f").Num("wy", ps.wps[ps.i][1], "%.0f").Num("wz", ps.wps[ps.i][2], "%.0f");
+    j.End().End();
   }
   std::string firsts = "{";
   for (const auto& [name, t] : g_phase.first) {
@@ -1565,13 +2271,33 @@ std::string Macro(const std::vector<std::string>& a) {
   } else if (kind == "aim_nearest") {
     p.macro_until = until(2, 2000);
     p.macro = MacroKind::kAimNearest;
+  } else if (kind == "path_to" && (a.size() >= 5 || (a.size() >= 3 && (a[2] == "objective" || a[2] == "hotspot")))) {
+    float goal[3];
+    size_t next = 5;
+    if (a[2] == "objective") {
+      std::lock_guard lock(g_snap_mutex);
+      if (!g_snap.objective.present) return Fail("no objective");
+      std::memcpy(goal, g_snap.objective.pos, sizeof(goal));
+      next = 3;
+    } else if (a[2] == "hotspot") {
+      std::lock_guard lock(g_snap_mutex);
+      if (!g_snap.hotspot.present) return Fail("no hotspot");
+      std::memcpy(goal, g_snap.hotspot.pos, sizeof(goal));
+      next = 3;
+    } else {
+      goal[0] = float(Arg(a, 2, 0)), goal[1] = float(Arg(a, 3, 0)), goal[2] = float(Arg(a, 4, 0));
+    }
+    p.macro_until = until(next, 120000);
+    const bool exact = std::find(a.begin(), a.end(), "exact") != a.end();
+    PathStart(goal, float(Arg(a, next + 1, 150)), !exact);
+    p.macro = MacroKind::kPathTo;
   } else if (kind == "turn" && a.size() >= 3) {
     p.yaw_target = float(Arg(a, 2, 0));
     p.macro_until = until(3, 3000);
     p.macro = MacroKind::kTurn;
   } else {
-    return Fail("macro move_to x y [z] [ms] [radius] | aim_at x y z [ms] | aim_nearest [ms] | turn yaw [ms] | fire "
-                "[ms] | stop");
+    return Fail("macro move_to x y [z] [ms] [radius] | path_to x y z|objective|hotspot [ms] [radius] [exact] | aim_at x y z [ms] | "
+                "aim_nearest [ms] | turn yaw [ms] | fire [ms] | stop");
   }
   g.macro_active = true;
   Event("macro", Str("name", kind) + "," + Str("end", "started"));
@@ -1741,15 +2467,57 @@ std::string Handle(Client& c, const std::string& line) {
       int i = 0;
       for (const auto& en : s.enemies) {
         if (i++ == n) break;
-        char buf[200];
+        char buf[240];
         std::snprintf(buf, sizeof(buf),
                       "%s{\"x\":%.0f,\"y\":%.0f,\"z\":%.0f,\"dist\":%.0f,\"bearing\":%.1f,\"pitch\":%.1f,\"health\":%d,"
-                      "\"player\":%s,\"team\":%d,\"class\":\"",
+                      "\"player\":%s,\"team\":%d,\"foe\":%s,\"los\":%d,\"class\":\"",
                       i > 1 ? "," : "", en.pos[0], en.pos[1], en.pos[2], en.dist, en.bearing, en.pitch, en.health,
-                      en.player ? "true" : "false", en.team);
+                      en.player ? "true" : "false", en.team, en.foe ? "true" : "false", en.los);
         e += buf + Escape(en.cls) + "\"}";
       }
       return e + "]}";
+    });
+    return r.empty() ? Fail("game thread busy") : r;
+  }
+  if (cmd == "pathdrop") {  // pathdrop [uu]: the deepest drop path_to will plan (default 260)
+    if (a.size() > 1) g_max_drop = float(std::clamp(Arg(a, 1, 260), 0.0, 2000.0));
+    return Ok("\"drop\":" + std::to_string(int(g_max_drop.load())));
+  }
+  if (cmd == "pathflags") {  // pathflags [N]: the trace flags path_to's walkability checks use (UE3 ETraceFlags)
+    if (a.size() > 1) g_walk_flags = uint32_t(std::strtoul(a[1].c_str(), nullptr, 0));
+    return Ok("\"flags\":" + std::to_string(g_walk_flags.load()));
+  }
+  if (cmd == "trace" || cmd == "floor") {
+    // trace x1 y1 z1 x2 y2 z2 [extent] [flags]: one collision trace (a box sweep with extent; UE3 ETraceFlags, default
+    // the world without pawns or volumes, as Actor.FastTrace); floor x y [z]: the floor
+    // under a point. Debugging aids for path_to and line of sight.
+    std::vector<double> v;
+    for (size_t i = 1; i < a.size(); ++i) v.push_back(Arg(a, i, 0));
+    if ((cmd == "trace" && v.size() < 6) || (cmd == "floor" && v.size() < 2))
+      return Fail("trace x1 y1 z1 x2 y2 z2 [extent] | floor x y [z]");
+    std::string r = OnGameThread([cmd, v] {
+      const uint32_t pc = LocalController();
+      const uint32_t pawn = pc ? PropObj(pc, "Pawn") : 0;
+      char buf[256];
+      if (cmd == "floor") {
+        const float z = v.size() > 2 ? float(v[2]) : 100000.0f;
+        const float f = Floor(float(v[0]), float(v[1]), z, z - (v.size() > 2 ? 2000.0f : 200000.0f), pawn);
+        std::snprintf(buf, sizeof(buf), "{\"ok\":true,\"floor\":%s}", std::isnan(f) ? "null" : std::to_string(f).c_str());
+        return std::string(buf);
+      }
+      const float s[3] = {float(v[0]), float(v[1]), float(v[2])}, e[3] = {float(v[3]), float(v[4]), float(v[5])};
+      const float ext = v.size() > 6 ? float(v[6]) : 0;
+      const float extent[3] = {ext, ext, ext};
+      const uint32_t flags = v.size() > 7 ? uint32_t(v[7]) : kTraceWorld;
+      Hit h;
+      const uint64_t t0 = NowUs();
+      if (!Trace(s, e, ext > 0 ? extent : nullptr, pawn, h, flags)) return std::string("{\"ok\":false,\"error\":\"no world\"}");
+      std::snprintf(buf, sizeof(buf),
+                    "{\"ok\":true,\"hit\":%s,\"x\":%.1f,\"y\":%.1f,\"z\":%.1f,\"nx\":%.2f,\"ny\":%.2f,\"nz\":%.2f,"
+                    "\"time\":%.3f,\"us\":%llu,\"actor\":\"",
+                    h.hit ? "true" : "false", h.loc[0], h.loc[1], h.loc[2], h.normal[0], h.normal[1], h.normal[2], h.time,
+                    static_cast<unsigned long long>(NowUs() - t0));
+      return buf + Escape(h.hit && Readable(h.actor) ? ObjName(h.actor) : "") + "\"}";
     });
     return r.empty() ? Fail("game thread busy") : r;
   }
@@ -1766,7 +2534,61 @@ std::string Handle(Client& c, const std::string& line) {
       else if (what == "camera") o = PropObj(pc, "PlayerCamera");
       else if (what == "engine") o = U32(kGEngine);
       else if (what == "hud") o = PropObj(pc, "myHUD");
+      else if (what.rfind("0x", 0) == 0) o = uint32_t(std::strtoul(what.c_str() + 2, nullptr, 16));
+      // "inspect OBJ Prop.": the members of struct property Prop (UStructProperty +0x84 is the struct)
+      if (!filter.empty() && filter.back() == '.') {
+        const Field f = Prop(o, filter.substr(0, filter.size() - 1).c_str());
+        if (!f.ok() || std::strcmp(ClassName(f.prop), "StructProperty")) return Fail("no such struct property");
+        return Inspect(o + f.offset, "", U32(f.prop + 0x84));
+      }
       return Inspect(o, filter);
+    });
+    return r.empty() ? Fail("game thread busy") : r;
+  }
+  if (cmd == "objs") {  // objs <Class> [n]: live objects of that class (or a subclass), with locations for actors
+    if (a.size() < 2) return Fail("usage: objs CLASS [n]");
+    const std::string cls = a[1];
+    const uint32_t want = uint32_t(Arg(a, 2, 50));
+    std::string r = OnGameThread([cls, want] {
+      std::string out;
+      uint32_t n = 0;
+      ForEachObject(cls.c_str(), [&](uint32_t o) {
+        if (n++ >= want) return;
+        float loc[3] = {};
+        char buf[96];
+        const bool has = PropVec(o, "Location", loc);
+        std::snprintf(buf, sizeof(buf), "@%08X", o);
+        out += std::string(n > 1 ? "," : "") + "\"" + Escape(ObjName(o)) + ":" + ClassName(o) + buf;
+        if (has) std::snprintf(buf, sizeof(buf), " %.0f %.0f %.0f", loc[0], loc[1], loc[2]), out += buf;
+        out += "\"";
+      });
+      return "{\"ok\":true,\"count\":" + std::to_string(n) + ",\"objs\":[" + out + "]}";
+    }, std::chrono::seconds(20));
+    return r.empty() ? Fail("game thread busy") : r;
+  }
+  if (cmd == "elems") {  // elems <0xobject> <ArrayProperty> [stride] [n]: an array's words, as objects where they are
+    if (a.size() < 3) return Fail("usage: elems 0xOBJECT PROP [stride] [n]");
+    const uint32_t o = uint32_t(std::strtoul(a[1].c_str() + (a[1].rfind("0x", 0) == 0 ? 2 : 0), nullptr, 16));
+    const std::string prop = a[2];
+    const uint32_t stride = uint32_t(Arg(a, 3, 4)), want = uint32_t(Arg(a, 4, 32));
+    std::string r = OnGameThread([o, prop, stride, want] {
+      const Field f = Readable(o) ? Prop(o, prop.c_str()) : Field{};
+      if (!f.ok()) return Fail("no such array");
+      const uint32_t data = U32(o + f.offset), count = U32(o + f.offset + 4);
+      std::string out = "{\"ok\":true,\"count\":" + std::to_string(count) + ",\"elems\":[";
+      for (uint32_t i = 0; Readable(data) && i < count && i < want; ++i) {
+        std::string e;
+        char buf[48];
+        for (uint32_t w = 0; w < stride; w += 4) {
+          const uint32_t v = U32(data + i * stride + w);
+          if (Readable(v) && Readable(U32(v + 0x34)))
+            e += (e.empty() ? "" : " ") + ObjName(v) + ":" + ClassName(v) + "@" + (std::snprintf(buf, sizeof(buf), "%08X", v), buf);
+          else
+            std::snprintf(buf, sizeof(buf), "%s%08X/%g", e.empty() ? "" : " ", v, F32(data + i * stride + w)), e += buf;
+        }
+        out += (i ? ",\"" : "\"") + Escape(e) + "\"";
+      }
+      return out + "]}";
     });
     return r.empty() ? Fail("game thread busy") : r;
   }
@@ -1796,7 +2618,7 @@ std::string Handle(Client& c, const std::string& line) {
     return {};
   }
   if (cmd == "help") return Ok(Str("help", "status keys watch hist press hold release stick trigger pad exec wait shot "
-                                           "burst dualshot macro enemies inspect log quit close"));
+                                           "burst dualshot macro enemies trace floor pathdrop pathflags inspect objs elems log quit close"));
   return Fail("unknown command " + cmd);
 }
 
@@ -1881,9 +2703,15 @@ void StatusThread() {
   }
   const uint64_t period = uint64_t(1e6 / Cfg().hz);
   uint64_t next_line = NowUs();
+  uint64_t human = MouseKeyboardDriver::HumanEvents();
   while (true) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     const uint64_t now = NowUs();
+    // Keyboard / mouse input the control channel didn't send: someone is at the machine (the run is contaminated).
+    if (const uint64_t h = MouseKeyboardDriver::HumanEvents(); h != human) {
+      Event("human_input", "\"events\":" + std::to_string(h - human) + ",\"total\":" + std::to_string(h));
+      human = h;
+    }
     std::vector<std::shared_ptr<Client>> clients;
     {
       std::lock_guard lock(g_clients_mutex);
@@ -1939,15 +2767,20 @@ void Start(std::function<rex::system::IGraphicsSystem*()> graphics) {
 
 std::unique_ptr<rex::input::InputDriver> MakeInputDriver() { return std::make_unique<InstrInputDriver>(); }
 
-void GameTick(uint8_t* base) {
+void GameTick(PPCContext& ctx, uint8_t* base) {
   if (!g_enabled) return;
   g_base = base;
+  g_ctx = &ctx;
+  struct Clear {
+    ~Clear() { g_ctx = nullptr; }
+  } clear;
   const uint64_t now = NowUs();
   g.ticks.fetch_add(1, std::memory_order_relaxed);
   g.last_tick_us.store(now, std::memory_order_relaxed);
   if (g_jobs_pending.load(std::memory_order_relaxed)) RunJobs();
   static uint64_t next_sample = 0;
   const bool steering = g.macro_active.load(std::memory_order_relaxed);
+  if (steering) PathTick(now);
   if (now < next_sample && !steering) return;
   const bool world = Cfg().world || steering;
   next_sample = now + (Cfg().world ? 250000 : 200000);
