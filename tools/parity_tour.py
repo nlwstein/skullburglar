@@ -56,6 +56,8 @@ def main():
     ap.add_argument("--checkpoints", help="comma-separated chapter ids (default: the built-in tour)")
     ap.add_argument("--shots", type=int, default=3, help="pairs per checkpoint")
     ap.add_argument("--load-secs", type=float, default=25, help="wait after LoadChapter before the first shot")
+    ap.add_argument("--n1-ready", type=float, default=0,
+                    help="before the first shot, wait up to this many seconds for n1's startup step to finish")
     ap.add_argument("--gap", type=float, default=6, help="seconds of play between shots")
     ap.add_argument("--shot-timeout", type=float, default=90, help="give up on a pair after this many seconds")
     ap.add_argument("--freeze", choices=["slomo", "pause", "none"], default="slomo",
@@ -142,6 +144,11 @@ def main():
             print(f"[{c0 - t0:6.0f} s] LoadChapter {cid} ({note})", flush=True)
             send(f"LoadChapter {cid}")
             time.sleep(a.load_secs)
+            if a.n1_ready > 0 and not record["checkpoints"]:
+                w0 = time.time()
+                got = log.wait(lambda l: "hybrid n1: startup step done" in l, a.n1_ready, alive)
+                print(f"    n1 startup step {'done' if got else 'NOT done'} after {time.time() - w0:.0f} s more",
+                      flush=True)
             send("EnableCheats")  # a new level has a new player controller
             entry = {"chapter": cid, "note": note, "shots": [], "load_at": c0 - t0}
             for k in range(a.shots):
