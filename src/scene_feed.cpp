@@ -1921,6 +1921,14 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam) {
 }
 }  // namespace
 
+bool LiveAtDraw() {
+  static const bool on = [] {
+    const char* v = std::getenv("BOTS_N1_FEED_AT_DRAW");
+    return !v || std::atoi(v) != 0;
+  }();
+  return on;
+}
+
 void Live(uint8_t* base) {
   HybridState* hs = FindHybridState();
   if (!hs || hs->fill.load(std::memory_order_relaxed) != 4) return;
