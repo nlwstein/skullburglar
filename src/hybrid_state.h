@@ -80,6 +80,10 @@ struct HybridScene {
   std::vector<float> particle_rows;
   float particles_ms = 0;  // game-thread cost of reading them
   uint64_t frame = 0;  // game frames counted by the feed; 0: nothing published yet
+  // The newest published camera when the walk ran: the view of the world state the walk read. The marker that draws
+  // this scene can be a frame or more older; a camera riding something fast (a helicopter) then sees that thing
+  // where it will be, not where it is, so n1 draws the scene with this camera instead.
+  uint32_t cam_seq = 0;
   std::vector<Instance> instances;
   std::vector<Skel> skeletal;
   std::vector<float> bones;

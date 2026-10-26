@@ -172,7 +172,8 @@ struct ClassInfo {
 // Offsets, resolved from the first instance of each class family seen.
 struct Offsets {
   bool primitive = false, mesh = false, static_mesh = false, skeletal = false, particle = false, decal = false;
-  Field scene_info, local_to_world, bounds, hidden_game, last_render_time, owner, materials, static_mesh_ref,
+  Field scene_info, local_to_world, bounds, hidden_game, last_render_time, owner, cull_dist, cached_cull, materials,
+      static_mesh_ref,
       forced_lod, skeletal_mesh_ref, space_bases, predicted_lod, template_ref, decal_material;
   bool actor = false;
   Field actor_hidden;
@@ -210,6 +211,10 @@ const ClassInfo& Classify(uint32_t cls) {
       o.hidden_game = FindProp(cls, "HiddenGame");
       o.last_render_time = FindProp(cls, "LastRenderTime");
       o.owner = FindProp(cls, "Owner");
+      o.cull_dist = FindProp(cls, "CullDistance");
+      o.cached_cull = FindProp(cls, "CachedCullDistance");
+      REXLOG_INFO("scenefeed: PrimitiveComponent CullDistance +{:X} CachedCullDistance +{:X}", o.cull_dist.offset,
+                  o.cached_cull.offset);
       REXLOG_INFO("scenefeed: PrimitiveComponent SceneInfo +{:X} LocalToWorld +{:X} Bounds +{:X} HiddenGame +{:X}/{:08X} "
                   "LastRenderTime +{:X} Owner +{:X}",
                   o.scene_info.offset, o.local_to_world.offset, o.bounds.offset, o.hidden_game.offset,
@@ -783,6 +788,9 @@ void Emitters(std::string& s, uint32_t component) {
   s += "]";
 }
 
+// A material as n1 names it: the first cooked material up its Parent chain, plus the run-time instances' parameters.
+std::string MaterialPath(uint32_t m, bool params = false, bool* runtime = nullptr);
+
 std::string FrameJson(uint32_t frame, const Camera& cam, uint32_t world_info, const std::vector<Primitive>& prims,
                       int64_t host_us) {
   static Field time_seconds, real_time;
@@ -833,7 +841,7 @@ std::string FrameJson(uint32_t frame, const Camera& cam, uint32_t world_info, co
       const uint32_t data = U32(c + g_off.materials.offset), n = U32(c + g_off.materials.offset + 4);
       for (uint32_t i = 0; Readable(data) && i < n && i < 64; ++i) {
         if (i) s += ',';
-        Str(s, Path(U32(data + 4 * i)));
+        Str(s, MaterialPath(U32(data + 4 * i), true));  // as the live feed passes it
       }
     } else if (p.kind == Kind::kDecal && g_off.decal_material.ok()) {
       Str(s, Path(U32(c + g_off.decal_material.offset)));
@@ -1179,6 +1187,7 @@ struct LiveComponent {
   const char* light_path = nullptr;
   uint32_t dle = 0;
   const char* env_path = nullptr;
+  bool runtime = false;  // a material was made at run time (MaterialPath): re-read its parameters every frame
   std::vector<const char*> materials;
 };
 // What an emitter's LOD level says about how to draw it, cached per LOD level (the property reads walk class records).
@@ -1230,12 +1239,82 @@ const char* Intern(const std::string& v) {
   return it->second.get();
 }
 
-// A material's path for the renderer. Runtime MaterialInstanceConstants the game makes (weapon pickups, tinted
-// characters) live in the Transient package, which no cooked file holds: walk Parent to the first cooked material.
-std::string MaterialPath(uint32_t m) {
+// Intern a material name. Run-time instances carry their parameters ("<path>?..."), and some change them per use
+// (tracer smoke: a start time and length per shot), so each variant is a new n1 material that is never freed. Cap
+// the variants: past kVariantsPerBase for one cooked material, or kVariantsTotal in all, new ones fall back to the
+// cooked material's own values.
+const char* InternMaterial(const std::string& v) {
+  constexpr size_t kVariantsPerBase = 64, kVariantsTotal = 4096;
+  static std::unordered_map<std::string, size_t> per_base;
+  static size_t total = 0;
+  const size_t q = v.find('?');
+  if (q == std::string::npos || g_live.strings.count(v)) return Intern(v);
+  size_t& n = per_base[v.substr(0, q)];
+  if (n >= kVariantsPerBase || total >= kVariantsTotal) {
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      REXLOG_INFO("scenefeed: material variant cap reached ({}); using cooked values", v);
+    }
+    return Intern(v.substr(0, q));
+  }
+  ++n, ++total;
+  return Intern(v);
+}
+
+// Material instances the game makes at run time: in the Transient package (weapon pickups, tinted characters) or
+// under a level's actors ("<Map>.TheWorld.PersistentLevel.<Actor>.MaterialInstanceConstant_N": tracer smoke,
+// vehicle paint). No cooked file holds them.
+bool RuntimeObject(const std::string& path) {
+  return path.starts_with("Transient.") || path.find(".TheWorld.") != std::string::npos;
+}
+
+// One parameter array of a MaterialInstanceConstant (ScalarParameterValues, VectorParameterValues,
+// TextureParameterValues), appended as "&<kind>:<name>=<value>" unless an outer instance already set that name.
+void InstanceParams(std::string& out, std::vector<uint32_t>& seen, uint32_t mic, const char* array, char kind) {
+  const uint32_t rec = PropRecord(mic, array);
+  if (!rec) return;
+  const uint32_t inner = U32(rec + 0x84);  // UArrayProperty Inner: a StructProperty
+  const uint32_t st = Readable(inner) ? U32(inner + 0x84) : 0;
+  if (!Readable(st)) return;
+  const uint32_t size = U32(inner + 0x48);
+  const Field name = FindProp(st, "ParameterName"), value = FindProp(st, "ParameterValue");
+  if (!name.ok() || !value.ok() || !size || size > 0x200) return;
+  const uint32_t at = mic + U32(rec + 0x64), data = U32(at), n = U32(at + 4);
+  for (uint32_t k = 0; Readable(data) && k < n && k < 32; ++k) {
+    const uint32_t e = data + k * size, nm = U32(e + name.offset);
+    const uint32_t key = (uint32_t(kind) << 24) ^ nm;
+    if (std::find(seen.begin(), seen.end(), key) != seen.end()) continue;
+    seen.push_back(key);
+    fmt::format_to(std::back_inserter(out), "&{}:{}=", kind, NameText(nm));
+    if (kind == 's') {
+      fmt::format_to(std::back_inserter(out), "{:.4g}", F32(e + value.offset));
+    } else if (kind == 'v') {
+      const uint32_t v = e + value.offset;
+      fmt::format_to(std::back_inserter(out), "{:.4g},{:.4g},{:.4g},{:.4g}", F32(v), F32(v + 4), F32(v + 8), F32(v + 12));
+    } else {
+      const uint32_t t = U32(e + value.offset);
+      if (IsObject(t)) out += Path(t);
+    }
+  }
+}
+
+// A material's path for the renderer: the first cooked material up the Parent chain. With `params`, a run-time
+// instance's own parameter values follow after '?' ("<path>?&s:Name=v&v:Name=r,g,b,a&t:Name=<texture>"; n1's
+// matir applies them over the cooked chain), so per-instance looks (paint, tint, fades) survive. `runtime` is set
+// when the material was made at run time, as its parameters can change from frame to frame.
+std::string MaterialPath(uint32_t m, bool params, bool* runtime) {
+  std::string extra;
+  std::vector<uint32_t> seen;
   for (int depth = 0; depth < 8 && IsObject(m); ++depth) {
     std::string p = Path(m);
-    if (!p.starts_with("Transient.")) return p;
+    if (!RuntimeObject(p)) return extra.empty() ? p : p + "?" + extra;
+    if (runtime) *runtime = true;
+    if (params && !std::strcmp(ClassName(m), "MaterialInstanceConstant")) {
+      InstanceParams(extra, seen, m, "ScalarParameterValues", 's');
+      InstanceParams(extra, seen, m, "VectorParameterValues", 'v');
+      InstanceParams(extra, seen, m, "TextureParameterValues", 't');
+    }
     m = PropU32(m, "Parent");
   }
   return {};
@@ -1245,7 +1324,24 @@ std::string MaterialPath(uint32_t m) {
 namespace {
 // The frame's particle emitters: every drawable emitter instance of the attached ParticleSystemComponents, with its
 // live particles copied out of guest memory (see FParticleEmitterInstance above for the layout).
-void LiveParticles(LiveState& st, HybridScene& out) {
+// UE3 skips a primitive whose bounds centre is farther from the view than its cull distance (CullDistance, or the
+// CachedCullDistance a cull-distance volume gave it; the smaller when both are set; later engines call these
+// MaxDrawDistance), though the game still ticks it: distant fires, props and decals the level designers cut.
+bool BeyondDrawDistance(uint32_t c, const Camera& cam) {
+  if (!cam.ok || !g_off.bounds.ok()) return false;
+  float limit = 0;
+  for (const Field* f : {&g_off.cull_dist, &g_off.cached_cull}) {
+    if (!f->ok()) continue;
+    const float v = F32(c + f->offset);
+    if (v > 0 && std::isfinite(v) && (limit == 0 || v < limit)) limit = v;
+  }
+  if (limit == 0) return false;
+  const uint32_t b = c + g_off.bounds.offset;
+  const float dx = F32(b) - cam.location[0], dy = F32(b + 4) - cam.location[1], dz = F32(b + 8) - cam.location[2];
+  return dx * dx + dy * dy + dz * dz > limit * limit;
+}
+
+void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam) {
   static Field instances;
   constexpr uint32_t kMaxRows = 24576;  // particles per frame; the renderer applies its own (lower) cap
   for (const Primitive& p : st.particle_prims) {
@@ -1254,7 +1350,7 @@ void LiveParticles(LiveState& st, HybridScene& out) {
     const uint32_t owner = g_off.owner.ok() ? U32(c + g_off.owner.offset) : 0;
     if (Readable(owner) && g_off.actor_hidden.ok())
       hidden |= (U32(owner + g_off.actor_hidden.offset) & g_off.actor_hidden.mask) != 0;
-    if (hidden) continue;
+    if (hidden || BeyondDrawDistance(c, cam)) continue;
     if (!instances.ok()) instances = FindProp(U32(c + 0x34), "EmitterInstances");
     if (!instances.ok()) return;
     const uint32_t data = U32(c + instances.offset), n = U32(c + instances.offset + 4);
@@ -1373,7 +1469,7 @@ void Live(uint8_t* base) {
       }
       if (g_off.actor_hidden.ok()) hidden |= (U32(owner + g_off.actor_hidden.offset) & g_off.actor_hidden.mask) != 0;
     }
-    if (hidden) continue;
+    if (hidden || BeyondDrawDistance(c, cam)) continue;
     uint32_t mats = 0, mat_count = 0;
     if (g_off.materials.ok()) {
       mats = U32(c + g_off.materials.offset);
@@ -1387,7 +1483,11 @@ void Live(uint8_t* base) {
       lc.mesh_path = Intern(Path(mesh));
       lc.light_path = Intern(Path(c));
       lc.materials.clear();
-      for (uint32_t i = 0; i < mat_count; ++i) lc.materials.push_back(Intern(MaterialPath(U32(mats + 4 * i))));
+      lc.runtime = false;
+      for (uint32_t i = 0; i < mat_count; ++i)
+        lc.materials.push_back(InternMaterial(MaterialPath(U32(mats + 4 * i), true, &lc.runtime)));
+    } else if (lc.runtime) {  // run-time instances: their parameters (fades, tints) can change every frame
+      for (uint32_t i = 0; i < mat_count; ++i) lc.materials[i] = InternMaterial(MaterialPath(U32(mats + 4 * i), true));
     }
     // The owner's light environment (characters, movers, pickups): lit by its composite lights in n1.
     const uint32_t dle = PropU32(c, "LightEnvironment");
@@ -1433,7 +1533,7 @@ void Live(uint8_t* base) {
   out.particles_ms = 0;
   if (st.particles && !st.particle_prims.empty()) {
     const auto tp = std::chrono::steady_clock::now();
-    LiveParticles(st, out);
+    LiveParticles(st, out, cam);
     out.particles_ms = float(Ms(tp, std::chrono::steady_clock::now()));
   }
   // Lights, fog and post for n1 (properties read live; the component list comes from the last walk).
@@ -1447,6 +1547,7 @@ void Live(uint8_t* base) {
     out.lighting_ms = float(Ms(tl, std::chrono::steady_clock::now()));
   }
   out.frame = ++st.frame;
+  out.cam_seq = hs->published.load(std::memory_order_acquire);
   out.build_ms = float(Ms(t0, std::chrono::steady_clock::now()));
   std::lock_guard lock(hs->scene_mutex);
   // Keep a lighting update the renderer has not taken yet when this frame brings none.
