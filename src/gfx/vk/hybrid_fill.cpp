@@ -105,14 +105,14 @@ struct N1Host {
   bool failed = false;
   uint32_t budget = 8;
   HybridScene scene;  // the newest one taken from the game
-  std::unordered_map<const char*, uint32_t> meshes, materials, lights, skel_meshes;
+  std::unordered_map<const char*, uint32_t> meshes, materials, lights, skel_meshes, envs;
   std::vector<N1Instance> instances;
   std::vector<N1SkelInstance> skeletal;
   std::vector<uint32_t> skel_materials;
   std::vector<uint32_t> material_handles;
   // Stats since the last log line.
   std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
-  double log_seconds = 5, host_ms = 0, record_ms = 0, build_ms = 0;
+  double log_seconds = 5, host_ms = 0, record_ms = 0, build_ms = 0, feed_ms = 0, lighting_ms = 0;
   uint64_t frames = 0, draws = 0, triangles = 0, scenes = 0;
   N1Stats last{};
 };
@@ -168,6 +168,15 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     std::lock_guard lock(state->scene_mutex);
     if (state->scene.frame > host->scene.frame) std::swap(host->scene, state->scene), ++host->scenes;
   }
+  // Lights, fog and post: handed over when the game built a new set (every BOTS_N1_FEED_EVERY game frames).
+  if (!host->scene.lighting.empty()) {
+    const auto f0 = std::chrono::steady_clock::now();
+    if (n1_set_feed(host->r, host->scene.lighting.data(), uint32_t(host->scene.lighting.size())) != 0)
+      REXLOG_WARN("hybrid n1: n1_set_feed failed: {}", n1_last_error());
+    host->feed_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - f0).count();
+    host->lighting_ms += host->scene.lighting_ms;
+    host->scene.lighting.clear();
+  }
   // Handles by interned path (the game never frees the strings). The light first: it names the level package that
   // mesh and material lookups then prefer.
   host->instances.clear();
@@ -177,6 +186,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     std::memcpy(out.transform, in.transform, sizeof(out.transform));
     out.light = Handle(host->lights, in.light, host->r, n1_light);
     out.mesh = Handle(host->meshes, in.mesh, host->r, n1_mesh);
+    out.env = Handle(host->envs, in.env, host->r, n1_env);
     out.mat_offset = uint32_t(host->material_handles.size());
     out.mat_count = in.mat_count;
     for (uint32_t i = 0; i < in.mat_count; ++i)
@@ -191,6 +201,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     std::memcpy(out.transform, in.transform, sizeof(out.transform));
     std::memcpy(out.bounds, in.bounds, sizeof(out.bounds));
     out.mesh = Handle(host->skel_meshes, in.mesh, host->r, n1_skel_mesh);
+    out.env = Handle(host->envs, in.env, host->r, n1_env);
     out.bone_offset = in.bone_offset, out.bone_count = in.bone_count;
     out.mat_offset = uint32_t(host->skel_materials.size());
     out.mat_count = in.mat_count;
@@ -249,13 +260,15 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     REXLOG_INFO("hybrid n1: {:.1f} s, {} frames ({} scenes): {} instances ({} skipped) -> {:.0f} draws, {:.0f}k tris "
                 "per frame; render thread {:.3f} ms/frame ({:.3f} in n1_record), game thread walk {:.3f} ms; meshes "
                 "{} ready {} pending {} missing, {} loading, {} textures ({} unsupported); skinned {} drawn {} culled {} "
-                "skipped, {} meshes ready",
+                "skipped, {} meshes ready; {} shaders {} pipelines ({} draws waiting), feed {} lights {} envs ({} "
+                "instances bound, {} handles), lighting json {:.3f} ms game / {:.3f} ms parse (totals)",
                 secs, host->frames, host->scenes, st.instances, st.skipped, host->draws / n, host->triangles / n / 1000,
                 host->host_ms / n, host->record_ms / n, host->build_ms / n, st.meshes_ready, st.meshes_pending,
                 st.meshes_missing, st.loading, st.textures, st.textures_unsupported, st.skel_drawn, st.skel_culled,
-                st.skel_skipped, st.skel_meshes_ready);
+                st.skel_skipped, st.skel_meshes_ready, st.shaders, st.pipelines, st.pipelines_pending, st.dyn_lights,
+                st.light_envs, st.env_bound, st.env_handles, host->lighting_ms, host->feed_ms);
     host->since = t2, host->frames = host->draws = host->triangles = host->scenes = 0;
-    host->host_ms = host->record_ms = host->build_ms = 0;
+    host->host_ms = host->record_ms = host->build_ms = host->feed_ms = host->lighting_ms = 0;
   }
   return true;
 }

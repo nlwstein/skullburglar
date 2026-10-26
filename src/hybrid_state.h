@@ -53,6 +53,7 @@ struct HybridScene {
     const char* mesh;     // StaticMesh path
     const char* light;    // the component's path (its baked vertex light), or null
     uint32_t mat_offset, mat_count;  // range in `materials` (Materials overrides; null entries keep the mesh's)
+    const char* env;      // the owner's DynamicLightEnvironmentComponent path (LightEnvironment), or null
   };
   struct Skel {
     float transform[16];  // LocalToWorld
@@ -60,12 +61,18 @@ struct HybridScene {
     uint32_t bone_offset, bone_count;  // range in `bones`, 16 floats each (SpaceBases, component space)
     uint32_t mat_offset, mat_count;    // range in `materials`
     float bounds[4];                   // world bounding sphere: centre, radius
+    const char* env;                   // DynamicLightEnvironmentComponent path, or null
   };
   uint64_t frame = 0;  // game frames counted by the feed; 0: nothing published yet
   std::vector<Instance> instances;
   std::vector<Skel> skeletal;
   std::vector<float> bones;
   std::vector<const char*> materials;
+  // The frame's lights, fog and post chain as the scene feed's JSON ({"lights":[..],"fog":[..],"post":{..}}, only the
+  // light properties n1 reads; fog and post on every 16th build, absent = unchanged); rebuilt every
+  // BOTS_N1_FEED_EVERY frames, empty when unchanged since the renderer last took it.
+  std::string lighting;
+  float lighting_ms = 0;  // game-thread cost of building `lighting`
   float build_ms = 0;  // game-thread cost of this frame's walk
   uint32_t walked = 0;  // primitives looked at
 };

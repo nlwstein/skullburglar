@@ -612,17 +612,64 @@ void NamedValue(std::string& s, const char* key, uint32_t object, const char* na
   Value(s, f, object + U32(f + 0x64), 0);
 }
 
-// Lights, fog and post-processing for the frame (see the format notes at the top).
-void LightsPostJson(std::string& s, uint32_t world_info) {
+// The light properties the live renderer reads; dumping every property of every light costs milliseconds a frame.
+constexpr const char* kLiveLightProps[] = {
+    "LightToWorld", "Brightness", "LightColor", "LightAffectsClassification", "LightingChannels",
+    "UseDirectLightMap", "LowerBrightness", "LowerColor", "WorldSpaceIncidentLighting", "LightEnvironment",
+    "bEnabled", "Radius", "FalloffExponent", "InnerConeAngle", "OuterConeAngle", "CastShadows",
+    "CastDynamicShadows", "LightShadowMode"};
+
+// One light as ObjectJson writes it, with only kLiveLightProps (property records cached per class).
+void CompactLightJson(std::string& s, uint32_t light) {
+  static std::unordered_map<uint32_t, std::vector<uint32_t>> records;
+  auto [it, fresh] = records.try_emplace(U32(light + 0x34));
+  if (fresh)
+    for (const char* name : kLiveLightProps)
+      if (const uint32_t f = PropRecord(light, name)) it->second.push_back(f);
+  // No "name": the renderer keys lights by their LightEnvironment, and Path() is the costly part.
+  fmt::format_to(std::back_inserter(s), "{{\"class\":\"{}\",\"props\":{{", ClassName(light));
+  bool first = true;
+  for (const uint32_t f : it->second) {
+    if (!first) s += ',';
+    first = false;
+    const char* name = NameText(U32(f + 0x2C));
+    Str(s, name);
+    s += ':';
+    if (!std::strcmp(name, "LightingChannels")) {  // a struct of ~30 bools; the renderer reads two
+      static const Field st = FindProp(U32(f + 0x84), "Static"), dy = FindProp(U32(f + 0x84), "Dynamic");
+      const uint32_t at = light + U32(f + 0x64);
+      fmt::format_to(std::back_inserter(s), "{{\"Static\":{},\"Dynamic\":{}}}",
+                     st.ok() && (U32(at + st.offset) & st.mask), dy.ok() && (U32(at + dy.offset) & dy.mask));
+    } else {
+      Value(s, f, light + U32(f + 0x64), 0);
+    }
+  }
+  s += "}}";
+}
+
+// Lights, fog and post-processing for the frame (see the format notes at the top). `live`: the renderer's cut: only
+// the light properties it reads, and fog and post only when `fog_post` (they rarely change).
+void LightsPostJson(std::string& s, uint32_t world_info, bool live = false, bool fog_post = true) {
   s += ",\"lights\":[";
   bool first = true;
   for (uint32_t l : g_extras.lights) {
     if (!IsObject(l)) continue;
+    // The renderer skips baked or disabled level point and spot lights (the lightmaps have them): leave them out.
+    if (live && !IsObject(PropU32(l, "LightEnvironment"))) {
+      const std::string_view cls = ClassName(l);
+      if ((cls == "PointLightComponent" || cls == "SpotLightComponent") &&
+          (!PropBool(l, "bEnabled") || PropBool(l, "UseDirectLightMap") ||
+           PropByte(l, "LightAffectsClassification") == 2 /* LAC_STATIC_AFFECTING */))
+        continue;
+    }
     if (!first) s += ",\n";
     first = false;
-    ObjectJson(s, l, "ActorComponent");
+    if (live) CompactLightJson(s, l);
+    else ObjectJson(s, l, "ActorComponent");
   }
-  s += "],\"fog\":[";
+  s += ']';
+  if (!fog_post) return;
+  s += ",\"fog\":[";
   first = true;
   for (uint32_t f : g_extras.fog) {
     if (!IsObject(f)) continue;
@@ -1130,6 +1177,8 @@ struct LiveComponent {
   uint32_t name = 0, outer = 0, mesh = 0, mats = 0, mat_count = 0;
   const char* mesh_path = nullptr;
   const char* light_path = nullptr;
+  uint32_t dle = 0;
+  const char* env_path = nullptr;
   std::vector<const char*> materials;
 };
 struct LiveState {
@@ -1140,6 +1189,11 @@ struct LiveState {
   }();
   float last_real_time = -1;
   uint64_t frame = 0;
+  uint32_t lighting_builds = 0;
+  uint32_t feed_every = [] {
+    const char* v = std::getenv("BOTS_N1_FEED_EVERY");
+    return uint32_t(v && *v ? std::max(0, std::atoi(v)) : 2);
+  }();
   std::unordered_map<uint32_t, LiveComponent> components;
   std::unordered_map<std::string, std::unique_ptr<char[]>> strings;
   HybridScene building;
@@ -1155,6 +1209,17 @@ const char* Intern(const std::string& v) {
     it = g_live.strings.emplace(v, std::move(copy)).first;
   }
   return it->second.get();
+}
+
+// A material's path for the renderer. Runtime MaterialInstanceConstants the game makes (weapon pickups, tinted
+// characters) live in the Transient package, which no cooked file holds: walk Parent to the first cooked material.
+std::string MaterialPath(uint32_t m) {
+  for (int depth = 0; depth < 8 && IsObject(m); ++depth) {
+    std::string p = Path(m);
+    if (!p.starts_with("Transient.")) return p;
+    m = PropU32(m, "Parent");
+  }
+  return {};
 }
 }  // namespace
 
@@ -1219,8 +1284,11 @@ void Live(uint8_t* base) {
       lc.mesh_path = Intern(Path(mesh));
       lc.light_path = Intern(Path(c));
       lc.materials.clear();
-      for (uint32_t i = 0; i < mat_count; ++i) lc.materials.push_back(Intern(Path(U32(mats + 4 * i))));
+      for (uint32_t i = 0; i < mat_count; ++i) lc.materials.push_back(Intern(MaterialPath(U32(mats + 4 * i))));
     }
+    // The owner's light environment (characters, movers, pickups): lit by its composite lights in n1.
+    const uint32_t dle = PropU32(c, "LightEnvironment");
+    if (dle != lc.dle) lc.dle = dle, lc.env_path = IsObject(dle) ? Intern(Path(dle)) : nullptr;
     if (!lc.mesh_path) continue;
     if (skel) {  // culled by bounds in n1 (the feed's `rendered` flag flickers)
       HybridScene::Skel& sk = out.skeletal.emplace_back();
@@ -1241,6 +1309,7 @@ void Live(uint8_t* base) {
       } else {
         sk.bounds[0] = sk.bounds[1] = sk.bounds[2] = 0, sk.bounds[3] = 1e30f;  // never culled
       }
+      sk.env = lc.env_path;
       sk.mat_offset = uint32_t(out.materials.size());
       sk.mat_count = uint32_t(lc.materials.size());
       out.materials.insert(out.materials.end(), lc.materials.begin(), lc.materials.end());
@@ -1250,14 +1319,27 @@ void Live(uint8_t* base) {
     for (int i = 0; i < 16; ++i) inst.transform[i] = F32(c + g_off.local_to_world.offset + 4 * i);
     inst.mesh = lc.mesh_path;
     inst.light = lc.light_path;
+    inst.env = lc.env_path;
     inst.mat_offset = uint32_t(out.materials.size());
     inst.mat_count = uint32_t(lc.materials.size());
     out.materials.insert(out.materials.end(), lc.materials.begin(), lc.materials.end());
   }
   out.walked = uint32_t(st.prims.size());
+  // Lights, fog and post for n1 (properties read live; the component list comes from the last walk).
+  out.lighting.clear();
+  out.lighting_ms = 0;
+  if (st.feed_every && st.frame % st.feed_every == 0) {
+    const auto tl = std::chrono::steady_clock::now();
+    out.lighting = "{\"v\":1";
+    LightsPostJson(out.lighting, world_info, true, st.lighting_builds++ % 16 == 0);
+    out.lighting += '}';
+    out.lighting_ms = float(Ms(tl, std::chrono::steady_clock::now()));
+  }
   out.frame = ++st.frame;
   out.build_ms = float(Ms(t0, std::chrono::steady_clock::now()));
   std::lock_guard lock(hs->scene_mutex);
+  // Keep a lighting update the renderer has not taken yet when this frame brings none.
+  if (out.lighting.empty() && !hs->scene.lighting.empty()) std::swap(out.lighting, hs->scene.lighting);
   std::swap(hs->scene, out);
 }
 
