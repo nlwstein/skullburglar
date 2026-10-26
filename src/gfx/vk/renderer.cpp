@@ -458,6 +458,7 @@ void Renderer::EndFrame() {
     }
   }
   PumpWarmup();
+  PumpN1Uploads();
   if (++frame_ % 64) return;
   const auto now = std::chrono::steady_clock::now();
   const std::chrono::seconds idle_time(texture_idle_seconds_);

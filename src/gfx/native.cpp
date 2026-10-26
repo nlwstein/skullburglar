@@ -319,8 +319,11 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     FrameMark now = MarkFrame();
     const std::string load_max_what = renderer_->texture_load_max_what();  // before the take: read with it
     const uint64_t load_max_us = renderer_->TakeTextureLoadMaxUs();
+    const vk::Renderer::N1FrameNote n1 = renderer_->TakeN1FrameNote();
+    if (n1.held) frame_marked_ = false, frame_avg_ms_ = 0;  // the level preload hold: not playable yet, not a hitch
     if (frame_marked_) {
       const double ms = std::chrono::duration<double, std::milli>(now.time - frame_mark_.time).count();
+      LogN1Hitch(ms, now, n1);
       static constexpr double kEdges[] = {20, 25, 33.4, 50, 100, 250};
       size_t bucket = 0;
       while (bucket < std::size(kEdges) && ms > kEdges[bucket]) ++bucket;
@@ -339,6 +342,55 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     }
     frame_mark_ = std::move(now);
     frame_marked_ = true;
+  }
+
+  // B-199: every frame over BOTS_N1_HITCH_MS (33.4) within BOTS_N1_HITCH_WINDOW_S (60; 0: all run) of n1 resuming
+  // after a gap (level start, end of a loading screen), with its likely cause. No relative test: at a level start
+  // every slow frame counts. At most 2000 lines.
+  void LogN1Hitch(double ms, const FrameMark& now, const vk::Renderer::N1FrameNote& n1) {
+    static const double limit = [] {
+      const char* v = std::getenv("BOTS_N1_HITCH_MS");
+      return v && *v ? std::atof(v) : 33.4;
+    }();
+    static const double window = [] {
+      const char* v = std::getenv("BOTS_N1_HITCH_WINDOW_S");
+      return v && *v ? std::atof(v) : 60.0;
+    }();
+    const double since = renderer_->n1_seconds_since_resume();
+    if (limit <= 0 || ms <= limit || since < 0 || (window > 0 && since > window) || n1_hitch_lines_ >= 2000) return;
+    ++n1_hitch_lines_;
+    const auto& a = frame_mark_.stats;
+    const auto& b = now.stats;
+    auto t = [](uint64_t from, uint64_t to) { return double(to - from) / 1000.0; };
+    const double n1_load = n1.apply_ms + n1.upload_ms;
+    const double port_tex = t(a.texture_us, b.texture_us), gpu_wait = t(a.wait_us, b.wait_us);
+    const double idle = t(frame_mark_.idle_us, now.idle_us);
+    const char* cause = "other";
+    if (n1.tree_capture) {
+      cause = "tree capture";
+    } else if (n1_load >= 8 || (n1.applied && n1_load >= 0.25 * ms)) {
+      cause = n1.lazy ? "n1 load (lazy)" : "n1 load (preloaded)";
+    } else if (n1.late_pipelines || n1.late_shaders || n1.draws_no_pipe || b.pending_draws != a.pending_draws ||
+               b.live_pipelines != a.live_pipelines) {
+      cause = "pipeline";
+    } else if (port_tex >= 8) {
+      cause = "port texture upload";
+    } else if (n1.record_ms >= 0.5 * ms) {
+      cause = "n1 record";
+    } else if (gpu_wait >= 0.4 * ms) {
+      cause = "gpu";
+    } else if (idle >= 0.5 * ms) {
+      cause = "game thread";
+    }
+    REXLOG_INFO("n1 hitch: t+{:.1f} s frame {} took {:.1f} ms, cause {}: n1 record {:.1f} ms ({} scenes), loads {:.1f} "
+                "ms ({} applied, longest {:.1f} ms, {} textures, {} meshes, {:.2f} MB; {} lazy, {} late skips), "
+                "upload pump {:.1f} ms; late pipelines {} shaders {}, {} draws without a pipeline, {} on the stand-in; "
+                "tree capture {}; port: draws {:.1f} ms, textures {:.1f} ms, GPU wait {:.1f} ms, CP idle {:.1f} ms, "
+                "{} new port pipelines",
+                since, frames_, ms, cause, n1.record_ms, n1.scenes, n1.apply_ms, n1.applied, n1.apply_max_ms,
+                n1.textures, n1.meshes, double(n1.bytes) / 1048576.0, n1.lazy, n1.late_skips, n1.upload_ms,
+                n1.late_pipelines, n1.late_shaders, n1.draws_no_pipe, n1.fallback_draws, n1.tree_capture ? 1 : 0,
+                t(a.draw_us, b.draw_us), port_tex, gpu_wait, idle, b.live_pipelines - a.live_pipelines);
   }
 
   // One slow frame: where this thread's time went (draw recording, of it texture loads, GPU fence waits, idle
@@ -524,7 +576,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   bool frame_marked_ = false;
   uint32_t frame_hist_[7] = {};  // <=20, 20-25, 25-33, 33-50, 50-100, 100-250, >250 ms
   double frame_max_ms_ = 0, frame_avg_ms_ = 0;  // frame_avg_ms_: moving average, slow frames capped at 100 ms
-  uint32_t hitch_lines_ = 0, hitches_unlogged_ = 0;
+  uint32_t hitch_lines_ = 0, hitches_unlogged_ = 0, n1_hitch_lines_ = 0;
   host::CpuTimes last_cpu_;
   std::chrono::steady_clock::time_point last_cpu_time_;
   std::string last_power_ = "-", last_overlays_ = "-";  // "-": not reported yet

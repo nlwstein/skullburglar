@@ -187,6 +187,26 @@ class Renderer : public Pm4Sink {
   uint64_t TakeTextureLoadMaxUs() { return std::exchange(texture_load_max_us_, 0); }
   // What that texture was: size, guest format, mips.
   const std::string& texture_load_max_what() const { return texture_load_max_what_; }
+  // B-199: what n1 did since the last take (one presented frame, for the hitch log), and whether the frame held the
+  // guest for the level preload (not a hitch: the level wasn't playable yet). hybrid_fill.cpp fills it.
+  struct N1FrameNote {
+    uint32_t scenes = 0;          // n1_record calls
+    double record_ms = 0;         // in n1_record (applying loads, culling, recording)
+    double upload_ms = 0;         // in n1_upload on frames without a scene
+    double hold_ms = 0;           // the preload hold
+    uint64_t applied = 0;         // loads applied (meshes, materials, lights, skeletal meshes)
+    double apply_ms = 0, apply_max_ms = 0;
+    uint64_t lazy = 0;            // loads first asked for by a draw (all kinds)
+    uint64_t late_skips = 0;      // draws skipped: preloaded but not in yet
+    uint64_t textures = 0, meshes = 0, bytes = 0;
+    uint32_t late_pipelines = 0, late_shaders = 0, draws_no_pipe = 0, fallback_draws = 0;
+    bool tree_capture = false;    // the port drew its own scene for the tree capture
+    bool held = false;
+  };
+  N1FrameNote TakeN1FrameNote() { return std::exchange(n1_note_, N1FrameNote{}); }
+  // Seconds since n1 last resumed drawing after a gap (level start, or after a loading screen); negative before the
+  // first scene.
+  double n1_seconds_since_resume() const;
   // Guest textures held: entries and their image bytes; the budget above which unused ones are evicted (0: evicted by
   // age alone, the behaviour before issue #12).
   size_t texture_count() const { return guest_textures_.size(); }
@@ -484,6 +504,11 @@ class Renderer : public Pm4Sink {
   // B-187: while the tree capture runs (hybrid_fill.cpp sets these) IssueDraw hands tree draws to n1ffi.
   void* n1_tree_r_ = nullptr;
   bool n1_tree_active_ = false;
+  N1FrameNote n1_note_;
+  std::chrono::steady_clock::time_point n1_resumed_{};
+  // Frames without a scene: hybrid_fill.cpp applies n1's loads then (loading screens), from EndFrame.
+  void PumpN1Uploads();
+  uint64_t n1_drawn_pumped_ = 0;
 
   // Textures (texture.cpp). TextureView may record an upload, so call it before a draw's ring reservation.
   // Views for the translator's unsigned or signed binding of a fetch: formats with both signednesses get a view of

@@ -52,11 +52,16 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 #include <time.h>
 
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
+#include <rex/ppc/func.h>
+#include <rex/runtime.h>
+#include <rex/system/kernel_state.h>
+#include <rex/system/xmemory.h>
 
 #include "hybrid_state.h"
 
@@ -365,7 +370,11 @@ using bots::HybridCamera;
 using bots::HybridState;
 
 // BeginRenderingViewFamily(FCanvas* r3, FSceneViewFamily* r4), game thread.
+namespace bots::hybrid {
+void InstallOpenHooks();  // B-199, end of file
+}
 extern "C" void sub_82BB3230(PPCContext& __restrict ctx, uint8_t* base) {
+  bots::hybrid::InstallOpenHooks();
   static const bool init = [] {
     g_suppress = EnvInt("BOTS_HYBRID_SUPPRESS", 0);
     if (g_suppress) g_suppress_mode = g_suppress;
@@ -531,3 +540,72 @@ extern "C" void sub_82BB1E78(PPCContext& __restrict ctx, uint8_t* base) {
   g_stats.render_ms += ms, ++g_stats.renders;
   if (marker) ++g_stats.markers;
 }
+
+// B-199 level preload. UE3 opens a cooked package's .xxx when it starts loading it (synchronously for a map,
+// asynchronously for a streamed sublevel), so the open comes before the level is loaded, let alone visible. The opens
+// reach the kernel through UE3's I/O function table (indirect calls to the NtCreateFile / NtOpenFile import thunks; the
+// XAPI CreateFile wrappers sub_8332D5E0 and friends never see them), so the thunks' dispatch-table slots are pointed at
+// a wrapper that notes the path and calls the import. The package's stem is queued for the renderer; with fill 4 it has n1
+// load what it holds (hybrid_fill.cpp). BOTS_N1_PRELOAD=0 turns the queueing off; opens are logged either way.
+namespace bots::hybrid {
+namespace {
+constexpr uint32_t kNtOpenFileThunk = 0x83740094, kNtCreateFileThunk = 0x837401D4;
+PPCFunc* g_nt_open = nullptr;
+PPCFunc* g_nt_create = nullptr;
+
+// r5 (both calls): OBJECT_ATTRIBUTES { RootDirectory, ANSI_STRING* ObjectName, Attributes }.
+void NotePackageOpen(PPCContext& ctx, uint8_t* base) {
+  const uint32_t attrs = ctx.r5.u32;
+  if (!Readable(attrs)) return;
+  const uint32_t name = U32(base, attrs + 4);
+  if (!Readable(name)) return;
+  uint16_t len;
+  std::memcpy(&len, Raw(base, name), 2);
+  len = __builtin_bswap16(len);
+  const uint32_t buf = U32(base, name + 4);
+  if (len <= 4 || len >= 260 || !buf || !Readable(buf & ~3u)) return;
+  std::string_view path(reinterpret_cast<const char*>(Raw(base, buf)), len);
+  auto lower = [](char c) { return char(std::tolower(uint8_t(c))); };
+  if (path[len - 4] != '.' || lower(path[len - 3]) != 'x' || lower(path[len - 2]) != 'x' || lower(path[len - 1]) != 'x')
+    return;
+  const size_t slash = path.find_last_of("\\/");
+  std::string stem(path.substr(slash == std::string_view::npos ? 0 : slash + 1));
+  stem.resize(stem.size() - 4);
+  static const bool preload = EnvInt("BOTS_N1_PRELOAD", 1) != 0;
+  const uint32_t k = g_state.opened.fetch_add(1, std::memory_order_relaxed);
+  // Queued whatever the fill mode (it is set later, and can change); only an n1 renderer takes them.
+  bool queued = false;
+  if (preload) {
+    std::lock_guard lock(g_state.package_mutex);
+    if ((queued = g_state.packages.size() < 4096)) g_state.packages.push_back(stem);
+  }
+  REXLOG_INFO("preload: package open #{} {}{}", k, stem, queued ? "" : " (not queued)");
+}
+void NtOpenFileHook(PPCContext& __restrict ctx, uint8_t* base) {
+  NotePackageOpen(ctx, base);
+  g_nt_open(ctx, base);
+}
+void NtCreateFileHook(PPCContext& __restrict ctx, uint8_t* base) {
+  NotePackageOpen(ctx, base);
+  g_nt_create(ctx, base);
+}
+}  // namespace
+
+// From OnPostLoadXexImage (before the guest runs), and again from the first game-thread hook in case the dispatch
+// table wasn't ready then. Installs once.
+void InstallOpenHooks() {
+  static std::atomic<bool> installed{false};
+  static std::mutex mutex;
+  if (installed.load(std::memory_order_acquire)) return;
+  std::lock_guard lock(mutex);
+  if (installed.load(std::memory_order_relaxed)) return;
+  auto* memory = rex::system::kernel_memory();
+  if (!memory || !memory->HasAnyFunctionTable()) return;
+  g_nt_open = rex::runtime::ResolveIndirectFunction(kNtOpenFileThunk);
+  g_nt_create = rex::runtime::ResolveIndirectFunction(kNtCreateFileThunk);
+  const bool ok = g_nt_open && g_nt_create && memory->SetFunction(kNtOpenFileThunk, NtOpenFileHook) &&
+                  memory->SetFunction(kNtCreateFileThunk, NtCreateFileHook);
+  installed.store(true, std::memory_order_release);
+  REXLOG_INFO("preload: package-open hooks {}", ok ? "installed" : "NOT installed");
+}
+}  // namespace bots::hybrid

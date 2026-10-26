@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #ifdef _WIN32
@@ -180,6 +181,13 @@ struct HybridState {
   std::atomic<uint32_t> dual{0};
   std::atomic<uint32_t> dual_shots{0};
   char dual_tag[96] = {};
+  // B-199 level preload: cooked packages (file stems, e.g. "Ambush_P", "AirlockOne") the game opened, in order. The
+  // game appends when it opens a .xxx file (a map, a streamed sublevel, a shared package: the open comes before the
+  // level is loaded, let alone visible); the renderer takes them and has n1 load what each holds. `opened` counts
+  // every package open, `level_opens` the ones a renderer hold may follow (BOTS_N1_PRELOAD_HOLD_S).
+  std::mutex package_mutex;
+  std::vector<std::string> packages;
+  std::atomic<uint32_t> opened{0};
 };
 
 // The register the marker writes: unknown to the Xenos register table (no side effects in the SDK's command
