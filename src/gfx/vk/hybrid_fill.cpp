@@ -420,6 +420,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     if (us > is->n1_record_worst_us.load(r)) is->n1_record_worst_us.store(us, r);
   }
   ++n1_drawn_, n1_scene_frame_ = host->scene.frame, n1_marker_seq_ = cam.seq, n1_view_seq_ = view_cam->seq;
+  n1_scene_cam_ = host->scene.cam_seq;
   host->host_ms += std::chrono::duration<double, std::milli>(t2 - t0).count();
   host->record_ms += std::chrono::duration<double, std::milli>(t2 - t1).count();
   {

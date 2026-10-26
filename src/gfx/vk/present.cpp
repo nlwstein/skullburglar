@@ -308,7 +308,7 @@ void Renderer::CaptureBurst(const Image& source) {
     }
     b->map = static_cast<uint8_t*>(mapped.pMappedData);
     b->taken = 0, b->burst_start = now, b->first_drawn = n1_drawn_;
-    b->lines = "frame\tms\tpresents\tn1_drawn\tmarker_seq\tview_seq\tscene_frame\n";
+    b->lines = "frame\tms\tpresents\tn1_drawn\tmarker_seq\tview_seq\tscene_cam\tscene_frame\n";
     REXLOG_INFO("capture burst {}: {} frames of {}x{}", b->number, b->count, b->w, b->h);
   }
   if (source.width != b->w || source.height != b->h) return;  // a resize mid-burst: skip those frames
@@ -322,10 +322,10 @@ void Renderer::CaptureBurst(const Image& source) {
   vk_.vkCmdCopyImageToBuffer(cmd_, source.image, VK_IMAGE_LAYOUT_GENERAL, b->buffer, 1, &region);
   Barrier();
   char line[160];
-  std::snprintf(line, sizeof(line), "%u\t%.2f\t%llu\t%llu\t%u\t%u\t%llu\n", b->taken,
+  std::snprintf(line, sizeof(line), "%u\t%.2f\t%llu\t%llu\t%u\t%u\t%u\t%llu\n", b->taken,
                 std::chrono::duration<double, std::milli>(now - b->burst_start).count(),
                 (unsigned long long)stats_.presents, (unsigned long long)(n1_drawn_ - b->first_drawn), n1_marker_seq_,
-                n1_view_seq_, (unsigned long long)n1_scene_frame_);
+                n1_view_seq_, n1_scene_cam_, (unsigned long long)n1_scene_frame_);
   b->lines += line;
   if (++b->taken < b->count) return;
   // The last frame: wait for the copies, hand the pixels to a writer thread, free the buffer.
