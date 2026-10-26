@@ -119,6 +119,7 @@ struct N1Host {
   std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
   double log_seconds = 5, host_ms = 0, record_ms = 0, build_ms = 0, feed_ms = 0, lighting_ms = 0, particles_ms = 0;
   uint64_t frames = 0, draws = 0, triangles = 0, scenes = 0;
+  uint32_t cam_seq = 0;  // the camera n1 drew the last frame with
   N1Stats last{};
 };
 uint32_t Handle(std::unordered_map<const char*, uint32_t>& map, const char* path, N1Renderer* r,
@@ -232,12 +233,21 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   n1_set_skeletal(host->r, host->skeletal.data(), uint32_t(host->skeletal.size()), host->scene.bones.data(),
                   uint32_t(host->scene.bones.size()), host->skel_materials.data(),
                   uint32_t(host->skel_materials.size()));
+  // The scene's own camera (HybridScene::cam_seq) when the ring still holds it; BOTS_N1_SCENE_CAMERA=0: the marker's.
+  static const bool scene_camera = std::atoi(EnvOr("BOTS_N1_SCENE_CAMERA", "1")) != 0;
+  const HybridCamera* view_cam = &cam;
+  if (scene_camera && host->scene.cam_seq) {
+    const HybridCamera& sc = state->cameras[host->scene.cam_seq % HybridState::kCameras];
+    if (sc.seq == host->scene.cam_seq) view_cam = &sc;
+  }
+  host->cam_seq = view_cam->seq;
+  n1_set_time(host->r, view_cam->time);  // materials' Time is the game's clock (tracer fades compare with it)
   N1Camera camera{};
-  std::memcpy(camera.view, cam.view, sizeof(camera.view));
-  std::memcpy(camera.proj, cam.proj, sizeof(camera.proj));
-  std::memcpy(camera.location, cam.location, sizeof(camera.location));
+  std::memcpy(camera.view, view_cam->view, sizeof(camera.view));
+  std::memcpy(camera.proj, view_cam->proj, sizeof(camera.proj));
+  std::memcpy(camera.location, view_cam->location, sizeof(camera.location));
   // UE3's infinite perspective: proj[14] = -near * proj[10].
-  camera.near_plane = cam.proj[10] != 0 ? -cam.proj[14] / cam.proj[10] : 5.0f;
+  camera.near_plane = view_cam->proj[10] != 0 ? -view_cam->proj[14] / view_cam->proj[10] : 5.0f;
   N1Target t{};
   t.view = target.view;
   t.layout = VK_IMAGE_LAYOUT_GENERAL;
@@ -568,7 +578,7 @@ bool Renderer::DrawSceneDual(Image& target, const HybridCamera& cam, const VkRec
   std::string& j = p.json;
   j = "{\"tag\":\"" + d->tag + "\",\"index\":" + std::to_string(d->index - 1) + ",\"wall\":" + std::to_string(t) +
       ",\"waited\":" + std::to_string(waited) + ",\"settled\":" + (d->settled >= d->settle ? "true" : "false") +
-      ",\"seq\":" + std::to_string(cam.seq) + ",\"scene_frame\":" + std::to_string(host->scene.frame) +
+      ",\"seq\":" + std::to_string(cam.seq) + ",\"scene_frame\":" + std::to_string(host->scene.frame) + ",\"scene_cam_seq\":" + std::to_string(host->cam_seq) +
       ",\"world_time\":" + std::to_string(cam.time) + ",\"camera\":{\"view\":" + Floats(cam.view, 16) +
       ",\"proj\":" + Floats(cam.proj, 16) + ",\"location\":" + Floats(cam.location, 3) +
       ",\"rotation\":[" + std::to_string(cam.rotation[0]) + "," + std::to_string(cam.rotation[1]) + "," +
@@ -581,7 +591,9 @@ bool Renderer::DrawSceneDual(Image& target, const HybridCamera& cam, const VkRec
       ",\"meshes_pending\":" + std::to_string(st.meshes_pending) +
       ",\"meshes_missing\":" + std::to_string(st.meshes_missing) + ",\"loading\":" + std::to_string(st.loading) +
       ",\"textures_unsupported\":" + std::to_string(st.textures_unsupported) +
-      ",\"skel_drawn\":" + std::to_string(st.skel_drawn) + ",\"skel_skipped\":" + std::to_string(st.skel_skipped) +
+      ",\"skel_drawn\":" + std::to_string(st.skel_drawn) + ",\"skel_culled\":" + std::to_string(st.skel_culled) +
+      ",\"skel_skipped\":" + std::to_string(st.skel_skipped) +
+      ",\"skel_meshes_ready\":" + std::to_string(st.skel_meshes_ready) + ",\"culled\":" + std::to_string(st.culled) +
       ",\"pipelines_pending\":" + std::to_string(st.pipelines_pending) +
       ",\"light_envs\":" + std::to_string(st.light_envs) + ",\"dyn_lights\":" + std::to_string(st.dyn_lights) +
       ",\"particle_emitters\":" + std::to_string(st.particle_emitters) +
