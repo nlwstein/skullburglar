@@ -68,6 +68,8 @@ def main():
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)
     ap.add_argument("--env", action="append", default=[], help="extra VAR=value for the game")
+    ap.add_argument("--feed", action="store_true",
+                    help="also write the scene feed's JSON for the frame of each pair (<out>/feed, scenefeed dump 1)")
     a = ap.parse_args()
 
     tour = DEFAULT_TOUR
@@ -105,6 +107,8 @@ def main():
         "BOTS_INVULNERABLE": "1",
         "BOTS_PRECOMPILE_HOLD": "0",
     })
+    if a.feed:
+        env["BOTS_SCENEFEED_DIR"] = os.path.join(out, "feed")
     if a.random != "0":
         env["BOTS_INPUT_RANDOM"] = f"60:{a.random}"
     for kv in a.env:
@@ -151,6 +155,9 @@ def main():
                 send(f"hybrid dualshot {tag}")
                 rx = re.compile(r"hybrid dual: wrote (\S+-" + re.escape(tag) + r")\.")
                 got = log.wait(lambda l: rx.search(l), a.shot_timeout, alive)
+                if got and a.feed:  # the world is still held, so this is the pair's scene to within a frame
+                    send("scenefeed dump 1")
+                    log.wait(lambda l: "scenefeed: wrote" in l or "frame_" in l, 5, alive)
                 if a.freeze == "slomo":
                     send("SloMo 1")
                 elif a.freeze == "pause":
