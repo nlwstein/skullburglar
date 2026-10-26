@@ -1238,7 +1238,7 @@ std::string BuildStatus(bool window, std::map<std::string, std::string>* flat) {
       .Num("worst_ms", worst / 1000.0, "%.1f")
       .Int("over33", int64_t(over33))
       .Int("over50", int64_t(over50))
-      .Num("frame_age_ms", last_frame ? double(now - last_frame) / 1000 : -1, "%.0f")
+      .Num("frame_age_ms", last_frame ? double(now - std::min<uint64_t>(now, last_frame)) / 1000 : -1, "%.0f")
       .Num("guest_fps_log", g.guest_fps, "%.1f")
       .Int("draws", int64_t(g_state.draws.load()))
       .Int("pending_draws", int64_t(g_state.pending_draws.load()))
