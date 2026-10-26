@@ -464,6 +464,10 @@ class Renderer : public Pm4Sink {
   // Fill 4: the n1 renderer's host state (hybrid_fill.cpp), or null.
   bool DrawSceneN1(Image& target, const bots::HybridCamera& cam, const VkRect2D& area);
   void* n1_host_ = nullptr;
+  // Dual render (BOTS_HYBRID_DUAL, parity harness): the port's scene stays, n1 draws the same frame offscreen and
+  // both are read back on request (hybrid_fill.cpp).
+  bool DrawSceneDual(Image& target, const bots::HybridCamera& cam, const VkRect2D& area);
+  void* dual_ = nullptr;
 
   // Textures (texture.cpp). TextureView may record an upload, so call it before a draw's ring reservation.
   // Views for the translator's unsigned or signed binding of a fetch: formats with both signednesses get a view of

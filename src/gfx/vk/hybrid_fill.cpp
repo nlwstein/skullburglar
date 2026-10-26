@@ -16,7 +16,11 @@
 //             BOTS_N1_LOG      seconds between stats lines (default 5)
 // It records into the frame's command buffer like a format transfer: its own one-attachment rendering, so the game's
 // pass simply reopens for the HUD.
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -240,7 +244,14 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   t.width = target.width, t.height = target.height;
   t.x = area.offset.x, t.y = area.offset.y, t.w = area.extent.width, t.h = area.extent.height;
   t.clear = 1;  // the host covers the whole view every frame
-  t.clear_color[0] = 0.32f, t.clear_color[1] = 0.40f, t.clear_color[2] = 0.50f, t.clear_color[3] = 1.0f;
+  // BOTS_N1_CLEAR="r,g,b": what n1 clears the view to (the parity harness uses a colour no scene has, to find pixels n1
+  // left empty).
+  static const std::array<float, 3> clear = [] {
+    std::array<float, 3> c{0.32f, 0.40f, 0.50f};
+    if (const char* v = std::getenv("BOTS_N1_CLEAR")) std::sscanf(v, "%f,%f,%f", &c[0], &c[1], &c[2]);
+    return c;
+  }();
+  t.clear_color[0] = clear[0], t.clear_color[1] = clear[1], t.clear_color[2] = clear[2], t.clear_color[3] = 1.0f;
   // Serials: this command buffer is submitted as stats_.flushes + 1; everything older than the oldest submission
   // not yet waited for is done.
   uint64_t completed = stats_.flushes;
@@ -292,10 +303,307 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   }
   return true;
 }
+
+// Dual render (BOTS_HYBRID_DUAL=1, the parity harness). The game draws its own scene as usual; the marker comes after
+// it, so `target` holds the port's finished scene (post-processed, before the HUD). n1 then draws the same frame (the
+// same feed and the marker's camera) into an offscreen image of the target's size and format, and on request both are
+// copied out and written as PNG with a JSON sidecar. Both pictures are post-process output in the target's encoding
+// (n1 resolves its linear RGBA16F scene through post and sRGB-encodes for a UNORM target, as the port does), so they
+// compare directly. Environment:
+//   BOTS_HYBRID_DUAL_DIR     where pictures go (default "dual"; must exist)
+//   BOTS_HYBRID_DUAL_EVERY   also take a pair every <s> seconds (default 0: only on "hybrid dualshot <tag>")
+//   BOTS_HYBRID_DUAL_SETTLE  frames n1 must have nothing loading or waiting (meshes, pipelines, particle materials)
+//                            and the port no draw waiting on a pipeline, before a shot (default 30)
+//   BOTS_HYBRID_DUAL_WAIT    seconds to wait for that before shooting anyway, marked "settled": false (default 30)
+namespace {
+uint32_t Crc32(const uint8_t* p, size_t n, uint32_t crc = 0) {
+  static const auto table = [] {
+    std::array<uint32_t, 256> t{};
+    for (uint32_t i = 0; i < 256; ++i) {
+      uint32_t c = i;
+      for (int k = 0; k < 8; ++k) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+      t[i] = c;
+    }
+    return t;
+  }();
+  crc = ~crc;
+  for (size_t i = 0; i < n; ++i) crc = table[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
+  return ~crc;
+}
+// 8-bit RGB as PNG, uncompressed (stored deflate blocks): no image library in the build, and the harness converts or
+// recompresses afterwards.
+bool WritePng(const std::string& path, const std::vector<uint8_t>& rgb, uint32_t w, uint32_t h) {
+  std::vector<uint8_t> raw;
+  raw.reserve(size_t(w * 3 + 1) * h);
+  for (uint32_t y = 0; y < h; ++y) {
+    raw.push_back(0);
+    raw.insert(raw.end(), rgb.begin() + size_t(y) * w * 3, rgb.begin() + size_t(y + 1) * w * 3);
+  }
+  std::vector<uint8_t> z{0x78, 0x01};
+  uint32_t a = 1, b = 0;
+  for (uint8_t v : raw) a = (a + v) % 65521, b = (b + a) % 65521;
+  for (size_t at = 0; at < raw.size() || at == 0;) {
+    const size_t n = std::min<size_t>(65535, raw.size() - at);
+    z.push_back(at + n == raw.size() ? 1 : 0);
+    z.push_back(uint8_t(n)), z.push_back(uint8_t(n >> 8)), z.push_back(uint8_t(~n)), z.push_back(uint8_t(~n >> 8));
+    z.insert(z.end(), raw.begin() + at, raw.begin() + at + n);
+    at += n;
+    if (n == 0) break;
+  }
+  const uint32_t adler = (b << 16) | a;
+  for (int k = 3; k >= 0; --k) z.push_back(uint8_t(adler >> (8 * k)));
+  FILE* f = std::fopen(path.c_str(), "wb");
+  if (!f) return false;
+  auto chunk = [&](const char* type, const uint8_t* data, size_t n) {
+    uint8_t head[8] = {uint8_t(n >> 24), uint8_t(n >> 16), uint8_t(n >> 8), uint8_t(n)};
+    std::memcpy(head + 4, type, 4);
+    std::fwrite(head, 1, 8, f);
+    if (n) std::fwrite(data, 1, n, f);
+    const uint32_t crc = Crc32(data, n, Crc32(head + 4, 4));
+    const uint8_t tail[4] = {uint8_t(crc >> 24), uint8_t(crc >> 16), uint8_t(crc >> 8), uint8_t(crc)};
+    std::fwrite(tail, 1, 4, f);
+  };
+  static const uint8_t sig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+  std::fwrite(sig, 1, 8, f);
+  const uint8_t ihdr[13] = {uint8_t(w >> 24), uint8_t(w >> 16), uint8_t(w >> 8), uint8_t(w),
+                            uint8_t(h >> 24), uint8_t(h >> 16), uint8_t(h >> 8), uint8_t(h),
+                            8, 2, 0, 0, 0};
+  chunk("IHDR", ihdr, sizeof(ihdr));
+  chunk("IDAT", z.data(), z.size());
+  chunk("IEND", nullptr, 0);
+  return std::fclose(f) == 0;
+}
+float HalfToFloat(uint16_t h) {
+  const uint32_t sign = uint32_t(h >> 15) << 31, exp = (h >> 10) & 0x1F, man = h & 0x3FF;
+  uint32_t bits;
+  if (exp == 0) {
+    const float v = std::ldexp(float(man), -24);
+    return sign ? -v : v;
+  }
+  bits = exp == 31 ? sign | 0x7F800000u | (man << 13) : sign | ((exp + 112) << 23) | (man << 13);
+  float f;
+  std::memcpy(&f, &bits, 4);
+  return f;
+}
+// Bytes per texel of the formats a back buffer can have; 0: not supported.
+uint32_t DualTexel(VkFormat f) {
+  switch (f) {
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_B8G8R8A8_UNORM:
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+      return 4;
+    case VK_FORMAT_R16G16B16A16_SFLOAT:
+      return 8;
+    default:
+      return 0;
+  }
+}
+void DualToRgb(VkFormat f, const uint8_t* src, size_t texels, std::vector<uint8_t>& rgb) {
+  rgb.resize(texels * 3);
+  auto byte = [](float v) { return uint8_t(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f)); };
+  for (size_t i = 0; i < texels; ++i) {
+    uint8_t* o = &rgb[i * 3];
+    if (f == VK_FORMAT_R16G16B16A16_SFLOAT) {
+      uint16_t h[4];
+      std::memcpy(h, src + i * 8, 8);
+      for (int k = 0; k < 3; ++k) o[k] = byte(HalfToFloat(h[k]));
+      continue;
+    }
+    uint32_t p;
+    std::memcpy(&p, src + i * 4, 4);
+    if (f == VK_FORMAT_A2B10G10R10_UNORM_PACK32) {
+      for (int k = 0; k < 3; ++k) o[k] = byte(float((p >> (10 * k)) & 0x3FF) / 1023.0f);
+    } else {
+      for (int k = 0; k < 3; ++k) o[k] = uint8_t(p >> (8 * k));
+      if (f == VK_FORMAT_B8G8R8A8_UNORM) std::swap(o[0], o[2]);
+    }
+  }
+}
+std::string Floats(const float* v, size_t n) {
+  std::string s = "[";
+  for (size_t i = 0; i < n; ++i) s += (i ? "," : "") + std::to_string(v[i]);
+  return s + "]";
+}
+struct DualState {
+  void* image = nullptr;  // Renderer::Image, n1's offscreen target
+  uint32_t seen = 0;      // dual_shots handled
+  bool want = false;
+  std::string tag;
+  std::chrono::steady_clock::time_point asked, next_auto, start = std::chrono::steady_clock::now();
+  uint32_t settled = 0;   // consecutive settled frames
+  uint64_t port_pending = 0;
+  uint32_t index = 0;
+  double every = 0, wait = 30;
+  uint32_t settle = 30;
+  std::string dir;
+  struct Pending {
+    VkBuffer buffer[2] = {};
+    VmaAllocation alloc[2] = {};
+    void* map[2] = {};
+    uint64_t serial = 0;
+    uint32_t w = 0, h = 0;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    std::string stem, json;
+  };
+  std::vector<Pending> pending;
+};
+}  // namespace
+
+bool Renderer::DrawSceneDual(Image& target, const HybridCamera& cam, const VkRect2D& area) {
+  HybridState* state = FindHybridState();
+  auto* d = static_cast<DualState*>(dual_);
+  if (!d) {
+    d = new DualState;
+    dual_ = d;
+    d->dir = EnvOr("BOTS_HYBRID_DUAL_DIR", "dual");
+    d->every = std::atof(EnvOr("BOTS_HYBRID_DUAL_EVERY", "0"));
+    d->wait = std::atof(EnvOr("BOTS_HYBRID_DUAL_WAIT", "30"));
+    d->settle = uint32_t(std::atoi(EnvOr("BOTS_HYBRID_DUAL_SETTLE", "30")));
+    d->next_auto = d->start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                  std::chrono::duration<double>(d->every));
+    REXLOG_INFO("hybrid dual: port and n1 in one frame, pictures to {} (every {} s, settle {} frames, wait {} s)",
+                d->dir, d->every, d->settle, d->wait);
+  }
+  const uint32_t texel = DualTexel(target.format);
+  if (!texel) {
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      REXLOG_WARN("hybrid dual: no readback for target format {}", int(target.format));
+    }
+    return false;
+  }
+  auto* image = static_cast<Image*>(d->image);
+  if (!image || image->width != target.width || image->height != target.height || image->format != target.format) {
+    if (image) Retire(*image);  // destroyed once this submission completes
+    else image = new Image, d->image = image;
+    if (!CreateImage(*image, target.format, target.width, target.height, false, VK_IMAGE_VIEW_TYPE_2D, true)) {
+      REXLOG_ERROR("hybrid dual: offscreen target {}x{} format {} failed", target.width, target.height,
+                   int(target.format));
+      delete image;
+      d->image = nullptr;
+      return false;
+    }
+  }
+  if (!DrawSceneN1(*image, cam, area)) return false;
+  auto* host = static_cast<N1Host*>(n1_host_);
+  const N1Stats& st = host->last;
+
+  // Finished readbacks: written once their submission has completed.
+  uint64_t completed = stats_.flushes;
+  for (const Submission& s : submissions_)
+    if (s.pending) completed = std::min(completed, s.serial - 1);
+  std::erase_if(d->pending, [&](DualState::Pending& p) {
+    if (p.serial > completed) return false;
+    std::vector<uint8_t> rgb;
+    const char* names[2] = {".port.png", ".n1.png"};
+    for (int k = 0; k < 2; ++k) {
+      vmaInvalidateAllocation(allocator_, p.alloc[k], 0, VK_WHOLE_SIZE);
+      DualToRgb(p.format, static_cast<const uint8_t*>(p.map[k]), size_t(p.w) * p.h, rgb);
+      if (!WritePng(p.stem + names[k], rgb, p.w, p.h)) REXLOG_WARN("hybrid dual: can't write {}{}", p.stem, names[k]);
+      vmaDestroyBuffer(allocator_, p.buffer[k], p.alloc[k]);
+    }
+    if (FILE* f = std::fopen((p.stem + ".json").c_str(), "wb")) {
+      std::fwrite(p.json.data(), 1, p.json.size(), f);
+      std::fclose(f);
+    }
+    REXLOG_INFO("hybrid dual: wrote {}.{{port,n1}}.png", p.stem);
+    return true;
+  });
+
+  // Requests: the console's, and the timer's.
+  const auto now = std::chrono::steady_clock::now();
+  const uint32_t shots = state->dual_shots.load(std::memory_order_acquire);
+  if (shots != d->seen) {
+    d->seen = shots, d->want = true, d->asked = now, d->tag = state->dual_tag;
+  } else if (d->every > 0 && now >= d->next_auto && !d->want) {
+    d->next_auto = now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                             std::chrono::duration<double>(d->every));
+    d->want = true, d->asked = now, d->tag = "auto";
+  }
+  // Settled: n1 has nothing still streaming or compiling, and the port drew everything (no draw skipped for a pipeline
+  // still being made since the last frame).
+  const bool port_complete = stats_.pending_draws == d->port_pending;
+  d->port_pending = stats_.pending_draws;
+  const bool quiet = st.meshes_pending == 0 && st.loading == 0 && st.pipelines_pending == 0 &&
+                     st.particle_skipped == 0 && port_complete;
+  d->settled = quiet ? d->settled + 1 : 0;
+  const double waited = std::chrono::duration<double>(now - d->asked).count();
+  if (!d->want || (d->settled < d->settle && waited < d->wait)) return true;
+  d->want = false;
+
+  DualState::Pending p;
+  p.w = area.extent.width, p.h = area.extent.height, p.format = target.format;
+  p.serial = stats_.flushes + 1;
+  VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  info.size = VkDeviceSize(p.w) * p.h * texel;
+  info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  VmaAllocationCreateInfo alloc{};
+  alloc.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+  alloc.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+  for (int k = 0; k < 2; ++k) {
+    VmaAllocationInfo mapped{};
+    if (vmaCreateBuffer(allocator_, &info, &alloc, &p.buffer[k], &p.alloc[k], &mapped) != VK_SUCCESS) {
+      if (k) vmaDestroyBuffer(allocator_, p.buffer[0], p.alloc[0]);
+      REXLOG_ERROR("hybrid dual: readback buffer failed");
+      return true;
+    }
+    p.map[k] = mapped.pMappedData;
+  }
+  BeginCommands(kGpuOther);
+  EndRendering("hybrid dual readback");
+  Barrier();  // the port's scene and n1's are both written by now
+  VkBufferImageCopy region{};
+  region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  region.imageOffset = {area.offset.x, area.offset.y, 0};
+  region.imageExtent = {p.w, p.h, 1};
+  vk_.vkCmdCopyImageToBuffer(cmd_, target.image, VK_IMAGE_LAYOUT_GENERAL, p.buffer[0], 1, &region);
+  vk_.vkCmdCopyImageToBuffer(cmd_, image->image, VK_IMAGE_LAYOUT_GENERAL, p.buffer[1], 1, &region);
+  Barrier();  // before the HUD draws over the target
+
+  char stem[64];
+  std::snprintf(stem, sizeof(stem), "%04u-", d->index++);
+  p.stem = d->dir + "/" + stem + d->tag;
+  const double t = std::chrono::duration<double>(now - d->start).count();
+  std::string& j = p.json;
+  j = "{\"tag\":\"" + d->tag + "\",\"index\":" + std::to_string(d->index - 1) + ",\"wall\":" + std::to_string(t) +
+      ",\"waited\":" + std::to_string(waited) + ",\"settled\":" + (d->settled >= d->settle ? "true" : "false") +
+      ",\"seq\":" + std::to_string(cam.seq) + ",\"scene_frame\":" + std::to_string(host->scene.frame) +
+      ",\"world_time\":" + std::to_string(cam.time) + ",\"camera\":{\"view\":" + Floats(cam.view, 16) +
+      ",\"proj\":" + Floats(cam.proj, 16) + ",\"location\":" + Floats(cam.location, 3) +
+      ",\"rotation\":[" + std::to_string(cam.rotation[0]) + "," + std::to_string(cam.rotation[1]) + "," +
+      std::to_string(cam.rotation[2]) + "],\"fov\":" + std::to_string(cam.fov) + ",\"rect\":" + Floats(cam.rect, 4) +
+      "},\"target\":{\"width\":" + std::to_string(target.width) + ",\"height\":" + std::to_string(target.height) +
+      ",\"format\":" + std::to_string(int(target.format)) + ",\"area\":[" + std::to_string(area.offset.x) + "," +
+      std::to_string(area.offset.y) + "," + std::to_string(p.w) + "," + std::to_string(p.h) + "]},\"n1\":{" +
+      "\"instances\":" + std::to_string(st.instances) + ",\"draws\":" + std::to_string(st.draws) +
+      ",\"triangles\":" + std::to_string(st.triangles) + ",\"meshes_ready\":" + std::to_string(st.meshes_ready) +
+      ",\"meshes_pending\":" + std::to_string(st.meshes_pending) +
+      ",\"meshes_missing\":" + std::to_string(st.meshes_missing) + ",\"loading\":" + std::to_string(st.loading) +
+      ",\"textures_unsupported\":" + std::to_string(st.textures_unsupported) +
+      ",\"skel_drawn\":" + std::to_string(st.skel_drawn) + ",\"skel_skipped\":" + std::to_string(st.skel_skipped) +
+      ",\"pipelines_pending\":" + std::to_string(st.pipelines_pending) +
+      ",\"light_envs\":" + std::to_string(st.light_envs) + ",\"dyn_lights\":" + std::to_string(st.dyn_lights) +
+      ",\"particle_emitters\":" + std::to_string(st.particle_emitters) +
+      ",\"particle_sprites\":" + std::to_string(st.particle_sprites) +
+      ",\"particle_skipped\":" + std::to_string(st.particle_skipped) +
+      ",\"scene_instances\":" + std::to_string(host->scene.instances.size()) +
+      ",\"scene_skeletal\":" + std::to_string(host->scene.skeletal.size()) +
+      ",\"scene_emitters\":" + std::to_string(host->scene.emitters.size()) + "}}\n";
+  d->pending.push_back(std::move(p));
+  return true;
+}
 #endif
 
 void Renderer::DestroySceneFill() {
 #ifdef BOTS_N1FFI
+  if (auto* d = static_cast<DualState*>(dual_)) {
+    for (auto& p : d->pending)  // after Finish: never written
+      for (int k = 0; k < 2; ++k) vmaDestroyBuffer(allocator_, p.buffer[k], p.alloc[k]);
+    if (auto* image = static_cast<Image*>(d->image)) DestroyImage(*image), delete image;
+    delete d;
+    dual_ = nullptr;
+  }
   if (auto* host = static_cast<N1Host*>(n1_host_)) {
     if (host->r) n1_destroy(host->r);  // after Finish: the GPU is idle
     delete host;
@@ -325,6 +633,11 @@ bool Renderer::DrawSceneFill(Image& target) {
   const VkRect2D area{{int32_t(x0), int32_t(y0)}, {x1 - x0, y1 - y0}};
   if (mode == 4) {
 #ifdef BOTS_N1FFI
+    if (state->dual.load(std::memory_order_relaxed)) {
+      if (!DrawSceneDual(target, cam, area)) return false;
+      state->fills_drawn.fetch_add(1, std::memory_order_relaxed);
+      return true;
+    }
     if (!DrawSceneN1(target, cam, area)) return false;
     state->fills_drawn.fetch_add(1, std::memory_order_relaxed);
     return true;

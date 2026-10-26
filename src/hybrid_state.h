@@ -105,6 +105,13 @@ struct HybridState {
   // Fill 4: the newest scene. The game swaps its finished frame in, the renderer swaps it out (both under the lock).
   std::mutex scene_mutex;
   HybridScene scene;
+  // Dual render (BOTS_HYBRID_DUAL=1, parity harness): the game's own scene is drawn as usual, the marker follows it,
+  // and n1 draws the same frame (fill 4's feed and the marker's camera) into an offscreen target of the same size.
+  // Each bump of dual_shots asks the renderer for one pair of pictures (port, n1) named after dual_tag
+  // (console "hybrid dualshot <tag>"); it waits for n1 to finish streaming first (hybrid_fill.cpp).
+  std::atomic<uint32_t> dual{0};
+  std::atomic<uint32_t> dual_shots{0};
+  char dual_tag[96] = {};
 };
 
 // The register the marker writes: unknown to the Xenos register table (no side effects in the SDK's command

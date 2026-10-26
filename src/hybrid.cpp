@@ -31,7 +31,10 @@
 //                            over the game's own scene (needs the native renderer; src/gfx/vk/hybrid_fill.cpp)
 //   BOTS_HYBRID_AB=<s>       toggle suppression every <s> seconds (interleaved A/B in one run)
 //   BOTS_HYBRID_CAMERA=<n>   log the camera (N2's JSON shape) every <n> frames
-// Console (BOTS_EXEC): "hybrid suppress 0|1|2", "hybrid fill 0..3", "hybrid camera", "hybrid dumpview".
+//   BOTS_HYBRID_DUAL=1       parity harness: the game draws its scene as usual (no suppression, no A/B) and n1 (fill
+//                            4) draws the same frame offscreen; pictures of both on request (hybrid_fill.cpp)
+// Console (BOTS_EXEC): "hybrid suppress 0|1|2", "hybrid fill 0..3", "hybrid camera", "hybrid dumpview",
+// "hybrid dualshot <tag>" (one port + n1 pair under BOTS_HYBRID_DUAL).
 //
 // Mode 2 also hooks sub_82D3E358, UE3's GetQueryResult(query, out, bWait): with the drawing skipped no occlusion
 // query is ever issued, so InitViews' waits would never return. It answers "visible" there and for two real frames
@@ -39,6 +42,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -340,6 +344,13 @@ bool Command(const std::string& cmd) {
     g_log_camera = true;
   } else if (cmd == "hybrid dumpview") {
     g_dump_view = true;
+  } else if (cmd.rfind("hybrid dualshot", 0) == 0) {
+    // The tag names the files; keep it to [A-Za-z0-9_-].
+    std::string tag = cmd.size() > 16 ? cmd.substr(16) : "shot";
+    for (char& c : tag)
+      if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') c = '_';
+    std::snprintf(g_state.dual_tag, sizeof(g_state.dual_tag), "%s", tag.c_str());
+    g_state.dual_shots.fetch_add(1, std::memory_order_release);
   } else {
     return false;
   }
@@ -362,6 +373,13 @@ extern "C" void sub_82BB3230(PPCContext& __restrict ctx, uint8_t* base) {
     g_state.fill = uint32_t(EnvInt("BOTS_HYBRID_FILL", 0));
     g_camera_every = EnvInt("BOTS_HYBRID_CAMERA", 0);
     g_ab_seconds = EnvInt("BOTS_HYBRID_AB", 0);
+    if (EnvInt("BOTS_HYBRID_DUAL", 0)) {
+      // Both renderers in one frame: the game's own scene stays, so nothing is suppressed or toggled.
+      g_state.dual = 1;
+      g_state.fill = 4;
+      g_suppress = 0;
+      g_ab_seconds = 0;
+    }
     REXLOG_INFO("hybrid: BeginRenderingViewFamily hooked: suppress {}, fill {}, camera log every {} frames, A/B {} s",
                 g_suppress.load(), g_state.fill.load(), g_camera_every, g_ab_seconds);
     return true;
@@ -495,8 +513,10 @@ extern "C" void sub_82BB1E78(PPCContext& __restrict ctx, uint8_t* base) {
   t_suppressed_visibility = false;
   if (answer_frames > 0) --answer_frames;
   const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-  // Fill 3 overlays the camera's grid on the game's own scene: the marker goes after it, before the HUD.
-  const bool marker = g_state.fill.load(std::memory_order_relaxed) == 3 && t_render_seq != 0;
+  // Fill 3 overlays the camera's grid on the game's own scene, and dual render draws n1's copy of it offscreen: the
+  // marker goes after the scene, before the HUD.
+  const uint32_t fill = g_state.fill.load(std::memory_order_relaxed);
+  const bool marker = (fill == 3 || (fill == 4 && g_state.dual.load(std::memory_order_relaxed))) && t_render_seq != 0;
   if (marker) EmitMarker(ctx, base, t_render_seq);
   std::lock_guard lock(g_stats_mutex);
   g_stats.render_ms += ms, ++g_stats.renders;
