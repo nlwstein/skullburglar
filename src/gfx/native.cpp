@@ -295,8 +295,9 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     shader_precompile_total_.store(uint32_t(renderer_->warmup_total()), std::memory_order_relaxed);
     shader_precompile_done_.store(uint32_t(renderer_->warmup_done()), std::memory_order_relaxed);
     if (InstrState* is = FindInstrState()) {
-      is->warm_total.store(uint32_t(renderer_->warmup_total()), std::memory_order_relaxed);
-      is->warm_done.store(uint32_t(renderer_->warmup_done()), std::memory_order_relaxed);
+      is->warm_total.store(uint32_t(renderer_->port_warmup_total()), std::memory_order_relaxed);
+      is->warm_done.store(uint32_t(renderer_->port_warmup_done()), std::memory_order_relaxed);
+      if (!pipeline_cache_path_.empty()) is->warm_loaded.store(1, std::memory_order_relaxed);
     }
   }
 

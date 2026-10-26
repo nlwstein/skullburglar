@@ -43,8 +43,9 @@ struct InstrState {
   // Port renderer (native) totals.
   std::atomic<uint64_t> draws{0}, presents{0}, pending_draws{0}, live_pipelines{0}, failed_pipeline_draws{0};
   std::atomic<uint32_t> render_w{0}, render_h{0};
-  // The startup step ("Compiling shaders"): port pipelines and n1's step, done / total; hold = the guest is held.
-  std::atomic<uint32_t> warm_done{0}, warm_total{0}, n1_warm_done{0}, n1_warm_total{0}, warm_hold{0};
+  // The startup step ("Compiling shaders"): the port's pipelines and n1's step, done / total; hold = the guest is held;
+  // loaded = the port's pipeline manifest is loaded, so warm_total is final (an empty list logs no "done" line).
+  std::atomic<uint32_t> warm_done{0}, warm_total{0}, n1_warm_done{0}, n1_warm_total{0}, warm_hold{0}, warm_loaded{0};
   std::atomic<uint32_t> n1_warm_state{0};  // 0 not started, 1 running, 2 done (n1_precompile_progress)
   std::atomic<uint64_t> n1_warm_ms{0};     // the n1 step's duration once done
 

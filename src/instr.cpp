@@ -1019,8 +1019,8 @@ PrecompileInfo Precompile() {
     const char* v = std::getenv("BOTS_HYBRID_FILL");
     return v && std::atoi(v) == 4;
   }();
-  if (g_state.frames > 0)
-    p.done = !p.hold && g.port_warm_done && (!n1_expected || g.n1_warm_done || p.n1_state == 2);
+  const bool port = g.port_warm_done || (g_state.warm_loaded && p.port_done >= p.port_total);
+  if (g_state.frames > 0) p.done = !p.hold && port && (!n1_expected || g.n1_warm_done || p.n1_state == 2);
   else
     p.done = g.ticks > 0 && (p.gfx_total == 0 || p.gfx_done >= p.gfx_total);
   return p;
@@ -1190,7 +1190,7 @@ std::string BuildStatus(bool window, std::map<std::string, std::string>* flat) {
   j.Obj("precompile")
       .Bool("done", pc.done)
       .Bool("hold", pc.hold)
-      .Bool("port_finished", g.port_warm_done)
+      .Bool("port_finished", g.port_warm_done || (g_state.warm_loaded && pc.port_done >= pc.port_total))
       .Int("warm_done", pc.port_done)
       .Int("warm_total", pc.port_total)
       .Int("n1_done", pc.n1_done)
