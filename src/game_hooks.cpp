@@ -43,6 +43,7 @@
 #include "gfx/capture.h"
 #include "mnk_input.h"
 #include "prompt_state.h"
+#include "scene_feed.h"
 
 namespace bots::hybrid {
 bool Command(const std::string& cmd);  // hybrid.cpp
@@ -287,7 +288,7 @@ void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std:
     for (int i = 0; i < count; ++i, addr += 4) REXLOG_INFO("BOTS_EXEC peek {:08X} = {:08X}", addr, LoadU32(base, addr));
     return;
   }
-  if (split_screen::Command(cmd) || debug::Command(base, cmd)) return;
+  if (split_screen::Command(cmd) || debug::Command(base, cmd) || bots::scenefeed::Command(base, cmd)) return;
   if (!st.buffer) st.buffer = rex::system::kernel_memory()->SystemHeapAlloc(0x400);
   ctx.r3.u64 = LoadU32(base, kGEngine);
   sub_823501E0(ctx, base);  // Cast<UGameEngine>
@@ -342,6 +343,7 @@ extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
   if (state && ctx.r3.u32 == 0) quit_option::FilterPad(base, state);
   split_screen::Poll(ctx, base, user, ctx.r3.u32 == 0 ? state : 0);
   if (split_screen::OffGameThread()) return;
+  if (user == 0) bots::scenefeed::Tick(base);
   ExecState* st = Exec();
   if (!st) return;
   auto now = std::chrono::steady_clock::now();
@@ -2393,9 +2395,9 @@ void Props(uint8_t* base, uint32_t object, const std::string& tag) {
       const char* type = NameOf(base, LoadU32(base, f + 0x34));
       if (!std::strstr(type, "Property")) continue;
       const uint32_t off = LoadU32(base, f + 0x64), v = LoadU32(base, object + off);
-      if (std::string_view(type) == "BoolProperty")  // UBoolProperty +0x68 BitMask
+      if (std::string_view(type) == "BoolProperty")  // UBoolProperty +0x84 BitMask (the record is 0x88 bytes)
         REXLOG_INFO("  {} {}.{} {} +{:X} = {:08X} mask {:08X} -> {}", tag, NameOf(base, cls), NameOf(base, f), type,
-                    off, v, LoadU32(base, f + 0x68), (v & LoadU32(base, f + 0x68)) != 0);
+                    off, v, LoadU32(base, f + 0x84), (v & LoadU32(base, f + 0x84)) != 0);
       else
         REXLOG_INFO("  {} {}.{} {} +{:X} = {:08X} ({})", tag, NameOf(base, cls), NameOf(base, f), type, off, v,
                     menu_pointer::LoadF32(base, object + off));
