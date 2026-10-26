@@ -1233,6 +1233,11 @@ struct LiveState {
   uint32_t walk_pos = 0;
   std::unordered_set<uint32_t> known;
   std::vector<uint32_t> lights, fog;
+  // Components a hook reported that were not attached yet (the game can add a component to a scene before it sets
+  // the state TrackAdd checks): retried every frame until they are attached, gone, or kPendingFrames old.
+  std::unordered_map<uint32_t, uint32_t> pending;  // component -> frames left
+  // Frames left of full walks after a burst of adds (a level made visible; see Track).
+  uint32_t burst_walks = 0;
 };
 LiveState g_live;
 
@@ -1299,6 +1304,7 @@ void Track(LiveState& st) {
     if (!g_objects) return;
     st.tracking = true;
     st.prims.clear(), st.particle_prims.clear(), st.lights.clear(), st.fog.clear(), st.known.clear();
+    st.pending.clear();
     for (uint32_t o : g_extras.lights) added |= TrackAdd(st, o);
     for (uint32_t o : g_extras.fog) added |= TrackAdd(st, o);
     for (const Primitive& p : all) added |= TrackAdd(st, p.component);
@@ -1328,7 +1334,51 @@ void Track(LiveState& st) {
       std::lock_guard lock(g_added_mutex);
       fresh.swap(g_added);
     }
-    for (uint32_t o : fresh) added |= TrackAdd(st, o);
+    constexpr uint32_t kPendingFrames = 300;
+    for (auto it = st.pending.begin(); it != st.pending.end();) {
+      if (TrackAdd(st, it->first)) {
+        added = true;
+        it = st.pending.erase(it);
+      } else if (--it->second == 0 || !IsObject(it->first)) {
+        it = st.pending.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    // A burst of adds means a level is being made visible. That also attaches components no hook reports (lights
+    // attached while disabled, fog volume density components; seen in a streamed lighting level at player spawn), and
+    // the sliced walk would take up to BOTS_N1_TRACK_SLICES frames to find them. So for the next few frames do a full
+    // walk instead (a few ms, only while a level comes in): the lists match a full walk every frame.
+    constexpr size_t kBurst = 256;
+    constexpr uint32_t kBurstWalks = 30;
+    if (fresh.size() >= kBurst) {
+      static uint32_t bursts = 0;
+      if (!st.burst_walks && bursts++ < 50) REXLOG_INFO("scenefeed: {} adds in one frame, full walks for {} frames", fresh.size(), kBurstWalks);
+      st.burst_walks = kBurstWalks;
+    }
+    for (uint32_t o : fresh) {
+      if (TrackAdd(st, o)) {
+        added = true;
+        st.pending.erase(o);
+      } else if (!st.known.count(o) && IsObject(o) && st.pending.size() < 4096) {
+        st.pending[o] = kPendingFrames;
+      }
+    }
+  }
+  if (st.burst_walks) {
+    --st.burst_walks;
+    Times unused;
+    std::vector<Primitive> all;
+    Enumerate(all, unused);  // refills g_extras from the walk
+    uint32_t found = 0;
+    for (uint32_t o : g_extras.lights) found += TrackAdd(st, o);
+    for (uint32_t o : g_extras.fog) found += TrackAdd(st, o);
+    for (const Primitive& p : all) found += TrackAdd(st, p.component);
+    if (found) {
+      added = true;
+      static uint32_t logged = 0;
+      if (logged++ < 20) REXLOG_INFO("scenefeed: a full walk after a burst of adds found {} component(s)", found);
+    }
   }
   // The safety-net slice.
   if (FindObjectTable()) {
@@ -1373,11 +1423,20 @@ void Track(LiveState& st) {
         want.insert(p.component);
     for (uint32_t o : g_extras.lights) want.insert(o);
     for (uint32_t o : g_extras.fog) want.insert(o);
-    uint32_t missing = 0, extra = 0;
-    for (uint32_t o : want) missing += !st.known.count(o);
+    uint32_t missing = 0, extra = 0, missing_pending = 0;
+    for (uint32_t o : want)
+      if (!st.known.count(o)) ++missing, missing_pending += st.pending.count(o);
     for (uint32_t o : st.known) extra += !want.count(o);
-    REXLOG_INFO("scenefeed: tracking check: {} tracked, {} in a full walk, {} missing, {} extra", st.known.size(),
-                want.size(), missing, extra);
+    REXLOG_INFO("scenefeed: tracking check: {} tracked, {} in a full walk, {} missing ({} pending), {} extra",
+                st.known.size(), want.size(), missing, missing_pending, extra);
+    static uint32_t named = 0;
+    if (missing && named < 40)
+      for (uint32_t o : want)
+        if (!st.known.count(o) && named++ < 40) {
+          const uint32_t owner = g_off.owner.ok() ? U32(o + g_off.owner.offset) : 0;
+          REXLOG_INFO("scenefeed: tracking check: missing {:08X} {} {} (owner {})", o, ClassName(o), Path(o),
+                      IsObject(owner) ? Path(owner) : std::string("-"));
+        }
   }
   // LightsPostJson reads g_extras.
   g_extras.lights = st.lights;
