@@ -242,14 +242,19 @@ class Run:
         opts = dict(w.split("=", 1) for w in words[2:] if "=" in w)
         name = opts.get("name", f"sample{len(self.samples) + 1}")
         shot_every = float(opts.get("shot_every", 0))
+        c0 = len(self.contaminated)
         self.check_contamination()
         h0 = self.send("hist")
         s0 = self.status()
         t_start = time.time()
         next_shot = t_start + shot_every if shot_every else None
         n_shot = 0
+        next_procs = t_start + 10
         while time.time() - t_start < secs:
             time.sleep(min(1.0, max(0.0, t_start + secs - time.time())))
+            if time.time() >= next_procs:  # another game process during the window, not only at its ends
+                self.check_contamination()
+                next_procs += 10
             if next_shot and time.time() >= next_shot:
                 n_shot += 1
                 self.do_shot(f"{name}-{n_shot:02d}")
@@ -291,6 +296,7 @@ class Run:
             "map": get(s1, "game.map"),
             "chapter": get(s1, "game.chapter"),
             "valid": not reasons,
+            "contaminated": len(self.contaminated) > c0,
             "invalid_reasons": reasons,
             **stats,
             "hitch_events": len(hitches),
@@ -304,7 +310,9 @@ class Run:
             "cpu": s1.get("cpu"),
         }
         self.samples.append(sample)
-        self.log(f"sample {name}: {'VALID' if not reasons else 'INVALID: ' + '; '.join(reasons)}; "
+        verdict = ("CONTAMINATED" if sample["contaminated"] else
+                   "VALID" if not reasons else "INVALID: " + "; ".join(reasons))
+        self.log(f"sample {name}: {verdict}; "
                  f"{stats['fps_mean']} fps mean, median {stats['fps_median']}, p10 {stats['fps_p10']}, "
                  f">33ms {stats['over_33ms']}, >50ms {stats['over_50ms']}")
 
@@ -468,6 +476,8 @@ def print_summary(s):
               f"{x['hitch_events']:>6} {x['audio_underruns']:>8}")
         for r in x["invalid_reasons"]:
             print(f"    INVALID: {r}")
+        if x.get("contaminated"):
+            print("    CONTAMINATED: another game process ran during this window")
 
 
 def main():
