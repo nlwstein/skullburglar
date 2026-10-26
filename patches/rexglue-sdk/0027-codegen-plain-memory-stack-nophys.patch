@@ -1,0 +1,189 @@
+diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
+index 68274d2..741e3ff 100644
+--- a/resources/templates/codegen/pch_h.inja
++++ b/resources/templates/codegen/pch_h.inja
+@@ -132,17 +132,59 @@ extern PPCFuncMapping PPCFuncMappings[];
+ 
+ #define REX_RAW_ADDR(x) (base + (u32)(x) + REX_PHYS_HOST_OFFSET(x))
+ 
+-#define REX_LOAD_U8(x) (*(volatile u8*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
+-#define REX_LOAD_U16(x) __builtin_bswap16(*(volatile u16*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
+-#define REX_LOAD_U32(x) __builtin_bswap32(*(volatile u32*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
+-#define REX_LOAD_U64(x) __builtin_bswap64(*(volatile u64*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
++// Guest memory access flavours, chosen by the build:
++//   default            volatile accesses: every guest load/store is performed exactly as written.
++//   REX_MEM_PLAIN      plain accesses the compiler may combine, reorder and keep in registers (may_alias types, so
++//                      u8/u16/u32/u64 views of the same bytes still order against each other). Safe only because
++//                      codegen puts REX_LOOP_BARRIER() at every backward-branch target (a spin loop re-reads), calls
++//                      are opaque, and sync/lwsync are real fences.
++//   REX_STACK_NOPHYS   r1-relative accesses (REX_SLOAD_*/REX_SSTORE_*) skip the physical-mirror select: the stack
++//                      is never at 0xE0000000 and up.
++#ifdef REX_MEM_PLAIN
++typedef u8 __attribute__((may_alias)) rex_mem_u8;
++typedef u16 __attribute__((may_alias)) rex_mem_u16;
++typedef u32 __attribute__((may_alias)) rex_mem_u32;
++typedef u64 __attribute__((may_alias)) rex_mem_u64;
++#define REX_LOOP_BARRIER() __asm__ __volatile__("" ::: "memory")
++#else
++typedef volatile u8 rex_mem_u8;
++typedef volatile u16 rex_mem_u16;
++typedef volatile u32 rex_mem_u32;
++typedef volatile u64 rex_mem_u64;
++#define REX_LOOP_BARRIER() ((void)0)
++#endif
++
++#define REX_LOAD_U8(x) (*(rex_mem_u8*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
++#define REX_LOAD_U16(x) __builtin_bswap16(*(rex_mem_u16*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
++#define REX_LOAD_U32(x) __builtin_bswap32(*(rex_mem_u32*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
++#define REX_LOAD_U64(x) __builtin_bswap64(*(rex_mem_u64*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
+ #define REX_LOAD_STRING(x, len) \
+   std::string_view(reinterpret_cast<const char*>(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)), (len))
+ 
+-#define REX_STORE_U8(x, y)  (*(volatile u8*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = (y))
+-#define REX_STORE_U16(x, y) (*(volatile u16*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap16(y))
+-#define REX_STORE_U32(x, y) (*(volatile u32*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap32(y))
+-#define REX_STORE_U64(x, y) (*(volatile u64*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap64(y))
++#define REX_STORE_U8(x, y)  (*(rex_mem_u8*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = (y))
++#define REX_STORE_U16(x, y) (*(rex_mem_u16*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap16(y))
++#define REX_STORE_U32(x, y) (*(rex_mem_u32*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap32(y))
++#define REX_STORE_U64(x, y) (*(rex_mem_u64*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap64(y))
++
++#ifdef REX_STACK_NOPHYS
++#define REX_SLOAD_U8(x) (*(rex_mem_u8*)(base + (u32)(x)))
++#define REX_SLOAD_U16(x) __builtin_bswap16(*(rex_mem_u16*)(base + (u32)(x)))
++#define REX_SLOAD_U32(x) __builtin_bswap32(*(rex_mem_u32*)(base + (u32)(x)))
++#define REX_SLOAD_U64(x) __builtin_bswap64(*(rex_mem_u64*)(base + (u32)(x)))
++#define REX_SSTORE_U8(x, y)  (*(rex_mem_u8*)(base + (u32)(x)) = (y))
++#define REX_SSTORE_U16(x, y) (*(rex_mem_u16*)(base + (u32)(x)) = __builtin_bswap16(y))
++#define REX_SSTORE_U32(x, y) (*(rex_mem_u32*)(base + (u32)(x)) = __builtin_bswap32(y))
++#define REX_SSTORE_U64(x, y) (*(rex_mem_u64*)(base + (u32)(x)) = __builtin_bswap64(y))
++#else
++#define REX_SLOAD_U8 REX_LOAD_U8
++#define REX_SLOAD_U16 REX_LOAD_U16
++#define REX_SLOAD_U32 REX_LOAD_U32
++#define REX_SLOAD_U64 REX_LOAD_U64
++#define REX_SSTORE_U8 REX_STORE_U8
++#define REX_SSTORE_U16 REX_STORE_U16
++#define REX_SSTORE_U32 REX_STORE_U32
++#define REX_SSTORE_U64 REX_STORE_U64
++#endif
+ 
+ #define REX_MEMORY_SIZE 0x100000000ull
+ 
+diff --git a/src/codegen/builders/context.cpp b/src/codegen/builders/context.cpp
+index f78e0d8..14ccd43 100644
+--- a/src/codegen/builders/context.cpp
++++ b/src/codegen/builders/context.cpp
+@@ -487,6 +487,17 @@ void BuilderContext::emit_vec_var_shift(const char* shift_dir, const char* eleme
+ // Memory (Load/Store) Code Generation Helpers
+ //=============================================================================
+ 
++namespace {
++/// r1 (the stack pointer) never points into the physical-mirror range, so r1-relative accesses use
++/// REX_SLOAD_* / REX_SSTORE_*, which the PCH may define without the physical-offset select.
++const char* stack_macro(const char* macro, bool is_stack, char* buf, size_t n) {
++  if (!is_stack) return macro;
++  if (strncmp(macro, "REX_LOAD_", 9) == 0) { snprintf(buf, n, "REX_SLOAD_%s", macro + 9); return buf; }
++  if (strncmp(macro, "REX_STORE_", 10) == 0) { snprintf(buf, n, "REX_SSTORE_%s", macro + 10); return buf; }
++  return macro;
++}
++}  // namespace
++
+ void BuilderContext::emit_load_d_form(const char* load_macro, const char* dest_type,
+                                       bool check_mmio) {
+   // D-form: rD = LOAD(rA + D) where operands[0]=rD, operands[1]=D, operands[2]=rA
+@@ -501,6 +512,8 @@ void BuilderContext::emit_load_d_form(const char* load_macro, const char* dest_t
+     }
+   }
+ 
++  static char s_macro[64];
++  if (macro == load_macro) macro = stack_macro(load_macro, insn.operands[2] == 1, s_macro, sizeof(s_macro));
+   print("\t{}.{} = {}(", r(insn.operands[0]), dest_type, macro);
+   if (insn.operands[2] != 0)
+     print("{}.u32 + ", r(insn.operands[2]));
+@@ -541,6 +554,8 @@ void BuilderContext::emit_store_d_form(const char* store_macro, const char* src_
+     }
+   }
+ 
++  static char s_macro[64];
++  if (macro == store_macro) macro = stack_macro(store_macro, insn.operands[2] == 1, s_macro, sizeof(s_macro));
+   print("\t{}(", macro);
+   if (insn.operands[2] != 0)
+     print("{}.u32 + ", r(insn.operands[2]));
+diff --git a/src/codegen/builders/helpers.h b/src/codegen/builders/helpers.h
+index dbc8d51..a5cd14a 100644
+--- a/src/codegen/builders/helpers.h
++++ b/src/codegen/builders/helpers.h
+@@ -13,6 +13,7 @@
+ 
+ #include "builder_context.h"
+ 
++#include <cstdio>
+ #include <cstring>
+ 
+ #include <rex/codegen/function_scanner.h>
+@@ -186,6 +187,11 @@ inline void emitLoadWithUpdate(BuilderContext& ctx, const char* load_macro) {
+   ctx.println("\t{} = {} + {}.u32;", ctx.ea(), static_cast<int32_t>(ctx.insn.operands[1]),
+               ctx.r(ctx.insn.operands[2]));
+   // rD = MEM[EA]
++  char sbuf[64];
++  if (ctx.insn.operands[2] == 1 && strncmp(load_macro, "REX_LOAD_", 9) == 0) {
++    snprintf(sbuf, sizeof(sbuf), "REX_SLOAD_%s", load_macro + 9);
++    load_macro = sbuf;
++  }
+   ctx.println("\t{}.u64 = {}({});", ctx.r(ctx.insn.operands[0]), load_macro, ctx.ea());
+   // rA = EA (update)
+   ctx.println("\t{}.u32 = {};", ctx.r(ctx.insn.operands[2]), ctx.ea());
+@@ -222,6 +228,11 @@ inline void emitStoreWithUpdate(BuilderContext& ctx, const char* store_macro, co
+   ctx.println("\t{} = {} + {}.u32;", ctx.ea(), static_cast<int32_t>(ctx.insn.operands[1]),
+               ctx.r(ctx.insn.operands[2]));
+   // MEM[EA] = rS
++  char sbuf[64];
++  if (ctx.insn.operands[2] == 1 && strncmp(store_macro, "REX_STORE_", 10) == 0) {
++    snprintf(sbuf, sizeof(sbuf), "REX_SSTORE_%s", store_macro + 10);
++    store_macro = sbuf;
++  }
+   ctx.println("\t{}({}, {}.{});", store_macro, ctx.ea(), ctx.r(ctx.insn.operands[0]), field);
+   // rA = EA (update)
+   ctx.println("\t{}.u32 = {};", ctx.r(ctx.insn.operands[2]), ctx.ea());
+diff --git a/src/codegen/function_graph.cpp b/src/codegen/function_graph.cpp
+index fc918bb..10b5f4b 100644
+--- a/src/codegen/function_graph.cpp
++++ b/src/codegen/function_graph.cpp
+@@ -385,6 +385,9 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
+   // --- First pass: collect labels from all blocks ---
+   std::unordered_set<size_t> labels;
+   labels.reserve(64);
++  // Labels that are the target of a backward branch (loop heads). The PCH's REX_LOOP_BARRIER() goes there
++  // so a build with plain (non-volatile) guest memory accesses still re-reads memory polled by a spin loop.
++  std::unordered_set<size_t> backLabels;
+ 
+   for (const auto& block : blocks()) {
+     auto* blockData = reinterpret_cast<const uint32_t*>(ctx.binary.translate(block.base));
+@@ -396,10 +399,13 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
+           load_and_swap<uint32_t>((const uint8_t*)blockData + addr - block.base);
+       if (!PPC_BL(instruction)) {
+         const size_t op = PPC_OP(instruction);
+-        if (op == PPC_OP_B)
+-          labels.emplace(addr + PPC_BI(instruction));
+-        else if (op == PPC_OP_BC)
+-          labels.emplace(addr + PPC_BD(instruction));
++        if (op == PPC_OP_B || op == PPC_OP_BC) {
++          const size_t target =
++              addr + (op == PPC_OP_B ? PPC_BI(instruction) : PPC_BD(instruction));
++          labels.emplace(target);
++          if (target <= addr)
++            backLabels.emplace(target);
++        }
+       }
+ 
+       // Labels from config switch tables
+@@ -511,6 +517,8 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
+       // Only emit each label once
+       if (labels.find(blockBase) != labels.end() && emittedLabels.insert(blockBase).second) {
+         emit_println(body, "loc_{:X}:", blockBase);
++        if (backLabels.find(blockBase) != backLabels.end())
++          emit_println(body, "\tREX_LOOP_BARRIER();");
+         csrState = CSRState::Unknown;
+       }
+ 

@@ -38,6 +38,8 @@
 #include <rex/logging.h>
 #include <rex/rex_app.h>
 #include <rex/system/xmemory.h>
+
+#include "thread_stats.h"
 #include <rex/ui/presenter.h>
 #include <rex/input/input_system.h>
 #include <rex/kernel/xam/module.h>
@@ -476,6 +478,7 @@ class BotsApp : public rex::ReXApp {
   // (script_input.h). --pad=N: only pad N drives this instance; --coop: player 1 starts player 2 here,
   // once the launcher (if any) has settled the game files and before the shader cache opens (coop.h).
   void OnPostSetup() override {
+    bots::StartThreadStats();
     SetLaunchCommandLine();
     RegisterFullscreenBind();
     bots::SpawnPlayerTwo(game_data_root(), user_data_root(), cache_root());
