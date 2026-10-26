@@ -269,7 +269,7 @@ std::string CameraJson(const HybridCamera& c) {
 std::mutex g_fifo_mutex;
 std::deque<uint32_t> g_fifo;  // seqs of view families with a scene, not yet rendered
 thread_local uint32_t t_render_seq = 0;
-thread_local bool t_suppressed_visibility = false;  // inside mode 2's InitViews
+thread_local bool t_suppressed_visibility = false;  // answer GetQueryResult at once (mode 2 and just after)
 std::atomic<uint64_t> g_queries_answered{0};
 
 struct Stats {
@@ -450,7 +450,13 @@ extern "C" void sub_82D3E358(PPCContext& __restrict ctx, uint8_t* base) {
 
 // FSceneRenderer::Render(), render thread.
 extern "C" void sub_82BB1E78(PPCContext& __restrict ctx, uint8_t* base) {
-  if (const int suppress = g_suppress.load(std::memory_order_relaxed)) {
+  // Leaving mode 2: its InitViews calls took queries for primitives that no drawing then issued, so the first real
+  // frames' InitViews would wait on them forever too. Answer queries for two real frames, until fresh ones exist.
+  static int last_suppress = 0, answer_frames = 0;
+  const int suppress_now = g_suppress.load(std::memory_order_relaxed);
+  if (last_suppress == 2 && suppress_now != 2) answer_frames = 2;
+  last_suppress = suppress_now;
+  if (const int suppress = suppress_now) {
     // Mode 2 keeps the visibility work Render() does around its drawing: InitViews (sub_82BAD738, Render's first call
     // after the render-target allocation: per view frustum, distance and occlusion-history culling into the views'
     // visibility maps) and, at its end, sub_82BB1958, which for each visible primitive sets
@@ -480,7 +486,10 @@ extern "C" void sub_82BB1E78(PPCContext& __restrict ctx, uint8_t* base) {
     return;
   }
   const auto start = std::chrono::steady_clock::now();
+  t_suppressed_visibility = answer_frames > 0;
   __imp__sub_82BB1E78(ctx, base);
+  t_suppressed_visibility = false;
+  if (answer_frames > 0) --answer_frames;
   const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
   // Fill 3 overlays the camera's grid on the game's own scene: the marker goes after it, before the HUD.
   const bool marker = g_state.fill.load(std::memory_order_relaxed) == 3 && t_render_seq != 0;
