@@ -27,17 +27,29 @@ NCONST = 1024
 
 
 def load_draws(path):
+    """(stamp, draws). Version 2 adds each draw's vertex streams: dicts {fetch, address, stride, endian,
+    attributes [(offset_words, format)], data (bytes as in guest memory)}."""
     data = open(path, "rb").read()
     if data[:4] != b"DFR1":
         raise SystemExit(f"{path}: not a draw dump")
-    (stamp,) = struct.unpack_from("<q", data, 8)
+    version, stamp = struct.unpack_from("<Iq", data, 4)
     off, draws = 16, []
     while off + REC.size + 4 * NCONST <= len(data):
-        magic, idx, vs, ps, w, h, flags, prim, count, _ = REC.unpack_from(data, off)
+        magic, idx, vs, ps, w, h, flags, prim, count, nstreams = REC.unpack_from(data, off)
         off += REC.size
         consts = np.frombuffer(data, dtype="<f4", count=NCONST, offset=off).reshape(256, 4)
         off += 4 * NCONST
-        draws.append(dict(idx=idx, vs=vs, ps=ps, w=w, h=h, flags=flags, prim=prim, count=count, c=consts))
+        streams = []
+        for _ in range(nstreams if version >= 2 else 0):
+            fetch, address, stride, endian, nattr, size = struct.unpack_from("<6I", data, off)
+            off += 24
+            attrs = [struct.unpack_from("<2I", data, off + 8 * k) for k in range(nattr)]
+            off += 8 * nattr
+            streams.append(dict(fetch=fetch, address=address, stride=stride, endian=endian, attributes=attrs,
+                                data=data[off : off + size]))
+            off += size
+        draws.append(dict(idx=idx, vs=vs, ps=ps, w=w, h=h, flags=flags, prim=prim, count=count, c=consts,
+                          streams=streams))
     return stamp, draws
 
 
@@ -70,10 +82,23 @@ def main():
     mats = all_mats
     ident_all = np.all(np.abs(all_mats - np.eye(4, dtype=np.float32)) < 1e-5, axis=(1, 2))
     ident, trans = ident_all, all_mats[:, 3, :3]
+    origins = np.array([p["bounds"]["origin"] if "bounds" in p else (1e9, 1e9, 1e9) for p in info], np.float32)
+    radii = np.array([p["bounds"].get("radius", 0) if "bounds" in p else 0 for p in info], np.float32)
     print(f"{nframes} feed frames; primitives per kind (summed over frames): {dict(total_prims)}")
     print(f"identity transforms: {collections.Counter(info[i]['kind'] for i in np.nonzero(ident_all)[0])}")
 
     frame_of = np.array(frame_ids)
+    # Particles by feed frame: rounded location -> (emitter type, primitive index), from the "emitters" lists.
+    particles = collections.defaultdict(dict)
+    emitter_counts = collections.defaultdict(list)  # frame -> [(active, locations array, type)]
+    for i, p in enumerate(info):
+        for e in p.get("emitters", []):
+            locs = [q[:3] for q in e["particles"] if q and q[0] is not None]
+            for q in locs:
+                particles[frame_of[i]][tuple(round(x, 1) for x in q)] = (e["type"], i)
+            if locs:
+                emitter_counts[frame_of[i]].append((len(locs), np.array(locs, np.float32), e["type"], i))
+    win_frames = []
     # Particle components' bounds, indexed like info (zero for everything else).
     part_idx = np.array([i for i, p in enumerate(info) if p["kind"] == "particle"], dtype=np.int64)
     part_origin = np.zeros((len(info), 3), np.float32)
@@ -97,6 +122,7 @@ def main():
             sel = np.abs(frame_of - best) <= 1
         else:
             sel = np.ones(len(frame_of), bool)
+        win_frames[:] = sorted(set(frame_of[sel].tolist()))
         mats = np.where(sel[:, None, None], all_mats, np.float32(1e9))
         ident = ident_all | ~sel
         trans = mats[:, 3, :3]
@@ -108,6 +134,78 @@ def main():
             return False
         o, e = part_origin[sel], part_extent[sel]
         return bool(np.any(np.all(np.abs(point - o) <= e, axis=1)))
+
+    def particle_at(point):
+        key = tuple(round(float(x), 1) for x in point)
+        for f in win_frames:
+            hit = particles[f].get(key)
+            if hit:
+                return hit
+        return None
+
+    def stream_vec3(dr, vertex, offset_bytes=0):
+        st = dr["streams"][0]
+        return struct.unpack_from(">3f", st["data"], vertex * st["stride"] + offset_bytes)
+
+    def match_sprites(dr):
+        """A particle sprite draw: 4 vertices per particle, each with Position (+0) and OldPosition (+12). Explained
+        when 90% of its particles sit exactly on a feed particle's Location (the renderer's position or the previous
+        one), or, failing that, when an emitter with the same particle count lies within 50 cm on average."""
+        st = dr["streams"][0] if dr["streams"] else None
+        if not st or st["stride"] < 24:
+            return None
+        nverts = min(dr["count"], len(st["data"]) // st["stride"])
+        if nverts < 4:
+            return None
+        hits, pos = [], []
+        for v in range(0, nverts, 4):
+            a, b = stream_vec3(dr, v), stream_vec3(dr, v, 12)
+            pos.append(a)
+            hits.append(particle_at(a) or particle_at(b))
+        found = [h for h in hits if h]
+        if len(found) >= 0.9 * len(hits):
+            return collections.Counter(h[1] for h in found).most_common(1)[0][0], "exact"
+        pos = np.array(pos, np.float32)
+        for f in win_frames:
+            for count, locs, _, i in emitter_counts[f]:
+                if count == len(pos):
+                    d = np.linalg.norm(locs[:, None, :] - pos[None, :, :], axis=2).min(axis=0).mean()
+                    if d < 50:
+                        return i, "near"
+        return None
+
+    def match_occlusion_box(dr):
+        """UE3's occlusion queries: a depth-only box (8 vertices, 36 indices, no pixel shader) around a primitive's
+        bounds. Explained when its centre is a feed primitive's bounds origin within 1 cm."""
+        if not (dr["flags"] & 1) or dr["ps"] or dr["count"] != 36 or not dr["streams"]:
+            return None
+        st = dr["streams"][0]
+        if st["stride"] != 12 or len(st["data"]) < 96:
+            return None
+        v = np.array([stream_vec3(dr, k) for k in range(8)], np.float32)
+        centre = (v.min(axis=0) + v.max(axis=0)) / 2
+        d = np.linalg.norm(origins - centre, axis=1)
+        d[ident] = np.inf
+        i = int(np.argmin(d))
+        if d[i] < 1:
+            return i, "bounds"
+        # A per-object projected shadow's occlusion query: a square of side 2r tangent to a caster's bounding sphere
+        # (radius r), extruded about 2.6 km along the light direction. Explained when that caster is in the feed.
+        if (v.max(axis=0) - v.min(axis=0)).max() < 50000:
+            return None, "unmatched"
+        sweep = v[np.argmax(np.linalg.norm(v - v[0], axis=1))] - v[0]
+        direction = sweep / np.linalg.norm(sweep)
+        order = np.argsort(v @ direction)
+        for end in (order[:4], order[4:]):  # the vertex order doesn't say which end is the caster's
+            near = v[end]
+            side = np.sort(np.linalg.norm(near[1:] - near[0], axis=1))[0]
+            d = np.linalg.norm(origins - near.mean(axis=0), axis=1)
+            ok = (np.abs(2 * radii - side) < 2) & ~ident
+            if ok.any():
+                i = int(np.argmin(np.where(ok, d, np.inf)))
+                if d[i] < radii[i] + 1:
+                    return i, "shadow caster"
+        return None, "shadow frustum"
 
     def match(block):
         """Primitive index for a 4-register row-major affine block: nearest translation, then rotation check."""
@@ -135,6 +233,23 @@ def main():
         for dr in draws:
             c = dr["c"]
             hit = None
+            occ = match_occlusion_box(dr)
+            if occ:
+                if occ[0] is not None:
+                    by_kind["occlusion query" if occ[1] == "bounds" else "shadow occlusion query"] += 1
+                    quality[occ[1]] += 1
+                elif occ[1] == "shadow frustum":
+                    category["shadow occlusion query, no caster"] += 1
+                else:
+                    category["occlusion query box, no primitive"] += 1
+                continue
+            if np.allclose(c[5, :3], c[4, :3]) and c[5, 3] == 0:
+                sp = match_sprites(dr)
+                if sp:
+                    by_kind["particle sprite"] += 1
+                    quality["sprite " + sp[1]] += 1
+                    matched.add(info[sp[0]]["name"])
+                    continue
             for r in range(5, 253):
                 blk = c[r : r + 4]
                 if blk[3, 3] != 1.0 or np.any(blk[:3, 3] != 0):
@@ -145,6 +260,16 @@ def main():
                 if i is not None:
                     hit = (i, q, r)
                     break
+            if not hit:
+                # Mesh-emitter particles: one draw per particle, its matrix's translation on the particle's Location.
+                for r in range(5, 253):
+                    blk = c[r : r + 4]
+                    if blk[3, 3] != 1.0 or np.any(blk[:3, 3] != 0):
+                        continue
+                    pm = particle_at(blk[3, :3])
+                    if pm:
+                        hit = (pm[1], "particle " + pm[0], r)
+                        break
             if not hit:
                 # SpeedTree and a few others pack scale and rotation apart: any w=1 row (but the camera at c4) on a
                 # primitive's translation.
@@ -161,7 +286,7 @@ def main():
                                          " ms" if dr["flags"] & 2 else "", " rect" if dr["flags"] & 4 else "")
             if hit:
                 i, q, r = hit
-                by_kind[info[i]["kind"]] += 1
+                by_kind["particle mesh" if q.startswith("particle") else info[i]["kind"]] += 1
                 quality[q] += 1
                 regs[r] += 1
                 matched.add(info[i]["name"])
@@ -190,7 +315,9 @@ def main():
                           f"count {dr['count']}\n{np.array2string(c[4:14], precision=4, suppress_small=True)}")
         n = len(draws)
         exp = sum(by_kind.values())
-        print(f"\n{os.path.basename(path)}: {n} draws; explained {exp} ({100 * exp / n:.1f}%) by "
+        world = n - category["2D (canvas/UI/full-screen pass)"]
+        print(f"\n{os.path.basename(path)}: {n} draws; explained {exp} ({100 * exp / n:.1f}%; "
+              f"{100 * exp / world:.1f}% of {world} non-2D) by "
               f"{len(matched)} primitives: {dict(by_kind)}; match quality {dict(quality)}; registers {dict(regs)}; "
               f"{nwin} feed frames in the window")
         print(f"  unexplained {n - exp}: {identity_draws} with LocalToWorld = identity at c5 (BSP / world-space)")

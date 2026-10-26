@@ -1504,12 +1504,29 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
                   samples_x * samples_y > 1 ? " ss4" : "");
     GpuLabel(kGpuDraw, label);
   }
-  if (drawdump::Active())
+  if (drawdump::Active()) {
+    std::vector<drawdump::Stream> streams;
+    for (const auto& binding : vshader->vertex_bindings()) {
+      const auto fetch = regs.GetVertexFetch(binding.fetch_constant);
+      if (fetch.type != xe::FetchConstantType::kVertex || streams.size() >= 8) continue;
+      drawdump::Stream& st = streams.emplace_back();
+      st.fetch_constant = binding.fetch_constant;
+      st.address = fetch.address << 2;
+      st.stride = binding.stride_words * 4;
+      st.endian = uint32_t(fetch.endian);
+      st.size = std::min<uint32_t>(fetch.size * 4, drawdump::kMaxStreamBytes);
+      st.data = memory_(st.address);
+      for (const auto& a : binding.attributes) {
+        if (st.attributes.size() >= 16) break;
+        st.attributes.push_back({uint32_t(a.fetch_instr.attributes.offset), uint32_t(a.fetch_instr.attributes.data_format)});
+      }
+    }
     drawdump::Record(&regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_000_X], vshader->ucode_data_hash(),
                      pshader ? pshader->ucode_data_hash() : 0, open_area_.width, open_area_.height,
                      (std::ranges::none_of(attachments.color, std::identity{}) ? 1u : 0u) |
                          (samples_x * samples_y > 1 ? 2u : 0u) | (rect ? 4u : 0u) | (indexed ? 8u : 0u),
-                     uint32_t(prim), host_count);
+                     uint32_t(prim), host_count, streams);
+  }
   if (indexed) vk_.vkCmdBindIndexBuffer(cmd_, ring_.buffer, index_offset, index_type);
   BeginDrawQuery();
   if (indexed) {
@@ -1566,7 +1583,7 @@ void Open(DumpState& st) {
   const int64_t now = NowUs();
   st.file = std::fopen((st.dir + "/draws_" + std::to_string(now) + ".bin").c_str(), "wb");
   if (!st.file) return;
-  const uint32_t version = 1;
+  const uint32_t version = 2;
   std::fwrite("DFR1", 1, 4, st.file);
   std::fwrite(&version, 4, 1, st.file);
   std::fwrite(&now, 8, 1, st.file);
@@ -1577,16 +1594,23 @@ void Open(DumpState& st) {
 bool Active() { return State().file != nullptr; }
 
 void Record(const uint32_t* vs_constants, uint64_t vs, uint64_t ps, uint32_t width, uint32_t height, uint32_t flags,
-            uint32_t prim, uint32_t count) {
+            uint32_t prim, uint32_t count, const std::vector<Stream>& streams) {
   DumpState& st = State();
   if (!st.file) return;
   const uint32_t head[] = {0x31575244u /* "DRW1" */, st.draw++};
-  const uint32_t tail[] = {width, height, flags, prim, count, 0};
+  const uint32_t tail[] = {width, height, flags, prim, count, uint32_t(streams.size())};
   std::fwrite(head, 4, 2, st.file);
   std::fwrite(&vs, 8, 1, st.file);
   std::fwrite(&ps, 8, 1, st.file);
   std::fwrite(tail, 4, 6, st.file);
   std::fwrite(vs_constants, 4, 1024, st.file);
+  for (const Stream& s : streams) {
+    const uint32_t size = s.data ? s.size & ~3u : 0;
+    const uint32_t h[] = {s.fetch_constant, s.address, s.stride, s.endian, uint32_t(s.attributes.size()), size};
+    std::fwrite(h, 4, 6, st.file);
+    for (const auto& a : s.attributes) std::fwrite(&a, 4, 2, st.file);
+    if (size) std::fwrite(s.data, 1, size, st.file);
+  }
 }
 
 void OnPresent() {

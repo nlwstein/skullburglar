@@ -18,13 +18,21 @@
 //   scenefeed census                 log every primitive component class: instances, attached, hidden, rendered
 //   scenefeed draws <frames>         ask the native renderer to dump its next <frames> frames of draws (VS constants
 //                                    and pass info) next to the JSON, for matching draws to primitives offline
+//   scenefeed emitters <frames>      research: write each particle component's emitter instances raw (see DumpEmitters)
 //
 // JSON (one object per file):
 //   frame, time (WorldInfo.TimeSeconds), real_time, host_us (steady clock, microseconds; the renderer's draw dumps
 //   use the same clock), camera {location[3], rotation[3] (UE3 units, 65536 = 360 degrees: pitch, yaw, roll), fov
 //   (horizontal, degrees), view[16], proj[16]}, primitives [ {kind, class, name (component path), owner, owner_class,
 //   mesh, transform[16], materials[], bounds {origin[3], extent[3], radius}, hidden, rendered, last_render_time,
-//   lod, bones[[16]...]} ], skeletons {mesh: {names[], parents[]}}.
+//   lod, bones[[16]...], emitters[...]} ], skeletons {mesh: {names[], parents[]}}.
+//   emitters (particle primitives only; one per FParticleEmitterInstance): {index, type (sprite, mesh, beam, trail or
+//   other, from the LOD level's TypeDataModule class), type_class, vtable, emitter (ParticleEmitter path), material,
+//   screen_alignment (EParticleScreenAlignment), local_space, sub_images [h, v], sub_uv_method, mesh, mesh_alignment,
+//   override_material (mesh emitters only), location[3], active, max, stride, particles [[location 3, old_location 3,
+//   size 3, rotation (radians), color 4 (linear RGBA), relative_time (0..1 of the lifetime), payload words...]]}.
+//   A sprite particle's quad is centred on location (or old_location, depending on the material's motion blur);
+//   a mesh particle's transform is translation(location) with the mesh emitter's rotation and size.
 //   Matrices are UE3 FMatrix as stored: 16 floats, row-major, row vectors (v' = v * M, translation in row 3).
 //   World space is UE3's: left-handed, Z up, 1 unit = 1 cm by convention.
 #include "scene_feed.h"
@@ -416,6 +424,105 @@ void Skeleton(std::string& s, uint32_t mesh) {
   s += "]}";
 }
 
+bool IsObject(uint32_t p);
+
+// A property of <object>'s class by name, cached per (class, name).
+Field Prop(uint32_t object, const char* name) {
+  static std::unordered_map<uint64_t, Field> cache;
+  const uint32_t cls = U32(object + 0x34);
+  const uint64_t key = (uint64_t(cls) << 32) ^ std::hash<std::string_view>{}(name);
+  auto it = cache.find(key);
+  if (it != cache.end()) return it->second;
+  return cache.emplace(key, FindProp(cls, name)).first->second;
+}
+uint32_t PropU32(uint32_t object, const char* name, uint32_t fallback = 0) {
+  const Field f = Prop(object, name);
+  return f.ok() ? U32(object + f.offset) : fallback;
+}
+bool PropBool(uint32_t object, const char* name) {
+  const Field f = Prop(object, name);
+  return f.ok() && (U32(object + f.offset) & f.mask);
+}
+uint8_t PropByte(uint32_t object, const char* name) {
+  const Field f = Prop(object, name);
+  return f.ok() ? *Raw(object + f.offset) : 0;
+}
+
+// FParticleEmitterInstance (native, this build; found by dumping instances and matching the sprite vertex data):
+//   +0x00 vtable, +0x10 CurrentLODLevel (UParticleLODLevel), +0x20 Location (FVector), +0x30 ParticleData,
+//   +0x34 ParticleIndices (WORD[]), +0xC0 ParticleStride, +0xC4 ActiveParticles, +0xC8 MaxActiveParticles,
+//   +0x130 the material the emitter draws with. Particles: ParticleData + ParticleIndices[i] * ParticleStride for
+//   i < ActiveParticles. FBaseParticle (0x80 bytes): +0x00 OldLocation, +0x0C RelativeTime, +0x10 Location,
+//   +0x1C OneOverMaxLifetime, +0x20 BaseVelocity, +0x2C Rotation, +0x30 Velocity, +0x3C BaseRotationRate,
+//   +0x40 BaseSize, +0x4C RotationRate, +0x50 Size, +0x5C Flags, +0x60 Color (FLinearColor), +0x70 BaseColor;
+//   module payloads follow from +0x80.
+constexpr uint32_t kEmitLod = 0x10, kEmitLocation = 0x20, kEmitData = 0x30, kEmitIndices = 0x34, kEmitStride = 0xC0,
+                   kEmitActive = 0xC4, kEmitMax = 0xC8, kEmitMaterial = 0x130;
+
+void Emitters(std::string& s, uint32_t component) {
+  static Field instances;
+  if (!instances.ok()) instances = FindProp(U32(component + 0x34), "EmitterInstances");
+  if (!instances.ok()) return;
+  const uint32_t data = U32(component + instances.offset), n = U32(component + instances.offset + 4);
+  s += ",\"emitters\":[";
+  bool first = true;
+  for (uint32_t i = 0; Readable(data) && i < n && i < 64; ++i) {
+    const uint32_t inst = U32(data + 4 * i);
+    if (!Readable(inst)) continue;
+    const uint32_t lod = U32(inst + kEmitLod);
+    if (!IsObject(lod)) continue;
+    const uint32_t required = PropU32(lod, "RequiredModule"), type_data = PropU32(lod, "TypeDataModule");
+    const char* type = "sprite";
+    std::string type_class = IsObject(type_data) ? ClassName(type_data) : "";
+    if (type_class.find("Mesh") != std::string::npos) type = "mesh";
+    else if (type_class.find("Beam") != std::string::npos) type = "beam";
+    else if (type_class.find("Trail") != std::string::npos) type = "trail";
+    else if (!type_class.empty()) type = "other";
+    const uint32_t active = U32(inst + kEmitActive), stride = U32(inst + kEmitStride);
+    if (!first) s += ',';
+    first = false;
+    fmt::format_to(std::back_inserter(s), "{{\"index\":{},\"type\":\"{}\",\"type_class\":\"{}\",\"vtable\":{},"
+                   "\"emitter\":", i, type, type_class, U32(inst));
+    Str(s, Path(U32(lod + 0x28)));  // the LOD level's outer: the ParticleEmitter
+    const uint32_t material = U32(inst + kEmitMaterial);
+    s += ",\"material\":";
+    Str(s, IsObject(material) ? Path(material) : (IsObject(required) ? Path(PropU32(required, "Material")) : ""));
+    if (IsObject(required))
+      fmt::format_to(std::back_inserter(s),
+                     ",\"screen_alignment\":{},\"local_space\":{},\"sub_images\":[{},{}],\"sub_uv_method\":{}",
+                     PropByte(required, "ScreenAlignment"), PropBool(required, "bUseLocalSpace"),
+                     int32_t(PropU32(required, "SubImages_Horizontal", 1)),
+                     int32_t(PropU32(required, "SubImages_Vertical", 1)), PropByte(required, "InterpolationMethod"));
+    if (IsObject(type_data) && std::string_view(type) == "mesh") {
+      s += ",\"mesh\":";
+      Str(s, Path(PropU32(type_data, "Mesh")));
+      fmt::format_to(std::back_inserter(s), ",\"mesh_alignment\":{},\"override_material\":{}",
+                     PropByte(type_data, "MeshAlignment"), PropBool(type_data, "bOverrideMaterial"));
+    }
+    s += ",\"location\":";
+    Floats(s, inst + kEmitLocation, 3);
+    fmt::format_to(std::back_inserter(s), ",\"active\":{},\"max\":{},\"stride\":{},\"particles\":[", active,
+                   U32(inst + kEmitMax), stride);
+    const uint32_t pdata = U32(inst + kEmitData), pindex = U32(inst + kEmitIndices);
+    if (Readable(pdata) && Readable(pindex & ~3u) && stride >= 0x80 && stride <= 0x1000 && active <= 4096) {
+      for (uint32_t k = 0; k < active; ++k) {
+        const uint16_t slot = uint16_t(__builtin_bswap16(*reinterpret_cast<const uint16_t*>(Raw(pindex + 2 * k))));
+        const uint32_t p = pdata + slot * stride;
+        if (k) s += ',';
+        // [location 3, old_location 3, size 3, rotation, color 4, relative_time, payload...]
+        s += '[';
+        for (uint32_t off : {0x10u, 0x14u, 0x18u, 0x00u, 0x04u, 0x08u, 0x50u, 0x54u, 0x58u, 0x2Cu, 0x60u, 0x64u, 0x68u,
+                             0x6Cu, 0x0Cu})
+          Float(s, off != 0x10u, F32(p + off));
+        for (uint32_t off = 0x80; off < stride; off += 4) Float(s, true, F32(p + off));
+        s += ']';
+      }
+    }
+    s += "]}";
+  }
+  s += "]";
+}
+
 std::string FrameJson(uint32_t frame, const Camera& cam, uint32_t world_info, const std::vector<Primitive>& prims,
                       int64_t host_us) {
   static Field time_seconds, real_time;
@@ -491,6 +598,7 @@ std::string FrameJson(uint32_t frame, const Camera& cam, uint32_t world_info, co
     const float lrt = g_off.last_render_time.ok() ? F32(c + g_off.last_render_time.offset) : -1;
     fmt::format_to(std::back_inserter(s), ",\"hidden\":{},\"last_render_time\":{:.4f},\"rendered\":{}", hidden, lrt,
                    lrt >= now - 0.05f);
+    if (p.kind == Kind::kParticle) Emitters(s, c);
     if (p.kind == Kind::kStatic && g_off.forced_lod.ok())
       fmt::format_to(std::back_inserter(s), ",\"lod\":{}", int32_t(U32(c + g_off.forced_lod.offset)));
     if (p.kind == Kind::kSkeletal) {
@@ -532,7 +640,7 @@ std::string FrameJson(uint32_t frame, const Camera& cam, uint32_t world_info, co
 }
 
 struct State {
-  int dump_left = 0, dump_every = 1, time_left = 0;
+  int dump_left = 0, dump_every = 1, time_left = 0, emitters_left = 0;
   bool cached = false;
   uint32_t frame = 0, written = 0;
   float last_real_time = -1;
@@ -604,6 +712,77 @@ void Census() {
                 KindName(c.kind), c.instances, c.attached, c.hidden, c.rendered);
 }
 
+// Is <p> a live UObject (its Index points back at it in the object table)?
+bool IsObject(uint32_t p) {
+  if (!Readable(p) || !g_objects) return false;
+  const uint32_t index = U32(p + 0x04);
+  return index < U32(g_objects + 4) && U32(U32(g_objects) + 4 * index) == p;
+}
+
+// Research dump for the native particle structures: every attached ParticleSystemComponent's EmitterInstances,
+// raw (guest memory, big-endian), plus whatever their first 0x200 bytes point at. emitters_<frame>.bin holds
+// regions {u32 address, u32 length, bytes}; emitters_<frame>.json indexes components and names the UObjects those
+// pointers hit.
+void DumpEmitters(uint32_t frame, const std::vector<Primitive>& prims) {
+  static Field instances;
+  std::string json = fmt::format("{{\"frame\":{},\"components\":[\n", frame);
+  std::string bin;
+  std::unordered_map<uint32_t, bool> done;
+  auto region = [&](uint32_t a, uint32_t len) {
+    if (!Readable(a) || done.count(a)) return;
+    done[a] = true;
+    const uint32_t h[2] = {a, len};
+    bin.append(reinterpret_cast<const char*>(h), 8);
+    bin.append(reinterpret_cast<const char*>(Raw(a)), len);
+  };
+  std::unordered_map<uint32_t, std::string> objects;
+  bool first = true;
+  for (const Primitive& p : prims) {
+    if (p.kind != Kind::kParticle) continue;
+    const uint32_t c = p.component;
+    if (!instances.ok()) instances = FindProp(U32(c + 0x34), "EmitterInstances");
+    if (!instances.ok()) return;
+    const uint32_t data = U32(c + instances.offset), n = U32(c + instances.offset + 4);
+    if (!first) json += ",\n";
+    first = false;
+    json += fmt::format("{{\"component\":{},\"template\":", c);
+    Str(json, Path(g_off.template_ref.ok() ? U32(c + g_off.template_ref.offset) : 0));
+    json += ",\"name\":";
+    Str(json, Path(c));
+    json += ",\"transform\":";
+    Floats(json, c + g_off.local_to_world.offset, 16);
+    json += ",\"instances\":[";
+    for (uint32_t i = 0; Readable(data) && i < n && i < 64; ++i) {
+      const uint32_t inst = U32(data + 4 * i);
+      json += fmt::format("{}{}", i ? "," : "", inst);
+      if (!Readable(inst)) continue;
+      region(inst, 0x400);
+      for (uint32_t k = 0; k < 0x200; k += 4) {
+        const uint32_t q = U32(inst + k);
+        if (!Readable(q) || q == inst) continue;
+        if (IsObject(q)) {
+          objects[q] = Path(q) + " (" + ClassName(q) + ")";
+          continue;
+        }
+        region(q, 0x2000);
+      }
+    }
+    json += "]}";
+  }
+  json += "\n],\"objects\":{";
+  first = true;
+  for (const auto& [a, name] : objects) {
+    json += fmt::format("{}\"{}\":", first ? "" : ",", a);
+    first = false;
+    Str(json, name);
+  }
+  json += "}}\n";
+  char stem[64];
+  std::snprintf(stem, sizeof(stem), "/emitters_%06u", frame);
+  std::ofstream(g_state.dir + stem + ".json", std::ios::binary) << json;
+  std::ofstream(g_state.dir + stem + ".bin", std::ios::binary) << bin;
+}
+
 void RequestDraws(int frames) {
   std::error_code ec;
   std::filesystem::create_directories(g_state.dir, ec);
@@ -629,6 +808,10 @@ bool Command(uint8_t* base, const std::string& cmd) {
     g_state.time_left = std::max(1, n), g_state.cached = std::string_view(extra) == "cached";
   } else if (w == "census") {
     Census();
+  } else if (w == "emitters") {
+    g_state.emitters_left = std::max(1, n);
+    std::error_code ec;
+    std::filesystem::create_directories(g_state.dir, ec);
   } else if (w == "draws") {
     RequestDraws(std::max(1, n));
   } else {
@@ -639,7 +822,7 @@ bool Command(uint8_t* base, const std::string& cmd) {
 
 void Tick(uint8_t* base) {
   State& st = g_state;
-  if (!st.dump_left && !st.time_left) return;
+  if (!st.dump_left && !st.time_left && !st.emitters_left) return;
   g_base = base;
   // Once per game frame: the input poll runs more than once a frame, so only a new RealTimeSeconds counts.
   Camera cam;
@@ -674,6 +857,12 @@ void Tick(uint8_t* base) {
   const int64_t host_us =
       std::chrono::duration_cast<std::chrono::microseconds>(t0.time_since_epoch()).count();
 
+  if (st.emitters_left > 0) {
+    if (!full) Enumerate(st.prims, t);
+    DumpEmitters(st.frame, st.prims);
+    if (!--st.emitters_left) REXLOG_INFO("scenefeed: emitter dump finished (frame {})", st.frame);
+    if (!dumping && !st.time_left) return;
+  }
   if (dumping) {
     if ((st.frame % st.dump_every) == 0) {
       const auto j0 = std::chrono::steady_clock::now();
