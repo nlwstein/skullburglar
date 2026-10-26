@@ -97,7 +97,7 @@ std::vector<Module> ListModules() {
   for (DWORD i = 0; i < std::min<DWORD>(needed / sizeof(HMODULE), 1024); ++i) {
     MODULEINFO mi{};
     char name[MAX_PATH] = "?";
-    GetModuleInfo(proc, handles[i], &mi, sizeof(mi));
+    GetModuleInformation(proc, handles[i], &mi, sizeof(mi));
     GetModuleBaseNameA(proc, handles[i], name, sizeof(name));
     mods.push_back({uint64_t(mi.lpBaseOfDll), mi.SizeOfImage, name});
   }
