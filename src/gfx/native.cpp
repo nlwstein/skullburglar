@@ -28,6 +28,8 @@
 #include <rex/system/xex_module.h>
 #include <rex/system/xmemory.h>
 #include <rex/ui/vulkan/presenter.h>
+
+#include "../instr_state.h"
 #include <rex/ui/vulkan/provider.h>
 
 #include "../hybrid_state.h"
@@ -54,6 +56,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     renderer_->EndFrame();
     PublishWarmup();
     HoldForWarmup();
+    if (InstrState* is = FindInstrState()) PublishInstr(*is, frontbuffer_width, frontbuffer_height);
     ++frames_;
     // BOTS_GFX_NO_PRESENT=1 (benchmarking): render everything but never hand the frame to the presenter. Under a
     // GPU-less X server (Xvfb) the Vulkan surface falls back to xcb_put_image and presenting costs more than the
@@ -291,6 +294,20 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   void PublishWarmup() {
     shader_precompile_total_.store(uint32_t(renderer_->warmup_total()), std::memory_order_relaxed);
     shader_precompile_done_.store(uint32_t(renderer_->warmup_done()), std::memory_order_relaxed);
+    if (InstrState* is = FindInstrState()) {
+      is->warm_total.store(uint32_t(renderer_->port_warmup_total()), std::memory_order_relaxed);
+      is->warm_done.store(uint32_t(renderer_->port_warmup_done()), std::memory_order_relaxed);
+      if (!pipeline_cache_path_.empty()) is->warm_loaded.store(1, std::memory_order_relaxed);
+    }
+  }
+
+  // Test instrumentation (instr_state.h): the renderer's counters, once per swap.
+  void PublishInstr(InstrState& is, uint32_t w, uint32_t h) {
+    constexpr auto r = std::memory_order_relaxed;
+    const auto& st = renderer_->stats();
+    is.draws.store(st.draws, r), is.presents.store(st.presents, r), is.pending_draws.store(st.pending_draws, r);
+    is.live_pipelines.store(st.live_pipelines, r), is.failed_pipeline_draws.store(st.failed_pipeline_draws, r);
+    is.render_w.store(w, r), is.render_h.store(h, r);
   }
 
   // While the panel is in the foreground (the player is waiting on it, not playing) the guest stays at this swap
@@ -321,6 +338,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     const uint64_t load_max_us = renderer_->TakeTextureLoadMaxUs();
     if (frame_marked_) {
       const double ms = std::chrono::duration<double, std::milli>(now.time - frame_mark_.time).count();
+      if (InstrState* is = FindInstrState()) is->Frame(ms);
       static constexpr double kEdges[] = {20, 25, 33.4, 50, 100, 250};
       size_t bucket = 0;
       while (bucket < std::size(kEdges) && ms > kEdges[bucket]) ++bucket;
@@ -413,6 +431,8 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     const auto start = std::chrono::steady_clock::now();
     auto report = start + std::chrono::seconds(5);
     const size_t from = renderer_->warmup_done();
+    InstrState* instr = FindInstrState();
+    if (instr) instr->warm_hold.store(1, std::memory_order_relaxed);
     while (shader_precompile_foreground_.load(std::memory_order_relaxed) && worker_running_ &&
            renderer_->warmup_done() < renderer_->warmup_total()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -425,6 +445,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
       }
     }
     frame_marked_ = false, frame_avg_ms_ = 0;  // not a hitch: the next frame interval starts after the hold
+    if (instr) instr->warm_hold.store(0, std::memory_order_relaxed);
     REXLOG_INFO("gfx native: guest held {:.1f} s for the pipeline warm-up ({} pipelines, {}/{} done)",
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
                 renderer_->warmup_done() - from, renderer_->warmup_done(), renderer_->warmup_total());

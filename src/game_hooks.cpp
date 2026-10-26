@@ -41,6 +41,7 @@
 #include "coop.h"
 #include "widescreen.h"
 #include "gfx/capture.h"
+#include "instr.h"
 #include "mnk_input.h"
 #include "prompt_state.h"
 #include "scene_feed.h"
@@ -261,7 +262,7 @@ ExecState* Exec() {
   static ExecState* state = [] {
     const char* timed = std::getenv("BOTS_EXEC");
     const char* file = std::getenv("BOTS_EXEC_FILE");
-    if (!(timed && *timed) && !(file && *file)) return static_cast<ExecState*>(nullptr);
+    if (!(timed && *timed) && !(file && *file) && !bots::instr::Enabled()) return static_cast<ExecState*>(nullptr);
     auto* st = new ExecState;
     if (file) st->file = file;
     for (std::string list = timed ? timed : "", item; !list.empty();) {
@@ -280,6 +281,7 @@ void RunPlayerCommand(PPCContext& ctx, uint8_t* base, ExecState& st, uint32_t pl
                       bool log = true);
 
 void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std::string& cmd) {
+  bots::instr::NoteCommand(cmd);
   // "peek <hex addr> [count]": log guest words (pointers the game fills in at runtime).
   if (cmd.rfind("peek ", 0) == 0) {
     char* end = nullptr;
@@ -343,7 +345,7 @@ extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
   if (state && ctx.r3.u32 == 0) quit_option::FilterPad(base, state);
   split_screen::Poll(ctx, base, user, ctx.r3.u32 == 0 ? state : 0);
   if (split_screen::OffGameThread()) return;
-  if (user == 0) bots::scenefeed::Tick(base), bots::scenefeed::Live(base);
+  if (user == 0) bots::scenefeed::Tick(base), bots::scenefeed::Live(base), bots::instr::GameTick(base);
   ExecState* st = Exec();
   if (!st) return;
   auto now = std::chrono::steady_clock::now();
@@ -364,6 +366,7 @@ extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
       std::ofstream(st->file, std::ios::trunc);
     }
   }
+  if (user == 0) bots::instr::TakeCommands(run);
   if (run.empty()) return;
   const PPCRegister r3 = ctx.r3;  // keep the poll's return value
   for (auto& cmd : run) RunConsoleCommand(ctx, base, *st, cmd);
@@ -1567,11 +1570,13 @@ void FilterPad(uint8_t* base, uint32_t state) {
 extern "C" void sub_82E2EB38(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_82E2EB38(ctx, base);
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) kbm->SetPaused(true);
+  bots::instr::SetPaused(true);
 }
 
 extern "C" void sub_82E2EBB8(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_82E2EBB8(ctx, base);
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) kbm->SetPaused(false);
+  bots::instr::SetPaused(false);
 }
 
 // Whether the local player is driving: GEngine +0x2D8 GamePlayers[0] (LocalPlayer) +0x40 Actor (C1PlayerController)
@@ -2638,6 +2643,7 @@ extern "C" void sub_8281D990(PPCContext& __restrict ctx, uint8_t* base) {
 
 extern "C" void sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_82E2E860(ctx, base);
+  bots::instr::HudTick();
   split_screen::Tick(base);
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) {
     kbm->NoteHudTick();
@@ -2755,6 +2761,7 @@ extern "C" void sub_82FA6250(PPCContext& __restrict ctx, uint8_t* base) {
 extern "C" void sub_827CF678(PPCContext& __restrict ctx, uint8_t* base) {
   const uint32_t engine = ctx.r3.u32, type = ctx.r5.u32;
   __imp__sub_827CF678(ctx, base);
+  if (bots::instr::Enabled()) bots::instr::Travel(FStr(base, engine + 0x46C));
   if (TravelTrace())
     REXLOG_INFO("travel trace: SetClientTravel -> TravelURL '{}' type {}", FStr(base, engine + 0x46C), type);
 }
@@ -2789,7 +2796,9 @@ extern "C" void sub_827DA828(PPCContext& __restrict ctx, uint8_t* base) {
   if (TravelTrace())
     REXLOG_INFO("travel trace: Browse enter, TravelURL '{}' LastURL map '{}'", FStr(base, engine + 0x46C),
                 FStr(base, engine + 0x3D8 + 0x1C));
+  if (bots::instr::Enabled()) bots::instr::BrowseBegin(FStr(base, engine + 0x46C));
   __imp__sub_827DA828(ctx, base);
+  bots::instr::BrowseEnd();
   if (TravelTrace())
     REXLOG_INFO("travel trace: Browse -> {} , TravelURL '{}'", ctx.r3.u32, FStr(base, engine + 0x46C));
 }

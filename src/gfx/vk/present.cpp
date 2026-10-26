@@ -14,6 +14,7 @@
 
 #include "renderer.h"
 #include "draw_dump.h"
+#include "../../instr_state.h"
 
 namespace bots::gfx::vk {
 namespace {
@@ -68,6 +69,9 @@ void main() {
 // b<burst>.tsv (wall ms, presents, n1 frames drawn, marker and scene camera sequences, scene frame). The GPU copies
 // cost a few hundred microseconds per frame; the buffer is made when a burst starts and written out after it ends,
 // so a burst stalls once at each end. Unset: one predictable branch per present.
+// The test instrumentation's `burst <dir> <count>` (instr_state.h) asks for one more burst, starting now.
+uint32_t g_instr_burst_seq = 0;  // the last request taken
+
 struct Burst {
   struct Window {
     double at;
@@ -237,7 +241,9 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
     const char* v = std::getenv("BOTS_CAPTURE_BURST");
     return v && *v;
   }();
-  if (burst) CaptureBurst(source);
+  InstrState* instr = FindInstrState();
+  if (burst || (instr && (burst_ || instr->burst_seq.load(std::memory_order_acquire) != g_instr_burst_seq)))
+    CaptureBurst(source);
   Flush();
   ++stats_.presents;
   drawdump::OnPresent();
@@ -263,6 +269,18 @@ void Renderer::CaptureBurst(const Image& source) {
     REXLOG_INFO("capture burst: {} bursts to {}", b->windows.size(), b->dir);
   }
   const auto now = std::chrono::steady_clock::now();
+  if (InstrState* is = FindInstrState(); is && !b->buffer) {
+    const uint32_t seq = is->burst_seq.load(std::memory_order_acquire);
+    if (seq != g_instr_burst_seq) {
+      g_instr_burst_seq = seq;
+      b->dir = is->burst_dir[0] ? is->burst_dir : "burst";
+      std::error_code ec;
+      std::filesystem::create_directories(b->dir, ec);
+      const double at = std::chrono::duration<double>(now - b->start).count();
+      b->windows.insert(b->windows.begin() + std::ptrdiff_t(std::min(b->next, b->windows.size())),
+                        {at, is->burst_count.load(std::memory_order_relaxed)});
+    }
+  }
   if (!b->buffer) {
     if (b->next >= b->windows.size() ||
         std::chrono::duration<double>(now - b->start).count() < b->windows[b->next].at)

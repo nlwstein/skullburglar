@@ -110,6 +110,8 @@ class Renderer : public Pm4Sink {
   // Warm-up progress: pipelines recorded in the manifest, and how many of them are created (ready or failed).
   // Includes the n1 renderer's startup step (hybrid_fill.cpp) while it runs.
   size_t warmup_total() const { return warm_.size() + n1_warm_total_; }
+  size_t port_warmup_total() const { return warm_.size(); }  // the port's own part (no n1)
+  size_t port_warmup_done() const { return warm_done_; }
   size_t warmup_done() const { return warm_done_ + n1_warm_done_; }
   // Warm-up outcome so far: pipelines built, and finished without one: the driver failed it, a shader missing from
   // the manifest and refs, a translation failed, or no pipeline layout.
