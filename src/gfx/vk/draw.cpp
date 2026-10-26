@@ -23,6 +23,9 @@
 
 #include "renderer.h"
 #include "draw_dump.h"
+#ifdef BOTS_N1FFI
+#include <n1ffi.h>
+#endif
 #include <string>
 
 namespace bots::gfx::vk {
@@ -1513,6 +1516,55 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
                   samples_x * samples_y > 1 ? " ss4" : "");
     GpuLabel(kGpuDraw, label);
   }
+#ifdef BOTS_N1FFI
+  if (n1_tree_active_ && n1_tree_r_ && pshader && dma && !std::ranges::none_of(attachments.color, std::identity{})) {
+    auto* nr = static_cast<N1Renderer*>(n1_tree_r_);
+    const float* consts = reinterpret_cast<const float*>(&regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
+    const uint64_t vs_hash = vshader->ucode_data_hash();
+    const uint32_t want = n1_tree_probe(nr, vs_hash, consts, count);
+    if (want & 2) n1_tree_ucode(nr, vs_hash, vshader->ucode_disassembly().c_str());
+    if (want & 1) {
+      N1TreeDraw td{};
+      td.vs_hash = vs_hash;
+      td.consts = consts;
+      uint32_t k = 0;
+      for (const auto& binding : vshader->vertex_bindings()) {
+        const auto fetch = regs.GetVertexFetch(binding.fetch_constant);
+        if (fetch.type != xe::FetchConstantType::kVertex || k >= 4) continue;
+        td.stream_addr[k] = fetch.address << 2;
+        td.stream[k] = memory_(td.stream_addr[k]);
+        td.stream_bytes[k] = fetch.size * 4;
+        td.stream_stride[k] = binding.stride_words * 4;
+        td.fetch_consts |= (binding.fetch_constant & 0xFF) << (8 * k);
+        ++k;
+      }
+      td.stream_count = k;
+      std::vector<uint32_t> idx(count);
+      const uint8_t* isrc = memory_(draw.index_base);
+      if (isrc && td.stream[0]) {
+        for (uint32_t i = 0; i < count; ++i) {
+          if (index32) {
+            uint32_t v;
+            std::memcpy(&v, isrc + i * 4, 4);
+            idx[i] = xe::GpuSwap(v, index_endian);
+          } else {
+            uint16_t h;
+            std::memcpy(&h, isrc + i * 2, 2);
+            idx[i] = xe::GpuSwap(h, index_endian);
+          }
+        }
+        td.indices = idx.data();
+        td.index_count = count;
+        td.index_offset = regs.values[rg::XE_GPU_REG_VGT_INDX_OFFSET];
+        for (const auto& b : pshader->GetTextureBindingsAfterTranslation()) {
+          if (td.tex_count >= 4) break;
+          td.tex_base[td.tex_count++] = regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + 6 * b.fetch_constant + 1];
+        }
+        n1_tree_capture(nr, &td);
+      }
+    }
+  }
+#endif
   if (drawdump::Active()) {
     std::vector<drawdump::Stream> streams;
     for (const auto& binding : vshader->vertex_bindings()) {

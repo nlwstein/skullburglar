@@ -481,6 +481,9 @@ class Renderer : public Pm4Sink {
   uint32_t n1_marker_seq_ = 0, n1_view_seq_ = 0;
   size_t n1_warm_total_ = 0, n1_warm_done_ = 0;
   bool n1_warm_started_ = false;
+  // B-187: while the tree capture runs (hybrid_fill.cpp sets these) IssueDraw hands tree draws to n1ffi.
+  void* n1_tree_r_ = nullptr;
+  bool n1_tree_active_ = false;
 
   // Textures (texture.cpp). TextureView may record an upload, so call it before a draw's ring reservation.
   // Views for the translator's unsigned or signed binding of a fetch: formats with both signednesses get a view of

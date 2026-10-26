@@ -110,6 +110,8 @@ struct N1Host {
   uint32_t budget = 8;
   HybridScene scene;  // the newest one taken from the game
   std::unordered_map<const char*, uint32_t> meshes, materials, lights, skel_meshes, envs, pmaterials, pmeshes;
+  std::unordered_map<const char*, uint32_t> tree_comps, tree_assets;
+  std::vector<N1Tree> trees;
   std::vector<N1Emitter> emitters;
   std::vector<N1Instance> instances;
   std::vector<N1SkelInstance> skeletal;
@@ -118,7 +120,7 @@ struct N1Host {
   // Stats since the last log line.
   std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
   double log_seconds = 5, host_ms = 0, record_ms = 0, build_ms = 0, feed_ms = 0, lighting_ms = 0, particles_ms = 0;
-  uint64_t frames = 0, draws = 0, triangles = 0, scenes = 0;
+  uint64_t frames = 0, draws = 0, triangles = 0, scenes = 0, light_updates = 0, verified = 0, verify_bad = 0;
   uint32_t cam_seq = 0;  // the camera n1 drew the last frame with
   // n1_record wall time: worst frame and frames over 20 ms in the window (a compile on the render thread shows here).
   double record_max_ms = 0;
@@ -163,6 +165,7 @@ void* Renderer::EnsureN1(VkFormat format) {
   const auto t0 = std::chrono::steady_clock::now();
   host->r = n1_create(&init);
   host->format = format;
+  n1_tree_r_ = host->r;
   if (!host->r) {
     host->failed = true;
     REXLOG_ERROR("hybrid n1: n1_create failed: {}", n1_last_error());
@@ -223,15 +226,51 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   const auto t0 = std::chrono::steady_clock::now();
   {
     std::lock_guard lock(state->scene_mutex);
-    if (state->scene.frame > host->scene.frame) std::swap(host->scene, state->scene), ++host->scenes;
+    if (state->scene.frame > host->scene.frame) {
+      std::swap(host->scene, state->scene), ++host->scenes;
+      host->lighting_ms += host->scene.lighting_ms;  // every build, changed or not
+    }
   }
-  // Lights, fog and post: handed over when the game built a new set (every BOTS_N1_FEED_EVERY game frames).
-  if (!host->scene.lighting.empty()) {
+  // Lights, fog and post: handed over when the game built a new set (every BOTS_N1_FEED_EVERY game frames). Binary
+  // records (B-188); the JSON text only for BOTS_N1_FEED=json, and both compared with BOTS_N1_FEED_VERIFY=1.
+  if (host->scene.light_pending) {
+    const auto f0 = std::chrono::steady_clock::now();
+    HybridLighting& l = host->scene.light;
+    std::vector<const char*> paths = l.paths;
+    N1FeedBin fb{};
+    static_assert(sizeof(N1FeedLight) == sizeof(HybridLight) && sizeof(N1FeedFog) == sizeof(HybridFog) &&
+                  sizeof(N1FeedPost) == sizeof(HybridPost));
+    fb.version = N1_FEED_VERSION;
+    fb.flags = l.has_fog_post ? N1_FEED_FOG_POST : 0;
+    fb.light_count = uint32_t(l.lights.size());
+    fb.sh_count = uint32_t(l.sh.size() / 27);
+    fb.lights = reinterpret_cast<const N1FeedLight*>(l.lights.data());
+    fb.sh = l.sh.data();
+    std::memcpy(&fb.fog, &l.fog, sizeof(fb.fog));
+    std::memcpy(&fb.post, &l.post, sizeof(fb.post));
+    if (l.has_fog_post && l.post_material) {
+      fb.post.material_effect = uint32_t(paths.size());
+      paths.push_back(l.post_material);
+    }
+    fb.path_count = uint32_t(paths.size());
+    fb.paths = paths.data();
+    if (n1_set_feed_bin(host->r, &fb) != 0) REXLOG_WARN("hybrid n1: n1_set_feed_bin failed: {}", n1_last_error());
+    if (!host->scene.lighting.empty()) {  // BOTS_N1_FEED_VERIFY=1
+      const int diffs = n1_check_feed(host->scene.lighting.data(), uint32_t(host->scene.lighting.size()), &fb);
+      ++host->verified;
+      if (diffs != 0 && host->verify_bad++ < 8)
+        REXLOG_WARN("hybrid n1: feed verify: {} differences: {}", diffs, n1_last_error());
+    }
+    host->feed_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - f0).count();
+    host->light_updates++;
+    host->scene.light_pending = false;
+    host->scene.lighting.clear();
+  } else if (!host->scene.lighting.empty()) {
     const auto f0 = std::chrono::steady_clock::now();
     if (n1_set_feed(host->r, host->scene.lighting.data(), uint32_t(host->scene.lighting.size())) != 0)
       REXLOG_WARN("hybrid n1: n1_set_feed failed: {}", n1_last_error());
     host->feed_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - f0).count();
-    host->lighting_ms += host->scene.lighting_ms;
+    host->light_updates++;
     host->scene.lighting.clear();
   }
   // Handles by interned path (the game never frees the strings). The light first: it names the level package that
@@ -281,6 +320,16 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   }
   n1_set_particles(host->r, host->emitters.data(), uint32_t(host->emitters.size()), host->scene.particle_rows.data(),
                    uint32_t(host->scene.particle_rows.size()));
+  host->trees.clear();
+  for (const HybridScene::Tree& in : host->scene.trees) {
+    N1Tree& out = host->trees.emplace_back();
+    out = {};
+    std::memcpy(out.transform, in.transform, sizeof(out.transform));
+    out.component = Handle(host->tree_comps, in.component, host->r, n1_tree_component);
+    out.asset = Handle(host->tree_assets, in.asset, host->r, n1_tree_asset);
+    std::memcpy(out.rotation, in.rotation, sizeof(out.rotation));
+  }
+  n1_set_trees(host->r, host->trees.data(), uint32_t(host->trees.size()));
   n1_set_skeletal(host->r, host->skeletal.data(), uint32_t(host->skeletal.size()), host->scene.bones.data(),
                   uint32_t(host->scene.bones.size()), host->skel_materials.data(),
                   uint32_t(host->skel_materials.size()));
@@ -338,6 +387,11 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     return false;
   }
   target.Use(uint32_t(t.x) + t.w, uint32_t(t.y) + t.h);
+  {
+    const uint32_t cap = n1_tree_end_frame(host->r);
+    n1_tree_active_ = cap > 0;
+    if (cap > 0 && state) state->capture_frames.store(int(cap));
+  }
   host->frames++, host->draws += st.draws, host->triangles += st.triangles, host->last = st;
   ++n1_drawn_, n1_scene_frame_ = host->scene.frame, n1_marker_seq_ = cam.seq, n1_view_seq_ = view_cam->seq;
   host->host_ms += std::chrono::duration<double, std::milli>(t2 - t0).count();
@@ -356,15 +410,17 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
                 "per frame; render thread {:.3f} ms/frame ({:.3f} in n1_record), game thread walk {:.3f} ms; meshes "
                 "{} ready {} pending {} missing, {} loading, {} textures ({} unsupported); skinned {} drawn {} culled {} "
                 "skipped, {} meshes ready; {} shaders {} pipelines ({} draws waiting), feed {} lights {} envs ({} "
-                "instances bound, {} handles), lighting json {:.3f} ms game / {:.3f} ms parse (totals); particles {} emitters "
-                "{} sprites {} meshes ({} dropped, {} skipped, {}/{} materials ready/failed), game thread {:.3f} ms",
+                "instances bound, {} handles), lighting {} updates, {:.3f} ms game / {:.3f} ms feed (totals; {} verified); particles {} emitters "
+                "{} sprites {} meshes ({} dropped, {} skipped, {}/{} materials ready/failed), game thread {:.3f} ms; trees {} placements {} drawn "
+                "({} assets ready, {} uncaptured, {} failed, {} captured this run)",
                 secs, host->frames, host->scenes, st.instances, st.skipped, host->draws / n, host->triangles / n / 1000,
                 host->host_ms / n, host->record_ms / n, host->build_ms / n, st.meshes_ready, st.meshes_pending,
                 st.meshes_missing, st.loading, st.textures, st.textures_unsupported, st.skel_drawn, st.skel_culled,
                 st.skel_skipped, st.skel_meshes_ready, st.shaders, st.pipelines, st.pipelines_pending, st.dyn_lights,
-                st.light_envs, st.env_bound, st.env_handles, host->lighting_ms, host->feed_ms, st.particle_emitters,
+                st.light_envs, st.env_bound, st.env_handles, host->light_updates, host->lighting_ms, host->feed_ms, host->verified, st.particle_emitters,
                 st.particle_sprites, st.particle_meshes, st.particle_dropped, st.particle_skipped,
-                st.particle_mats_ready, st.particle_mats_failed, host->particles_ms / n);
+                st.particle_mats_ready, st.particle_mats_failed, host->particles_ms / n, st.tree_placements, st.tree_instances,
+                st.tree_assets_ready, st.tree_assets_uncaptured, st.tree_assets_failed, st.tree_captured);
     REXLOG_INFO("hybrid n1 compile: t={:.1f} s: built {}+{} shaders and {}+{} pipelines (startup+play), {} late "
                 "shaders and {} late pipelines, {} failed; {:.1f} s in the driver (worst {:.0f} ms), spirv cache "
                 "{}/{}; render thread: {} draws skipped, {} on the stand-in, {} partial frames, backlog {}; n1_record "
@@ -377,6 +433,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     host->record_max_ms = 0, host->record_over_20 = 0;
     host->since = t2, host->frames = host->draws = host->triangles = host->scenes = 0;
     host->host_ms = host->record_ms = host->build_ms = host->feed_ms = host->lighting_ms = host->particles_ms = 0;
+    host->light_updates = host->verified = 0;
   }
   return true;
 }
