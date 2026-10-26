@@ -157,6 +157,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
       host->failed = true;
       REXLOG_ERROR("hybrid n1: n1_create failed: {}", n1_last_error());
     } else {
+      n1_precompile_start(host->r);  // builds the shaders and pipelines on worker threads; draws wait for theirs
       REXLOG_INFO("hybrid n1: renderer up in {:.1f} ms (target format {}, {}x{})",
                   std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
                   int(target.format), target.width, target.height);
