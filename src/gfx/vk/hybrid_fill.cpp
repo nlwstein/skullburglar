@@ -16,6 +16,7 @@
 //             BOTS_N1_LOG      seconds between stats lines (default 5)
 // It records into the frame's command buffer like a format transfer: its own one-attachment rendering, so the game's
 // pass simply reopens for the HUD.
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -115,6 +116,13 @@ struct N1Host {
   std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
   double log_seconds = 5, host_ms = 0, record_ms = 0, build_ms = 0, feed_ms = 0, lighting_ms = 0, particles_ms = 0;
   uint64_t frames = 0, draws = 0, triangles = 0, scenes = 0;
+  // n1_record wall time: worst frame and frames over 20 ms in the window (a compile on the render thread shows here).
+  double record_max_ms = 0;
+  uint64_t record_over_20 = 0;
+  const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+  // The startup step (n1_precompile_*): when it began, and whether its result has been logged.
+  std::chrono::steady_clock::time_point precompile_started{};
+  bool precompile_logged = false;
   N1Stats last{};
 };
 uint32_t Handle(std::unordered_map<const char*, uint32_t>& map, const char* path, N1Renderer* r,
@@ -130,40 +138,84 @@ const char* EnvOr(const char* name, const char* fallback) {
 }
 }  // namespace
 
+// Makes the n1 renderer for colour target `format` (the guest's 8-bit colour target; DrawSceneN1 remakes it if the
+// first scene arrives in another). Called at start-up so the startup step can run before the first level.
+void* Renderer::EnsureN1(VkFormat format) {
+  auto* host = static_cast<N1Host*>(n1_host_);
+  if (host) return host;
+  host = new N1Host;
+  n1_host_ = host;
+  host->budget = uint32_t(std::atoi(EnvOr("BOTS_N1_BUDGET", "8")));
+  host->log_seconds = std::atof(EnvOr("BOTS_N1_LOG", "5"));
+  N1Init init{};
+  init.get_instance_proc_addr = device_->vulkan_instance()->functions().vkGetInstanceProcAddr;
+  init.instance = device_->vulkan_instance()->instance();
+  init.physical_device = device_->physical_device();
+  init.device = device_->device();
+  init.color_format = format;
+  init.cooked_dir = EnvOr("BOTS_N1_COOKED", "game/C1Game/CookedXenon");
+  init.cache_dir = EnvOr("BOTS_N1_CACHE", "cache/n1");
+  init.loader_threads = uint32_t(std::atoi(EnvOr("BOTS_N1_THREADS", "2")));
+  const auto t0 = std::chrono::steady_clock::now();
+  host->r = n1_create(&init);
+  host->format = format;
+  if (!host->r) {
+    host->failed = true;
+    REXLOG_ERROR("hybrid n1: n1_create failed: {}", n1_last_error());
+  } else {
+    REXLOG_INFO("hybrid n1: renderer up in {:.1f} ms (target format {})",
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), int(format));
+  }
+  return host;
+}
+
+// The startup step's share of the warm-up (renderer.h warmup_total/done): starts it once the hybrid scene is on, then
+// follows its progress. Called from PumpWarmup every frame on the GPU thread.
+void Renderer::PumpN1Warmup() {
+  if (!n1_warm_started_) {
+    HybridState* state = FindHybridState();
+    if (!state || state->fill.load(std::memory_order_relaxed) != 4) return;
+    n1_warm_started_ = true;
+    auto* host = static_cast<N1Host*>(EnsureN1(VK_FORMAT_R8G8B8A8_UNORM));
+    if (host && host->r) {
+      n1_precompile_start(host->r);
+      host->precompile_started = std::chrono::steady_clock::now();
+    }
+  }
+  auto* host = static_cast<N1Host*>(n1_host_);
+  if (!host || !host->r || host->precompile_logged) return;
+  uint32_t done = 0, total = 0;
+  const uint32_t state = n1_precompile_progress(host->r, &done, &total);
+  if (state == 1) {
+    n1_warm_total_ = std::max<size_t>(total, done + 1), n1_warm_done_ = done;
+  } else if (state == 2) {
+    n1_warm_total_ = n1_warm_done_ = 0;
+    host->precompile_logged = true;
+    REXLOG_INFO("hybrid n1: startup step done in {:.1f} s",
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - host->precompile_started).count());
+  }
+}
+
 bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2D& area) {
   HybridState* state = FindHybridState();
   auto* host = static_cast<N1Host*>(n1_host_);
+  if (host && host->r && target.format != host->format) {
+    // The first scene is in another colour format than the one the renderer was made for: make it again (the shader
+    // and pipeline caches make this quick). The GPU must be idle.
+    REXLOG_WARN("hybrid n1: target format {} is not the renderer's {}; remaking it", int(target.format),
+                int(host->format));
+    Finish();
+    n1_destroy(host->r);
+    delete host;
+    n1_host_ = host = nullptr;
+    n1_warm_started_ = false;
+    n1_warm_total_ = n1_warm_done_ = 0;
+  }
   if (!host) {
-    host = new N1Host;
-    n1_host_ = host;
-    host->budget = uint32_t(std::atoi(EnvOr("BOTS_N1_BUDGET", "8")));
-    host->log_seconds = std::atof(EnvOr("BOTS_N1_LOG", "5"));
-    N1Init init{};
-    init.get_instance_proc_addr = device_->vulkan_instance()->functions().vkGetInstanceProcAddr;
-    init.instance = device_->vulkan_instance()->instance();
-    init.physical_device = device_->physical_device();
-    init.device = device_->device();
-    init.color_format = target.format;
-    init.cooked_dir = EnvOr("BOTS_N1_COOKED", "game/C1Game/CookedXenon");
-    init.cache_dir = EnvOr("BOTS_N1_CACHE", "cache/n1");
-    init.loader_threads = uint32_t(std::atoi(EnvOr("BOTS_N1_THREADS", "2")));
-    const auto t0 = std::chrono::steady_clock::now();
-    host->r = n1_create(&init);
-    host->format = target.format;
-    if (!host->r) {
-      host->failed = true;
-      REXLOG_ERROR("hybrid n1: n1_create failed: {}", n1_last_error());
-    } else {
-      REXLOG_INFO("hybrid n1: renderer up in {:.1f} ms (target format {}, {}x{})",
-                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
-                  int(target.format), target.width, target.height);
-    }
+    host = static_cast<N1Host*>(EnsureN1(target.format));
+    if (host->r) n1_precompile_start(host->r);
   }
   if (host->failed) return false;
-  if (target.format != host->format) {
-    REXLOG_WARN("hybrid n1: target format {} is not the renderer's {}; skipped", int(target.format), int(host->format));
-    return false;
-  }
   const auto t0 = std::chrono::steady_clock::now();
   {
     std::lock_guard lock(state->scene_mutex);
@@ -269,6 +321,11 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   host->frames++, host->draws += st.draws, host->triangles += st.triangles, host->last = st;
   host->host_ms += std::chrono::duration<double, std::milli>(t2 - t0).count();
   host->record_ms += std::chrono::duration<double, std::milli>(t2 - t1).count();
+  {
+    const double ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+    host->record_max_ms = std::max(host->record_max_ms, ms);
+    host->record_over_20 += ms > 20.0;
+  }
   host->build_ms += host->scene.build_ms;
   host->particles_ms += host->scene.particles_ms;
   const double secs = std::chrono::duration<double>(t2 - host->since).count();
@@ -287,11 +344,26 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
                 st.light_envs, st.env_bound, st.env_handles, host->lighting_ms, host->feed_ms, st.particle_emitters,
                 st.particle_sprites, st.particle_meshes, st.particle_dropped, st.particle_skipped,
                 st.particle_mats_ready, st.particle_mats_failed, host->particles_ms / n);
+    REXLOG_INFO("hybrid n1 compile: t={:.1f} s: built {}+{} shaders and {}+{} pipelines (startup+play), {} late "
+                "shaders and {} late pipelines, {} failed; {:.1f} s in the driver (worst {:.0f} ms), spirv cache "
+                "{}/{}; render thread: {} draws skipped, {} on the stand-in, {} partial frames, backlog {}; n1_record "
+                "worst {:.1f} ms, {} frames over 20 ms",
+                std::chrono::duration<double>(t2 - host->started).count(), st.shaders_startup, st.shaders_live,
+                st.pipelines_startup, st.pipelines_live, st.late_shaders, st.late_pipelines, st.build_failures,
+                double(st.pipeline_ms) / 1e3, double(st.pipeline_max_ms), st.spv_hits, st.spv_hits + st.spv_misses,
+                st.draws_no_pipe, st.fallback_draws, st.partial_frames, st.compile_backlog, host->record_max_ms,
+                host->record_over_20);
+    host->record_max_ms = 0, host->record_over_20 = 0;
     host->since = t2, host->frames = host->draws = host->triangles = host->scenes = 0;
     host->host_ms = host->record_ms = host->build_ms = host->feed_ms = host->lighting_ms = host->particles_ms = 0;
   }
   return true;
 }
+#endif
+
+#ifndef BOTS_N1FFI
+void* Renderer::EnsureN1(VkFormat) { return nullptr; }
+void Renderer::PumpN1Warmup() {}
 #endif
 
 void Renderer::DestroySceneFill() {
