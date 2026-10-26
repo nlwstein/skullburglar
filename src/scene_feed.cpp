@@ -2154,6 +2154,7 @@ void Live(uint8_t* base) {
     }
   }
   std::swap(hs->scene, out);
+  hs->scene_cv.notify_all();
 }
 
 }  // namespace bots::scenefeed
