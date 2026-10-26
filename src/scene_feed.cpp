@@ -25,7 +25,7 @@
 //   use the same clock), camera {location[3], rotation[3] (UE3 units, 65536 = 360 degrees: pitch, yaw, roll), fov
 //   (horizontal, degrees), view[16], proj[16]}, primitives [ {kind, class, name (component path), owner, owner_class,
 //   mesh, transform[16], materials[], bounds {origin[3], extent[3], radius}, hidden, rendered, last_render_time,
-//   lod, bones[[16]...], emitters[...]} ], skeletons {mesh: {names[], parents[]}}.
+//   lod, bones[[16]...], emitters[...]} ], skeletons {mesh: {names[], parents[]}}, lights [...], fog [...], post {...}.
 //   emitters (particle primitives only; one per FParticleEmitterInstance): {index, type (sprite, mesh, beam, trail or
 //   other, from the LOD level's TypeDataModule class), type_class, vtable, emitter (ParticleEmitter path), material,
 //   screen_alignment (EParticleScreenAlignment), local_space, sub_images [h, v], sub_uv_method, mesh, mesh_alignment,
@@ -33,6 +33,16 @@
 //   size 3, rotation (radians), color 4 (linear RGBA), relative_time (0..1 of the lifetime), payload words...]]}.
 //   A sprite particle's quad is centred on location (or old_location, depending on the material's motion blur);
 //   a mesh particle's transform is translation(location) with the mesh emitter's rotation and size.
+//   lights (every attached LightComponent: world lights and the ones DynamicLightEnvironments make for characters
+//   and movers), fog (attached HeightFogComponent and FogVolumeDensityComponent): {class, name, props}, where props
+//   holds every script property below ActorComponent, by name, as reflection describes it (see Members): for lights
+//   LightToWorld (row 2, its Z axis, is the direction light travels: the owner's forward axis), Brightness, LightColor [R, G, B, A],
+//   Radius, FalloffExponent, CastShadows, CastDynamicShadows, LightEnvironment, LightShadowMode, Inner/OuterConeAngle
+//   (spot), LowerBrightness/LowerColor (sky), WorldSpaceIncidentLighting (spherical-harmonic environment lights).
+//   post: {chain [{class, name, props}] (the local player's PlayerPostProcess effects, e.g. SfUberPostProcessEffect,
+//   SfGodRaysEffect, MaterialEffect), chain_name, current (LocalPlayer.CurrentPPInfo: LastSettings, the blended
+//   PostProcessSettings the renderer uses, and LastVolumeUsed), world_default (WorldInfo.DefaultPostProcessSettings),
+//   camera_settings / camera_override_alpha when the camera class has them}. Enum values are written by name.
 //   Matrices are UE3 FMatrix as stored: 16 floats, row-major, row vectors (v' = v * M, translation in row 3).
 //   World space is UE3's: left-handed, Z up, 1 unit = 1 cm by convention.
 #include "scene_feed.h"
@@ -147,8 +157,12 @@ const char* KindName(Kind k) {
   }
 }
 
+// Non-primitive components the feed also reports: lights and fog.
+enum class Extra : uint8_t { kNone, kLight, kFog };
+
 struct ClassInfo {
   Kind kind = Kind::kNone;  // kNone: not a PrimitiveComponent
+  Extra extra = Extra::kNone;
   const char* name = "";
 };
 
@@ -171,6 +185,9 @@ const ClassInfo& Classify(uint32_t cls) {
   if (it != g_classes.end()) return it->second;
   ClassInfo info;
   info.name = Readable(cls) ? NameText(U32(cls + 0x2C)) : "None";
+  if (ClassChainHas(cls, "LightComponent")) info.extra = Extra::kLight;
+  else if (ClassChainHas(cls, "HeightFogComponent") || ClassChainHas(cls, "FogVolumeDensityComponent"))
+    info.extra = Extra::kFog;
   if (ClassChainHas(cls, "PrimitiveComponent")) {
     if (ClassChainHas(cls, "SkeletalMeshComponent")) info.kind = Kind::kSkeletal;
     else if (ClassChainHas(cls, "StaticMeshComponent")) info.kind = Kind::kStatic;
@@ -347,9 +364,25 @@ struct Times {
   uint32_t primitives = 0, objects = 0;
 };
 
+// Lights and fog components attached to the world (ActorComponent.bAttached), found by the same walk.
+struct Extras {
+  std::vector<uint32_t> lights, fog;
+};
+Extras g_extras;
+
+bool Attached(uint32_t component) {
+  static std::unordered_map<uint32_t, Field> by_class;
+  const uint32_t cls = U32(component + 0x34);
+  auto it = by_class.find(cls);
+  if (it == by_class.end()) it = by_class.emplace(cls, FindProp(cls, "bAttached")).first;
+  return it->second.ok() && (U32(component + it->second.offset) & it->second.mask);
+}
+
 // Every attached primitive component in the object table.
 void Enumerate(std::vector<Primitive>& out, Times& t) {
   out.clear();
+  g_extras.lights.clear();
+  g_extras.fog.clear();
   if (!FindObjectTable()) return;
   const uint32_t data = U32(g_objects), count = U32(g_objects + 4);
   t.objects = count;
@@ -360,6 +393,10 @@ void Enumerate(std::vector<Primitive>& out, Times& t) {
     if (!o) continue;
     const uint32_t cls = U32(o + 0x34);
     if (cls != last_cls) last_cls = cls, last = &Classify(cls);
+    if (last->extra != Extra::kNone) {
+      if (Attached(o)) (last->extra == Extra::kLight ? g_extras.lights : g_extras.fog).push_back(o);
+      continue;
+    }
     if (last->kind == Kind::kNone) continue;
     if (!g_off.scene_info.ok() || !U32(o + g_off.scene_info.offset)) continue;  // not attached to a scene
     out.push_back({o, last->kind});
@@ -446,6 +483,179 @@ bool PropBool(uint32_t object, const char* name) {
 uint8_t PropByte(uint32_t object, const char* name) {
   const Field f = Prop(object, name);
   return f.ok() ? *Raw(object + f.offset) : 0;
+}
+
+// Every script property of an object (or struct) as JSON, from the reflection records alone. UProperty: +0x44
+// ArrayDim, +0x48 ElementSize, +0x64 Offset; the subclass's first field (+0x84) is UBoolProperty BitMask,
+// UStructProperty Struct, UObjectProperty PropertyClass, UArrayProperty Inner or UByteProperty Enum (UEnum: +0x44
+// Names, a TArray<FName>). Vector, Vector2D, Rotator, Color, LinearColor and Matrix are written as arrays (Color as
+// [R, G, B, A] bytes); other structs as objects; dynamic arrays up to 64 elements. Properties of <stop> and its
+// superclasses are left out.
+void Value(std::string& s, uint32_t prop, uint32_t address, int depth);
+
+void Members(std::string& s, uint32_t structure, uint32_t address, int depth, const char* stop = "Object") {
+  s += '{';
+  bool first = true;
+  for (int level = 0; Readable(structure) && level < 16; structure = U32(structure + 0x3C), ++level) {
+    if (!std::strcmp(NameText(U32(structure + 0x2C)), stop)) break;
+    for (uint32_t f = U32(structure + 0x50), n = 0; Readable(f) && n < 4096; f = U32(f + 0x40), ++n) {
+      if (!std::strstr(ClassName(f), "Property")) continue;
+      if (!first) s += ',';
+      first = false;
+      Str(s, NameText(U32(f + 0x2C)));
+      s += ':';
+      const uint32_t dim = U32(f + 0x44), size = U32(f + 0x48), at = address + U32(f + 0x64);
+      if (dim > 1 && dim <= 64) {
+        s += '[';
+        for (uint32_t k = 0; k < dim; ++k) {
+          if (k) s += ',';
+          Value(s, f, at + k * size, depth);
+        }
+        s += ']';
+      } else {
+        Value(s, f, at, depth);
+      }
+    }
+  }
+  s += '}';
+}
+
+void Value(std::string& s, uint32_t prop, uint32_t address, int depth) {
+  const std::string_view type = ClassName(prop);
+  const uint32_t sub = U32(prop + 0x84);
+  if (type == "FloatProperty") {
+    Float(s, false, F32(address));
+  } else if (type == "IntProperty") {
+    fmt::format_to(std::back_inserter(s), "{}", int32_t(U32(address)));
+  } else if (type == "BoolProperty") {
+    s += (U32(address) & sub) ? "true" : "false";
+  } else if (type == "ByteProperty") {
+    const uint8_t v = *Raw(address);
+    const uint32_t names = IsObject(sub) ? U32(sub + 0x44) : 0;
+    if (Readable(names) && v < U32(sub + 0x48)) Str(s, NameText(U32(names + 8 * v)));  // enum value name
+    else fmt::format_to(std::back_inserter(s), "{}", v);
+  } else if (type == "NameProperty") {
+    Str(s, NameText(U32(address)));
+  } else if (type == "ObjectProperty" || type == "ComponentProperty" || type == "ClassProperty") {
+    const uint32_t o = U32(address);
+    if (IsObject(o)) Str(s, Path(o));
+    else s += "null";
+  } else if (type == "StrProperty") {
+    const uint32_t data = U32(address), n = U32(address + 4);
+    std::string text;
+    for (uint32_t k = 0; Readable(data & ~3u) && k + 1 < n && k < 256; ++k) {
+      const uint16_t c = uint16_t(__builtin_bswap16(*reinterpret_cast<const uint16_t*>(Raw(data + 2 * k))));
+      text += c < 0x80 ? char(c) : '?';
+    }
+    Str(s, text);
+  } else if (type == "StructProperty" && Readable(sub) && depth < 6) {
+    const std::string_view name = NameText(U32(sub + 0x2C));
+    auto members = [&](std::initializer_list<const char*> names) {
+      s += '[';
+      bool first = true;
+      for (const char* m : names) {
+        const Field f = FindProp(sub, m);
+        if (!first) s += ',';
+        first = false;
+        if (!f.ok()) s += "null";
+        else if (name == "Color") fmt::format_to(std::back_inserter(s), "{}", *Raw(address + f.offset));
+        else if (name == "Rotator") fmt::format_to(std::back_inserter(s), "{}", int32_t(U32(address + f.offset)));
+        else Float(s, false, F32(address + f.offset));
+      }
+      s += ']';
+    };
+    if (name == "Vector") members({"X", "Y", "Z"});
+    else if (name == "Vector2D") members({"X", "Y"});
+    else if (name == "Rotator") members({"Pitch", "Yaw", "Roll"});
+    else if (name == "Color" || name == "LinearColor") members({"R", "G", "B", "A"});
+    else if (name == "Matrix") Floats(s, address, 16);
+    else Members(s, sub, address, depth + 1);
+  } else if (type == "ArrayProperty" && Readable(sub) && depth < 6) {
+    const uint32_t data = U32(address), n = U32(address + 4), size = U32(sub + 0x48);
+    s += '[';
+    for (uint32_t k = 0; Readable(data) && k < n && k < 64 && size && size <= 0x1000; ++k) {
+      if (k) s += ',';
+      Value(s, sub, data + k * size, depth + 1);
+    }
+    s += ']';
+  } else {
+    s += "null";  // delegates, interfaces, native pointers, maps
+  }
+}
+
+// One object: {class, name (path), props {...}}.
+void ObjectJson(std::string& s, uint32_t object, const char* stop) {
+  fmt::format_to(std::back_inserter(s), "{{\"class\":\"{}\",\"name\":", ClassName(object));
+  Str(s, Path(object));
+  s += ",\"props\":";
+  Members(s, U32(object + 0x34), object, 0, stop);
+  s += '}';
+}
+
+// The UProperty record of <object>'s property <name> (0 if none).
+uint32_t PropRecord(uint32_t object, const char* name) {
+  for (uint32_t cls = U32(object + 0x34), depth = 0; Readable(cls) && depth < 16; cls = U32(cls + 0x3C), ++depth)
+    for (uint32_t f = U32(cls + 0x50), n = 0; Readable(f) && n < 4096; f = U32(f + 0x40), ++n)
+      if (!std::strcmp(NameText(U32(f + 0x2C)), name)) return f;
+  return 0;
+}
+
+// ,"<key>":<object.name> when the object has that property.
+void NamedValue(std::string& s, const char* key, uint32_t object, const char* name) {
+  if (!IsObject(object)) return;
+  const uint32_t f = PropRecord(object, name);
+  if (!f) return;
+  fmt::format_to(std::back_inserter(s), ",\"{}\":", key);
+  Value(s, f, object + U32(f + 0x64), 0);
+}
+
+// Lights, fog and post-processing for the frame (see the format notes at the top).
+void LightsPostJson(std::string& s, uint32_t world_info) {
+  s += ",\"lights\":[";
+  bool first = true;
+  for (uint32_t l : g_extras.lights) {
+    if (!IsObject(l)) continue;
+    if (!first) s += ",\n";
+    first = false;
+    ObjectJson(s, l, "ActorComponent");
+  }
+  s += "],\"fog\":[";
+  first = true;
+  for (uint32_t f : g_extras.fog) {
+    if (!IsObject(f)) continue;
+    if (!first) s += ",\n";
+    first = false;
+    ObjectJson(s, f, "ActorComponent");
+  }
+  s += "],\"post\":{\"chain\":[";
+  const uint32_t engine = Engine();
+  const uint32_t players = IsObject(engine) ? PropRecord(engine, "GamePlayers") : 0;
+  const uint32_t lp = players && U32(engine + U32(players + 0x64) + 4) ? U32(U32(engine + U32(players + 0x64))) : 0;
+  const uint32_t chain = IsObject(lp) ? PropU32(lp, "PlayerPostProcess") : 0;
+  if (IsObject(chain)) {
+    const Field effects = Prop(chain, "Effects");
+    const uint32_t data = effects.ok() ? U32(chain + effects.offset) : 0, n = effects.ok() ? U32(chain + effects.offset + 4) : 0;
+    first = true;
+    for (uint32_t i = 0; Readable(data) && i < n && i < 32; ++i) {
+      const uint32_t e = U32(data + 4 * i);
+      if (!IsObject(e)) continue;
+      if (!first) s += ",\n";
+      first = false;
+      ObjectJson(s, e, "Object");
+    }
+  }
+  s += ']';
+  if (IsObject(chain)) {
+    s += ",\"chain_name\":";
+    Str(s, Path(chain));
+  }
+  NamedValue(s, "current", lp, "CurrentPPInfo");
+  const uint32_t pc = IsObject(lp) ? PropU32(lp, "Actor") : 0;
+  const uint32_t camera = IsObject(pc) ? PropU32(pc, "PlayerCamera") : 0;
+  NamedValue(s, "camera_override_alpha", camera, "CamOverridePostProcessAlpha");
+  NamedValue(s, "camera_settings", camera, "CamPostProcessSettings");
+  NamedValue(s, "world_default", world_info, "DefaultPostProcessSettings");
+  s += '}';
 }
 
 // FParticleEmitterInstance (native, this build; found by dumping instances and matching the sprite vertex data):
@@ -635,7 +845,9 @@ std::string FrameJson(uint32_t frame, const Camera& cam, uint32_t world_info, co
     Skeleton(s, mesh);
     if (s.size() == before) s += "null";
   }
-  s += "}}\n";
+  s += "}";
+  LightsPostJson(s, world_info);
+  s += "}\n";
   return s;
 }
 

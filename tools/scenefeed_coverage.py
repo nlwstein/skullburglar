@@ -147,6 +147,15 @@ def main():
         st = dr["streams"][0]
         return struct.unpack_from(">3f", st["data"], vertex * st["stride"] + offset_bytes)
 
+    def screen_quad(dr):
+        """A rectangle in clip space or pixels (every vertex at z = 0, at most 8 of them): a full-screen pass (post
+        chain, god rays, fades) or a canvas draw, whatever its constants say."""
+        if not dr["streams"] or dr["streams"][0]["stride"] < 12:
+            return False
+        st = dr["streams"][0]
+        n = len(st["data"]) // st["stride"]
+        return 0 < n <= 8 and all(stream_vec3(dr, k)[2] == 0 for k in range(n))
+
     def match_sprites(dr):
         """A particle sprite draw: 4 vertices per particle, each with Position (+0) and OldPosition (+12). Explained
         when 90% of its particles sit exactly on a feed particle's Location (the renderer's position or the previous
@@ -189,8 +198,9 @@ def main():
         i = int(np.argmin(d))
         if d[i] < 1:
             return i, "bounds"
-        # A per-object projected shadow's occlusion query: a square of side 2r tangent to a caster's bounding sphere
-        # (radius r), extruded about 2.6 km along the light direction. Explained when that caster is in the feed.
+        # A per-object projected shadow volume (drawn twice a frame, depth-only, no pixel shader): a square of side 2r
+        # tangent to a caster's bounding sphere (radius r), extruded about 2.6 km along the light direction (in 61465
+        # exactly the sun's LightToWorld Z row). Explained when that caster is in the feed.
         if (v.max(axis=0) - v.min(axis=0)).max() < 50000:
             return None, "unmatched"
         sweep = v[np.argmax(np.linalg.norm(v - v[0], axis=1))] - v[0]
@@ -293,7 +303,7 @@ def main():
             else:
                 is_id = np.all(np.abs(c[5:9] - np.eye(4)) < 1e-6)
                 identity_draws += is_id
-                if np.array_equal(c[4], np.array([0, 0, -1, 0], np.float32)):
+                if np.array_equal(c[4], np.array([0, 0, -1, 0], np.float32)) or screen_quad(dr):
                     what = "2D (canvas/UI/full-screen pass)"
                 elif np.allclose(c[5, :3], c[4, :3]) and c[5, 3] == 0:
                     what = "camera-facing (particle sprite/beam)"
