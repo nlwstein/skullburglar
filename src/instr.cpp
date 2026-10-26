@@ -31,8 +31,8 @@
 //   log [n] [filter]           the last log lines
 //   quit                       quit the game cleanly;  close: close this connection;  help
 //
-// Status line (type "status", v 1): t (s since start), pid, phase (boot, precompile, loading, dialog, paused, movie,
-// cutscene, front_end, in_play, menu), phase_s, game {...}, precompile {...}, render {..., n1 {...}}, health {...},
+// Status line (type "status", v 1): t (s since start), pid, phase (boot, precompile, loading, hung, dialog, paused,
+// movie, cutscene, front_end, in_play, menu), phase_s, game {...}, precompile {...}, render {..., n1 {...}}, health {...},
 // input {...}, cpu [...]. Events (type "event"): phase changes, loads, LoadChapter, presenter failures, hitches, builds
 // in play, errors, macro ends, captures. docs: the project's instrumentation notes.
 #include "instr.h"
@@ -1031,7 +1031,11 @@ std::string ComputePhase(const Snap& s, const PrecompileInfo& pc, uint64_t now, 
   const uint64_t ticks = g.ticks, tick_age = now - g.last_tick_us, hud_age = now - g.last_hud_us;
   if (pc.hold) return "precompile";
   if (!ticks || (!g_state.frames && !s.has_pc && s.scenes.empty())) return "boot";
-  if (g.in_browse || tick_age > 1500000) return "loading";
+  if (g.in_browse) return "loading";
+  // The game thread stopped: briefly while a level streams in; for good when the guest waits on something that never
+  // comes (e.g. a system UI the port doesn't show). A real load that long still has in_browse set.
+  if (tick_age > 10000000) return "hung";
+  if (tick_age > 1500000) return "loading";
   // A dialog is the top scene (scenes below the top stay in the stack while hidden). Overlays don't count.
   for (auto it = s.scenes.rbegin(); it != s.scenes.rend(); ++it) {
     if (it->find("ButtonBar") != std::string::npos) continue;

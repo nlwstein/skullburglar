@@ -345,6 +345,8 @@ class Run:
             if r.get("ok") and st.get("phase") != "dialog":
                 self.log(f"  until: {cond} after {time.time() - self.t0:.1f}s, phase {st.get('phase')}")
                 return
+            if st.get("phase") == "hung":
+                raise RuntimeError(f"until: the game thread stopped (phase hung, scene {get(st, 'game.scene')})")
             if st.get("phase") == "dialog":
                 self.log(f"  until: dialog {get(st, 'game.dialog')} -> {btn}")
                 self.send(f"press {btn}")
