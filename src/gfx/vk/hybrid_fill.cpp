@@ -32,6 +32,7 @@
 #include <glslang/Public/ShaderLang.h>
 
 #include "../../hybrid_state.h"
+#include "../../instr_state.h"
 #include "renderer.h"
 
 #ifdef BOTS_N1FFI
@@ -193,6 +194,15 @@ void Renderer::PumpN1Warmup() {
   if (!host || !host->r || host->precompile_logged) return;
   uint32_t done = 0, total = 0;
   const uint32_t state = n1_precompile_progress(host->r, &done, &total);
+  if (InstrState* is = FindInstrState()) {
+    is->n1_warm_state.store(state, std::memory_order_relaxed);
+    is->n1_warm_done.store(done, std::memory_order_relaxed);
+    is->n1_warm_total.store(total, std::memory_order_relaxed);
+    if (state == 2)
+      is->n1_warm_ms.store(uint64_t(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                                              host->precompile_started).count()),
+                           std::memory_order_relaxed);
+  }
   if (state == 1) {
     n1_warm_total_ = std::max<size_t>(total, done + 1), n1_warm_done_ = done;
   } else if (state == 2) {
@@ -384,6 +394,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   if (rc != 0) {
     REXLOG_ERROR("hybrid n1: n1_record failed: {}", n1_last_error());
     host->failed = true;
+    if (InstrState* is = FindInstrState()) is->n1_failed.store(1, std::memory_order_relaxed);
     return false;
   }
   target.Use(uint32_t(t.x) + t.w, uint32_t(t.y) + t.h);
@@ -393,6 +404,21 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     if (cap > 0 && state) state->capture_frames.store(int(cap));
   }
   host->frames++, host->draws += st.draws, host->triangles += st.triangles, host->last = st;
+  if (InstrState* is = FindInstrState()) {  // test instrumentation (instr_state.h)
+    constexpr auto r = std::memory_order_relaxed;
+    is->n1_frames.fetch_add(1, r);
+    is->n1_draws.store(st.draws, r), is->n1_instances.store(st.instances, r), is->n1_skipped.store(st.skipped, r);
+    is->n1_particles.store(st.particle_sprites + st.particle_meshes, r);
+    is->n1_particle_dropped.fetch_add(st.particle_dropped, r);
+    is->n1_meshes_pending.store(st.meshes_pending, r), is->n1_loading.store(st.loading, r);
+    is->n1_pipelines_live.store(uint32_t(st.pipelines_live), r), is->n1_shaders_live.store(uint32_t(st.shaders_live), r);
+    is->n1_late_pipelines.store(uint32_t(st.late_pipelines), r), is->n1_late_shaders.store(uint32_t(st.late_shaders), r);
+    is->n1_build_failures.store(uint32_t(st.build_failures), r);
+    is->n1_partial_frames.store(uint32_t(st.partial_frames), r);
+    is->n1_draws_no_pipe.store(uint64_t(st.draws_no_pipe), r), is->n1_fallback_draws.store(uint64_t(st.fallback_draws), r);
+    const uint32_t us = uint32_t(std::chrono::duration<double, std::micro>(t2 - t1).count());
+    if (us > is->n1_record_worst_us.load(r)) is->n1_record_worst_us.store(us, r);
+  }
   ++n1_drawn_, n1_scene_frame_ = host->scene.frame, n1_marker_seq_ = cam.seq, n1_view_seq_ = view_cam->seq;
   host->host_ms += std::chrono::duration<double, std::milli>(t2 - t0).count();
   host->record_ms += std::chrono::duration<double, std::milli>(t2 - t1).count();

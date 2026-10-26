@@ -40,6 +40,7 @@
 #include <rex/system/xmemory.h>
 
 #include "thread_stats.h"
+#include "instr.h"
 #include <rex/ui/presenter.h>
 #include <rex/input/input_system.h>
 #include <rex/kernel/xam/module.h>
@@ -483,6 +484,9 @@ class BotsApp : public rex::ReXApp {
     RegisterFullscreenBind();
     bots::SpawnPlayerTwo(game_data_root(), user_data_root(), cache_root());
     if (runtime()) bots::SetWidescreenWindow(runtime()->display_window());
+    // BOTS_INSTR: status stream and control channel for tests and agents (instr.h).
+    if (bots::instr::Enabled())
+      bots::instr::Start([this] { return runtime() ? runtime()->graphics_system() : nullptr; });
     if (!runtime() || !runtime()->input_system()) return;
     auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system());
     if (auto assignment = bots::MakePadAssignment()) {
@@ -499,6 +503,7 @@ class BotsApp : public rex::ReXApp {
     input->AddDriver(std::move(kbm));
     const char* script = std::getenv("BOTS_INPUT");
     if (script && *script) input->AddDriver(std::make_unique<bots::ScriptInputDriver>(script));
+    if (bots::instr::Enabled()) input->AddDriver(bots::instr::MakeInputDriver());
 #if TARGET_OS_IPHONE
 #if !TARGET_OS_TV
     // On-screen controller, shown while no game controller is connected.
