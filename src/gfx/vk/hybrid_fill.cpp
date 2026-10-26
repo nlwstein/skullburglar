@@ -401,7 +401,9 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   {
     const uint32_t cap = n1_tree_end_frame(host->r);
     n1_tree_active_ = cap > 0;
-    if (cap > 0 && state) state->capture_frames.store(int(cap));
+    // Also 0 when a session ends: left at its last count, the game went on drawing its own scene for up to 30 more
+    // frames (35-70 ms each on a UHD 620).
+    if (state && (cap > 0 || state->capture_frames.load(std::memory_order_relaxed) > 0)) state->capture_frames.store(int(cap));
   }
   host->frames++, host->draws += st.draws, host->triangles += st.triangles, host->last = st;
   if (InstrState* is = FindInstrState()) {  // test instrumentation (instr_state.h)
