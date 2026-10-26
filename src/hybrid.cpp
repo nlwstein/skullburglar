@@ -31,7 +31,11 @@
 //                            over the game's own scene (needs the native renderer; src/gfx/vk/hybrid_fill.cpp)
 //   BOTS_HYBRID_AB=<s>       toggle suppression every <s> seconds (interleaved A/B in one run)
 //   BOTS_HYBRID_CAMERA=<n>   log the camera (N2's JSON shape) every <n> frames
-// Console (BOTS_EXEC): "hybrid suppress 0|1", "hybrid fill 0|1|2", "hybrid camera", "hybrid dumpview".
+// Console (BOTS_EXEC): "hybrid suppress 0|1|2", "hybrid fill 0..3", "hybrid camera", "hybrid dumpview".
+//
+// Mode 2 also hooks sub_82D3E358, UE3's GetQueryResult(query, out, bWait): with the drawing skipped no occlusion
+// query is ever issued, so InitViews' waits would never return. It answers "visible" there and for two real frames
+// after mode 2 ends.
 #include <algorithm>
 #include <array>
 #include <atomic>
