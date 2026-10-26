@@ -30,6 +30,13 @@ struct ThreadCpu {
   double seconds;
 };
 
+#if defined(_WIN32)
+std::map<uint64_t, ThreadCpu> SampleThreadCpuWin();  // cpu_sampler_win.cpp
+void StartCpuSampler();                               // BOTS_CPU_SAMPLE, cpu_sampler_win.cpp
+#else
+inline void StartCpuSampler() {}
+#endif
+
 // Cumulative CPU seconds per thread id.
 inline std::map<uint64_t, ThreadCpu> SampleThreadCpu() {
   std::map<uint64_t, ThreadCpu> out;
@@ -76,11 +83,14 @@ inline std::map<uint64_t, ThreadCpu> SampleThreadCpu() {
     }
     closedir(d);
   }
+#elif defined(_WIN32)
+  out = SampleThreadCpuWin();
 #endif
   return out;
 }
 
 inline void StartThreadStats() {
+  StartCpuSampler();
   const char* env = std::getenv("BOTS_THREAD_STATS");
   if (!env || !*env || *env == '0') return;
   std::thread([] {
