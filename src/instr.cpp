@@ -1867,15 +1867,15 @@ std::string BuildStatus(bool window, std::map<std::string, std::string>* flat) {
     j.Num("x", h.pos[0], "%.0f").Num("y", h.pos[1], "%.0f").Num("z", h.pos[2], "%.0f");
     j.Num("dist", std::sqrt(dx * dx + dy * dy), "%.0f").Num("dz", h.pos[2] - s.pos[2], "%.0f");
     j.Num("bearing", Wrap180(std::atan2(dy, dx) * 180 / kPi - yaw), "%.1f");
-    std::string near = "[";
+    std::string nearest_json = "[";
     for (const auto& n : h.nearest) {
       char buf[160];
       std::snprintf(buf, sizeof(buf), "%s{\"actor\":\"%s\",\"kind\":\"%s\",\"x\":%.0f,\"y\":%.0f,\"z\":%.0f,\"d\":%.0f}",
-                    near.size() > 1 ? "," : "", Escape(n.actor).c_str(), Escape(n.kind).c_str(), n.pos[0], n.pos[1],
+                    nearest_json.size() > 1 ? "," : "", Escape(n.actor).c_str(), Escape(n.kind).c_str(), n.pos[0], n.pos[1],
                     n.pos[2], std::sqrt(n.d2));
-      near += buf;
+      nearest_json += buf;
     }
-    j.Value("nearest", near + "]").End();
+    j.Value("nearest", nearest_json + "]").End();
   }
   j.Obj("prompt").Bool("counterkill", s.prompt_counterkill).Bool("tutorial", s.prompt_tutorial).End();
   if (s.cam_ok)
