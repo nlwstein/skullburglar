@@ -464,6 +464,9 @@ class Renderer : public Pm4Sink {
   // Fill 4: the n1 renderer's host state (hybrid_fill.cpp), or null.
   bool DrawSceneN1(Image& target, const bots::HybridCamera& cam, const VkRect2D& area);
   void* n1_host_ = nullptr;
+  // B-187: while the tree capture runs (hybrid_fill.cpp sets these) IssueDraw hands tree draws to n1ffi.
+  void* n1_tree_r_ = nullptr;
+  bool n1_tree_active_ = false;
 
   // Textures (texture.cpp). TextureView may record an upload, so call it before a draw's ring reservation.
   // Views for the translator's unsigned or signed binding of a fetch: formats with both signednesses get a view of

@@ -120,6 +120,16 @@ struct HybridScene {
     float origin[3];       // emitter location (UE3), for far-to-near ordering
     float transform[16];   // the component's LocalToWorld
   };
+  // One SpeedTree placement (B-187): the component's LocalToWorld (scale and translation; the actor's rotation is
+  // kept separately), the component's path (its baked vertex light), the tree asset's path and the rotation in UE3
+  // units (pitch, yaw, roll).
+  struct Tree {
+    float transform[16];
+    const char* component;
+    const char* asset;
+    int32_t rotation[3];
+  };
+  std::vector<Tree> trees;
   std::vector<Emitter> emitters;
   std::vector<float> particle_rows;
   float particles_ms = 0;  // game-thread cost of reading them
@@ -148,6 +158,10 @@ struct HybridState {
   // static meshes of `scene` drawn by the external n1 renderer (BOTS_N1_* in hybrid_fill.cpp).
   std::atomic<uint32_t> fill{0};
   std::atomic<uint32_t> published{0};  // seq of the newest camera
+  // B-187: frames the game should draw its own scene for although the port suppresses it (mode 2), so the SpeedTree
+  // capture hook sees the trees' draws. The renderer sets it when a tree asset has no geometry cache yet; Render()
+  // counts it down, and the n1 marker is emitted in those frames so the capture session advances.
+  std::atomic<int> capture_frames{0};
   std::atomic<uint64_t> markers_seen{0}, fills_drawn{0};  // renderer side, for the log
   HybridCamera cameras[kCameras] = {};
   // Fill 4: the newest scene. The game swaps its finished frame in, the renderer swaps it out (both under the lock).

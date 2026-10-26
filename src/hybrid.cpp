@@ -457,7 +457,14 @@ extern "C" void sub_82BB1E78(PPCContext& __restrict ctx, uint8_t* base) {
   // Leaving mode 2: its InitViews calls took queries for primitives that no drawing then issued, so the first real
   // frames' InitViews would wait on them forever too. Answer queries for two real frames, until fresh ones exist.
   static int last_suppress = 0, answer_frames = 0;
-  const int suppress_now = g_suppress.load(std::memory_order_relaxed);
+  int suppress_now = g_suppress.load(std::memory_order_relaxed);
+  // B-187: the SpeedTree capture needs the game's own draws; let some real frames through in mode 2.
+  bool capturing = false;
+  if (suppress_now == 2 && g_state.capture_frames.load(std::memory_order_relaxed) > 0) {
+    g_state.capture_frames.fetch_sub(1, std::memory_order_relaxed);
+    suppress_now = 0;
+    capturing = true;
+  }
   if (last_suppress == 2 && suppress_now != 2) answer_frames = 2;
   last_suppress = suppress_now;
   if (const int suppress = suppress_now) {
@@ -496,7 +503,8 @@ extern "C" void sub_82BB1E78(PPCContext& __restrict ctx, uint8_t* base) {
   if (answer_frames > 0) --answer_frames;
   const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
   // Fill 3 overlays the camera's grid on the game's own scene: the marker goes after it, before the HUD.
-  const bool marker = g_state.fill.load(std::memory_order_relaxed) == 3 && t_render_seq != 0;
+  const uint32_t fill_now = g_state.fill.load(std::memory_order_relaxed);
+  const bool marker = (fill_now == 3 || (capturing && fill_now == 4)) && t_render_seq != 0;
   if (marker) EmitMarker(ctx, base, t_render_seq);
   std::lock_guard lock(g_stats_mutex);
   g_stats.render_ms += ms, ++g_stats.renders;

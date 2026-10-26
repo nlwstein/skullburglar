@@ -106,6 +106,8 @@ struct N1Host {
   uint32_t budget = 8;
   HybridScene scene;  // the newest one taken from the game
   std::unordered_map<const char*, uint32_t> meshes, materials, lights, skel_meshes, envs, pmaterials, pmeshes;
+  std::unordered_map<const char*, uint32_t> tree_comps, tree_assets;
+  std::vector<N1Tree> trees;
   std::vector<N1Emitter> emitters;
   std::vector<N1Instance> instances;
   std::vector<N1SkelInstance> skeletal;
@@ -150,6 +152,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     const auto t0 = std::chrono::steady_clock::now();
     host->r = n1_create(&init);
     host->format = target.format;
+    n1_tree_r_ = host->r;
     if (!host->r) {
       host->failed = true;
       REXLOG_ERROR("hybrid n1: n1_create failed: {}", n1_last_error());
@@ -261,6 +264,16 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   }
   n1_set_particles(host->r, host->emitters.data(), uint32_t(host->emitters.size()), host->scene.particle_rows.data(),
                    uint32_t(host->scene.particle_rows.size()));
+  host->trees.clear();
+  for (const HybridScene::Tree& in : host->scene.trees) {
+    N1Tree& out = host->trees.emplace_back();
+    out = {};
+    std::memcpy(out.transform, in.transform, sizeof(out.transform));
+    out.component = Handle(host->tree_comps, in.component, host->r, n1_tree_component);
+    out.asset = Handle(host->tree_assets, in.asset, host->r, n1_tree_asset);
+    std::memcpy(out.rotation, in.rotation, sizeof(out.rotation));
+  }
+  n1_set_trees(host->r, host->trees.data(), uint32_t(host->trees.size()));
   n1_set_skeletal(host->r, host->skeletal.data(), uint32_t(host->skeletal.size()), host->scene.bones.data(),
                   uint32_t(host->scene.bones.size()), host->skel_materials.data(),
                   uint32_t(host->skel_materials.size()));
@@ -302,6 +315,11 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     return false;
   }
   target.Use(uint32_t(t.x) + t.w, uint32_t(t.y) + t.h);
+  {
+    const uint32_t cap = n1_tree_end_frame(host->r);
+    n1_tree_active_ = cap > 0;
+    if (cap > 0 && state) state->capture_frames.store(int(cap));
+  }
   host->frames++, host->draws += st.draws, host->triangles += st.triangles, host->last = st;
   host->host_ms += std::chrono::duration<double, std::milli>(t2 - t0).count();
   host->record_ms += std::chrono::duration<double, std::milli>(t2 - t1).count();
@@ -315,14 +333,16 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
                 "{} ready {} pending {} missing, {} loading, {} textures ({} unsupported); skinned {} drawn {} culled {} "
                 "skipped, {} meshes ready; {} shaders {} pipelines ({} draws waiting), feed {} lights {} envs ({} "
                 "instances bound, {} handles), lighting {} updates, {:.3f} ms game / {:.3f} ms feed (totals; {} verified); particles {} emitters "
-                "{} sprites {} meshes ({} dropped, {} skipped, {}/{} materials ready/failed), game thread {:.3f} ms",
+                "{} sprites {} meshes ({} dropped, {} skipped, {}/{} materials ready/failed), game thread {:.3f} ms; trees {} placements {} drawn "
+                "({} assets ready, {} uncaptured, {} failed, {} captured this run)",
                 secs, host->frames, host->scenes, st.instances, st.skipped, host->draws / n, host->triangles / n / 1000,
                 host->host_ms / n, host->record_ms / n, host->build_ms / n, st.meshes_ready, st.meshes_pending,
                 st.meshes_missing, st.loading, st.textures, st.textures_unsupported, st.skel_drawn, st.skel_culled,
                 st.skel_skipped, st.skel_meshes_ready, st.shaders, st.pipelines, st.pipelines_pending, st.dyn_lights,
                 st.light_envs, st.env_bound, st.env_handles, host->light_updates, host->lighting_ms, host->feed_ms, host->verified, st.particle_emitters,
                 st.particle_sprites, st.particle_meshes, st.particle_dropped, st.particle_skipped,
-                st.particle_mats_ready, st.particle_mats_failed, host->particles_ms / n);
+                st.particle_mats_ready, st.particle_mats_failed, host->particles_ms / n, st.tree_placements, st.tree_instances,
+                st.tree_assets_ready, st.tree_assets_uncaptured, st.tree_assets_failed, st.tree_captured);
     host->since = t2, host->frames = host->draws = host->triangles = host->scenes = 0;
     host->host_ms = host->record_ms = host->build_ms = host->feed_ms = host->lighting_ms = host->particles_ms = 0;
     host->light_updates = host->verified = 0;

@@ -1190,9 +1190,21 @@ struct LiveEmitter {
   const char* material_path = nullptr;
   const char* mesh_path = nullptr;
 };
+// A SpeedTreeComponent: the paths the renderer needs, cached until the component's tree changes.
+struct LiveTree {
+  uint32_t tree = 0;
+  const char* component_path = nullptr;
+  const char* asset_path = nullptr;
+};
 struct LiveState {
   std::vector<Primitive> prims;
   std::vector<Primitive> particle_prims;
+  std::vector<Primitive> tree_prims;
+  std::unordered_map<uint32_t, LiveTree> trees;
+  bool trees_on = [] {
+    const char* v = std::getenv("BOTS_N1_TREES");
+    return !(v && !std::strncmp(v, "off", 3));
+  }();
   std::unordered_map<uint32_t, LiveEmitter> emitters;
   bool particles = [] {
     const char* v = std::getenv("BOTS_N1_PARTICLES");
@@ -1631,9 +1643,11 @@ void Live(uint8_t* base) {
     Times unused;
     Enumerate(st.prims, unused);
     st.particle_prims.clear();
-    if (st.particles)
-      for (const Primitive& p : st.prims)
-        if (p.kind == Kind::kParticle) st.particle_prims.push_back(p);
+    st.tree_prims.clear();
+    for (const Primitive& p : st.prims) {
+      if (st.particles && p.kind == Kind::kParticle) st.particle_prims.push_back(p);
+      if (st.trees_on && p.kind == Kind::kSpeedTree) st.tree_prims.push_back(p);
+    }
     std::erase_if(st.prims, [](const Primitive& p) { return p.kind != Kind::kStatic && p.kind != Kind::kSkeletal; });
     st.age = 0;
   } else {
@@ -1643,6 +1657,7 @@ void Live(uint8_t* base) {
     };
     std::erase_if(st.prims, gone);
     std::erase_if(st.particle_prims, gone);
+    std::erase_if(st.tree_prims, gone);
   }
   HybridScene& out = st.building;
   out.instances.clear();
@@ -1720,6 +1735,41 @@ void Live(uint8_t* base) {
     out.materials.insert(out.materials.end(), lc.materials.begin(), lc.materials.end());
   }
   out.walked = uint32_t(st.prims.size());
+  // SpeedTree placements (B-187): the component's LocalToWorld (scale + translation), its tree asset and the actor's
+  // rotation, which UE3 keeps out of the component transform for SpeedTree.
+  out.trees.clear();
+  for (const Primitive& p : st.tree_prims) {
+    const uint32_t c = p.component;
+    bool hidden = g_off.hidden_game.ok() && (U32(c + g_off.hidden_game.offset) & g_off.hidden_game.mask);
+    const uint32_t owner = g_off.owner.ok() ? U32(c + g_off.owner.offset) : 0;
+    if (Readable(owner)) {
+      if (!g_off.actor) {
+        g_off.actor = true;
+        g_off.actor_hidden = FindProp(U32(owner + 0x34), "bHidden");
+      }
+      if (g_off.actor_hidden.ok()) hidden |= (U32(owner + g_off.actor_hidden.offset) & g_off.actor_hidden.mask) != 0;
+    }
+    if (hidden) continue;
+    const uint32_t tree = PropU32(c, "SpeedTree");
+    if (!Readable(tree)) continue;
+    LiveTree& lt = st.trees[c];
+    if (lt.tree != tree || !lt.component_path) {
+      lt.tree = tree;
+      lt.component_path = Intern(Path(c));
+      lt.asset_path = Intern(Path(tree));
+    }
+    if (!lt.component_path || !lt.asset_path) continue;
+    HybridScene::Tree& t = out.trees.emplace_back();
+    for (int i = 0; i < 16; ++i) t.transform[i] = F32(c + g_off.local_to_world.offset + 4 * i);
+    t.component = lt.component_path;
+    t.asset = lt.asset_path;
+    t.rotation[0] = t.rotation[1] = t.rotation[2] = 0;
+    if (Readable(owner)) {
+      const Field rot = Prop(owner, "Rotation");
+      if (rot.ok())
+        for (int i = 0; i < 3; ++i) t.rotation[i] = int32_t(U32(owner + rot.offset + 4 * i));
+    }
+  }
   out.emitters.clear();
   out.particle_rows.clear();
   out.particles_ms = 0;
