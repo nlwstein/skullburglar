@@ -564,10 +564,10 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
                 st.draws_no_pipe, st.fallback_draws, st.partial_frames, st.compile_backlog, host->record_max_ms,
                 host->record_over_20);
     REXLOG_INFO("hybrid n1 loads: t={:.1f} s: lazy {} meshes {} materials {} lights {} skeletal {} particle {} tree; {} "
-                "late skips; {} preload requests ({} packages, {} pending, {} scans running); {} applied in {:.1f} ms "
+                "late skips; {} material variants; {} preload requests ({} packages, {} pending, {} scans running); {} applied in {:.1f} ms "
                 "(worst {:.1f} ms); {:.1f} MB to the GPU, {} textures, {} meshes; {} copies waiting ({:.1f} MB staging)",
                 std::chrono::duration<double>(t2 - host->started).count(), st.lazy_meshes, st.lazy_materials,
-                st.lazy_lights, st.lazy_skel, st.lazy_particles, st.lazy_trees, st.late_skips, st.preload_requests,
+                st.lazy_lights, st.lazy_skel, st.lazy_particles, st.lazy_trees, st.late_skips, st.variant_materials, st.preload_requests,
                 host->packages, st.preload_pending, st.preload_scanning, st.applied, double(st.apply_ms),
                 double(st.apply_max_ms), double(st.upload_bytes) / 1048576.0, st.textures_added, st.meshes_added,
                 st.copies_pending, double(st.staging_bytes) / 1048576.0);
