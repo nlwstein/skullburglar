@@ -2391,9 +2391,9 @@ void Props(uint8_t* base, uint32_t object, const std::string& tag) {
       const char* type = NameOf(base, LoadU32(base, f + 0x34));
       if (!std::strstr(type, "Property")) continue;
       const uint32_t off = LoadU32(base, f + 0x64), v = LoadU32(base, object + off);
-      if (std::string_view(type) == "BoolProperty")  // UBoolProperty +0x68 BitMask
+      if (std::string_view(type) == "BoolProperty")  // UBoolProperty +0x84 BitMask (the record is 0x88 bytes)
         REXLOG_INFO("  {} {}.{} {} +{:X} = {:08X} mask {:08X} -> {}", tag, NameOf(base, cls), NameOf(base, f), type,
-                    off, v, LoadU32(base, f + 0x68), (v & LoadU32(base, f + 0x68)) != 0);
+                    off, v, LoadU32(base, f + 0x84), (v & LoadU32(base, f + 0x84)) != 0);
       else
         REXLOG_INFO("  {} {}.{} {} +{:X} = {:08X} ({})", tag, NameOf(base, cls), NameOf(base, f), type, off, v,
                     menu_pointer::LoadF32(base, object + off));
