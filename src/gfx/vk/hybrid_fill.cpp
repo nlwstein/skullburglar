@@ -7,16 +7,32 @@
 //           inverse view-projection, so camera motion shows that the camera is the game's
 //   fill 3  the grid lines only, over the game's own scene (not suppressed): lines that stay put on the world as the
 //           camera moves check the camera against what the game draws
+//   fill 4  the n1 renderer (an external library, built with -DBOTS_N1FFI_DIR=<dir with include/n1ffi.h and
+//           libn1ffi.a>): the static meshes the game publishes each frame (HybridScene, scene_feed.cpp Live) drawn
+//           from disc assets with the frame's camera, recorded into this command buffer. Environment:
+//             BOTS_N1_COOKED   the cooked packages (default game/C1Game/CookedXenon)
+//             BOTS_N1_CACHE    a writable cache directory (default cache/n1)
+//             BOTS_N1_THREADS  asset loader threads (default 2); BOTS_N1_BUDGET uploads per frame (default 8)
+//             BOTS_N1_LOG      seconds between stats lines (default 5)
 // It records into the frame's command buffer like a format transfer: its own one-attachment rendering, so the game's
 // pass simply reopens for the HUD.
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unordered_map>
+#include <vector>
+
+#include <rex/logging.h>
 
 #include <glslang/Public/ShaderLang.h>
 
 #include "../../hybrid_state.h"
 #include "renderer.h"
+
+#ifdef BOTS_N1FFI
+#include <n1ffi.h>
+#endif
 
 namespace bots::gfx::vk {
 namespace {
@@ -81,7 +97,156 @@ struct FillConstants {
 
 void Renderer::QueueSceneFill(uint32_t seq) { scene_fill_seq_ = seq; }
 
+#ifdef BOTS_N1FFI
+namespace {
+struct N1Host {
+  N1Renderer* r = nullptr;
+  VkFormat format = VK_FORMAT_UNDEFINED;
+  bool failed = false;
+  uint32_t budget = 8;
+  HybridScene scene;  // the newest one taken from the game
+  std::unordered_map<const char*, uint32_t> meshes, materials, lights;
+  std::vector<N1Instance> instances;
+  std::vector<uint32_t> material_handles;
+  // Stats since the last log line.
+  std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
+  double log_seconds = 5, host_ms = 0, record_ms = 0, build_ms = 0;
+  uint64_t frames = 0, draws = 0, triangles = 0, scenes = 0;
+  N1Stats last{};
+};
+uint32_t Handle(std::unordered_map<const char*, uint32_t>& map, const char* path, N1Renderer* r,
+                uint32_t (*make)(N1Renderer*, const char*)) {
+  if (!path) return N1_NONE;
+  auto it = map.find(path);
+  if (it == map.end()) it = map.emplace(path, make(r, path)).first;
+  return it->second;
+}
+const char* EnvOr(const char* name, const char* fallback) {
+  const char* v = std::getenv(name);
+  return v && *v ? v : fallback;
+}
+}  // namespace
+
+bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2D& area) {
+  HybridState* state = FindHybridState();
+  auto* host = static_cast<N1Host*>(n1_host_);
+  if (!host) {
+    host = new N1Host;
+    n1_host_ = host;
+    host->budget = uint32_t(std::atoi(EnvOr("BOTS_N1_BUDGET", "8")));
+    host->log_seconds = std::atof(EnvOr("BOTS_N1_LOG", "5"));
+    N1Init init{};
+    init.get_instance_proc_addr = device_->vulkan_instance()->functions().vkGetInstanceProcAddr;
+    init.instance = device_->vulkan_instance()->instance();
+    init.physical_device = device_->physical_device();
+    init.device = device_->device();
+    init.color_format = target.format;
+    init.cooked_dir = EnvOr("BOTS_N1_COOKED", "game/C1Game/CookedXenon");
+    init.cache_dir = EnvOr("BOTS_N1_CACHE", "cache/n1");
+    init.loader_threads = uint32_t(std::atoi(EnvOr("BOTS_N1_THREADS", "2")));
+    const auto t0 = std::chrono::steady_clock::now();
+    host->r = n1_create(&init);
+    host->format = target.format;
+    if (!host->r) {
+      host->failed = true;
+      REXLOG_ERROR("hybrid n1: n1_create failed: {}", n1_last_error());
+    } else {
+      REXLOG_INFO("hybrid n1: renderer up in {:.1f} ms (target format {}, {}x{})",
+                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+                  int(target.format), target.width, target.height);
+    }
+  }
+  if (host->failed) return false;
+  if (target.format != host->format) {
+    REXLOG_WARN("hybrid n1: target format {} is not the renderer's {}; skipped", int(target.format), int(host->format));
+    return false;
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  {
+    std::lock_guard lock(state->scene_mutex);
+    if (state->scene.frame > host->scene.frame) std::swap(host->scene, state->scene), ++host->scenes;
+  }
+  // Handles by interned path (the game never frees the strings). The light first: it names the level package that
+  // mesh and material lookups then prefer.
+  host->instances.clear();
+  host->material_handles.clear();
+  for (const HybridScene::Instance& in : host->scene.instances) {
+    N1Instance& out = host->instances.emplace_back();
+    std::memcpy(out.transform, in.transform, sizeof(out.transform));
+    out.light = Handle(host->lights, in.light, host->r, n1_light);
+    out.mesh = Handle(host->meshes, in.mesh, host->r, n1_mesh);
+    out.mat_offset = uint32_t(host->material_handles.size());
+    out.mat_count = in.mat_count;
+    for (uint32_t i = 0; i < in.mat_count; ++i)
+      host->material_handles.push_back(Handle(host->materials, host->scene.materials[in.mat_offset + i], host->r,
+                                              n1_material));
+  }
+  N1Camera camera{};
+  std::memcpy(camera.view, cam.view, sizeof(camera.view));
+  std::memcpy(camera.proj, cam.proj, sizeof(camera.proj));
+  std::memcpy(camera.location, cam.location, sizeof(camera.location));
+  // UE3's infinite perspective: proj[14] = -near * proj[10].
+  camera.near_plane = cam.proj[10] != 0 ? -cam.proj[14] / cam.proj[10] : 5.0f;
+  N1Target t{};
+  t.view = target.view;
+  t.layout = VK_IMAGE_LAYOUT_GENERAL;
+  t.width = target.width, t.height = target.height;
+  t.x = area.offset.x, t.y = area.offset.y, t.w = area.extent.width, t.h = area.extent.height;
+  t.clear = 1;  // the host covers the whole view every frame
+  t.clear_color[0] = 0.32f, t.clear_color[1] = 0.40f, t.clear_color[2] = 0.50f, t.clear_color[3] = 1.0f;
+  // Serials: this command buffer is submitted as stats_.flushes + 1; everything older than the oldest submission
+  // not yet waited for is done.
+  uint64_t completed = stats_.flushes;
+  for (const Submission& s : submissions_)
+    if (s.pending) completed = std::min(completed, s.serial - 1);
+
+  BeginCommands(kGpuDraw);
+  EndRendering("hybrid n1");
+  Image* const write_image = &target;
+  Access({}, {&write_image, 1});
+  if (gpu_timing_) GpuLabel(kGpuDraw, "hybrid n1");
+  const auto t1 = std::chrono::steady_clock::now();
+  N1Stats st{};
+  const int32_t rc = n1_record(host->r, cmd_, &t, &camera, host->instances.data(), uint32_t(host->instances.size()),
+                               host->material_handles.data(), uint32_t(host->material_handles.size()),
+                               stats_.flushes + 1, completed, host->budget, &st);
+  const auto t2 = std::chrono::steady_clock::now();
+  bound_pipeline_ = VK_NULL_HANDLE;
+  dynamic_valid_ = false;
+  if (rc != 0) {
+    REXLOG_ERROR("hybrid n1: n1_record failed: {}", n1_last_error());
+    host->failed = true;
+    return false;
+  }
+  target.Use(uint32_t(t.x) + t.w, uint32_t(t.y) + t.h);
+  host->frames++, host->draws += st.draws, host->triangles += st.triangles, host->last = st;
+  host->host_ms += std::chrono::duration<double, std::milli>(t2 - t0).count();
+  host->record_ms += std::chrono::duration<double, std::milli>(t2 - t1).count();
+  host->build_ms += host->scene.build_ms;
+  const double secs = std::chrono::duration<double>(t2 - host->since).count();
+  if (host->log_seconds > 0 && secs >= host->log_seconds) {
+    const double n = double(host->frames);
+    REXLOG_INFO("hybrid n1: {:.1f} s, {} frames ({} scenes): {} instances ({} skipped) -> {:.0f} draws, {:.0f}k tris "
+                "per frame; render thread {:.3f} ms/frame ({:.3f} in n1_record), game thread walk {:.3f} ms; meshes "
+                "{} ready {} pending {} missing, {} loading, {} textures ({} unsupported)",
+                secs, host->frames, host->scenes, st.instances, st.skipped, host->draws / n, host->triangles / n / 1000,
+                host->host_ms / n, host->record_ms / n, host->build_ms / n, st.meshes_ready, st.meshes_pending,
+                st.meshes_missing, st.loading, st.textures, st.textures_unsupported);
+    host->since = t2, host->frames = host->draws = host->triangles = host->scenes = 0;
+    host->host_ms = host->record_ms = host->build_ms = 0;
+  }
+  return true;
+}
+#endif
+
 void Renderer::DestroySceneFill() {
+#ifdef BOTS_N1FFI
+  if (auto* host = static_cast<N1Host*>(n1_host_)) {
+    if (host->r) n1_destroy(host->r);  // after Finish: the GPU is idle
+    delete host;
+    n1_host_ = nullptr;
+  }
+#endif
   const VkDevice dev = device_->device();
   for (auto& [k, pipeline] : fill_pipelines_) vk_.vkDestroyPipeline(dev, pipeline, nullptr);
   for (VkShaderModule module : fill_modules_) vk_.vkDestroyShaderModule(dev, module, nullptr);
@@ -102,11 +267,20 @@ bool Renderer::DrawSceneFill(Image& target) {
   const uint32_t x1 = Host(uint32_t(cam.rect[0] + cam.rect[2])), y1 = Host(uint32_t(cam.rect[1] + cam.rect[3]));
   if (x1 <= x0 || y1 <= y0 || target.width < x1 || target.height < y1) return false;
 
+  const VkRect2D area{{int32_t(x0), int32_t(y0)}, {x1 - x0, y1 - y0}};
+  if (mode == 4) {
+#ifdef BOTS_N1FFI
+    if (!DrawSceneN1(target, cam, area)) return false;
+    state->fills_drawn.fetch_add(1, std::memory_order_relaxed);
+    return true;
+#else
+    return false;
+#endif
+  }
   BeginCommands(kGpuDraw);
   EndRendering("hybrid fill");
   Image* const write_image = &target;
   Access({}, {&write_image, 1});
-  const VkRect2D area{{int32_t(x0), int32_t(y0)}, {x1 - x0, y1 - y0}};
   if (mode == 1) {
     // A clear inside a one-attachment pass (vkCmdClearAttachments): the simplest stand-in.
     VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};

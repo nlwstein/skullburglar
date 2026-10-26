@@ -14,6 +14,8 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <mutex>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -42,14 +44,35 @@ struct HybridCamera {
   uint32_t seq;
 };
 
+// Fill 4 (n1, hybrid_fill.cpp): the static meshes UE3 has attached to its scene, read from the live engine objects
+// on the game thread (scene_feed.cpp) and drawn by an external renderer library. Assets are named by UE3 path; the
+// strings are interned by the game and never freed, so the renderer may key its caches on the pointers.
+struct HybridScene {
+  struct Instance {
+    float transform[16];  // LocalToWorld, UE3 FMatrix as stored
+    const char* mesh;     // StaticMesh path
+    const char* light;    // the component's path (its baked vertex light), or null
+    uint32_t mat_offset, mat_count;  // range in `materials` (Materials overrides; null entries keep the mesh's)
+  };
+  uint64_t frame = 0;  // game frames counted by the feed; 0: nothing published yet
+  std::vector<Instance> instances;
+  std::vector<const char*> materials;
+  float build_ms = 0;  // game-thread cost of this frame's walk
+  uint32_t walked = 0;  // primitives looked at
+};
+
 struct HybridState {
   static constexpr uint32_t kCameras = 64;
   // What the renderer does at a marker: 0 nothing (the back buffer keeps whatever it held), 1 clear to a test colour,
-  // 2 a world-space test grid drawn with the frame's camera.
+  // 2 a world-space test grid drawn with the frame's camera, 3 the grid's lines over the game's scene, 4 the
+  // static meshes of `scene` drawn by the external n1 renderer (BOTS_N1_* in hybrid_fill.cpp).
   std::atomic<uint32_t> fill{0};
   std::atomic<uint32_t> published{0};  // seq of the newest camera
   std::atomic<uint64_t> markers_seen{0}, fills_drawn{0};  // renderer side, for the log
   HybridCamera cameras[kCameras] = {};
+  // Fill 4: the newest scene. The game swaps its finished frame in, the renderer swaps it out (both under the lock).
+  std::mutex scene_mutex;
+  HybridScene scene;
 };
 
 // The register the marker writes: unknown to the Xenos register table (no side effects in the SDK's command

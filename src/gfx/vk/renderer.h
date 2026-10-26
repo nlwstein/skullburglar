@@ -40,6 +40,7 @@
 #include "vk_api.h"
 
 namespace bots {
+struct HybridCamera;
 enum class PromptDevice : uint32_t;  // prompt_state.h (it pulls in windows.h)
 }
 
@@ -460,6 +461,9 @@ class Renderer : public Pm4Sink {
   VkPipelineLayout fill_layout_ = VK_NULL_HANDLE;
   std::vector<VkShaderModule> fill_modules_;
   std::map<std::pair<uint32_t, VkFormat>, VkPipeline> fill_pipelines_;
+  // Fill 4: the n1 renderer's host state (hybrid_fill.cpp), or null.
+  bool DrawSceneN1(Image& target, const bots::HybridCamera& cam, const VkRect2D& area);
+  void* n1_host_ = nullptr;
 
   // Textures (texture.cpp). TextureView may record an upload, so call it before a draw's ring reservation.
   // Views for the translator's unsigned or signed binding of a fetch: formats with both signednesses get a view of

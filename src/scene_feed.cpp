@@ -58,12 +58,15 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
 
 #include <rex/logging.h>
+
+#include "hybrid_state.h"
 
 namespace bots::scenefeed {
 namespace {
@@ -1116,6 +1119,118 @@ void Tick(uint8_t* base) {
     REXLOG_INFO("scenefeed time ({}):", st.cached ? "cached list, full walk every 64 frames" : "full walk every frame");
     ReportTimes();
   }
+}
+
+
+// Hybrid fill 4: publish this frame's static meshes to the n1 renderer (hybrid_state.h HybridScene). A cached
+// primitive list, re-walked every BOTS_N1_RESCAN frames (default 16; the walk costs about 1.5 ms), each entry checked
+// every frame as the timing mode does. Paths are interned per component and rebuilt when its mesh or materials change.
+namespace {
+struct LiveComponent {
+  uint32_t name = 0, outer = 0, mesh = 0, mats = 0, mat_count = 0;
+  const char* mesh_path = nullptr;
+  const char* light_path = nullptr;
+  std::vector<const char*> materials;
+};
+struct LiveState {
+  std::vector<Primitive> prims;
+  uint32_t age = 1u << 30, rescan = [] {
+    const char* v = std::getenv("BOTS_N1_RESCAN");
+    return uint32_t(v && *v ? std::max(1, std::atoi(v)) : 16);
+  }();
+  float last_real_time = -1;
+  uint64_t frame = 0;
+  std::unordered_map<uint32_t, LiveComponent> components;
+  std::unordered_map<std::string, std::unique_ptr<char[]>> strings;
+  HybridScene building;
+};
+LiveState g_live;
+
+const char* Intern(const std::string& v) {
+  if (v.empty()) return nullptr;
+  auto it = g_live.strings.find(v);
+  if (it == g_live.strings.end()) {
+    auto copy = std::make_unique<char[]>(v.size() + 1);
+    std::memcpy(copy.get(), v.c_str(), v.size() + 1);
+    it = g_live.strings.emplace(v, std::move(copy)).first;
+  }
+  return it->second.get();
+}
+}  // namespace
+
+void Live(uint8_t* base) {
+  HybridState* hs = FindHybridState();
+  if (!hs || hs->fill.load(std::memory_order_relaxed) != 4) return;
+  g_base = base;
+  LiveState& st = g_live;
+  Camera cam;
+  uint32_t world_info = 0;
+  ReadCamera(cam, world_info);
+  static Field real_time;
+  if (Readable(world_info) && !real_time.ok()) real_time = FindProp(U32(world_info + 0x34), "RealTimeSeconds");
+  if (!real_time.ok() || !Readable(world_info)) return;
+  const float rt = F32(world_info + real_time.offset);
+  if (rt == st.last_real_time) return;
+  st.last_real_time = rt;
+  const auto t0 = std::chrono::steady_clock::now();
+  if (++st.age >= st.rescan) {
+    Times unused;
+    Enumerate(st.prims, unused);
+    std::erase_if(st.prims, [](const Primitive& p) { return p.kind != Kind::kStatic; });
+    st.age = 0;
+  } else {
+    std::erase_if(st.prims, [](const Primitive& p) {
+      return !Readable(p.component) || Classify(U32(p.component + 0x34)).kind != p.kind ||
+             !U32(p.component + g_off.scene_info.offset);
+    });
+  }
+  HybridScene& out = st.building;
+  out.instances.clear();
+  out.materials.clear();
+  for (const Primitive& p : st.prims) {
+    const uint32_t c = p.component;
+    if (!g_off.static_mesh_ref.ok()) break;
+    const uint32_t mesh = U32(c + g_off.static_mesh_ref.offset);
+    if (!Readable(mesh)) continue;
+    bool hidden = g_off.hidden_game.ok() && (U32(c + g_off.hidden_game.offset) & g_off.hidden_game.mask);
+    const uint32_t owner = g_off.owner.ok() ? U32(c + g_off.owner.offset) : 0;
+    if (Readable(owner)) {
+      if (!g_off.actor) {
+        g_off.actor = true;
+        g_off.actor_hidden = FindProp(U32(owner + 0x34), "bHidden");
+      }
+      if (g_off.actor_hidden.ok()) hidden |= (U32(owner + g_off.actor_hidden.offset) & g_off.actor_hidden.mask) != 0;
+    }
+    if (hidden) continue;
+    uint32_t mats = 0, mat_count = 0;
+    if (g_off.materials.ok()) {
+      mats = U32(c + g_off.materials.offset);
+      mat_count = std::min<uint32_t>(U32(c + g_off.materials.offset + 4), 64);
+      if (!Readable(mats)) mats = 0, mat_count = 0;
+    }
+    LiveComponent& lc = st.components[c];
+    if (lc.name != U32(c + 0x2C) || lc.outer != U32(c + 0x28) || lc.mesh != mesh || lc.mats != mats ||
+        lc.mat_count != mat_count) {
+      lc.name = U32(c + 0x2C), lc.outer = U32(c + 0x28), lc.mesh = mesh, lc.mats = mats, lc.mat_count = mat_count;
+      lc.mesh_path = Intern(Path(mesh));
+      lc.light_path = Intern(Path(c));
+      lc.materials.clear();
+      for (uint32_t i = 0; i < mat_count; ++i) lc.materials.push_back(Intern(Path(U32(mats + 4 * i))));
+    }
+    if (!lc.mesh_path) continue;
+    HybridScene::Instance& inst = out.instances.emplace_back();
+    for (int i = 0; i < 16; ++i) inst.transform[i] = F32(c + g_off.local_to_world.offset + 4 * i);
+    inst.mesh = lc.mesh_path;
+    inst.light = lc.light_path;
+    inst.mat_offset = uint32_t(out.materials.size());
+    inst.mat_count = uint32_t(lc.materials.size());
+    out.materials.insert(out.materials.end(), lc.materials.begin(), lc.materials.end());
+  }
+  out.walked = uint32_t(st.prims.size());
+  out.frame = ++st.frame;
+  out.build_ms = float(Ms(t0, std::chrono::steady_clock::now()));
+  std::lock_guard lock(hs->scene_mutex);
+  std::swap(hs->scene, out);
 }
 
 }  // namespace bots::scenefeed

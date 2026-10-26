@@ -253,6 +253,22 @@ if(REXSDK_DIR AND (NOT WIN32 OR REXGLUE_USE_VULKAN))
                 LINKER:-exported_symbol,_rex_gpu_abi_version LINKER:-exported_symbol,_rex_gpu_create)
         endif()
         add_dependencies(bots rexgpu-native)
+
+        # Hybrid spike, fill 4 (src/gfx/vk/hybrid_fill.cpp): an external scene renderer linked into the plugin.
+        # BOTS_N1FFI_LIBRARY: its static library (libn1ffi.a); BOTS_N1FFI_INCLUDE_DIR: the directory with n1ffi.h.
+        set(BOTS_N1FFI_LIBRARY "" CACHE FILEPATH "Hybrid spike: n1 renderer static library")
+        set(BOTS_N1FFI_INCLUDE_DIR "" CACHE PATH "Hybrid spike: directory holding n1ffi.h")
+        if(BOTS_N1FFI_LIBRARY AND BOTS_N1FFI_INCLUDE_DIR)
+            target_compile_definitions(rexgpu-native PRIVATE BOTS_N1FFI=1)
+            target_include_directories(rexgpu-native PRIVATE ${BOTS_N1FFI_INCLUDE_DIR})
+            target_link_libraries(rexgpu-native PRIVATE ${BOTS_N1FFI_LIBRARY})
+            if(APPLE)
+                target_link_libraries(rexgpu-native PRIVATE "-framework CoreFoundation" "-framework Security" iconv)
+            elseif(UNIX)
+                target_link_libraries(rexgpu-native PRIVATE dl pthread m)
+            endif()
+            set_property(TARGET rexgpu-native APPEND PROPERTY LINK_DEPENDS ${BOTS_N1FFI_LIBRARY})
+        endif()
     endif()
 endif()
 
