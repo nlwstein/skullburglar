@@ -1289,12 +1289,15 @@ const char* Intern(const std::string& v) {
 }
 
 // Intern a material name. Run-time instances carry their parameters ("<path>?..."), and some change them per use
-// (tracer smoke: a start time and length per shot), so each variant is a new n1 material that is never freed. Cap
-// the variants: past kVariantsPerBase for one cooked material, or kVariantsTotal in all, new ones get nullptr and the
-// primitive is not drawn. (Falling back to the cooked material's own values drew BulletTracerSmoke_MAT with no fade
-// and no length: the long opaque white streams across the screen in every firefight after the first ~64 shots.)
+// (tracer smoke: a start time and length per shot), so each variant is a new name. n1 gives a variant's GPU material
+// back once nothing names it for a few seconds, but the names themselves stay (here, in the host's handle table and in
+// n1's resolver), so a runaway guard remains: past kVariantsPerBase for one cooked material, or kVariantsTotal in all,
+// new ones get nullptr and the primitive is not drawn. (Falling back to the cooked material's own values drew
+// BulletTracerSmoke_MAT with no fade and no length: long opaque white streams across the screen. The old cap of 64
+// per material was reached after about a minute of a firefight.) A variant name is under 300 bytes, so the guard
+// bounds this at a few tens of MB; 16384 tracers is hours of shooting.
 const char* InternMaterial(const std::string& v) {
-  constexpr size_t kVariantsPerBase = 64, kVariantsTotal = 4096;
+  constexpr size_t kVariantsPerBase = 16384, kVariantsTotal = 65536;
   static std::unordered_map<std::string, size_t> per_base;
   static size_t total = 0;
   const size_t q = v.find('?');
