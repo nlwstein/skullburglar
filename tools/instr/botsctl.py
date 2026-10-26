@@ -28,7 +28,8 @@ Anything else goes to the game unchanged (wait, exec, press, hold, release, stic
 Validity: a sample window is INVALID if, during it, the phase was ever not in_play, a frame took longer than
 --stall-ms to arrive (presentation stopped: GPU hang, lost device), the presenter logged a failure, pipelines were
 built in play (port or n1 late pipelines), n1 failed, or no frames arrived. It is CONTAMINATED if --procs-cmd
-reports a game process other than this one (two runs sharing a machine). Exit codes: 0 valid, 4 INVALID,
+reports a game process other than this one (two runs sharing a machine), or the game saw keyboard / mouse input this
+script didn't send (status input.human rose: someone used the machine). Exit codes: 0 valid, 4 INVALID,
 5 CONTAMINATED, 2 the scenario failed.
 """
 import argparse
@@ -264,6 +265,10 @@ class Run:
         wall = time.time() - t_start
         self.check_contamination()
         hist = hist_delta(h0, h1)
+        human = (get(s1, "input.human", 0) or 0) - (get(s0, "input.human", 0) or 0)
+        if human > 0:
+            self.contaminated.append({"t": round(time.time() - self.t0, 1), "human_input": human})
+            self.log(f"CONTAMINATED: {human} keyboard/mouse events the script didn't send")
         stream = [o for o in self.rec.since(t_start) if o.get("host_t", 0) <= time.time()]
         statuses = [o for o in stream if o.get("type") == "status"] + [s1]
         events = [o for o in stream if o.get("type") == "event"]
@@ -477,7 +482,7 @@ def print_summary(s):
         for r in x["invalid_reasons"]:
             print(f"    INVALID: {r}")
         if x.get("contaminated"):
-            print("    CONTAMINATED: another game process ran during this window")
+            print("    CONTAMINATED: another game process or keyboard/mouse input during this window")
 
 
 def main():

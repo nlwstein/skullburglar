@@ -16,6 +16,8 @@
 #include <memory>
 #include <string>
 
+struct PPCContext;
+
 namespace rex::input {
 class InputDriver;
 }
@@ -34,8 +36,9 @@ void Start(std::function<rex::system::IGraphicsSystem*()> graphics);
 // The control channel's pad (guest user 0, merged with real pads like the scripted one).
 std::unique_ptr<rex::input::InputDriver> MakeInputDriver();
 
-// Game thread, once per frame (the per-frame input poll, user 0).
-void GameTick(uint8_t* base);
+// Game thread, once per frame (the per-frame input poll, user 0), with that call's guest context: collision traces
+// (line of sight, path_to) call the game's own trace code with it, and restore it.
+void GameTick(PPCContext& ctx, uint8_t* base);
 // Game thread: the gameplay HUD ticked (C1HUD execTickCashAndScore).
 void HudTick();
 // Game thread: the pause menu opened / closed (C1HUD execNativePauseGame / execNativeUnpauseGame).
