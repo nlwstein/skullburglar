@@ -49,6 +49,7 @@ set(BOTS_SOURCES
     src/mnk_input.cpp
     src/motion_blur.cpp
     src/hybrid.cpp
+    src/idle_backoff.cpp
     src/scene_feed.cpp
     src/widescreen.cpp
     src/gfx/d3d_hooks.cpp
