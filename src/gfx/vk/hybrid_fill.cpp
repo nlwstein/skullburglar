@@ -105,14 +105,15 @@ struct N1Host {
   bool failed = false;
   uint32_t budget = 8;
   HybridScene scene;  // the newest one taken from the game
-  std::unordered_map<const char*, uint32_t> meshes, materials, lights, skel_meshes, envs;
+  std::unordered_map<const char*, uint32_t> meshes, materials, lights, skel_meshes, envs, pmaterials, pmeshes;
+  std::vector<N1Emitter> emitters;
   std::vector<N1Instance> instances;
   std::vector<N1SkelInstance> skeletal;
   std::vector<uint32_t> skel_materials;
   std::vector<uint32_t> material_handles;
   // Stats since the last log line.
   std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
-  double log_seconds = 5, host_ms = 0, record_ms = 0, build_ms = 0, feed_ms = 0, lighting_ms = 0;
+  double log_seconds = 5, host_ms = 0, record_ms = 0, build_ms = 0, feed_ms = 0, lighting_ms = 0, particles_ms = 0;
   uint64_t frames = 0, draws = 0, triangles = 0, scenes = 0;
   N1Stats last{};
 };
@@ -209,6 +210,21 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
       host->skel_materials.push_back(Handle(host->materials, host->scene.materials[in.mat_offset + i], host->r,
                                             n1_material));
   }
+  // Particles: emitters by interned material and mesh path; the rows are the game's copy of the particle data.
+  host->emitters.clear();
+  for (const HybridScene::Emitter& in : host->scene.emitters) {
+    N1Emitter& out = host->emitters.emplace_back();
+    out = {};
+    out.kind = in.kind, out.align = in.align, out.sub_h = in.sub_h, out.sub_v = in.sub_v;
+    out.sub_method = in.sub_method, out.local_space = in.local_space;
+    out.material = Handle(host->pmaterials, in.material, host->r, n1_pmaterial);
+    out.mesh = Handle(host->pmeshes, in.mesh, host->r, n1_pmesh);
+    out.count = in.count, out.row_offset = in.row_offset, out.row_floats = in.row_floats;
+    std::memcpy(out.origin, in.origin, sizeof(out.origin));
+    std::memcpy(out.transform, in.transform, sizeof(out.transform));
+  }
+  n1_set_particles(host->r, host->emitters.data(), uint32_t(host->emitters.size()), host->scene.particle_rows.data(),
+                   uint32_t(host->scene.particle_rows.size()));
   n1_set_skeletal(host->r, host->skeletal.data(), uint32_t(host->skeletal.size()), host->scene.bones.data(),
                   uint32_t(host->scene.bones.size()), host->skel_materials.data(),
                   uint32_t(host->skel_materials.size()));
@@ -254,6 +270,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   host->host_ms += std::chrono::duration<double, std::milli>(t2 - t0).count();
   host->record_ms += std::chrono::duration<double, std::milli>(t2 - t1).count();
   host->build_ms += host->scene.build_ms;
+  host->particles_ms += host->scene.particles_ms;
   const double secs = std::chrono::duration<double>(t2 - host->since).count();
   if (host->log_seconds > 0 && secs >= host->log_seconds) {
     const double n = double(host->frames);
@@ -261,14 +278,17 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
                 "per frame; render thread {:.3f} ms/frame ({:.3f} in n1_record), game thread walk {:.3f} ms; meshes "
                 "{} ready {} pending {} missing, {} loading, {} textures ({} unsupported); skinned {} drawn {} culled {} "
                 "skipped, {} meshes ready; {} shaders {} pipelines ({} draws waiting), feed {} lights {} envs ({} "
-                "instances bound, {} handles), lighting json {:.3f} ms game / {:.3f} ms parse (totals)",
+                "instances bound, {} handles), lighting json {:.3f} ms game / {:.3f} ms parse (totals); particles {} emitters "
+                "{} sprites {} meshes ({} dropped, {} skipped, {}/{} materials ready/failed), game thread {:.3f} ms",
                 secs, host->frames, host->scenes, st.instances, st.skipped, host->draws / n, host->triangles / n / 1000,
                 host->host_ms / n, host->record_ms / n, host->build_ms / n, st.meshes_ready, st.meshes_pending,
                 st.meshes_missing, st.loading, st.textures, st.textures_unsupported, st.skel_drawn, st.skel_culled,
                 st.skel_skipped, st.skel_meshes_ready, st.shaders, st.pipelines, st.pipelines_pending, st.dyn_lights,
-                st.light_envs, st.env_bound, st.env_handles, host->lighting_ms, host->feed_ms);
+                st.light_envs, st.env_bound, st.env_handles, host->lighting_ms, host->feed_ms, st.particle_emitters,
+                st.particle_sprites, st.particle_meshes, st.particle_dropped, st.particle_skipped,
+                st.particle_mats_ready, st.particle_mats_failed, host->particles_ms / n);
     host->since = t2, host->frames = host->draws = host->triangles = host->scenes = 0;
-    host->host_ms = host->record_ms = host->build_ms = host->feed_ms = host->lighting_ms = 0;
+    host->host_ms = host->record_ms = host->build_ms = host->feed_ms = host->lighting_ms = host->particles_ms = 0;
   }
   return true;
 }

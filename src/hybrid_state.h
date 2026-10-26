@@ -63,6 +63,22 @@ struct HybridScene {
     float bounds[4];                   // world bounding sphere: centre, radius
     const char* env;                   // DynamicLightEnvironmentComponent path, or null
   };
+  // One particle emitter instance (sprite or mesh) with its live particles in `particle_rows`: `count` rows of
+  // `row_floats` floats from `row_offset`, each [location 3, old_location 3, size 3, rotation, colour 4,
+  // relative_time, payload...] in UE3 units (guest values; local-space rows are moved to world space by the
+  // renderer with `transform`). No JSON: the rows are copied straight from guest memory.
+  struct Emitter {
+    uint32_t kind;  // 0 sprite, 1 mesh
+    uint32_t align, sub_h, sub_v, sub_method, local_space;  // EParticleScreenAlignment, sub-image grid, interpolation
+    const char* material;  // the material the emitter draws with
+    const char* mesh;      // mesh emitters: StaticMesh path
+    uint32_t count, row_offset, row_floats;
+    float origin[3];       // emitter location (UE3), for far-to-near ordering
+    float transform[16];   // the component's LocalToWorld
+  };
+  std::vector<Emitter> emitters;
+  std::vector<float> particle_rows;
+  float particles_ms = 0;  // game-thread cost of reading them
   uint64_t frame = 0;  // game frames counted by the feed; 0: nothing published yet
   std::vector<Instance> instances;
   std::vector<Skel> skeletal;

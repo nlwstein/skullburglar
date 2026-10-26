@@ -1181,11 +1181,30 @@ struct LiveComponent {
   const char* env_path = nullptr;
   std::vector<const char*> materials;
 };
+// What an emitter's LOD level says about how to draw it, cached per LOD level (the property reads walk class records).
+struct LiveEmitter {
+  uint32_t name = 0, outer = 0, material = 0, type_data = 0;
+  int kind = -1;  // 0 sprite, 1 mesh, -1 not drawn (beam, trail, other)
+  uint32_t align = 0, sub_h = 1, sub_v = 1, sub_method = 0, local_space = 0;
+  const char* material_path = nullptr;
+  const char* mesh_path = nullptr;
+};
 struct LiveState {
   std::vector<Primitive> prims;
+  std::vector<Primitive> particle_prims;
+  std::unordered_map<uint32_t, LiveEmitter> emitters;
+  bool particles = [] {
+    const char* v = std::getenv("BOTS_N1_PARTICLES");
+    return !(v && (v[0] == '0'));
+  }();
   uint32_t age = 1u << 30, rescan = [] {
     const char* v = std::getenv("BOTS_N1_RESCAN");
-    return uint32_t(v && *v ? std::max(1, std::atoi(v)) : 16);
+    uint32_t every = uint32_t(v && *v ? std::max(1, std::atoi(v)) : 16);
+    // Particle components come and go within a few frames (muzzle flashes): look for them more often.
+    const char* pv = std::getenv("BOTS_N1_PRESCAN");
+    const char* on = std::getenv("BOTS_N1_PARTICLES");
+    if (on && on[0] == '0') return every;
+    return std::min(every, uint32_t(pv && *pv ? std::max(1, std::atoi(pv)) : 4));
   }();
   float last_real_time = -1;
   uint64_t frame = 0;
@@ -1223,6 +1242,84 @@ std::string MaterialPath(uint32_t m) {
 }
 }  // namespace
 
+namespace {
+// The frame's particle emitters: every drawable emitter instance of the attached ParticleSystemComponents, with its
+// live particles copied out of guest memory (see FParticleEmitterInstance above for the layout).
+void LiveParticles(LiveState& st, HybridScene& out) {
+  static Field instances;
+  constexpr uint32_t kMaxRows = 24576;  // particles per frame; the renderer applies its own (lower) cap
+  for (const Primitive& p : st.particle_prims) {
+    const uint32_t c = p.component;
+    bool hidden = g_off.hidden_game.ok() && (U32(c + g_off.hidden_game.offset) & g_off.hidden_game.mask);
+    const uint32_t owner = g_off.owner.ok() ? U32(c + g_off.owner.offset) : 0;
+    if (Readable(owner) && g_off.actor_hidden.ok())
+      hidden |= (U32(owner + g_off.actor_hidden.offset) & g_off.actor_hidden.mask) != 0;
+    if (hidden) continue;
+    if (!instances.ok()) instances = FindProp(U32(c + 0x34), "EmitterInstances");
+    if (!instances.ok()) return;
+    const uint32_t data = U32(c + instances.offset), n = U32(c + instances.offset + 4);
+    if (!Readable(data)) continue;
+    for (uint32_t i = 0; i < n && i < 64; ++i) {
+      const uint32_t inst = U32(data + 4 * i);
+      if (!Readable(inst)) continue;
+      const uint32_t active = U32(inst + kEmitActive), stride = U32(inst + kEmitStride);
+      if (!active || stride < 0x80 || stride > 0x1000 || active > 4096) continue;
+      const uint32_t lod = U32(inst + kEmitLod);
+      if (!IsObject(lod)) continue;
+      const uint32_t material = U32(inst + kEmitMaterial);
+      LiveEmitter& le = st.emitters[lod];
+      const uint32_t type_data0 = PropU32(lod, "TypeDataModule");
+      if (le.name != U32(lod + 0x2C) || le.outer != U32(lod + 0x28) || le.material != material ||
+          le.type_data != type_data0) {
+        le = {};
+        le.name = U32(lod + 0x2C), le.outer = U32(lod + 0x28), le.material = material, le.type_data = type_data0;
+        const uint32_t required = PropU32(lod, "RequiredModule");
+        const std::string type_class = IsObject(type_data0) ? ClassName(type_data0) : "";
+        le.kind = type_class.empty() ? 0 : type_class.find("Mesh") != std::string::npos ? 1 : -1;
+        if (IsObject(required)) {
+          le.align = PropByte(required, "ScreenAlignment");
+          le.local_space = PropBool(required, "bUseLocalSpace");
+          le.sub_h = std::max<int32_t>(1, int32_t(PropU32(required, "SubImages_Horizontal", 1)));
+          le.sub_v = std::max<int32_t>(1, int32_t(PropU32(required, "SubImages_Vertical", 1)));
+          le.sub_method = PropByte(required, "InterpolationMethod");
+        }
+        le.material_path = Intern(IsObject(material) ? MaterialPath(material)
+                                                      : (IsObject(required) ? MaterialPath(PropU32(required, "Material")) : ""));
+        if (le.kind == 1) le.mesh_path = Intern(Path(PropU32(type_data0, "Mesh")));
+      }
+      if (le.kind < 0 || !le.material_path || (le.kind == 1 && !le.mesh_path)) continue;
+      const uint32_t pdata = U32(inst + kEmitData), pindex = U32(inst + kEmitIndices);
+      if (!Readable(pdata) || !Readable(pindex & ~3u)) continue;
+      if (out.particle_rows.size() / 15 + active > kMaxRows) return;
+      // Payload floats: all of them for sub-UV animation (the renderer finds the frame data), the rotation for mesh
+      // particles, none otherwise.
+      const bool subuv = (le.sub_h > 1 || le.sub_v > 1) && le.sub_method != 0;
+      const uint32_t payload = subuv ? (stride - 0x80) / 4 : (le.kind == 1 ? 3 : 0);
+      const uint32_t row_floats = 15 + payload;
+      HybridScene::Emitter& e = out.emitters.emplace_back();
+      e.kind = uint32_t(le.kind), e.align = le.align, e.sub_h = le.sub_h, e.sub_v = le.sub_v;
+      e.sub_method = le.sub_method, e.local_space = le.local_space;
+      e.material = le.material_path, e.mesh = le.mesh_path;
+      e.count = active, e.row_offset = uint32_t(out.particle_rows.size()), e.row_floats = row_floats;
+      for (int k = 0; k < 3; ++k) e.origin[k] = F32(inst + kEmitLocation + 4 * k);
+      if (le.local_space)
+        for (int k = 0; k < 16; ++k) e.transform[k] = F32(c + g_off.local_to_world.offset + 4 * k);
+      else
+        std::memset(e.transform, 0, sizeof(e.transform));
+      out.particle_rows.reserve(out.particle_rows.size() + size_t(active) * row_floats);
+      for (uint32_t k = 0; k < active; ++k) {
+        const uint16_t slot = uint16_t(__builtin_bswap16(*reinterpret_cast<const uint16_t*>(Raw(pindex + 2 * k))));
+        const uint32_t pp = pdata + slot * stride;
+        for (uint32_t off : {0x10u, 0x14u, 0x18u, 0x00u, 0x04u, 0x08u, 0x50u, 0x54u, 0x58u, 0x2Cu, 0x60u, 0x64u, 0x68u,
+                             0x6Cu, 0x0Cu})
+          out.particle_rows.push_back(F32(pp + off));
+        for (uint32_t q = 0; q < payload; ++q) out.particle_rows.push_back(F32(pp + 0x80 + 4 * q));
+      }
+    }
+  }
+}
+}  // namespace
+
 void Live(uint8_t* base) {
   HybridState* hs = FindHybridState();
   if (!hs || hs->fill.load(std::memory_order_relaxed) != 4) return;
@@ -1241,13 +1338,19 @@ void Live(uint8_t* base) {
   if (++st.age >= st.rescan) {
     Times unused;
     Enumerate(st.prims, unused);
+    st.particle_prims.clear();
+    if (st.particles)
+      for (const Primitive& p : st.prims)
+        if (p.kind == Kind::kParticle) st.particle_prims.push_back(p);
     std::erase_if(st.prims, [](const Primitive& p) { return p.kind != Kind::kStatic && p.kind != Kind::kSkeletal; });
     st.age = 0;
   } else {
-    std::erase_if(st.prims, [](const Primitive& p) {
+    auto gone = [](const Primitive& p) {
       return !Readable(p.component) || Classify(U32(p.component + 0x34)).kind != p.kind ||
              !U32(p.component + g_off.scene_info.offset);
-    });
+    };
+    std::erase_if(st.prims, gone);
+    std::erase_if(st.particle_prims, gone);
   }
   HybridScene& out = st.building;
   out.instances.clear();
@@ -1325,6 +1428,14 @@ void Live(uint8_t* base) {
     out.materials.insert(out.materials.end(), lc.materials.begin(), lc.materials.end());
   }
   out.walked = uint32_t(st.prims.size());
+  out.emitters.clear();
+  out.particle_rows.clear();
+  out.particles_ms = 0;
+  if (st.particles && !st.particle_prims.empty()) {
+    const auto tp = std::chrono::steady_clock::now();
+    LiveParticles(st, out);
+    out.particles_ms = float(Ms(tp, std::chrono::steady_clock::now()));
+  }
   // Lights, fog and post for n1 (properties read live; the component list comes from the last walk).
   out.lighting.clear();
   out.lighting_ms = 0;
