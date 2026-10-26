@@ -12,8 +12,9 @@ The game must run with BOTS_INSTR=1 (control channel on 127.0.0.1:47100). For an
 
 Scenario files: one step per line, # comments. Steps the driver handles itself:
   sample SECS [shot_every=S] [name=NAME]    measure SECS seconds of play (see "Validity"); shots every S seconds
-  dismiss [BTN] [timeout=S]                 while a dialog is up, press BTN (default A); state-driven
+  dismiss [BTN] [timeout=S]                 while a dialog is up, press BTN (default B: cancel); state-driven
   press_until COND BTN [every=MS] [timeout=S]  press BTN every MS (default 700) until COND holds
+  until COND [btn=B] [timeout=S]            wait for COND (default 600 s), dismissing dialogs with BTN meanwhile
   expect COND                               fail the run (INVALID) unless COND holds now
   shot NAME                                 DIR/shots/NAME.png (+ .json sidecar with the status at that moment)
   burst NAME COUNT                          COUNT consecutive frames into DIR/shots/NAME/
@@ -22,7 +23,7 @@ Scenario files: one step per line, # comments. Steps the driver handles itself:
   mark NAME                                 a timestamp in the summary
   default VAR=VALUE                         ${VAR} when --set doesn't give it
 Anything else goes to the game unchanged (wait, exec, press, hold, release, stick, trigger, macro, ...); a reply with
-"ok": false fails the run, except for `wait` steps prefixed with `try ` (e.g. `try wait -t 5 phase==dialog`).
+"ok": false fails the run, except for steps prefixed with `try ` (e.g. `try wait -t 5 phase==dialog`).
 
 Validity: a sample window is INVALID if, during it, the phase was ever not in_play, a frame took longer than
 --stall-ms to arrive (presentation stopped: GPU hang, lost device), the presenter logged a failure, pipelines were
@@ -265,7 +266,10 @@ class Run:
         phases = sorted(set(o.get("phase") for o in statuses))
         if phases != ["in_play"]:
             reasons.append(f"not in play for the whole window (phases {phases})")
-        worst_age = max([get(o, "render.frame_age_ms", 0) or 0 for o in statuses] + [0])
+        # A stall shows as a status line with no recent frame, or (when the whole process stalled, so no status line
+        # was written meanwhile) as the longest frame of the next line's window.
+        worst_age = max([get(o, "render.frame_age_ms", 0) or 0 for o in statuses]
+                        + [get(o, "render.worst_ms", 0) or 0 for o in statuses[1:]] + [0])
         if worst_age > self.args.stall_ms:
             reasons.append(f"presentation stalled ({worst_age:.0f} ms without a frame)")
         for key, label in (("health.presenter_failures", "presenter failures"),
@@ -313,7 +317,7 @@ class Run:
         return r
 
     def step_dismiss(self, words):
-        btn = words[1] if len(words) > 1 and "=" not in words[1] else "A"
+        btn = words[1] if len(words) > 1 and "=" not in words[1] else "B"
         opts = dict(w.split("=", 1) for w in words[1:] if "=" in w)
         deadline = time.time() + float(opts.get("timeout", 30))
         n = 0
@@ -328,6 +332,24 @@ class Run:
         else:
             raise RuntimeError("dialog still up")
         self.log(f"dismiss: {n} dialogs")
+
+    def step_until(self, words):
+        """until COND [btn=B] [timeout=S]: wait for COND, dismissing any dialog that comes up meanwhile."""
+        cond = words[1]
+        opts = dict(w.split("=", 1) for w in words[2:] if "=" in w)
+        btn = opts.get("btn", "B")
+        deadline = time.time() + float(opts.get("timeout", 600))
+        while time.time() < deadline:
+            r = self.send(f"wait -t 2 {cond} || phase==dialog")
+            st = r.get("status", {})
+            if r.get("ok") and st.get("phase") != "dialog":
+                self.log(f"  until: {cond} after {time.time() - self.t0:.1f}s, phase {st.get('phase')}")
+                return
+            if st.get("phase") == "dialog":
+                self.log(f"  until: dialog {get(st, 'game.dialog')} -> {btn}")
+                self.send(f"press {btn}")
+                self.send("wait -t 3 phase!=dialog")
+        raise RuntimeError(f"until: {cond} never held")
 
     def step_press_until(self, words):
         cond, btn = words[1], words[2]
@@ -344,6 +366,12 @@ class Run:
     def run_step(self, line):
         words = shlex.split(line, comments=False, posix=True)
         op = words[0]
+        if op == "try" and words[1] in ("sample", "dismiss", "press_until", "expect", "shot", "burst"):
+            try:  # an optional driver step: a failure is logged, not fatal
+                return self.run_step(line.split(None, 1)[1])
+            except Exception as e:  # noqa: BLE001
+                self.log(f"  (optional step failed: {e})")
+                return None
         t = time.time()
         self.log(f"> {line}")
         if op == "sample":
@@ -352,6 +380,8 @@ class Run:
             self.step_dismiss(words)
         elif op == "press_until":
             self.step_press_until(words)
+        elif op == "until":
+            self.step_until(words)
         elif op == "expect":
             ok, reply = self.condition(line[len("expect"):].strip())
             if not ok:

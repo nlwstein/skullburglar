@@ -1,5 +1,6 @@
 # Boot to the main menu, wait for the shader step, load two chapters and measure each.
-# No timed input: every step waits on the game's reported state.
+# No timed input: every step waits on the game's reported state; `until` dismisses dialogs on the way
+# (B, cancel: e.g. "No Storage Device Selected" on a fresh test root).
 #   botsctl.py run scenarios/two_chapters.txt --out DIR --set CH1=11010 --set CH2=61465 [--set SECS=120]
 default CH1=11010
 default CH2=61465
@@ -14,8 +15,7 @@ wait -t 1800 precompile.done==1
 mark precompile_done
 
 exec LoadChapter ${CH1}
-wait -t 600 game.chapter==${CH1} && phase==in_play && phase_s>=5
-dismiss
+until "game.chapter==${CH1} && phase==in_play && phase_s>=5" timeout=600
 mark ch1_in_play
 shot ch1-start
 burst ch1-burst 8
@@ -23,8 +23,7 @@ stick R 1 0 1500
 sample ${SECS} shot_every=30 name=ch1
 
 exec LoadChapter ${CH2}
-wait -t 600 game.chapter==${CH2} && phase==in_play && phase_s>=5
-dismiss
+until "game.chapter==${CH2} && phase==in_play && phase_s>=5" timeout=600
 mark ch2_in_play
 shot ch2-start
 dualshot ch2-dual

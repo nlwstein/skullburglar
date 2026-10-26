@@ -1,0 +1,14 @@
+# Deliberately bad samples, to prove the grading (run with the game already in a chapter, or from boot).
+#   1. a sample taken on the main menu -> INVALID (not in play)
+#   2. a sample during which the driver's --procs-cmd sees a second game process -> CONTAMINATED
+#   3. a sample during which presentation stops for over a second (the wrapper pauses the process) -> INVALID
+default CH1=11010
+wait -t 1800 phase==front_end || phase==movie || phase==dialog || phase==menu || phase==in_play
+try press_until "game.scenes~=MainMenu" START every=1000 timeout=30
+sample 5 name=on-menu
+wait -t 1800 precompile.done==1
+exec LoadChapter ${CH1}
+wait -t 600 game.chapter==${CH1} && phase==in_play && phase_s>=5
+mark stall_window
+sample 20 name=stalled
+sample 20 name=contaminated
