@@ -1290,8 +1290,9 @@ const char* Intern(const std::string& v) {
 
 // Intern a material name. Run-time instances carry their parameters ("<path>?..."), and some change them per use
 // (tracer smoke: a start time and length per shot), so each variant is a new n1 material that is never freed. Cap
-// the variants: past kVariantsPerBase for one cooked material, or kVariantsTotal in all, new ones fall back to the
-// cooked material's own values.
+// the variants: past kVariantsPerBase for one cooked material, or kVariantsTotal in all, new ones get nullptr and the
+// primitive is not drawn. (Falling back to the cooked material's own values drew BulletTracerSmoke_MAT with no fade
+// and no length: the long opaque white streams across the screen in every firefight after the first ~64 shots.)
 const char* InternMaterial(const std::string& v) {
   constexpr size_t kVariantsPerBase = 64, kVariantsTotal = 4096;
   static std::unordered_map<std::string, size_t> per_base;
@@ -1303,9 +1304,9 @@ const char* InternMaterial(const std::string& v) {
     static bool logged = false;
     if (!logged) {
       logged = true;
-      REXLOG_INFO("scenefeed: material variant cap reached ({}); using cooked values", v);
+      REXLOG_INFO("scenefeed: material variant cap reached ({}); further variants are not drawn", v);
     }
-    return Intern(v.substr(0, q));
+    return nullptr;
   }
   ++n, ++total;
   return Intern(v);
@@ -2023,6 +2024,8 @@ void Live(uint8_t* base) {
     const uint32_t dle = PropU32(c, "LightEnvironment");
     if (dle != lc.dle) lc.dle = dle, lc.env_path = IsObject(dle) ? Intern(Path(dle)) : nullptr;
     if (!lc.mesh_path) continue;
+    // A run-time material past the variant cap (InternMaterial): skip the primitive rather than draw it wrong.
+    if (lc.runtime && std::find(lc.materials.begin(), lc.materials.end(), nullptr) != lc.materials.end()) continue;
     if (skel) {  // culled by bounds in n1 (the feed's `rendered` flag flickers)
       HybridScene::Skel& sk = out.skeletal.emplace_back();
       for (int i = 0; i < 16; ++i) sk.transform[i] = F32(c + g_off.local_to_world.offset + 4 * i);
