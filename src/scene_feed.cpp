@@ -1193,6 +1193,7 @@ struct LiveComponent {
   const char* env_path = nullptr;
   bool runtime = false;  // a material was made at run time (MaterialPath): re-read its parameters every frame
   std::vector<const char*> materials;
+  std::vector<uint64_t> fingerprints;  // per material, when `runtime` (MaterialFingerprint)
 };
 // What an emitter's LOD level says about how to draw it, cached per LOD level (the property reads walk class records).
 struct LiveEmitter {
@@ -1366,6 +1367,50 @@ std::string MaterialPath(uint32_t m, bool params, bool* runtime) {
     m = PropU32(m, "Parent");
   }
   return {};
+}
+
+// Everything MaterialPath(m, true) reads, hashed without building any strings: each object up the Parent chain (its
+// address, name, outer and class) and, for a MaterialInstanceConstant, the raw bytes of its three parameter arrays
+// (names, values and texture references). Equal fingerprints give the same MaterialPath, so a run-time instance's
+// path is rebuilt only when one of these changed. The property records are looked up once per class. Texture
+// parameters are hashed by address: a texture freed and another loaded at the same address while the instance
+// keeps pointing at it would be missed (BOTS_N1_MIC_CHECK=1 counts any mismatch).
+uint64_t MaterialFingerprint(uint32_t m) {
+  struct Layout {
+    bool mic = false;
+    uint32_t offset[3] = {}, size[3] = {};  // size 0: the class has no such array
+  };
+  static std::unordered_map<uint32_t, Layout> layouts;
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&h](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+  for (int depth = 0; depth < 8 && IsObject(m); ++depth) {
+    const uint32_t cls = U32(m + 0x34);
+    mix(m), mix(U32(m + 0x2C)), mix(U32(m + 0x28)), mix(cls);
+    auto [it, fresh] = layouts.try_emplace(cls);
+    Layout& l = it->second;
+    if (fresh && !std::strcmp(ClassName(m), "MaterialInstanceConstant")) {
+      l.mic = true;
+      const char* arrays[3] = {"ScalarParameterValues", "VectorParameterValues", "TextureParameterValues"};
+      for (int k = 0; k < 3; ++k) {
+        const uint32_t rec = PropRecord(m, arrays[k]);
+        const uint32_t inner = rec ? U32(rec + 0x84) : 0;
+        const uint32_t size = Readable(inner) ? U32(inner + 0x48) : 0;
+        if (size && size <= 0x200) l.offset[k] = U32(rec + 0x64), l.size[k] = size;
+      }
+    }
+    if (l.mic) {
+      for (int k = 0; k < 3; ++k) {
+        if (!l.size[k]) continue;
+        const uint32_t at = m + l.offset[k], data = U32(at), n = std::min<uint32_t>(U32(at + 4), 32);
+        mix(data), mix(n);
+        if (!Readable(data)) continue;
+        const uint8_t* bytes = Raw(data);
+        for (uint32_t i = 0, end = n * l.size[k]; i < end; ++i) h = (h ^ bytes[i]) * 1099511628211ull;
+      }
+    }
+    m = PropU32(m, "Parent");
+  }
+  return h;
 }
 }  // namespace
 
@@ -1947,8 +1992,32 @@ void Live(uint8_t* base) {
       lc.runtime = false;
       for (uint32_t i = 0; i < mat_count; ++i)
         lc.materials.push_back(InternMaterial(MaterialPath(U32(mats + 4 * i), true, &lc.runtime)));
+      if (lc.runtime) {
+        lc.fingerprints.resize(mat_count);
+        for (uint32_t i = 0; i < mat_count; ++i) lc.fingerprints[i] = MaterialFingerprint(U32(mats + 4 * i));
+      }
     } else if (lc.runtime) {  // run-time instances: their parameters (fades, tints) can change every frame
-      for (uint32_t i = 0; i < mat_count; ++i) lc.materials[i] = InternMaterial(MaterialPath(U32(mats + 4 * i), true));
+      // Rebuild a material's path only when what it is built from changed (MaterialFingerprint); building it means
+      // name lookups and string formatting for every parameter, every frame.
+      // BOTS_N1_MIC_CHECK=1 builds the path anyway when the fingerprint says unchanged and counts mismatches (testing).
+      static const bool mic_check = [] {
+        const char* v = std::getenv("BOTS_N1_MIC_CHECK");
+        return v && *v && *v != '0';
+      }();
+      for (uint32_t i = 0; i < mat_count; ++i) {
+        const uint64_t fp = MaterialFingerprint(U32(mats + 4 * i));
+        if (fp == lc.fingerprints[i]) {
+          if (mic_check) {
+            static uint64_t checked = 0, wrong = 0;
+            wrong += InternMaterial(MaterialPath(U32(mats + 4 * i), true)) != lc.materials[i];
+            if (++checked % 20000 == 0)
+              REXLOG_INFO("scenefeed: MIC check: {} unchanged fingerprints, {} paths differed", checked, wrong);
+          }
+          continue;
+        }
+        lc.fingerprints[i] = fp;
+        lc.materials[i] = InternMaterial(MaterialPath(U32(mats + 4 * i), true));
+      }
     }
     // The owner's light environment (characters, movers, pickups): lit by its composite lights in n1.
     const uint32_t dle = PropU32(c, "LightEnvironment");
