@@ -264,6 +264,10 @@ if(REXSDK_DIR AND (NOT WIN32 OR REXGLUE_USE_VULKAN))
             target_link_libraries(rexgpu-native PRIVATE ${BOTS_N1FFI_LIBRARY})
             if(APPLE)
                 target_link_libraries(rexgpu-native PRIVATE "-framework CoreFoundation" "-framework Security" iconv)
+            elseif(WIN32)
+                # What rustc reports for the staticlib (--print native-static-libs). Its /defaultlib:msvcrt is the
+                # dynamic CRT, the same as this build's default (/MD), so the two agree.
+                target_link_libraries(rexgpu-native PRIVATE kernel32 ntdll userenv ws2_32 dbghelp)
             elseif(UNIX)
                 target_link_libraries(rexgpu-native PRIVATE dl pthread m)
             endif()
