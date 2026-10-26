@@ -58,6 +58,7 @@ extern "C" void __imp__sub_82BB1E78(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_82BAD738(PPCContext& __restrict ctx, uint8_t* base);  // FSceneRenderer::InitViews
 extern "C" void sub_82BB1958(PPCContext& __restrict ctx, uint8_t* base);  // per visible primitive: LastRenderTime
 extern "C" void sub_8231FA50(PPCContext& __restrict ctx, uint8_t* base);  // D3D: make ring space, returns ring ptr
+extern "C" void __imp__sub_82D3E358(PPCContext& __restrict ctx, uint8_t* base);  // GetQueryResult(q, out, bWait)
 
 namespace bots::hybrid {
 namespace {
@@ -268,6 +269,8 @@ std::string CameraJson(const HybridCamera& c) {
 std::mutex g_fifo_mutex;
 std::deque<uint32_t> g_fifo;  // seqs of view families with a scene, not yet rendered
 thread_local uint32_t t_render_seq = 0;
+thread_local bool t_suppressed_visibility = false;  // inside mode 2's InitViews
+std::atomic<uint64_t> g_queries_answered{0};
 
 struct Stats {
   uint64_t families = 0, scene_families = 0, renders = 0, suppressed = 0, markers = 0, by_site[4] = {};
@@ -290,11 +293,12 @@ void Report(std::chrono::steady_clock::time_point now) {
   const HybridState& st = g_state;
   REXLOG_INFO(
       "hybrid: {:.1f} s, suppress {}, fill {}: {:.1f} fps (view families), render thread CPU {:.2f} ms/frame, "
-      "FSceneRenderer::Render {:.2f} ms/frame ({} run, {} skipped, visibility {:.2f} ms/frame), game thread CPU {:.2f} ms/frame; sites "
+      "FSceneRenderer::Render {:.2f} ms/frame ({} run, {} skipped, visibility {:.2f} ms/frame, {} queries answered), game thread CPU {:.2f} ms/frame; sites "
       "{}/{}/{}/{}, markers {} written {} seen {} filled",
       secs, g_suppress.load(), st.fill.load(), double(s.families) / secs,
       s.rt_frames ? s.rt_cpu_ms / double(s.rt_frames) : 0.0, s.renders ? s.render_ms / double(s.renders) : 0.0,
-      s.renders, s.suppressed, s.suppressed ? s.visibility_ms / double(s.suppressed) : 0.0, s.gt_frames ? s.gt_cpu_ms / double(s.gt_frames) : 0.0, s.by_site[0], s.by_site[1],
+      s.renders, s.suppressed, s.suppressed ? s.visibility_ms / double(s.suppressed) : 0.0,
+      g_queries_answered.exchange(0), s.gt_frames ? s.gt_cpu_ms / double(s.gt_frames) : 0.0, s.by_site[0], s.by_site[1],
       s.by_site[2], s.by_site[3], s.markers, st.markers_seen.load(), st.fills_drawn.load());
   g_stats = {};
   g_report = now;
@@ -431,6 +435,19 @@ extern "C" void sub_82BB3128(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_82BB3128(ctx, base);
 }
 
+// UE3 GetQueryResult(q, out, bWait): InitViews reads the occlusion queries the previous frame's drawing issued. With the
+// drawing suppressed nothing issues them, so bWait = 1 waits forever (mode 2 hung on the first level load). Inside a
+// suppressed InitViews, answer "visible" at once; the host renderer will own occlusion.
+extern "C" void sub_82D3E358(PPCContext& __restrict ctx, uint8_t* base) {
+  if (t_suppressed_visibility) {
+    if (Readable(ctx.r4.u32)) Store(base, ctx.r4.u32, 4096);
+    g_queries_answered.fetch_add(1, std::memory_order_relaxed);
+    ctx.r3.u64 = 1;
+    return;
+  }
+  __imp__sub_82D3E358(ctx, base);
+}
+
 // FSceneRenderer::Render(), render thread.
 extern "C" void sub_82BB1E78(PPCContext& __restrict ctx, uint8_t* base) {
   if (const int suppress = g_suppress.load(std::memory_order_relaxed)) {
@@ -444,7 +461,9 @@ extern "C" void sub_82BB1E78(PPCContext& __restrict ctx, uint8_t* base) {
       const auto start = std::chrono::steady_clock::now();
       const uint32_t renderer = ctx.r3.u32;
       PPCContext saved = ctx;
+      t_suppressed_visibility = true;
       sub_82BAD738(ctx, base);
+      t_suppressed_visibility = false;
       ctx = saved;
       ctx.r3.u64 = renderer;
       sub_82BB1958(ctx, base);
