@@ -533,6 +533,22 @@ uint32_t PropU32(uint32_t object, const char* name, uint32_t fallback = 0) {
   const Field f = Prop(object, name);
   return f.ok() ? U32(object + f.offset) : fallback;
 }
+// Prop() for a per-frame call site that nearly always sees one class: a one-entry cache in front of the map (which
+// hashes the name string on every call). Declare the site static next to the call.
+struct PropSite {
+  uint32_t cls = 0;
+  bool set = false;
+  Field field;
+};
+Field Prop(PropSite& site, uint32_t object, const char* name) {
+  const uint32_t cls = U32(object + 0x34);
+  if (!site.set || site.cls != cls) site.field = Prop(object, name), site.cls = cls, site.set = true;
+  return site.field;
+}
+uint32_t PropU32(PropSite& site, uint32_t object, const char* name) {
+  const Field f = Prop(site, object, name);
+  return f.ok() ? U32(object + f.offset) : 0;
+}
 bool PropBool(uint32_t object, const char* name) {
   const Field f = Prop(object, name);
   return f.ok() && (U32(object + f.offset) & f.mask);
@@ -1981,7 +1997,8 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam) {
       if (!IsObject(lod)) continue;
       const uint32_t material = U32(inst + kEmitMaterial);
       LiveEmitter& le = st.emitters[lod];
-      const uint32_t type_data0 = PropU32(lod, "TypeDataModule");
+      static PropSite type_data_site;
+      const uint32_t type_data0 = PropU32(type_data_site, lod, "TypeDataModule");
       if (le.name != U32(lod + 0x2C) || le.outer != U32(lod + 0x28) || le.material != material ||
           le.type_data != type_data0) {
         le = {};
@@ -2191,7 +2208,8 @@ void Live(uint8_t* base) {
       if (g_off.actor_hidden.ok()) hidden |= (U32(owner + g_off.actor_hidden.offset) & g_off.actor_hidden.mask) != 0;
     }
     if (hidden) continue;
-    const uint32_t tree = PropU32(c, "SpeedTree");
+    static PropSite tree_site;
+    const uint32_t tree = PropU32(tree_site, c, "SpeedTree");
     if (!Readable(tree)) continue;
     LiveTree& lt = st.trees[c];
     if (lt.tree != tree || !lt.component_path) {
@@ -2206,7 +2224,8 @@ void Live(uint8_t* base) {
     t.asset = lt.asset_path;
     t.rotation[0] = t.rotation[1] = t.rotation[2] = 0;
     if (Readable(owner)) {
-      const Field rot = Prop(owner, "Rotation");
+      static PropSite rotation_site;
+      const Field rot = Prop(rotation_site, owner, "Rotation");
       if (rot.ok())
         for (int i = 0; i < 3; ++i) t.rotation[i] = int32_t(U32(owner + rot.offset + 4 * i));
     }
