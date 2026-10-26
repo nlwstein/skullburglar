@@ -353,7 +353,9 @@ class Renderer : public Pm4Sink {
   void GpuMark(GpuCat cat, bool force = false);
   void GpuLabel(GpuCat cat, std::string label);  // a forced mark whose span is reported under its label
   std::unordered_map<std::string, std::pair<uint64_t, uint64_t>> gpu_labels_;  // ns, spans
-  static constexpr uint32_t kMaxGpuMarks = 16384;
+  // Metal counter sample buffers hold at most 32 KB (4096 timestamps); a larger pool makes MoltenVK fall back to
+  // emulated timestamps, which read as zero.
+  static constexpr uint32_t kMaxGpuMarks = 4096;
   bool gpu_timing_ = false;
   uint8_t gpu_cat_ = 0xFF;
   double timestamp_ns_ = 1.0;
