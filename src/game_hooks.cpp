@@ -44,6 +44,10 @@
 #include "mnk_input.h"
 #include "prompt_state.h"
 
+namespace bots::hybrid {
+bool Command(const std::string& cmd);  // hybrid.cpp
+}
+
 extern "C" void __imp__sub_82E1AC28(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_823598E0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_823501E0(PPCContext& __restrict ctx, uint8_t* base);
@@ -2508,6 +2512,7 @@ bool Command(uint8_t* base, const std::string& cmd) {
   }
   if (cmd == "renderdiff") return render_diff = true;
   if (cmd == "gfxcapture") return bots::gfx::RequestCapture(), true;
+  if (cmd.rfind("hybrid ", 0) == 0) return bots::hybrid::Command(cmd);
   // "mkexec <function>": flag a function of the local players' controller or pawn classes exec (UFunction +0x94
   // FunctionFlags, FUNC_Exec 0x200) so tests can run it from the console, e.g. "p2:GotoStateReviving".
   if (cmd.rfind("mkexec ", 0) == 0) {

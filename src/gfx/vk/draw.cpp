@@ -1363,6 +1363,7 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     return;
   }
 
+  if (scene_fill_seq_ && pass.color[0]) DrawSceneFill(*pass.color[0]);
   profile.Mark(kPhasePass);
   // Render pass: kept open across draws to the same targets, and reopened when a draw samples something written
   // since the last barrier (reopening the same attachments then always barriers: they count as written). An

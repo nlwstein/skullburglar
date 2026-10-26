@@ -30,6 +30,7 @@
 #include <rex/ui/vulkan/presenter.h>
 #include <rex/ui/vulkan/provider.h>
 
+#include "../hybrid_state.h"
 #include "host_stats.h"
 #include "pm4.h"
 #include "upk.h"
@@ -430,6 +431,13 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   }
 
   void WriteRegister(uint32_t index, uint32_t value) override {
+    if (index == bots::kHybridMarkerRegister) {  // hybrid spike: the game's scene was skipped here (hybrid_state.h)
+      if (bots::HybridState* state = bots::FindHybridState()) {
+        state->markers_seen.fetch_add(1, std::memory_order_relaxed);
+        if (renderer_) renderer_->QueueSceneFill(value);
+      }
+      return;
+    }
     CommandProcessor::WriteRegister(index, value);
     constant_writes_.Note(index);
   }

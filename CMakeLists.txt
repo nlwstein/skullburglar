@@ -48,6 +48,7 @@ set(BOTS_SOURCES
     src/aim_assist.cpp
     src/mnk_input.cpp
     src/motion_blur.cpp
+    src/hybrid.cpp
     src/widescreen.cpp
     src/gfx/d3d_hooks.cpp
     src/gfx/capture.cpp
@@ -161,6 +162,7 @@ if(REXSDK_DIR AND (NOT WIN32 OR REXGLUE_USE_VULKAN))
         src/gfx/vk/shaders.cpp
         src/gfx/vk/texture.cpp
         src/gfx/vk/transfer.cpp
+        src/gfx/vk/hybrid_fill.cpp
         ${REX_GRAPHICS_SRC}/register_file.cpp
         ${REX_GRAPHICS_SRC}/registers.cpp
         # Xenos microcode -> SPIR-V

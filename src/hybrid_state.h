@@ -1,0 +1,77 @@
+// Hybrid renderer research spike: state shared between the game's hooks (src/hybrid.cpp) and the native renderer
+// plugin (src/gfx/), which has no access to the game's symbols.
+//
+// The game owns the one instance and publishes its address in the process environment (BOTS_HYBRID_STATE, hex)
+// during static initialization, before any plugin loads (as prompt_state.h does).
+//
+// Per frame: the game thread writes the frame's camera (from UE3's FSceneView) into cameras[seq % kCameras] and
+// bumps `published`. When the 3D scene is suppressed, the guest render thread writes a marker into the GPU command
+// stream at the point the scene would have been drawn: a type-0 write of `seq` to register kMarkerRegister. The
+// native command processor sees it in stream order and has the renderer draw the host scene for that camera into the
+// back buffer before the HUD's draws, which follow in the same stream.
+#pragma once
+
+#include <atomic>
+#include <cstdint>
+#include <cstdlib>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
+namespace bots {
+
+// UE3's camera for one frame, as the scene renderer would have used it. Matrices are UE3 FMatrix as stored: 16 floats,
+// row-major, row vectors (v' = v * M, translation in row 3); world space is UE3's (left-handed, Z up, cm).
+struct HybridCamera {
+  float view[16];
+  float proj[16];
+  float view_proj[16];
+  float inv_view_proj[16];
+  float location[3];      // view origin (world)
+  float fov;              // horizontal, degrees (from the projection)
+  int32_t rotation[3];    // pitch, yaw, roll in UE3 units (65536 = 360 degrees), from the view matrix
+  float rect[4];          // view X, Y, SizeX, SizeY in back-buffer pixels
+  float time;             // ViewFamily CurrentWorldTime
+  uint32_t seq;
+};
+
+struct HybridState {
+  static constexpr uint32_t kCameras = 64;
+  // What the renderer does at a marker: 0 nothing (the back buffer keeps whatever it held), 1 clear to a test colour,
+  // 2 a world-space test grid drawn with the frame's camera.
+  std::atomic<uint32_t> fill{0};
+  std::atomic<uint32_t> published{0};  // seq of the newest camera
+  std::atomic<uint64_t> markers_seen{0}, fills_drawn{0};  // renderer side, for the log
+  HybridCamera cameras[kCameras] = {};
+};
+
+// The register the marker writes: unknown to the Xenos register table (no side effects in the SDK's command
+// processor) and never written by the D3D runtime.
+inline constexpr uint32_t kHybridMarkerRegister = 0x0030;
+
+inline constexpr const char* kHybridStateEnv = "BOTS_HYBRID_STATE";
+
+// The game's instance, or null (another host, e.g. bots-replay). Looked up once.
+inline HybridState* FindHybridState() {
+  static HybridState* state = [] {
+    char value[32] = {};
+#ifdef _WIN32
+    if (!GetEnvironmentVariableA(kHybridStateEnv, value, sizeof(value))) return static_cast<HybridState*>(nullptr);
+#else
+    const char* v = std::getenv(kHybridStateEnv);
+    if (!v) return static_cast<HybridState*>(nullptr);
+    for (size_t i = 0; v[i] && i + 1 < sizeof(value); ++i) value[i] = v[i];
+#endif
+    return reinterpret_cast<HybridState*>(uintptr_t(std::strtoull(value, nullptr, 16)));
+  }();
+  return state;
+}
+
+}  // namespace bots

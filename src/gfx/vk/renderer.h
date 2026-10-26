@@ -68,6 +68,9 @@ class Renderer : public Pm4Sink {
 
   void OnDraw(const rex::graphics::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
               const Draw& draw) override;
+  // Hybrid spike (hybrid_fill.cpp): the game's scene was suppressed at this point of the stream for camera `seq`;
+  // the next colour draw first gets a host-drawn stand-in scene.
+  void QueueSceneFill(uint32_t seq);
 
   // Submits everything recorded so far and waits for it.
   // Submits what's recorded without waiting (up to kSubmissions in flight). Finish also waits for the GPU:
@@ -448,6 +451,13 @@ class Renderer : public Pm4Sink {
   bool InitPresent();
   void Transfer(Image& source, uint32_t source_format, Image& dest, uint32_t dest_format,
                 const VkRect2D* rect = nullptr, float scale = 1.0f);
+  // Hybrid spike (hybrid_fill.cpp): draws the queued stand-in scene into `target`; false if there was none to draw.
+  bool DrawSceneFill(Image& target);
+  void DestroySceneFill();
+  uint32_t scene_fill_seq_ = 0;
+  VkPipelineLayout fill_layout_ = VK_NULL_HANDLE;
+  std::vector<VkShaderModule> fill_modules_;
+  std::map<std::pair<uint32_t, VkFormat>, VkPipeline> fill_pipelines_;
 
   // Textures (texture.cpp). TextureView may record an upload, so call it before a draw's ring reservation.
   // Views for the translator's unsigned or signed binding of a fetch: formats with both signednesses get a view of
