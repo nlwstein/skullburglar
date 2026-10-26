@@ -22,6 +22,8 @@
 #include <rex/logging.h>
 
 #include "renderer.h"
+#include "draw_dump.h"
+#include <string>
 
 namespace bots::gfx::vk {
 namespace {
@@ -1502,6 +1504,12 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
                   samples_x * samples_y > 1 ? " ss4" : "");
     GpuLabel(kGpuDraw, label);
   }
+  if (drawdump::Active())
+    drawdump::Record(&regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_000_X], vshader->ucode_data_hash(),
+                     pshader ? pshader->ucode_data_hash() : 0, open_area_.width, open_area_.height,
+                     (std::ranges::none_of(attachments.color, std::identity{}) ? 1u : 0u) |
+                         (samples_x * samples_y > 1 ? 2u : 0u) | (rect ? 4u : 0u) | (indexed ? 8u : 0u),
+                     uint32_t(prim), host_count);
   if (indexed) vk_.vkCmdBindIndexBuffer(cmd_, ring_.buffer, index_offset, index_type);
   BeginDrawQuery();
   if (indexed) {
@@ -1532,3 +1540,79 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
 }
 
 }  // namespace bots::gfx::vk
+
+// Scene-feed draw dump (draw_dump.h).
+namespace bots::gfx::drawdump {
+namespace {
+struct DumpState {
+  std::string dir = [] {
+    const char* v = std::getenv("BOTS_SCENEFEED_DIR");
+    return std::string(v ? v : "");
+  }();
+  FILE* file = nullptr;
+  int frames_left = 0;
+  uint32_t draw = 0;
+  std::chrono::steady_clock::time_point next_check{};
+};
+DumpState& State() {
+  static DumpState st;
+  return st;
+}
+int64_t NowUs() {
+  return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+void Open(DumpState& st) {
+  const int64_t now = NowUs();
+  st.file = std::fopen((st.dir + "/draws_" + std::to_string(now) + ".bin").c_str(), "wb");
+  if (!st.file) return;
+  const uint32_t version = 1;
+  std::fwrite("DFR1", 1, 4, st.file);
+  std::fwrite(&version, 4, 1, st.file);
+  std::fwrite(&now, 8, 1, st.file);
+  st.draw = 0;
+}
+}  // namespace
+
+bool Active() { return State().file != nullptr; }
+
+void Record(const uint32_t* vs_constants, uint64_t vs, uint64_t ps, uint32_t width, uint32_t height, uint32_t flags,
+            uint32_t prim, uint32_t count) {
+  DumpState& st = State();
+  if (!st.file) return;
+  const uint32_t head[] = {0x31575244u /* "DRW1" */, st.draw++};
+  const uint32_t tail[] = {width, height, flags, prim, count, 0};
+  std::fwrite(head, 4, 2, st.file);
+  std::fwrite(&vs, 8, 1, st.file);
+  std::fwrite(&ps, 8, 1, st.file);
+  std::fwrite(tail, 4, 6, st.file);
+  std::fwrite(vs_constants, 4, 1024, st.file);
+}
+
+void OnPresent() {
+  DumpState& st = State();
+  if (st.dir.empty()) return;
+  if (st.file) {
+    std::fclose(st.file);
+    st.file = nullptr;
+    if (--st.frames_left > 0) Open(st);
+    else REXLOG_INFO("scenefeed: draw dump finished");
+    return;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (now < st.next_check) return;
+  st.next_check = now + std::chrono::milliseconds(250);
+  const std::string req = st.dir + "/draws.req";
+  if (FILE* f = std::fopen(req.c_str(), "rb")) {
+    int n = 0;
+    if (std::fscanf(f, "%d", &n) != 1) n = 0;
+    std::fclose(f);
+    std::remove(req.c_str());
+    if (n > 0) {
+      st.frames_left = n;
+      Open(st);
+      REXLOG_INFO("scenefeed: dumping the next {} frames of draws to {}", n, st.dir);
+    }
+  }
+}
+}  // namespace bots::gfx::drawdump

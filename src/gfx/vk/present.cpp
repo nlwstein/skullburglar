@@ -7,6 +7,7 @@
 #include <rex/logging.h>
 
 #include "renderer.h"
+#include "draw_dump.h"
 
 namespace bots::gfx::vk {
 namespace {
@@ -188,6 +189,7 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
                            0, 0, nullptr, 0, nullptr, 1, &barrier);
   Flush();
   ++stats_.presents;
+  drawdump::OnPresent();
   return true;
 }
 
