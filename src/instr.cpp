@@ -74,6 +74,7 @@
 #include <thread>
 #include <vector>
 
+#include <rex/cvar.h>
 #include <rex/input/input_driver.h>
 #include <rex/logging.h>
 #include <rex/system/interfaces/graphics.h>
@@ -1020,15 +1021,19 @@ PrecompileInfo Precompile() {
     return v && std::atoi(v) == 4;
   }();
   const bool port = g.port_warm_done || (g_state.warm_loaded && p.port_done >= p.port_total);
+  // The native renderer publishes nothing before its first frame, so its 0/0 then means "not started".
+  static const bool native = rex::cvar::GetFlagByName("gpu_plugin") == "native";
   if (g_state.frames > 0) p.done = !p.hold && port && (!n1_expected || g.n1_warm_done || p.n1_state == 2);
-  else
+  else if (!native)
     p.done = g.ticks > 0 && (p.gfx_total == 0 || p.gfx_done >= p.gfx_total);
   return p;
 }
 
 // What the game is doing, most specific first.
 std::string ComputePhase(const Snap& s, const PrecompileInfo& pc, uint64_t now, std::string* dialog) {
-  const uint64_t ticks = g.ticks, tick_age = now - g.last_tick_us, hud_age = now - g.last_hud_us;
+  // The game thread can stamp a tick after `now` was read: clamp, or the unsigned age wraps and reads as a hang.
+  const auto age = [now](uint64_t at) { return at > now ? uint64_t(0) : now - at; };
+  const uint64_t ticks = g.ticks, tick_age = age(g.last_tick_us), hud_age = age(g.last_hud_us);
   if (pc.hold) return "precompile";
   if (!ticks || (!g_state.frames && !s.has_pc && s.scenes.empty())) return "boot";
   if (g.in_browse) return "loading";
@@ -1134,8 +1139,8 @@ std::string BuildStatus(bool window, std::map<std::string, std::string>* flat) {
     std::lock_guard tl(g.text_mutex);
     j.Obj("game")
         .Int("ticks", int64_t(g.ticks))
-        .Num("tick_age_ms", g.ticks ? double(now - g.last_tick_us) / 1000 : -1, "%.0f")
-        .Num("hud_age_ms", g.last_hud_us ? double(now - g.last_hud_us) / 1000 : -1, "%.0f")
+        .Num("tick_age_ms", g.ticks ? double(now - std::min<uint64_t>(now, g.last_tick_us)) / 1000 : -1, "%.0f")
+        .Num("hud_age_ms", g.last_hud_us ? double(now - std::min<uint64_t>(now, g.last_hud_us)) / 1000 : -1, "%.0f")
         .Str("map", s.map)
         .Str("game", s.game_class)
         .Num("world_time", s.world_time, "%.2f")
