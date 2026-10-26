@@ -108,8 +108,9 @@ class Renderer : public Pm4Sink {
     refs_dirs_ = std::move(refs_dirs), refs_reader_ = std::move(reader);
   }
   // Warm-up progress: pipelines recorded in the manifest, and how many of them are created (ready or failed).
-  size_t warmup_total() const { return warm_.size(); }
-  size_t warmup_done() const { return warm_done_; }
+  // Includes the n1 renderer's startup step (hybrid_fill.cpp) while it runs.
+  size_t warmup_total() const { return warm_.size() + n1_warm_total_; }
+  size_t warmup_done() const { return warm_done_ + n1_warm_done_; }
   // Warm-up outcome so far: pipelines built, and finished without one: the driver failed it, a shader missing from
   // the manifest and refs, a translation failed, or no pipeline layout.
   struct WarmupResult {
@@ -463,11 +464,15 @@ class Renderer : public Pm4Sink {
   std::map<std::pair<uint32_t, VkFormat>, VkPipeline> fill_pipelines_;
   // Fill 4: the n1 renderer's host state (hybrid_fill.cpp), or null.
   bool DrawSceneN1(Image& target, const bots::HybridCamera& cam, const VkRect2D& area);
+  void* EnsureN1(VkFormat format);
+  void PumpN1Warmup();
   void* n1_host_ = nullptr;
   // Dual render (BOTS_HYBRID_DUAL, parity harness): the port's scene stays, n1 draws the same frame offscreen and
   // both are read back on request (hybrid_fill.cpp).
   bool DrawSceneDual(Image& target, const bots::HybridCamera& cam, const VkRect2D& area);
   void* dual_ = nullptr;
+  size_t n1_warm_total_ = 0, n1_warm_done_ = 0;
+  bool n1_warm_started_ = false;
 
   // Textures (texture.cpp). TextureView may record an upload, so call it before a draw's ring reservation.
   // Views for the translator's unsigned or signed binding of a fetch: formats with both signednesses get a view of

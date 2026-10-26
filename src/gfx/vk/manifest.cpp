@@ -323,6 +323,7 @@ void Renderer::RecordPipeline(const PipelineKey& key) {
 // From EndFrame (the GPU thread): starts warm-up pipelines while the background queue is short, and builds the ones
 // whose translations have finished. Translations and pipelines both run on the workers behind live work.
 void Renderer::PumpWarmup() {
+  PumpN1Warmup();
   if (warm_done_ >= warm_.size() || !shaders_) return;
   Workers* workers = shaders_->workers();
   if (!workers) return;
