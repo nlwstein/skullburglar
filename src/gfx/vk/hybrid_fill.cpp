@@ -339,6 +339,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   }
   target.Use(uint32_t(t.x) + t.w, uint32_t(t.y) + t.h);
   host->frames++, host->draws += st.draws, host->triangles += st.triangles, host->last = st;
+  ++n1_drawn_, n1_scene_frame_ = host->scene.frame, n1_marker_seq_ = cam.seq, n1_view_seq_ = view_cam->seq;
   host->host_ms += std::chrono::duration<double, std::milli>(t2 - t0).count();
   host->record_ms += std::chrono::duration<double, std::milli>(t2 - t1).count();
   {
@@ -679,6 +680,7 @@ void Renderer::PumpN1Warmup() {}
 #endif
 
 void Renderer::DestroySceneFill() {
+  DestroyBurst();
 #ifdef BOTS_N1FFI
   if (auto* d = static_cast<DualState*>(dual_)) {
     for (auto& p : d->pending)  // after Finish: never written

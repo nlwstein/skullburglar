@@ -471,6 +471,14 @@ class Renderer : public Pm4Sink {
   // both are read back on request (hybrid_fill.cpp).
   bool DrawSceneDual(Image& target, const bots::HybridCamera& cam, const VkRect2D& area);
   void* dual_ = nullptr;
+  // BOTS_CAPTURE_BURST (present.cpp): consecutive presented frames to disk; nothing runs while it is unset.
+  void CaptureBurst(const Image& source);
+  void DestroyBurst();
+  void* burst_ = nullptr;
+  // Fill 4 bookkeeping for the burst sidecar: frames n1 drew, the last marker's camera, the camera n1 drew with and
+  // the scene it drew.
+  uint64_t n1_drawn_ = 0, n1_scene_frame_ = 0;
+  uint32_t n1_marker_seq_ = 0, n1_view_seq_ = 0;
   size_t n1_warm_total_ = 0, n1_warm_done_ = 0;
   bool n1_warm_started_ = false;
 
