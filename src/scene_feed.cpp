@@ -60,12 +60,15 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <rex/logging.h>
+#include <rex/ppc/context.h>
 
 #include "hybrid_state.h"
 
@@ -1251,8 +1254,27 @@ struct LiveState {
   std::unordered_map<uint32_t, LiveComponent> components;
   std::unordered_map<std::string, std::unique_ptr<char[]>> strings;
   HybridScene building;
+  // Tracking (BOTS_N1_TRACK, default on): the lists come from the FScene::Add* hooks plus a slow sliced walk, not from
+  // a whole-table walk every few frames. `known` holds every component on one of the lists.
+  bool track = [] {
+    const char* v = std::getenv("BOTS_N1_TRACK");
+    return !(v && v[0] == '0');
+  }();
+  uint32_t slice = [] {  // the sliced walk covers the table in this many frames
+    const char* v = std::getenv("BOTS_N1_TRACK_SLICES");
+    return uint32_t(v && *v ? std::max(1, std::atoi(v)) : 64);
+  }();
+  bool tracking = false;  // the first full walk has run
+  uint32_t walk_pos = 0;
+  std::unordered_set<uint32_t> known;
+  std::vector<uint32_t> lights, fog;
 };
 LiveState g_live;
+
+// Components the game added to a scene (FScene::AddPrimitive / AddLight / AddHeightFog / AddFogVolume, hooked below)
+// since the feed last looked. Filled on the game thread; the mutex only guards against an add from another thread.
+std::mutex g_added_mutex;
+std::vector<uint32_t> g_added;
 
 const char* Intern(const std::string& v) {
   if (v.empty()) return nullptr;
@@ -1650,6 +1672,131 @@ bool BeyondDrawDistance(uint32_t c, const Camera& cam) {
   return dx * dx + dy * dy + dz * dz > limit * limit;
 }
 
+// Tracking: keep the primitive, light and fog lists without walking the whole object table (about 110k objects,
+// 3-4 ms on a laptop CPU) every few frames. A component enters the lists when the game adds it to a scene (the hooks at
+// the end of this file) or when a slow walk of 1/BOTS_N1_TRACK_SLICES of the table per frame finds it attached (a
+// safety net for anything attached another way, such as a light that is attached while disabled). Every entry is
+// checked every frame exactly as before (still readable, same class kind, still attached) and dropped when it fails,
+// so a detached or freed component leaves the lists on the next frame. The lists are kept in object-table order (by
+// UObject Index), the order the full walk produced. The first frame does one full walk.
+bool TrackAdd(LiveState& st, uint32_t o) {
+  if (!IsObject(o) || st.known.count(o)) return false;
+  const ClassInfo& ci = Classify(U32(o + 0x34));
+  if (ci.extra != Extra::kNone) {
+    if (!Attached(o)) return false;
+    (ci.extra == Extra::kLight ? st.lights : st.fog).push_back(o);
+  } else if (ci.kind == Kind::kStatic || ci.kind == Kind::kSkeletal || (ci.kind == Kind::kParticle && st.particles) ||
+             (ci.kind == Kind::kSpeedTree && st.trees_on)) {
+    if (!g_off.scene_info.ok() || !U32(o + g_off.scene_info.offset)) return false;
+    (ci.kind == Kind::kParticle    ? st.particle_prims
+     : ci.kind == Kind::kSpeedTree ? st.tree_prims
+                                   : st.prims)
+        .push_back({o, ci.kind});
+  } else {
+    return false;
+  }
+  st.known.insert(o);
+  return true;
+}
+
+void Track(LiveState& st) {
+  bool added = false;
+  if (!st.tracking) {
+    Times unused;
+    std::vector<Primitive> all;
+    Enumerate(all, unused);
+    if (!g_objects) return;
+    st.tracking = true;
+    st.prims.clear(), st.particle_prims.clear(), st.tree_prims.clear(), st.lights.clear(), st.fog.clear();
+    st.known.clear();
+    for (uint32_t o : g_extras.lights) added |= TrackAdd(st, o);
+    for (uint32_t o : g_extras.fog) added |= TrackAdd(st, o);
+    for (const Primitive& p : all) added |= TrackAdd(st, p.component);
+    std::lock_guard lock(g_added_mutex);
+    g_added.clear();
+  }
+  // Drop what was detached, freed or reused since the last frame.
+  auto gone = [&st](const Primitive& p) {
+    const bool g = !Readable(p.component) || Classify(U32(p.component + 0x34)).kind != p.kind ||
+                   !U32(p.component + g_off.scene_info.offset);
+    if (g) st.known.erase(p.component);
+    return g;
+  };
+  std::erase_if(st.prims, gone);
+  std::erase_if(st.particle_prims, gone);
+  std::erase_if(st.tree_prims, gone);
+  auto gone_extra = [&st](uint32_t o) {
+    const bool g = !IsObject(o) || Classify(U32(o + 0x34)).extra == Extra::kNone || !Attached(o);
+    if (g) st.known.erase(o);
+    return g;
+  };
+  std::erase_if(st.lights, gone_extra);
+  std::erase_if(st.fog, gone_extra);
+  // What the game added since the last frame.
+  {
+    std::vector<uint32_t> fresh;
+    {
+      std::lock_guard lock(g_added_mutex);
+      fresh.swap(g_added);
+    }
+    for (uint32_t o : fresh) added |= TrackAdd(st, o);
+  }
+  // The safety-net slice.
+  if (FindObjectTable()) {
+    const uint32_t data = U32(g_objects), count = U32(g_objects + 4);
+    const uint32_t n = count / st.slice + 1;
+    if (st.walk_pos >= count) st.walk_pos = 0;
+    const uint32_t end = std::min(count, st.walk_pos + n);
+    uint32_t found = 0;
+    for (uint32_t i = st.walk_pos; i < end; ++i) {
+      const uint32_t o = U32(data + 4 * i);
+      if (o && !st.known.count(o) && TrackAdd(st, o)) ++found;
+    }
+    st.walk_pos = end;
+    if (found) {
+      added = true;
+      static uint32_t logged = 0;
+      if (logged++ < 20) REXLOG_INFO("scenefeed: the tracking walk found {} component(s) no hook reported", found);
+    }
+  }
+  if (added) {
+    auto by_index = [](const Primitive& a, const Primitive& b) { return U32(a.component + 4) < U32(b.component + 4); };
+    auto by_index_u = [](uint32_t a, uint32_t b) { return U32(a + 4) < U32(b + 4); };
+    std::sort(st.prims.begin(), st.prims.end(), by_index);
+    std::sort(st.particle_prims.begin(), st.particle_prims.end(), by_index);
+    std::sort(st.tree_prims.begin(), st.tree_prims.end(), by_index);
+    std::sort(st.lights.begin(), st.lights.end(), by_index_u);
+    std::sort(st.fog.begin(), st.fog.end(), by_index_u);
+  }
+  // BOTS_N1_TRACK_CHECK=<n>: every n frames compare the lists with a full walk and log the differences (testing).
+  static const uint32_t check = [] {
+    const char* v = std::getenv("BOTS_N1_TRACK_CHECK");
+    return uint32_t(v && *v ? std::max(0, std::atoi(v)) : 0);
+  }();
+  static uint32_t check_age = 0;
+  if (check && ++check_age >= check) {
+    check_age = 0;
+    Times unused;
+    std::vector<Primitive> all;
+    Enumerate(all, unused);  // also refills g_extras from the walk
+    std::unordered_set<uint32_t> want;
+    for (const Primitive& p : all)
+      if (p.kind == Kind::kStatic || p.kind == Kind::kSkeletal || (p.kind == Kind::kParticle && st.particles) ||
+          (p.kind == Kind::kSpeedTree && st.trees_on))
+        want.insert(p.component);
+    for (uint32_t o : g_extras.lights) want.insert(o);
+    for (uint32_t o : g_extras.fog) want.insert(o);
+    uint32_t missing = 0, extra = 0;
+    for (uint32_t o : want) missing += !st.known.count(o);
+    for (uint32_t o : st.known) extra += !want.count(o);
+    REXLOG_INFO("scenefeed: tracking check: {} tracked, {} in a full walk, {} missing, {} extra", st.known.size(),
+                want.size(), missing, extra);
+  }
+  // LightsPostJson reads g_extras.
+  g_extras.lights = st.lights;
+  g_extras.fog = st.fog;
+}
+
 void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam) {
   static Field instances;
   constexpr uint32_t kMaxRows = 24576;  // particles per frame; the renderer applies its own (lower) cap
@@ -1740,7 +1887,9 @@ void Live(uint8_t* base) {
   if (rt == st.last_real_time) return;
   st.last_real_time = rt;
   const auto t0 = std::chrono::steady_clock::now();
-  if (++st.age >= st.rescan) {
+  if (st.track) {
+    Track(st);
+  } else if (++st.age >= st.rescan) {
     Times unused;
     Enumerate(st.prims, unused);
     st.particle_prims.clear();
@@ -1939,3 +2088,34 @@ void Live(uint8_t* base) {
 }
 
 }  // namespace bots::scenefeed
+
+// FScene's add functions (this build; FScene vtable at 0x82096920, found from the render commands each one enqueues,
+// whose DescribeCommand returns the names below). Each is called on the game thread with the component as r4; the
+// hook calls the original and then records the component for Track(). Nothing in the game's behaviour changes.
+//   sub_827834D0  FScene::AddPrimitive(UPrimitiveComponent*)        FAddPrimitiveCommand
+//   sub_827836F8  FScene::AddLight(ULightComponent*)                FAddLightCommand
+//   sub_8277D9D0  FScene::AddHeightFog(UHeightFogComponent*)        FAddFogCommand
+//   sub_82783918  FScene::AddFogVolume(UFogVolumeDensityComponent*, UPrimitiveComponent*)   FAddFogVolumeCommand
+extern "C" {
+void __imp__sub_827834D0(PPCContext& __restrict ctx, uint8_t* base);
+void __imp__sub_827836F8(PPCContext& __restrict ctx, uint8_t* base);
+void __imp__sub_8277D9D0(PPCContext& __restrict ctx, uint8_t* base);
+void __imp__sub_82783918(PPCContext& __restrict ctx, uint8_t* base);
+}
+namespace {
+void Added(uint32_t component) {
+  std::lock_guard lock(bots::scenefeed::g_added_mutex);
+  if (bots::scenefeed::g_added.size() < (1u << 20)) bots::scenefeed::g_added.push_back(component);
+}
+}  // namespace
+#define BOTS_SCENE_ADD_HOOK(addr)                                       \
+  extern "C" void sub_##addr(PPCContext& __restrict ctx, uint8_t* base) { \
+    const uint32_t component = ctx.r4.u32;                              \
+    __imp__sub_##addr(ctx, base);                                       \
+    Added(component);                                                   \
+  }
+BOTS_SCENE_ADD_HOOK(827834D0)
+BOTS_SCENE_ADD_HOOK(827836F8)
+BOTS_SCENE_ADD_HOOK(8277D9D0)
+BOTS_SCENE_ADD_HOOK(82783918)
+#undef BOTS_SCENE_ADD_HOOK

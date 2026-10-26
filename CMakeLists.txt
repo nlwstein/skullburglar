@@ -49,6 +49,7 @@ set(BOTS_SOURCES
     src/mnk_input.cpp
     src/motion_blur.cpp
     src/hybrid.cpp
+    src/idle_backoff.cpp
     src/scene_feed.cpp
     src/widescreen.cpp
     src/gfx/d3d_hooks.cpp
@@ -84,7 +85,7 @@ else()
 endif()
 
 if(WIN32)
-    list(APPEND BOTS_SOURCES src/crash_win.cpp)
+    list(APPEND BOTS_SOURCES src/crash_win.cpp src/cpu_sampler_win.cpp src/display_awake_win.cpp)
     add_executable(bots WIN32 ${BOTS_SOURCES})
 elseif(ANDROID)
     # SDL's Java activity (tools/android) loads the game as libmain.so and calls its SDL_main.
@@ -95,6 +96,16 @@ else()
 endif()
 
 rexglue_setup_target(bots GPU_PLUGINS xenos)
+# Experiments with the recompiled code's flags (-O3, LTO, PGO, memory-access modes) without rebuilding the SDK:
+#   -DBOTS_RECOMP_EXTRA_OPTIONS="-DREX_MEM_PLAIN;-O3"  -DBOTS_EXTRA_LINK_OPTIONS="-flto=thin"
+set(BOTS_RECOMP_EXTRA_OPTIONS "" CACHE STRING "Extra compile options for the recompiled guest code (; separated)")
+set(BOTS_EXTRA_LINK_OPTIONS "" CACHE STRING "Extra link options for the game executable (; separated)")
+if(TARGET bots_recomp AND BOTS_RECOMP_EXTRA_OPTIONS)
+    target_compile_options(bots_recomp PRIVATE ${BOTS_RECOMP_EXTRA_OPTIONS})
+endif()
+if(BOTS_EXTRA_LINK_OPTIONS)
+    target_link_options(bots PRIVATE ${BOTS_EXTRA_LINK_OPTIONS})
+endif()
 if(CMAKE_SYSTEM_NAME MATCHES "^(iOS|tvOS)$")
     target_link_libraries(bots PRIVATE "-framework UIKit" "-framework GameController" "-framework Network" "-framework CoreImage"
         "-framework UniformTypeIdentifiers")
