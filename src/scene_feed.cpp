@@ -1435,7 +1435,7 @@ void FogBin(HybridFog& fog) {
       cl.Bytes(f, L[1], c);
     }
     const float k = FieldF(f, L[2], 1.f);
-    for (int i = 0; i < 3; ++i) fog.color[i] = (c[i] / 255.f) * k;
+    for (int i = 0; i < 3; ++i) fog.color[i] = (c[i] / 255.f) * k, fog.light_color[i] = c[i] / 255.f;
     fog.density = FieldF(f, L[3], 0.f), fog.height = FieldF(f, L[4], 0.f), fog.start = FieldF(f, L[5], 0.f);
     fog.extinction = FieldF(f, L[6], 1e8f);
     return;
@@ -1460,7 +1460,7 @@ void Triple(uint32_t base, const FieldEx& prop, float out[3]) {
   }
 }
 
-enum : uint32_t { kPfUber = 1, kPfGod = 2, kPfLsBloom = 4, kPfLsBalance = 8, kPfLsScene = 16, kPfLsTone = 32, kPfLast = 64 };
+enum : uint32_t { kPfUber = 1, kPfGod = 2, kPfLsBloom = 4, kPfLsBalance = 8, kPfLsScene = 16, kPfLsTone = 32, kPfLast = 64, kPfUberDiffKernel = 128 };
 
 // The player's post chain and blended settings (LightsPostJson's `post`), as raw numbers.
 void PostBin(HybridLighting& out) {
@@ -1473,6 +1473,7 @@ void PostBin(HybridLighting& out) {
   for (float& v : p.balance) v = 255.f;
   for (int i = 0; i < 3; ++i) p.shadows[i] = p.midtones[i] = p.highlights[i] = nan;
   for (float& v : p.god) v = nan;
+  for (float& v : p.uber_dof) v = nan;
   p.present = 1;
   out.post_material = nullptr;
   const uint32_t engine = Engine();
@@ -1491,6 +1492,10 @@ void PostBin(HybridLighting& out) {
         p.flags |= kPfUber;
         p.uber_bloom_scale = FieldF(e, FindEx(cls, "BloomScale"), nan);
         p.uber_bloom_threshold = FieldF(e, FindEx(cls, "BloomThreshold"), nan);
+        const char* dof[7] = {"BloomKernelSize", "BlurKernelSize",    "FalloffExponent", "MaxNearBlurAmount",
+                              "MaxFarBlurAmount", "FocusInnerRadius", "FocusDistance"};
+        for (int k = 0; k < 7; ++k) p.uber_dof[k] = FieldF(e, FindEx(cls, dof[k]), nan);
+        if (FieldB(e, FindEx(cls, "UseDifferentKernelForBloom"))) p.flags |= kPfUberDiffKernel;
       } else if (name == "MaterialEffect") {
         const FieldEx m = FindEx(cls, "Material");
         const uint32_t mat = m.ok() ? U32(e + m.offset) : 0;

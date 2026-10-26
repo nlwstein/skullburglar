@@ -61,20 +61,22 @@ struct HybridLight {  // 80 bytes
   float lower[3];     // LowerColor / 255 * LowerBrightness
   int32_t sh;         // index of its 27 floats (R, G, B x 9) in HybridLighting::sh, or -1
 };
-struct HybridFog {  // 32 bytes
+struct HybridFog {  // 44 bytes
   uint32_t present;
   float color[3];
+  float light_color[3];  // raw LightColor / 255, no brightness
   float density, height, start, extinction;
 };
-struct HybridPost {  // 152 bytes; NaN = property absent
+struct HybridPost {  // 180 bytes; NaN = property absent
   uint32_t present, flags, material_effect;
   float uber_bloom_scale, uber_bloom_threshold, ls_bloom_scale, ls_bloom_threshold;
   float balance[9];
   float desaturation, shadows[3], midtones[3], highlights[3];
   float tone_min, tone_max, tone_scale;
   float god[9];
+  float uber_dof[7];  // BloomKernelSize, BlurKernelSize, FalloffExponent, MaxNear/FarBlurAmount, FocusInnerRadius, FocusDistance
 };
-static_assert(sizeof(HybridLight) == 80 && sizeof(HybridFog) == 32 && sizeof(HybridPost) == 152);
+static_assert(sizeof(HybridLight) == 80 && sizeof(HybridFog) == 44 && sizeof(HybridPost) == 180);
 struct HybridLighting {
   bool has_fog_post = false;  // this update carries fog and post (sent only when they change)
   std::vector<HybridLight> lights;
