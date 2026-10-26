@@ -23,6 +23,9 @@
 
 #include "renderer.h"
 #include "draw_dump.h"
+#ifdef BOTS_N1FFI
+#include <n1ffi.h>
+#endif
 #include <string>
 
 namespace bots::gfx::vk {
@@ -685,23 +688,31 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     ++stats_.draws;
     return;
   }
-  // BOTS_DUMP_DRAW=<n> prints the microcode of draw n (numbered as in the draw trace) - debugging.
-  static const long long dump_draw = [] {
+  // BOTS_DUMP_DRAW=<n> or <first>:<last> prints the microcode and the non-zero vertex and pixel shader constants of
+  // those draws (numbered as in the draw trace) - debugging.
+  static const std::pair<long long, long long> dump_draw = [] {
     const char* v = std::getenv("BOTS_DUMP_DRAW");
-    return v ? std::atoll(v) : -1;
+    if (!v) return std::pair<long long, long long>{-1, -1};
+    const long long a = std::atoll(v);
+    const char* c = std::strchr(v, ':');
+    return std::pair<long long, long long>{a, c ? std::atoll(c + 1) : a};
   }();
-  if (dump_draw == (long long)stats_.draws + 1) {
-    std::fprintf(stderr, "--- draw %lld vertex shader %08X\n%s", dump_draw, vs.address,
+  if ((long long)stats_.draws + 1 >= dump_draw.first && (long long)stats_.draws + 1 <= dump_draw.second) {
+    std::fprintf(stderr, "--- draw %lld vertex shader %08X\n%s", (long long)stats_.draws + 1, vs.address,
                  vshader->ucode_disassembly().c_str());
-    if (pshader) {
-      std::fprintf(stderr, "--- pixel shader %08X\n%s", ps.address, pshader->ucode_disassembly().c_str());
+    const auto consts = [&](uint32_t base, const char* tag) {
       for (uint32_t c = 0; c < 256; ++c) {
-        const uint32_t* v = &regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_256_X + 4 * c];
+        const uint32_t* v = &regs.values[base + 4 * c];
         if (!(v[0] | v[1] | v[2] | v[3])) continue;
         float f[4];
         std::memcpy(f, v, sizeof(f));
-        std::fprintf(stderr, "  c%u = %g %g %g %g\n", c, f[0], f[1], f[2], f[3]);
+        std::fprintf(stderr, "  %s%u = %g %g %g %g\n", tag, c, f[0], f[1], f[2], f[3]);
       }
+    };
+    consts(rg::XE_GPU_REG_SHADER_CONSTANT_000_X, "vc");
+    if (pshader) {
+      std::fprintf(stderr, "--- pixel shader %08X\n%s", ps.address, pshader->ucode_disassembly().c_str());
+      consts(rg::XE_GPU_REG_SHADER_CONSTANT_256_X, "c");
     }
   }
   const reg::RB_DEPTHCONTROL depth_control = du::GetNormalizedDepthControl(regs);
@@ -1505,6 +1516,55 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
                   samples_x * samples_y > 1 ? " ss4" : "");
     GpuLabel(kGpuDraw, label);
   }
+#ifdef BOTS_N1FFI
+  if (n1_tree_active_ && n1_tree_r_ && pshader && dma && !std::ranges::none_of(attachments.color, std::identity{})) {
+    auto* nr = static_cast<N1Renderer*>(n1_tree_r_);
+    const float* consts = reinterpret_cast<const float*>(&regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
+    const uint64_t vs_hash = vshader->ucode_data_hash();
+    const uint32_t want = n1_tree_probe(nr, vs_hash, consts, count);
+    if (want & 2) n1_tree_ucode(nr, vs_hash, vshader->ucode_disassembly().c_str());
+    if (want & 1) {
+      N1TreeDraw td{};
+      td.vs_hash = vs_hash;
+      td.consts = consts;
+      uint32_t k = 0;
+      for (const auto& binding : vshader->vertex_bindings()) {
+        const auto fetch = regs.GetVertexFetch(binding.fetch_constant);
+        if (fetch.type != xe::FetchConstantType::kVertex || k >= 4) continue;
+        td.stream_addr[k] = fetch.address << 2;
+        td.stream[k] = memory_(td.stream_addr[k]);
+        td.stream_bytes[k] = fetch.size * 4;
+        td.stream_stride[k] = binding.stride_words * 4;
+        td.fetch_consts |= (binding.fetch_constant & 0xFF) << (8 * k);
+        ++k;
+      }
+      td.stream_count = k;
+      std::vector<uint32_t> idx(count);
+      const uint8_t* isrc = memory_(draw.index_base);
+      if (isrc && td.stream[0]) {
+        for (uint32_t i = 0; i < count; ++i) {
+          if (index32) {
+            uint32_t v;
+            std::memcpy(&v, isrc + i * 4, 4);
+            idx[i] = xe::GpuSwap(v, index_endian);
+          } else {
+            uint16_t h;
+            std::memcpy(&h, isrc + i * 2, 2);
+            idx[i] = xe::GpuSwap(h, index_endian);
+          }
+        }
+        td.indices = idx.data();
+        td.index_count = count;
+        td.index_offset = regs.values[rg::XE_GPU_REG_VGT_INDX_OFFSET];
+        for (const auto& b : pshader->GetTextureBindingsAfterTranslation()) {
+          if (td.tex_count >= 4) break;
+          td.tex_base[td.tex_count++] = regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + 6 * b.fetch_constant + 1];
+        }
+        n1_tree_capture(nr, &td);
+      }
+    }
+  }
+#endif
   if (drawdump::Active()) {
     std::vector<drawdump::Stream> streams;
     for (const auto& binding : vshader->vertex_bindings()) {

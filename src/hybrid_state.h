@@ -47,6 +47,52 @@ struct HybridCamera {
 // Fill 4 (n1, hybrid_fill.cpp): the static meshes UE3 has attached to its scene, read from the live engine objects
 // on the game thread (scene_feed.cpp) and drawn by an external renderer library. Assets are named by UE3 path; the
 // strings are interned by the game and never freed, so the renderer may key its caches on the pointers.
+// B-188: the lighting feed as fixed-layout binary records (no JSON). The layouts are the same as lightfeed::bin in the
+// renderer and N1Feed* in n1ffi.h (sizes asserted on both sides); the game fills them straight from guest memory.
+inline constexpr uint32_t kHybridNone = 0xFFFFFFFFu;
+struct HybridLight {  // 80 bytes
+  uint32_t kind;      // 0 point, 1 spot, 2 directional, 3 spherical harmonic, 4 sky
+  uint32_t flags;     // 1 enabled, 2 baked, 4 casts dynamic shadows, 8 lights static, 16 lights dynamic
+  uint32_t env;       // index in HybridLighting::paths (the owner's DynamicLightEnvironmentComponent) or kHybridNone
+  float radius, falloff, inner_deg, outer_deg;
+  float pos[3];       // LightToWorld translation (UE3 axes)
+  float axis[3];      // LightToWorld Z row
+  float color[3];     // LightColor / 255 * Brightness
+  float lower[3];     // LowerColor / 255 * LowerBrightness
+  int32_t sh;         // index of its 27 floats (R, G, B x 9) in HybridLighting::sh, or -1
+};
+struct HybridFog {  // 44 bytes
+  uint32_t present;
+  float color[3];
+  float light_color[3];  // raw LightColor / 255, no brightness
+  float density, height, start, extinction;
+};
+struct HybridPost {  // 180 bytes; NaN = property absent
+  uint32_t present, flags, material_effect;
+  float uber_bloom_scale, uber_bloom_threshold, ls_bloom_scale, ls_bloom_threshold;
+  float balance[9];
+  float desaturation, shadows[3], midtones[3], highlights[3];
+  float tone_min, tone_max, tone_scale;
+  float god[9];
+  float uber_dof[7];  // BloomKernelSize, BlurKernelSize, FalloffExponent, MaxNear/FarBlurAmount, FocusInnerRadius, FocusDistance
+};
+static_assert(sizeof(HybridLight) == 80 && sizeof(HybridFog) == 44 && sizeof(HybridPost) == 180);
+struct HybridLighting {
+  bool has_fog_post = false;  // this update carries fog and post (sent only when they change)
+  std::vector<HybridLight> lights;
+  std::vector<float> sh;
+  std::vector<const char*> paths;  // interned, stable
+  HybridFog fog = {};
+  HybridPost post = {};
+  const char* post_material = nullptr;  // the post chain's material effect (interned), not in `paths`
+  void Clear() {
+    has_fog_post = false;
+    lights.clear();
+    sh.clear();
+    paths.clear();
+  }
+};
+
 struct HybridScene {
   struct Instance {
     float transform[16];  // LocalToWorld, UE3 FMatrix as stored
@@ -76,19 +122,37 @@ struct HybridScene {
     float origin[3];       // emitter location (UE3), for far-to-near ordering
     float transform[16];   // the component's LocalToWorld
   };
+  // One SpeedTree placement (B-187): the component's LocalToWorld (scale and translation; the actor's rotation is
+  // kept separately), the component's path (its baked vertex light), the tree asset's path and the rotation in UE3
+  // units (pitch, yaw, roll).
+  struct Tree {
+    float transform[16];
+    const char* component;
+    const char* asset;
+    int32_t rotation[3];
+  };
+  std::vector<Tree> trees;
   std::vector<Emitter> emitters;
   std::vector<float> particle_rows;
   float particles_ms = 0;  // game-thread cost of reading them
   uint64_t frame = 0;  // game frames counted by the feed; 0: nothing published yet
+  // The newest published camera when the walk ran: the view of the world state the walk read. The marker that draws
+  // this scene can be a frame or more older; a camera riding something fast (a helicopter) then sees that thing
+  // where it will be, not where it is, so n1 draws the scene with this camera instead.
+  uint32_t cam_seq = 0;
   std::vector<Instance> instances;
   std::vector<Skel> skeletal;
   std::vector<float> bones;
   std::vector<const char*> materials;
-  // The frame's lights, fog and post chain as the scene feed's JSON ({"lights":[..],"fog":[..],"post":{..}}, only the
-  // light properties n1 reads; fog and post on every 16th build, absent = unchanged); rebuilt every
-  // BOTS_N1_FEED_EVERY frames, empty when unchanged since the renderer last took it.
+  // The frame's lights, fog and post chain (B-188). `light` is set when the game built a new lighting state that
+  // differs from the last one it published (every BOTS_N1_FEED_EVERY frames at most; fog and post only when they
+  // changed); the renderer takes it (clears `light_pending`) and the game keeps an unconsumed update across frames.
+  // `lighting` is the same data as the scene feed's JSON, built only with BOTS_N1_FEED=json (the pre-B-188 path, kept
+  // for A/B measurement) or BOTS_N1_FEED_VERIFY=1 (the renderer checks both against each other).
+  bool light_pending = false;
+  HybridLighting light;
   std::string lighting;
-  float lighting_ms = 0;  // game-thread cost of building `lighting`
+  float lighting_ms = 0;  // game-thread cost of building the lighting update
   float build_ms = 0;  // game-thread cost of this frame's walk
   uint32_t walked = 0;  // primitives looked at
 };
@@ -100,11 +164,22 @@ struct HybridState {
   // static meshes of `scene` drawn by the external n1 renderer (BOTS_N1_* in hybrid_fill.cpp).
   std::atomic<uint32_t> fill{0};
   std::atomic<uint32_t> published{0};  // seq of the newest camera
+  // B-187: frames the game should draw its own scene for although the port suppresses it (mode 2), so the SpeedTree
+  // capture hook sees the trees' draws. The renderer sets it when a tree asset has no geometry cache yet; Render()
+  // counts it down, and the n1 marker is emitted in those frames so the capture session advances.
+  std::atomic<int> capture_frames{0};
   std::atomic<uint64_t> markers_seen{0}, fills_drawn{0};  // renderer side, for the log
   HybridCamera cameras[kCameras] = {};
   // Fill 4: the newest scene. The game swaps its finished frame in, the renderer swaps it out (both under the lock).
   std::mutex scene_mutex;
   HybridScene scene;
+  // Dual render (BOTS_HYBRID_DUAL=1, parity harness): the game's own scene is drawn as usual, the marker follows it,
+  // and n1 draws the same frame (fill 4's feed and the marker's camera) into an offscreen target of the same size.
+  // Each bump of dual_shots asks the renderer for one pair of pictures (port, n1) named after dual_tag
+  // (console "hybrid dualshot <tag>"); it waits for n1 to finish streaming first (hybrid_fill.cpp).
+  std::atomic<uint32_t> dual{0};
+  std::atomic<uint32_t> dual_shots{0};
+  char dual_tag[96] = {};
 };
 
 // The register the marker writes: unknown to the Xenos register table (no side effects in the SDK's command

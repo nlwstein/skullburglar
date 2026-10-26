@@ -48,6 +48,7 @@
 #include "scene_feed.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cctype>
 #include <chrono>
@@ -175,7 +176,8 @@ struct ClassInfo {
 // Offsets, resolved from the first instance of each class family seen.
 struct Offsets {
   bool primitive = false, mesh = false, static_mesh = false, skeletal = false, particle = false, decal = false;
-  Field scene_info, local_to_world, bounds, hidden_game, last_render_time, owner, materials, static_mesh_ref,
+  Field scene_info, local_to_world, bounds, hidden_game, last_render_time, owner, cull_dist, cached_cull, materials,
+      static_mesh_ref,
       forced_lod, skeletal_mesh_ref, space_bases, predicted_lod, template_ref, decal_material;
   bool actor = false;
   Field actor_hidden;
@@ -213,6 +215,10 @@ const ClassInfo& Classify(uint32_t cls) {
       o.hidden_game = FindProp(cls, "HiddenGame");
       o.last_render_time = FindProp(cls, "LastRenderTime");
       o.owner = FindProp(cls, "Owner");
+      o.cull_dist = FindProp(cls, "CullDistance");
+      o.cached_cull = FindProp(cls, "CachedCullDistance");
+      REXLOG_INFO("scenefeed: PrimitiveComponent CullDistance +{:X} CachedCullDistance +{:X}", o.cull_dist.offset,
+                  o.cached_cull.offset);
       REXLOG_INFO("scenefeed: PrimitiveComponent SceneInfo +{:X} LocalToWorld +{:X} Bounds +{:X} HiddenGame +{:X}/{:08X} "
                   "LastRenderTime +{:X} Owner +{:X}",
                   o.scene_info.offset, o.local_to_world.offset, o.bounds.offset, o.hidden_game.offset,
@@ -786,6 +792,9 @@ void Emitters(std::string& s, uint32_t component) {
   s += "]";
 }
 
+// A material as n1 names it: the first cooked material up its Parent chain, plus the run-time instances' parameters.
+std::string MaterialPath(uint32_t m, bool params = false, bool* runtime = nullptr);
+
 std::string FrameJson(uint32_t frame, const Camera& cam, uint32_t world_info, const std::vector<Primitive>& prims,
                       int64_t host_us) {
   static Field time_seconds, real_time;
@@ -836,7 +845,7 @@ std::string FrameJson(uint32_t frame, const Camera& cam, uint32_t world_info, co
       const uint32_t data = U32(c + g_off.materials.offset), n = U32(c + g_off.materials.offset + 4);
       for (uint32_t i = 0; Readable(data) && i < n && i < 64; ++i) {
         if (i) s += ',';
-        Str(s, Path(U32(data + 4 * i)));
+        Str(s, MaterialPath(U32(data + 4 * i), true));  // as the live feed passes it
       }
     } else if (p.kind == Kind::kDecal && g_off.decal_material.ok()) {
       Str(s, Path(U32(c + g_off.decal_material.offset)));
@@ -1182,7 +1191,9 @@ struct LiveComponent {
   const char* light_path = nullptr;
   uint32_t dle = 0;
   const char* env_path = nullptr;
+  bool runtime = false;  // a material was made at run time (MaterialPath): re-read its parameters every frame
   std::vector<const char*> materials;
+  std::vector<uint64_t> fingerprints;  // per material, when `runtime` (MaterialFingerprint)
 };
 // What an emitter's LOD level says about how to draw it, cached per LOD level (the property reads walk class records).
 struct LiveEmitter {
@@ -1192,9 +1203,21 @@ struct LiveEmitter {
   const char* material_path = nullptr;
   const char* mesh_path = nullptr;
 };
+// A SpeedTreeComponent: the paths the renderer needs, cached until the component's tree changes.
+struct LiveTree {
+  uint32_t tree = 0;
+  const char* component_path = nullptr;
+  const char* asset_path = nullptr;
+};
 struct LiveState {
   std::vector<Primitive> prims;
   std::vector<Primitive> particle_prims;
+  std::vector<Primitive> tree_prims;
+  std::unordered_map<uint32_t, LiveTree> trees;
+  bool trees_on = [] {
+    const char* v = std::getenv("BOTS_N1_TREES");
+    return !(v && !std::strncmp(v, "off", 3));
+  }();
   std::unordered_map<uint32_t, LiveEmitter> emitters;
   bool particles = [] {
     const char* v = std::getenv("BOTS_N1_PARTICLES");
@@ -1211,7 +1234,20 @@ struct LiveState {
   }();
   float last_real_time = -1;
   uint64_t frame = 0;
-  uint32_t lighting_builds = 0;
+  uint32_t lighting_builds = 0, env_stamp = 0;
+  bool json_feed = [] {
+    const char* v = std::getenv("BOTS_N1_FEED");
+    return v && !std::strcmp(v, "json");
+  }();
+  bool verify_feed = [] {
+    const char* v = std::getenv("BOTS_N1_FEED_VERIFY");
+    return v && v[0] == '1';
+  }();
+  HybridLighting next_light, last_light;  // the build in progress; the last state the renderer was given
+  HybridFog last_fog = {};
+  HybridPost last_post = {};
+  const char* last_material = nullptr;
+  bool have_fog_post = false;
   uint32_t feed_every = [] {
     const char* v = std::getenv("BOTS_N1_FEED_EVERY");
     return uint32_t(v && *v ? std::max(0, std::atoi(v)) : 2);
@@ -1257,21 +1293,435 @@ const char* Intern(const std::string& v) {
   return it->second.get();
 }
 
-// A material's path for the renderer. Runtime MaterialInstanceConstants the game makes (weapon pickups, tinted
-// characters) live in the Transient package, which no cooked file holds: walk Parent to the first cooked material.
-std::string MaterialPath(uint32_t m) {
+// Intern a material name. Run-time instances carry their parameters ("<path>?..."), and some change them per use
+// (tracer smoke: a start time and length per shot), so each variant is a new n1 material that is never freed. Cap
+// the variants: past kVariantsPerBase for one cooked material, or kVariantsTotal in all, new ones fall back to the
+// cooked material's own values.
+const char* InternMaterial(const std::string& v) {
+  constexpr size_t kVariantsPerBase = 64, kVariantsTotal = 4096;
+  static std::unordered_map<std::string, size_t> per_base;
+  static size_t total = 0;
+  const size_t q = v.find('?');
+  if (q == std::string::npos || g_live.strings.count(v)) return Intern(v);
+  size_t& n = per_base[v.substr(0, q)];
+  if (n >= kVariantsPerBase || total >= kVariantsTotal) {
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      REXLOG_INFO("scenefeed: material variant cap reached ({}); using cooked values", v);
+    }
+    return Intern(v.substr(0, q));
+  }
+  ++n, ++total;
+  return Intern(v);
+}
+
+// Material instances the game makes at run time: in the Transient package (weapon pickups, tinted characters) or
+// under a level's actors ("<Map>.TheWorld.PersistentLevel.<Actor>.MaterialInstanceConstant_N": tracer smoke,
+// vehicle paint). No cooked file holds them.
+bool RuntimeObject(const std::string& path) {
+  return path.starts_with("Transient.") || path.find(".TheWorld.") != std::string::npos;
+}
+
+// One parameter array of a MaterialInstanceConstant (ScalarParameterValues, VectorParameterValues,
+// TextureParameterValues), appended as "&<kind>:<name>=<value>" unless an outer instance already set that name.
+void InstanceParams(std::string& out, std::vector<uint32_t>& seen, uint32_t mic, const char* array, char kind) {
+  const uint32_t rec = PropRecord(mic, array);
+  if (!rec) return;
+  const uint32_t inner = U32(rec + 0x84);  // UArrayProperty Inner: a StructProperty
+  const uint32_t st = Readable(inner) ? U32(inner + 0x84) : 0;
+  if (!Readable(st)) return;
+  const uint32_t size = U32(inner + 0x48);
+  const Field name = FindProp(st, "ParameterName"), value = FindProp(st, "ParameterValue");
+  if (!name.ok() || !value.ok() || !size || size > 0x200) return;
+  const uint32_t at = mic + U32(rec + 0x64), data = U32(at), n = U32(at + 4);
+  for (uint32_t k = 0; Readable(data) && k < n && k < 32; ++k) {
+    const uint32_t e = data + k * size, nm = U32(e + name.offset);
+    const uint32_t key = (uint32_t(kind) << 24) ^ nm;
+    if (std::find(seen.begin(), seen.end(), key) != seen.end()) continue;
+    seen.push_back(key);
+    fmt::format_to(std::back_inserter(out), "&{}:{}=", kind, NameText(nm));
+    if (kind == 's') {
+      fmt::format_to(std::back_inserter(out), "{:.4g}", F32(e + value.offset));
+    } else if (kind == 'v') {
+      const uint32_t v = e + value.offset;
+      fmt::format_to(std::back_inserter(out), "{:.4g},{:.4g},{:.4g},{:.4g}", F32(v), F32(v + 4), F32(v + 8), F32(v + 12));
+    } else {
+      const uint32_t t = U32(e + value.offset);
+      if (IsObject(t)) out += Path(t);
+    }
+  }
+}
+
+// A material's path for the renderer: the first cooked material up the Parent chain. With `params`, a run-time
+// instance's own parameter values follow after '?' ("<path>?&s:Name=v&v:Name=r,g,b,a&t:Name=<texture>"; n1's
+// matir applies them over the cooked chain), so per-instance looks (paint, tint, fades) survive. `runtime` is set
+// when the material was made at run time, as its parameters can change from frame to frame.
+std::string MaterialPath(uint32_t m, bool params, bool* runtime) {
+  std::string extra;
+  std::vector<uint32_t> seen;
   for (int depth = 0; depth < 8 && IsObject(m); ++depth) {
     std::string p = Path(m);
-    if (!p.starts_with("Transient.")) return p;
+    if (!RuntimeObject(p)) return extra.empty() ? p : p + "?" + extra;
+    if (runtime) *runtime = true;
+    if (params && !std::strcmp(ClassName(m), "MaterialInstanceConstant")) {
+      InstanceParams(extra, seen, m, "ScalarParameterValues", 's');
+      InstanceParams(extra, seen, m, "VectorParameterValues", 'v');
+      InstanceParams(extra, seen, m, "TextureParameterValues", 't');
+    }
     m = PropU32(m, "Parent");
   }
   return {};
+}
+
+// Everything MaterialPath(m, true) reads, hashed without building any strings: each object up the Parent chain (its
+// address, name, outer and class) and, for a MaterialInstanceConstant, the raw bytes of its three parameter arrays
+// (names, values and texture references). Equal fingerprints give the same MaterialPath, so a run-time instance's
+// path is rebuilt only when one of these changed. The property records are looked up once per class. Texture
+// parameters are hashed by address: a texture freed and another loaded at the same address while the instance
+// keeps pointing at it would be missed (BOTS_N1_MIC_CHECK=1 counts any mismatch).
+uint64_t MaterialFingerprint(uint32_t m) {
+  struct Layout {
+    bool mic = false;
+    uint32_t offset[3] = {}, size[3] = {};  // size 0: the class has no such array
+  };
+  static std::unordered_map<uint32_t, Layout> layouts;
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&h](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+  for (int depth = 0; depth < 8 && IsObject(m); ++depth) {
+    const uint32_t cls = U32(m + 0x34);
+    mix(m), mix(U32(m + 0x2C)), mix(U32(m + 0x28)), mix(cls);
+    auto [it, fresh] = layouts.try_emplace(cls);
+    Layout& l = it->second;
+    if (fresh && !std::strcmp(ClassName(m), "MaterialInstanceConstant")) {
+      l.mic = true;
+      const char* arrays[3] = {"ScalarParameterValues", "VectorParameterValues", "TextureParameterValues"};
+      for (int k = 0; k < 3; ++k) {
+        const uint32_t rec = PropRecord(m, arrays[k]);
+        const uint32_t inner = rec ? U32(rec + 0x84) : 0;
+        const uint32_t size = Readable(inner) ? U32(inner + 0x48) : 0;
+        if (size && size <= 0x200) l.offset[k] = U32(rec + 0x64), l.size[k] = size;
+      }
+    }
+    if (l.mic) {
+      for (int k = 0; k < 3; ++k) {
+        if (!l.size[k]) continue;
+        const uint32_t at = m + l.offset[k], data = U32(at), n = std::min<uint32_t>(U32(at + 4), 32);
+        mix(data), mix(n);
+        if (!Readable(data)) continue;
+        const uint8_t* bytes = Raw(data);
+        for (uint32_t i = 0, end = n * l.size[k]; i < end; ++i) h = (h ^ bytes[i]) * 1099511628211ull;
+      }
+    }
+    m = PropU32(m, "Parent");
+  }
+  return h;
+}
+}  // namespace
+
+namespace {
+// B-188: the lighting feed as binary records (hybrid_state.h HybridLighting), read from the same guest objects
+// CompactLightJson / LightsPostJson walk, with the same per-field defaults the renderer applies to a missing JSON
+// property. Property records are looked up once per class.
+struct FieldEx {
+  uint32_t offset = 0xFFFFFFFF, mask = 0, sub = 0;  // sub: the struct class of a struct property, the enum of a byte one
+  bool ok() const { return offset != 0xFFFFFFFF; }
+};
+
+FieldEx FindEx(uint32_t cls, const char* name) {
+  for (int depth = 0; Readable(cls) && depth < 16; cls = U32(cls + 0x3C), ++depth)
+    for (uint32_t f = U32(cls + 0x50), n = 0; Readable(f) && n < 4096; f = U32(f + 0x40), ++n)
+      if (!std::strcmp(NameText(U32(f + 0x2C)), name)) {
+        FieldEx out{U32(f + 0x64), 0, U32(f + kBoolMask)};
+        if (!std::strcmp(ClassName(f), "BoolProperty")) out.mask = out.sub;
+        return out;
+      }
+  return {};
+}
+
+// A member of a struct property: the struct's class is the property's `sub`.
+FieldEx Member(const FieldEx& prop, const char* name) { return prop.ok() ? FindEx(prop.sub, name) : FieldEx{}; }
+
+float FieldF(uint32_t base, const FieldEx& f, float fallback) { return f.ok() ? F32(base + f.offset) : fallback; }
+bool FieldB(uint32_t base, const FieldEx& f) { return f.ok() && (U32(base + f.offset) & f.mask); }
+
+// A Color struct's R, G, B members (bytes).
+struct ColorLayout {
+  FieldEx r, g, b;
+  void Init(const FieldEx& prop) { r = Member(prop, "R"), g = Member(prop, "G"), b = Member(prop, "B"); }
+  void Bytes(uint32_t base, const FieldEx& prop, float out[3]) const {
+    const uint32_t at = base + prop.offset;
+    out[0] = r.ok() ? float(*Raw(at + r.offset)) : 0.f;
+    out[1] = g.ok() ? float(*Raw(at + g.offset)) : 0.f;
+    out[2] = b.ok() ? float(*Raw(at + b.offset)) : 0.f;
+  }
+};
+
+constexpr uint32_t kLfEnabled = 1, kLfBaked = 2, kLfCast = 4, kLfStatic = 8, kLfDynamic = 16;
+
+struct LightLayout {
+  int kind = -1;  // HybridLight::kind, -1: not a class the renderer reads
+  FieldEx l2w, brightness, color, affects, channels, direct, lower_b, lower_c, wsil, env, enabled, radius, falloff,
+      inner, outer, cast, ch_static, ch_dynamic;
+  ColorLayout color_l, lower_l;
+  FieldEx sh_r, sh_g, sh_b, sh_rv, sh_gv, sh_bv;
+};
+
+const LightLayout& LayoutFor(uint32_t light) {
+  static std::unordered_map<uint32_t, LightLayout> layouts;
+  const uint32_t cls = U32(light + 0x34);
+  auto [it, fresh] = layouts.try_emplace(cls);
+  LightLayout& L = it->second;
+  if (!fresh) return L;
+  const std::string_view name = ClassName(light);
+  L.kind = name == "PointLightComponent"                  ? 0
+           : name == "SpotLightComponent"                 ? 1
+           : name == "DirectionalLightComponent"          ? 2
+           : name == "SphericalHarmonicLightComponent"    ? 3
+           : name == "SkyLightComponent"                  ? 4
+                                                          : -1;
+  if (L.kind < 0) return L;
+  L.l2w = FindEx(cls, "LightToWorld"), L.brightness = FindEx(cls, "Brightness"), L.color = FindEx(cls, "LightColor");
+  L.affects = FindEx(cls, "LightAffectsClassification"), L.channels = FindEx(cls, "LightingChannels");
+  L.direct = FindEx(cls, "UseDirectLightMap"), L.lower_b = FindEx(cls, "LowerBrightness");
+  L.lower_c = FindEx(cls, "LowerColor"), L.wsil = FindEx(cls, "WorldSpaceIncidentLighting");
+  L.env = FindEx(cls, "LightEnvironment"), L.enabled = FindEx(cls, "bEnabled"), L.radius = FindEx(cls, "Radius");
+  L.falloff = FindEx(cls, "FalloffExponent"), L.inner = FindEx(cls, "InnerConeAngle");
+  L.outer = FindEx(cls, "OuterConeAngle"), L.cast = FindEx(cls, "CastDynamicShadows");
+  L.ch_static = Member(L.channels, "Static"), L.ch_dynamic = Member(L.channels, "Dynamic");
+  L.color_l.Init(L.color), L.lower_l.Init(L.lower_c);
+  L.sh_r = Member(L.wsil, "R"), L.sh_g = Member(L.wsil, "G"), L.sh_b = Member(L.wsil, "B");
+  L.sh_rv = Member(L.sh_r, "V"), L.sh_gv = Member(L.sh_g, "V"), L.sh_bv = Member(L.sh_b, "V");
+  return L;
+}
+
+// A DynamicLightEnvironmentComponent's path, cached per object (re-read when the slot's name or outer changes).
+struct DleInfo {
+  uint32_t name = 0, outer = 0;
+  const char* path = nullptr;
+  uint32_t stamp = 0, index = 0;
+};
+std::unordered_map<uint32_t, DleInfo> g_dle;
+
+uint32_t EnvIndex(HybridLighting& out, uint32_t dle, uint32_t stamp) {
+  DleInfo& d = g_dle[dle];
+  if (!d.path || d.name != U32(dle + 0x2C) || d.outer != U32(dle + 0x28)) {
+    d.name = U32(dle + 0x2C), d.outer = U32(dle + 0x28);
+    d.path = Intern(Path(dle));
+    d.stamp = 0;
+  }
+  if (d.stamp != stamp) {
+    d.stamp = stamp;
+    d.index = uint32_t(out.paths.size());
+    out.paths.push_back(d.path);
+  }
+  return d.index;
+}
+
+// The renderer's cut of the feed's lights (see LightsPostJson): baked or disabled level point and spot lights are
+// the lightmaps' business and left out.
+void LightsBin(HybridLighting& out, uint32_t stamp) {
+  for (uint32_t l : g_extras.lights) {
+    if (!IsObject(l)) continue;
+    const LightLayout& L = LayoutFor(l);
+    if (L.kind < 0) continue;
+    const uint32_t dle = L.env.ok() ? U32(l + L.env.offset) : 0;
+    const bool has_env = IsObject(dle);
+    const bool baked = FieldB(l, L.direct) || (L.affects.ok() && *Raw(l + L.affects.offset) == 2);
+    if (!has_env && (L.kind == 0 || L.kind == 1) && (!FieldB(l, L.enabled) || baked)) continue;
+    HybridLight& h = out.lights.emplace_back();
+    std::memset(&h, 0, sizeof(h));
+    h.kind = uint32_t(L.kind);
+    h.flags = (FieldB(l, L.enabled) ? kLfEnabled : 0) | (baked ? kLfBaked : 0) | (FieldB(l, L.cast) ? kLfCast : 0) |
+              (!L.channels.ok() || (L.ch_static.ok() && (U32(l + L.channels.offset + L.ch_static.offset) & L.ch_static.mask))
+                   ? kLfStatic
+                   : 0) |
+              (!L.channels.ok() || (L.ch_dynamic.ok() && (U32(l + L.channels.offset + L.ch_dynamic.offset) & L.ch_dynamic.mask))
+                   ? kLfDynamic
+                   : 0);
+    h.env = has_env ? EnvIndex(out, dle, stamp) : kHybridNone;
+    h.radius = FieldF(l, L.radius, 0.f), h.falloff = FieldF(l, L.falloff, 2.f);
+    h.inner_deg = FieldF(l, L.inner, 0.f), h.outer_deg = FieldF(l, L.outer, 44.f);
+    if (L.l2w.ok()) {
+      const uint32_t m = l + L.l2w.offset;
+      for (int k = 0; k < 3; ++k) h.pos[k] = F32(m + 4 * (12 + k)), h.axis[k] = F32(m + 4 * (8 + k));
+    }
+    const float brightness = FieldF(l, L.brightness, 1.f);
+    float c[3] = {0, 0, 0};
+    if (L.color.ok()) L.color_l.Bytes(l, L.color, c);
+    for (int k = 0; k < 3; ++k) h.color[k] = (c[k] / 255.f) * brightness;
+    const float lower_b = FieldF(l, L.lower_b, 0.f);
+    float lc[3] = {0, 0, 0};
+    if (L.lower_c.ok()) L.lower_l.Bytes(l, L.lower_c, lc);
+    for (int k = 0; k < 3; ++k) h.lower[k] = (lc[k] / 255.f) * lower_b;
+    h.sh = -1;
+    if (L.wsil.ok() && L.sh_rv.ok() && L.sh_gv.ok() && L.sh_bv.ok()) {
+      const uint32_t w = l + L.wsil.offset;
+      h.sh = int32_t(out.sh.size() / 27);
+      for (const auto& [m, v] : {std::pair{&L.sh_r, &L.sh_rv}, {&L.sh_g, &L.sh_gv}, {&L.sh_b, &L.sh_bv}})
+        for (int k = 0; k < 9; ++k) out.sh.push_back(F32(w + m->offset + v->offset + 4 * k));
+    }
+  }
+}
+
+void FogBin(HybridFog& fog) {
+  std::memset(&fog, 0, sizeof(fog));
+  for (uint32_t f : g_extras.fog) {
+    if (!IsObject(f) || std::strcmp(ClassName(f), "HeightFogComponent")) continue;
+    const uint32_t cls = U32(f + 0x34);
+    static std::unordered_map<uint32_t, std::array<FieldEx, 7>> layouts;
+    auto [it, fresh] = layouts.try_emplace(cls);
+    auto& L = it->second;
+    if (fresh) {
+      const char* names[7] = {"bEnabled", "LightColor", "LightBrightness", "Density", "Height", "StartDistance",
+                              "ExtinctionDistance"};
+      for (int i = 0; i < 7; ++i) L[i] = FindEx(cls, names[i]);
+    }
+    if (!FieldB(f, L[0])) return;  // the first height fog decides, enabled or not
+    fog.present = 1;
+    float c[3] = {0, 0, 0};
+    if (L[1].ok()) {
+      ColorLayout cl;
+      cl.Init(L[1]);
+      cl.Bytes(f, L[1], c);
+    }
+    const float k = FieldF(f, L[2], 1.f);
+    for (int i = 0; i < 3; ++i) fog.color[i] = (c[i] / 255.f) * k, fog.light_color[i] = c[i] / 255.f;
+    fog.density = FieldF(f, L[3], 0.f), fog.height = FieldF(f, L[4], 0.f), fog.start = FieldF(f, L[5], 0.f);
+    fog.extinction = FieldF(f, L[6], 1e8f);
+    return;
+  }
+}
+
+// Three numbers of a Color (bytes), Vector or LinearColor struct property, as the JSON writes them.
+void Triple(uint32_t base, const FieldEx& prop, float out[3]) {
+  out[0] = out[1] = out[2] = std::nanf("");
+  if (!prop.ok()) return;
+  const std::string_view type = NameText(U32(prop.sub + 0x2C));
+  const uint32_t at = base + prop.offset;
+  if (type == "Color") {
+    const char* m[3] = {"R", "G", "B"};
+    for (int i = 0; i < 3; ++i)
+      if (const FieldEx f = FindEx(prop.sub, m[i]); f.ok()) out[i] = float(*Raw(at + f.offset));
+  } else {
+    const bool vec = type == "Vector";
+    const char* m[3] = {vec ? "X" : "R", vec ? "Y" : "G", vec ? "Z" : "B"};
+    for (int i = 0; i < 3; ++i)
+      if (const FieldEx f = FindEx(prop.sub, m[i]); f.ok()) out[i] = F32(at + f.offset);
+  }
+}
+
+enum : uint32_t { kPfUber = 1, kPfGod = 2, kPfLsBloom = 4, kPfLsBalance = 8, kPfLsScene = 16, kPfLsTone = 32, kPfLast = 64, kPfUberDiffKernel = 128 };
+
+// The player's post chain and blended settings (LightsPostJson's `post`), as raw numbers.
+void PostBin(HybridLighting& out) {
+  HybridPost& p = out.post;
+  std::memset(&p, 0, sizeof(p));
+  const float nan = std::nanf("");
+  p.material_effect = kHybridNone;
+  p.uber_bloom_scale = p.uber_bloom_threshold = p.ls_bloom_scale = p.ls_bloom_threshold = nan;
+  p.desaturation = p.tone_min = p.tone_max = p.tone_scale = nan;
+  for (float& v : p.balance) v = 255.f;
+  for (int i = 0; i < 3; ++i) p.shadows[i] = p.midtones[i] = p.highlights[i] = nan;
+  for (float& v : p.god) v = nan;
+  for (float& v : p.uber_dof) v = nan;
+  p.present = 1;
+  out.post_material = nullptr;
+  const uint32_t engine = Engine();
+  const uint32_t players = IsObject(engine) ? PropRecord(engine, "GamePlayers") : 0;
+  const uint32_t lp = players && U32(engine + U32(players + 0x64) + 4) ? U32(U32(engine + U32(players + 0x64))) : 0;
+  const uint32_t chain = IsObject(lp) ? PropU32(lp, "PlayerPostProcess") : 0;
+  if (IsObject(chain)) {
+    const Field effects = Prop(chain, "Effects");
+    const uint32_t data = effects.ok() ? U32(chain + effects.offset) : 0, n = effects.ok() ? U32(chain + effects.offset + 4) : 0;
+    for (uint32_t i = 0; Readable(data) && i < n && i < 32; ++i) {
+      const uint32_t e = U32(data + 4 * i);
+      if (!IsObject(e)) continue;
+      const uint32_t cls = U32(e + 0x34);
+      const std::string_view name = ClassName(e);
+      if (name == "SfUberPostProcessEffect") {
+        p.flags |= kPfUber;
+        p.uber_bloom_scale = FieldF(e, FindEx(cls, "BloomScale"), nan);
+        p.uber_bloom_threshold = FieldF(e, FindEx(cls, "BloomThreshold"), nan);
+        const char* dof[7] = {"BloomKernelSize", "BlurKernelSize",    "FalloffExponent", "MaxNearBlurAmount",
+                              "MaxFarBlurAmount", "FocusInnerRadius", "FocusDistance"};
+        for (int k = 0; k < 7; ++k) p.uber_dof[k] = FieldF(e, FindEx(cls, dof[k]), nan);
+        if (FieldB(e, FindEx(cls, "UseDifferentKernelForBloom"))) p.flags |= kPfUberDiffKernel;
+      } else if (name == "MaterialEffect") {
+        const FieldEx m = FindEx(cls, "Material");
+        const uint32_t mat = m.ok() ? U32(e + m.offset) : 0;
+        out.post_material = IsObject(mat) ? Intern(Path(mat)) : nullptr;
+      } else if (name == "SfGodRaysEffect") {
+        if (!FieldB(e, FindEx(cls, "Enabled"))) continue;
+        p.flags |= kPfGod;
+        p.god[0] = FieldF(e, FindEx(cls, "Exposure"), nan);
+        p.god[1] = FieldF(e, FindEx(cls, "DecayPerSample"), nan);
+        p.god[2] = FieldF(e, FindEx(cls, "RayMagnitude"), nan);
+        float c[3];
+        Triple(e, FindEx(cls, "ModulateRayColour"), c);
+        for (int k = 0; k < 3; ++k) p.god[3 + k] = std::isnan(c[k]) ? 255.f : c[k];
+        p.god[6] = FieldF(e, FindEx(cls, "vTextureSpaceLightPointX"), nan);
+        p.god[7] = FieldF(e, FindEx(cls, "vTextureSpaceLightPointY"), nan);
+      }
+    }
+  }
+  if (!IsObject(lp)) return;
+  const FieldEx cur = FindEx(U32(lp + 0x34), "CurrentPPInfo");
+  const FieldEx last = Member(cur, "LastSettings");
+  if (!last.ok()) return;
+  const uint32_t s = lp + cur.offset + last.offset, sc = last.sub;
+  p.flags |= kPfLast;
+  if (FieldB(s, FindEx(sc, "bEnableBloom"))) p.flags |= kPfLsBloom;
+  p.ls_bloom_scale = FieldF(s, FindEx(sc, "Bloom_Scale"), nan);
+  p.ls_bloom_threshold = FieldF(s, FindEx(sc, "Bloom_Threshold"), nan);
+  if (FieldB(s, FindEx(sc, "bEnableColourBalanceEffect"))) {
+    p.flags |= kPfLsBalance;
+    const char* names[3] = {"ColourBalance_Shadows", "ColourBalance_Midtones", "ColourBalance_Highlights"};
+    for (int i = 0; i < 3; ++i) {
+      float c[3];
+      Triple(s, FindEx(sc, names[i]), c);
+      for (int k = 0; k < 3; ++k) p.balance[3 * i + k] = std::isnan(c[k]) ? 255.f : c[k];
+    }
+  }
+  if (FieldB(s, FindEx(sc, "bEnableSceneEffect"))) {
+    p.flags |= kPfLsScene;
+    p.desaturation = FieldF(s, FindEx(sc, "Scene_Desaturation"), nan);
+    Triple(s, FindEx(sc, "Scene_Shadows"), p.shadows);
+    Triple(s, FindEx(sc, "Scene_MidTones"), p.midtones);
+    Triple(s, FindEx(sc, "Scene_HighLights"), p.highlights);
+  }
+  if (FieldB(s, FindEx(sc, "bEnableToneMappingEffect"))) p.flags |= kPfLsTone;
+  p.tone_min = FieldF(s, FindEx(sc, "ToneMapping_MinLuminosity"), nan);
+  p.tone_max = FieldF(s, FindEx(sc, "ToneMapping_MaxLuminosity"), nan);
+  p.tone_scale = FieldF(s, FindEx(sc, "ToneMapping_BrightnessScale"), nan);
+}
+
+bool SameLights(const HybridLighting& a, const HybridLighting& b) {
+  return a.lights.size() == b.lights.size() && a.sh == b.sh && a.paths == b.paths &&
+         (a.lights.empty() || !std::memcmp(a.lights.data(), b.lights.data(), a.lights.size() * sizeof(HybridLight)));
 }
 }  // namespace
 
 namespace {
 // The frame's particle emitters: every drawable emitter instance of the attached ParticleSystemComponents, with its
 // live particles copied out of guest memory (see FParticleEmitterInstance above for the layout).
+// UE3 skips a primitive whose bounds centre is farther from the view than its cull distance (CullDistance, or the
+// CachedCullDistance a cull-distance volume gave it; the smaller when both are set; later engines call these
+// MaxDrawDistance), though the game still ticks it: distant fires, props and decals the level designers cut.
+bool BeyondDrawDistance(uint32_t c, const Camera& cam) {
+  if (!cam.ok || !g_off.bounds.ok()) return false;
+  float limit = 0;
+  for (const Field* f : {&g_off.cull_dist, &g_off.cached_cull}) {
+    if (!f->ok()) continue;
+    const float v = F32(c + f->offset);
+    if (v > 0 && std::isfinite(v) && (limit == 0 || v < limit)) limit = v;
+  }
+  if (limit == 0) return false;
+  const uint32_t b = c + g_off.bounds.offset;
+  const float dx = F32(b) - cam.location[0], dy = F32(b + 4) - cam.location[1], dz = F32(b + 8) - cam.location[2];
+  return dx * dx + dy * dy + dz * dz > limit * limit;
+}
+
 // Tracking: keep the primitive, light and fog lists without walking the whole object table (about 110k objects,
 // 3-4 ms on a laptop CPU) every few frames. A component enters the lists when the game adds it to a scene (the hooks at
 // the end of this file) or when a slow walk of 1/BOTS_N1_TRACK_SLICES of the table per frame finds it attached (a
@@ -1285,9 +1735,13 @@ bool TrackAdd(LiveState& st, uint32_t o) {
   if (ci.extra != Extra::kNone) {
     if (!Attached(o)) return false;
     (ci.extra == Extra::kLight ? st.lights : st.fog).push_back(o);
-  } else if (ci.kind == Kind::kStatic || ci.kind == Kind::kSkeletal || (ci.kind == Kind::kParticle && st.particles)) {
+  } else if (ci.kind == Kind::kStatic || ci.kind == Kind::kSkeletal || (ci.kind == Kind::kParticle && st.particles) ||
+             (ci.kind == Kind::kSpeedTree && st.trees_on)) {
     if (!g_off.scene_info.ok() || !U32(o + g_off.scene_info.offset)) return false;
-    (ci.kind == Kind::kParticle ? st.particle_prims : st.prims).push_back({o, ci.kind});
+    (ci.kind == Kind::kParticle    ? st.particle_prims
+     : ci.kind == Kind::kSpeedTree ? st.tree_prims
+                                   : st.prims)
+        .push_back({o, ci.kind});
   } else {
     return false;
   }
@@ -1303,8 +1757,8 @@ void Track(LiveState& st) {
     Enumerate(all, unused);
     if (!g_objects) return;
     st.tracking = true;
-    st.prims.clear(), st.particle_prims.clear(), st.lights.clear(), st.fog.clear(), st.known.clear();
-    st.pending.clear();
+    st.prims.clear(), st.particle_prims.clear(), st.tree_prims.clear(), st.lights.clear(), st.fog.clear();
+    st.known.clear(), st.pending.clear();
     for (uint32_t o : g_extras.lights) added |= TrackAdd(st, o);
     for (uint32_t o : g_extras.fog) added |= TrackAdd(st, o);
     for (const Primitive& p : all) added |= TrackAdd(st, p.component);
@@ -1320,6 +1774,7 @@ void Track(LiveState& st) {
   };
   std::erase_if(st.prims, gone);
   std::erase_if(st.particle_prims, gone);
+  std::erase_if(st.tree_prims, gone);
   auto gone_extra = [&st](uint32_t o) {
     const bool g = !IsObject(o) || Classify(U32(o + 0x34)).extra == Extra::kNone || !Attached(o);
     if (g) st.known.erase(o);
@@ -1403,6 +1858,7 @@ void Track(LiveState& st) {
     auto by_index_u = [](uint32_t a, uint32_t b) { return U32(a + 4) < U32(b + 4); };
     std::sort(st.prims.begin(), st.prims.end(), by_index);
     std::sort(st.particle_prims.begin(), st.particle_prims.end(), by_index);
+    std::sort(st.tree_prims.begin(), st.tree_prims.end(), by_index);
     std::sort(st.lights.begin(), st.lights.end(), by_index_u);
     std::sort(st.fog.begin(), st.fog.end(), by_index_u);
   }
@@ -1419,7 +1875,8 @@ void Track(LiveState& st) {
     Enumerate(all, unused);  // also refills g_extras from the walk
     std::unordered_set<uint32_t> want;
     for (const Primitive& p : all)
-      if (p.kind == Kind::kStatic || p.kind == Kind::kSkeletal || (p.kind == Kind::kParticle && st.particles))
+      if (p.kind == Kind::kStatic || p.kind == Kind::kSkeletal || (p.kind == Kind::kParticle && st.particles) ||
+          (p.kind == Kind::kSpeedTree && st.trees_on))
         want.insert(p.component);
     for (uint32_t o : g_extras.lights) want.insert(o);
     for (uint32_t o : g_extras.fog) want.insert(o);
@@ -1443,7 +1900,7 @@ void Track(LiveState& st) {
   g_extras.fog = st.fog;
 }
 
-void LiveParticles(LiveState& st, HybridScene& out) {
+void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam) {
   static Field instances;
   constexpr uint32_t kMaxRows = 24576;  // particles per frame; the renderer applies its own (lower) cap
   for (const Primitive& p : st.particle_prims) {
@@ -1452,7 +1909,7 @@ void LiveParticles(LiveState& st, HybridScene& out) {
     const uint32_t owner = g_off.owner.ok() ? U32(c + g_off.owner.offset) : 0;
     if (Readable(owner) && g_off.actor_hidden.ok())
       hidden |= (U32(owner + g_off.actor_hidden.offset) & g_off.actor_hidden.mask) != 0;
-    if (hidden) continue;
+    if (hidden || BeyondDrawDistance(c, cam)) continue;
     if (!instances.ok()) instances = FindProp(U32(c + 0x34), "EmitterInstances");
     if (!instances.ok()) return;
     const uint32_t data = U32(c + instances.offset), n = U32(c + instances.offset + 4);
@@ -1539,9 +1996,11 @@ void Live(uint8_t* base) {
     Times unused;
     Enumerate(st.prims, unused);
     st.particle_prims.clear();
-    if (st.particles)
-      for (const Primitive& p : st.prims)
-        if (p.kind == Kind::kParticle) st.particle_prims.push_back(p);
+    st.tree_prims.clear();
+    for (const Primitive& p : st.prims) {
+      if (st.particles && p.kind == Kind::kParticle) st.particle_prims.push_back(p);
+      if (st.trees_on && p.kind == Kind::kSpeedTree) st.tree_prims.push_back(p);
+    }
     std::erase_if(st.prims, [](const Primitive& p) { return p.kind != Kind::kStatic && p.kind != Kind::kSkeletal; });
     st.age = 0;
   } else {
@@ -1551,6 +2010,7 @@ void Live(uint8_t* base) {
     };
     std::erase_if(st.prims, gone);
     std::erase_if(st.particle_prims, gone);
+    std::erase_if(st.tree_prims, gone);
   }
   HybridScene& out = st.building;
   out.instances.clear();
@@ -1573,7 +2033,7 @@ void Live(uint8_t* base) {
       }
       if (g_off.actor_hidden.ok()) hidden |= (U32(owner + g_off.actor_hidden.offset) & g_off.actor_hidden.mask) != 0;
     }
-    if (hidden) continue;
+    if (hidden || BeyondDrawDistance(c, cam)) continue;
     uint32_t mats = 0, mat_count = 0;
     if (g_off.materials.ok()) {
       mats = U32(c + g_off.materials.offset);
@@ -1587,7 +2047,35 @@ void Live(uint8_t* base) {
       lc.mesh_path = Intern(Path(mesh));
       lc.light_path = Intern(Path(c));
       lc.materials.clear();
-      for (uint32_t i = 0; i < mat_count; ++i) lc.materials.push_back(Intern(MaterialPath(U32(mats + 4 * i))));
+      lc.runtime = false;
+      for (uint32_t i = 0; i < mat_count; ++i)
+        lc.materials.push_back(InternMaterial(MaterialPath(U32(mats + 4 * i), true, &lc.runtime)));
+      if (lc.runtime) {
+        lc.fingerprints.resize(mat_count);
+        for (uint32_t i = 0; i < mat_count; ++i) lc.fingerprints[i] = MaterialFingerprint(U32(mats + 4 * i));
+      }
+    } else if (lc.runtime) {  // run-time instances: their parameters (fades, tints) can change every frame
+      // Rebuild a material's path only when what it is built from changed (MaterialFingerprint); building it means
+      // name lookups and string formatting for every parameter, every frame.
+      // BOTS_N1_MIC_CHECK=1 builds the path anyway when the fingerprint says unchanged and counts mismatches (testing).
+      static const bool mic_check = [] {
+        const char* v = std::getenv("BOTS_N1_MIC_CHECK");
+        return v && *v && *v != '0';
+      }();
+      for (uint32_t i = 0; i < mat_count; ++i) {
+        const uint64_t fp = MaterialFingerprint(U32(mats + 4 * i));
+        if (fp == lc.fingerprints[i]) {
+          if (mic_check) {
+            static uint64_t checked = 0, wrong = 0;
+            wrong += InternMaterial(MaterialPath(U32(mats + 4 * i), true)) != lc.materials[i];
+            if (++checked % 20000 == 0)
+              REXLOG_INFO("scenefeed: MIC check: {} unchanged fingerprints, {} paths differed", checked, wrong);
+          }
+          continue;
+        }
+        lc.fingerprints[i] = fp;
+        lc.materials[i] = InternMaterial(MaterialPath(U32(mats + 4 * i), true));
+      }
     }
     // The owner's light environment (characters, movers, pickups): lit by its composite lights in n1.
     const uint32_t dle = PropU32(c, "LightEnvironment");
@@ -1628,29 +2116,101 @@ void Live(uint8_t* base) {
     out.materials.insert(out.materials.end(), lc.materials.begin(), lc.materials.end());
   }
   out.walked = uint32_t(st.prims.size());
+  // SpeedTree placements (B-187): the component's LocalToWorld (scale + translation), its tree asset and the actor's
+  // rotation, which UE3 keeps out of the component transform for SpeedTree.
+  out.trees.clear();
+  for (const Primitive& p : st.tree_prims) {
+    const uint32_t c = p.component;
+    bool hidden = g_off.hidden_game.ok() && (U32(c + g_off.hidden_game.offset) & g_off.hidden_game.mask);
+    const uint32_t owner = g_off.owner.ok() ? U32(c + g_off.owner.offset) : 0;
+    if (Readable(owner)) {
+      if (!g_off.actor) {
+        g_off.actor = true;
+        g_off.actor_hidden = FindProp(U32(owner + 0x34), "bHidden");
+      }
+      if (g_off.actor_hidden.ok()) hidden |= (U32(owner + g_off.actor_hidden.offset) & g_off.actor_hidden.mask) != 0;
+    }
+    if (hidden) continue;
+    const uint32_t tree = PropU32(c, "SpeedTree");
+    if (!Readable(tree)) continue;
+    LiveTree& lt = st.trees[c];
+    if (lt.tree != tree || !lt.component_path) {
+      lt.tree = tree;
+      lt.component_path = Intern(Path(c));
+      lt.asset_path = Intern(Path(tree));
+    }
+    if (!lt.component_path || !lt.asset_path) continue;
+    HybridScene::Tree& t = out.trees.emplace_back();
+    for (int i = 0; i < 16; ++i) t.transform[i] = F32(c + g_off.local_to_world.offset + 4 * i);
+    t.component = lt.component_path;
+    t.asset = lt.asset_path;
+    t.rotation[0] = t.rotation[1] = t.rotation[2] = 0;
+    if (Readable(owner)) {
+      const Field rot = Prop(owner, "Rotation");
+      if (rot.ok())
+        for (int i = 0; i < 3; ++i) t.rotation[i] = int32_t(U32(owner + rot.offset + 4 * i));
+    }
+  }
   out.emitters.clear();
   out.particle_rows.clear();
   out.particles_ms = 0;
   if (st.particles && !st.particle_prims.empty()) {
     const auto tp = std::chrono::steady_clock::now();
-    LiveParticles(st, out);
+    LiveParticles(st, out, cam);
     out.particles_ms = float(Ms(tp, std::chrono::steady_clock::now()));
   }
-  // Lights, fog and post for n1 (properties read live; the component list comes from the last walk).
+  // Lights, fog and post for n1 (properties read live; the component list comes from the last walk). Binary records
+  // (B-188) unless BOTS_N1_FEED=json; both with BOTS_N1_FEED_VERIFY=1.
   out.lighting.clear();
   out.lighting_ms = 0;
+  out.light_pending = false;
   if (st.feed_every && st.frame % st.feed_every == 0) {
     const auto tl = std::chrono::steady_clock::now();
-    out.lighting = "{\"v\":1";
-    LightsPostJson(out.lighting, world_info, true, st.lighting_builds++ % 16 == 0);
-    out.lighting += '}';
+    const bool fp = st.lighting_builds++ % 16 == 0;
+    if (st.json_feed || st.verify_feed) {
+      out.lighting = "{\"v\":1";
+      LightsPostJson(out.lighting, world_info, true, fp);
+      out.lighting += '}';
+    }
+    if (!st.json_feed) {
+      HybridLighting& nl = st.next_light;
+      nl.Clear();
+      LightsBin(nl, ++st.env_stamp);
+      bool post_changed = false;
+      if (fp) {
+        FogBin(nl.fog);
+        PostBin(nl);
+        post_changed = st.verify_feed || !st.have_fog_post || std::memcmp(&nl.fog, &st.last_fog, sizeof(HybridFog)) ||
+                       std::memcmp(&nl.post, &st.last_post, sizeof(HybridPost)) || nl.post_material != st.last_material;
+      }
+      if (st.verify_feed || !SameLights(nl, st.last_light) || post_changed) {
+        nl.has_fog_post = post_changed;
+        if (post_changed) st.last_fog = nl.fog, st.last_post = nl.post, st.last_material = nl.post_material;
+        st.have_fog_post |= post_changed;
+        st.last_light.lights = nl.lights, st.last_light.sh = nl.sh, st.last_light.paths = nl.paths;
+        out.light = nl;
+        out.light_pending = true;
+      }
+    }
     out.lighting_ms = float(Ms(tl, std::chrono::steady_clock::now()));
   }
   out.frame = ++st.frame;
+  out.cam_seq = hs->published.load(std::memory_order_acquire);
   out.build_ms = float(Ms(t0, std::chrono::steady_clock::now()));
   std::lock_guard lock(hs->scene_mutex);
-  // Keep a lighting update the renderer has not taken yet when this frame brings none.
+  // Keep a lighting update the renderer has not taken yet when this frame brings none, and fold an unconsumed fog and
+  // post update into a newer lights-only one.
   if (out.lighting.empty() && !hs->scene.lighting.empty()) std::swap(out.lighting, hs->scene.lighting);
+  if (hs->scene.light_pending) {
+    if (!out.light_pending) {
+      std::swap(out.light, hs->scene.light);
+      out.light_pending = true;
+    } else if (hs->scene.light.has_fog_post && !out.light.has_fog_post && !st.verify_feed) {  // (verify: JSON is not merged)
+      out.light.has_fog_post = true;
+      out.light.fog = hs->scene.light.fog, out.light.post = hs->scene.light.post;
+      out.light.post_material = hs->scene.light.post_material;
+    }
+  }
   std::swap(hs->scene, out);
 }
 
