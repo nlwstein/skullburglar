@@ -405,6 +405,11 @@ struct Hotspot {
   float pos[3] = {};
   std::string actor, kind;
   int count = 0;  // activatable hot spots in the world
+  struct Near {
+    float pos[3], d2;
+    std::string actor, kind;
+  };
+  std::vector<Near> nearest;  // the 4 nearest, nearest first (when one does nothing, try the next)
 };
 
 struct Snap {
@@ -589,13 +594,17 @@ void ReadHotspot(Snap& s) {
     ++h.count;
     const float dx = p[0] - s.pos[0], dy = p[1] - s.pos[1], dz = p[2] - s.pos[2];
     const float d = dx * dx + dy * dy + dz * dz;
+    std::string kind = ObjName(PropObj(o, "SharedMaterialInstance_base"));
+    if (const size_t k = kind.rfind("_MIC"); k != std::string::npos) kind.resize(k);
+    h.nearest.push_back({{p[0], p[1], p[2]}, d, ObjName(o), kind});
     if (h.present && d >= best) continue;
     h.present = true, best = d;
     std::memcpy(h.pos, p, sizeof(p));
     h.actor = ObjName(o);
-    h.kind = ObjName(PropObj(o, "SharedMaterialInstance_base"));
-    if (const size_t k = h.kind.rfind("_MIC"); k != std::string::npos) h.kind.resize(k);
+    h.kind = kind;
   }
+  std::sort(h.nearest.begin(), h.nearest.end(), [](const auto& a, const auto& b) { return a.d2 < b.d2; });
+  if (h.nearest.size() > 4) h.nearest.resize(4);
 }
 
 uint32_t LocalController() {
@@ -1857,7 +1866,16 @@ std::string BuildStatus(bool window, std::map<std::string, std::string>* flat) {
     j.Obj("hotspot").Int("n", h.count).Str("kind", h.kind).Str("actor", h.actor);
     j.Num("x", h.pos[0], "%.0f").Num("y", h.pos[1], "%.0f").Num("z", h.pos[2], "%.0f");
     j.Num("dist", std::sqrt(dx * dx + dy * dy), "%.0f").Num("dz", h.pos[2] - s.pos[2], "%.0f");
-    j.Num("bearing", Wrap180(std::atan2(dy, dx) * 180 / kPi - yaw), "%.1f").End();
+    j.Num("bearing", Wrap180(std::atan2(dy, dx) * 180 / kPi - yaw), "%.1f");
+    std::string near = "[";
+    for (const auto& n : h.nearest) {
+      char buf[160];
+      std::snprintf(buf, sizeof(buf), "%s{\"actor\":\"%s\",\"kind\":\"%s\",\"x\":%.0f,\"y\":%.0f,\"z\":%.0f,\"d\":%.0f}",
+                    near.size() > 1 ? "," : "", Escape(n.actor).c_str(), Escape(n.kind).c_str(), n.pos[0], n.pos[1],
+                    n.pos[2], std::sqrt(n.d2));
+      near += buf;
+    }
+    j.Value("nearest", near + "]").End();
   }
   j.Obj("prompt").Bool("counterkill", s.prompt_counterkill).Bool("tutorial", s.prompt_tutorial).End();
   if (s.cam_ok)
