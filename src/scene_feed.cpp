@@ -192,6 +192,7 @@ Offsets g_off;
 std::unordered_map<uint32_t, ClassInfo> g_classes;
 
 const ClassInfo& ClassifySlow(uint32_t cls);
+const ClassInfo kNotAClass{};  // what ClassifySlow returns for a pointer that is not a live class (never cached)
 // The class map lookup sits on the per-frame walk (every tracked component, every frame, plus the safety-net slice):
 // a small direct-mapped memo in front of it. Map entries never move or go away, so the pointers stay valid.
 const ClassInfo& Classify(uint32_t cls) {
@@ -203,13 +204,19 @@ const ClassInfo& Classify(uint32_t cls) {
   Slot& slot = memo[((cls >> 2) ^ (cls >> 14)) & 4095];
   if (slot.info && slot.cls == cls) return *slot.info;
   const ClassInfo& info = ClassifySlow(cls);
-  slot.cls = cls, slot.info = &info;
+  if (&info != &kNotAClass) slot.cls = cls, slot.info = &info;
   return info;
 }
+
+bool NotAClass(uint32_t cls);
 
 const ClassInfo& ClassifySlow(uint32_t cls) {
   auto it = g_classes.find(cls);
   if (it != g_classes.end()) return it->second;
+  // The per-frame checks read +0x34 of components that may have been freed since the last frame, so <cls> can be
+  // garbage. Only a live UObject is classified (and cached); anything else is "not a component" (a T480 run crashed
+  // in NameText on such a pointer after a chapter load, with tracking off).
+  if (NotAClass(cls)) return kNotAClass;
   ClassInfo info;
   info.name = Readable(cls) ? NameText(U32(cls + 0x2C)) : "None";
   if (ClassChainHas(cls, "LightComponent")) info.extra = Extra::kLight;
@@ -1053,6 +1060,7 @@ bool IsObject(uint32_t p) {
   const uint32_t index = U32(p + 0x04);
   return index < U32(g_objects + 4) && U32(U32(g_objects) + 4 * index) == p;
 }
+bool NotAClass(uint32_t cls) { return g_objects ? !IsObject(cls) : !Readable(cls); }
 
 // Research dump for the native particle structures: every attached ParticleSystemComponent's EmitterInstances,
 // raw (guest memory, big-endian), plus whatever their first 0x200 bytes point at. emitters_<frame>.bin holds
