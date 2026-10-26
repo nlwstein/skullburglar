@@ -105,8 +105,10 @@ struct N1Host {
   bool failed = false;
   uint32_t budget = 8;
   HybridScene scene;  // the newest one taken from the game
-  std::unordered_map<const char*, uint32_t> meshes, materials, lights;
+  std::unordered_map<const char*, uint32_t> meshes, materials, lights, skel_meshes;
   std::vector<N1Instance> instances;
+  std::vector<N1SkelInstance> skeletal;
+  std::vector<uint32_t> skel_materials;
   std::vector<uint32_t> material_handles;
   // Stats since the last log line.
   std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
@@ -181,6 +183,24 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
       host->material_handles.push_back(Handle(host->materials, host->scene.materials[in.mat_offset + i], host->r,
                                               n1_material));
   }
+  // Skinned primitives: bones are passed as published (n1 rebuilds unset ones from the reference pose).
+  host->skeletal.clear();
+  host->skel_materials.clear();
+  for (const HybridScene::Skel& in : host->scene.skeletal) {
+    N1SkelInstance& out = host->skeletal.emplace_back();
+    std::memcpy(out.transform, in.transform, sizeof(out.transform));
+    std::memcpy(out.bounds, in.bounds, sizeof(out.bounds));
+    out.mesh = Handle(host->skel_meshes, in.mesh, host->r, n1_skel_mesh);
+    out.bone_offset = in.bone_offset, out.bone_count = in.bone_count;
+    out.mat_offset = uint32_t(host->skel_materials.size());
+    out.mat_count = in.mat_count;
+    for (uint32_t i = 0; i < in.mat_count; ++i)
+      host->skel_materials.push_back(Handle(host->materials, host->scene.materials[in.mat_offset + i], host->r,
+                                            n1_material));
+  }
+  n1_set_skeletal(host->r, host->skeletal.data(), uint32_t(host->skeletal.size()), host->scene.bones.data(),
+                  uint32_t(host->scene.bones.size()), host->skel_materials.data(),
+                  uint32_t(host->skel_materials.size()));
   N1Camera camera{};
   std::memcpy(camera.view, cam.view, sizeof(camera.view));
   std::memcpy(camera.proj, cam.proj, sizeof(camera.proj));
@@ -228,10 +248,12 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     const double n = double(host->frames);
     REXLOG_INFO("hybrid n1: {:.1f} s, {} frames ({} scenes): {} instances ({} skipped) -> {:.0f} draws, {:.0f}k tris "
                 "per frame; render thread {:.3f} ms/frame ({:.3f} in n1_record), game thread walk {:.3f} ms; meshes "
-                "{} ready {} pending {} missing, {} loading, {} textures ({} unsupported)",
+                "{} ready {} pending {} missing, {} loading, {} textures ({} unsupported); skinned {} drawn {} culled {} "
+                "skipped, {} meshes ready",
                 secs, host->frames, host->scenes, st.instances, st.skipped, host->draws / n, host->triangles / n / 1000,
                 host->host_ms / n, host->record_ms / n, host->build_ms / n, st.meshes_ready, st.meshes_pending,
-                st.meshes_missing, st.loading, st.textures, st.textures_unsupported);
+                st.meshes_missing, st.loading, st.textures, st.textures_unsupported, st.skel_drawn, st.skel_culled,
+                st.skel_skipped, st.skel_meshes_ready);
     host->since = t2, host->frames = host->draws = host->triangles = host->scenes = 0;
     host->host_ms = host->record_ms = host->build_ms = 0;
   }

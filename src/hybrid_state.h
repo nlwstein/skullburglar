@@ -54,8 +54,17 @@ struct HybridScene {
     const char* light;    // the component's path (its baked vertex light), or null
     uint32_t mat_offset, mat_count;  // range in `materials` (Materials overrides; null entries keep the mesh's)
   };
+  struct Skel {
+    float transform[16];  // LocalToWorld
+    const char* mesh;     // SkeletalMesh path
+    uint32_t bone_offset, bone_count;  // range in `bones`, 16 floats each (SpaceBases, component space)
+    uint32_t mat_offset, mat_count;    // range in `materials`
+    float bounds[4];                   // world bounding sphere: centre, radius
+  };
   uint64_t frame = 0;  // game frames counted by the feed; 0: nothing published yet
   std::vector<Instance> instances;
+  std::vector<Skel> skeletal;
+  std::vector<float> bones;
   std::vector<const char*> materials;
   float build_ms = 0;  // game-thread cost of this frame's walk
   uint32_t walked = 0;  // primitives looked at

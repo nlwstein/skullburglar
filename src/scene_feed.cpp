@@ -1122,7 +1122,7 @@ void Tick(uint8_t* base) {
 }
 
 
-// Hybrid fill 4: publish this frame's static meshes to the n1 renderer (hybrid_state.h HybridScene). A cached
+// Hybrid fill 4: publish this frame's static and skeletal meshes to the n1 renderer (hybrid_state.h HybridScene). A cached
 // primitive list, re-walked every BOTS_N1_RESCAN frames (default 16; the walk costs about 1.5 ms), each entry checked
 // every frame as the timing mode does. Paths are interned per component and rebuilt when its mesh or materials change.
 namespace {
@@ -1176,7 +1176,7 @@ void Live(uint8_t* base) {
   if (++st.age >= st.rescan) {
     Times unused;
     Enumerate(st.prims, unused);
-    std::erase_if(st.prims, [](const Primitive& p) { return p.kind != Kind::kStatic; });
+    std::erase_if(st.prims, [](const Primitive& p) { return p.kind != Kind::kStatic && p.kind != Kind::kSkeletal; });
     st.age = 0;
   } else {
     std::erase_if(st.prims, [](const Primitive& p) {
@@ -1186,11 +1186,15 @@ void Live(uint8_t* base) {
   }
   HybridScene& out = st.building;
   out.instances.clear();
+  out.skeletal.clear();
+  out.bones.clear();
   out.materials.clear();
   for (const Primitive& p : st.prims) {
     const uint32_t c = p.component;
-    if (!g_off.static_mesh_ref.ok()) break;
-    const uint32_t mesh = U32(c + g_off.static_mesh_ref.offset);
+    const bool skel = p.kind == Kind::kSkeletal;
+    const Field& ref = skel ? g_off.skeletal_mesh_ref : g_off.static_mesh_ref;
+    if (!ref.ok()) continue;
+    const uint32_t mesh = U32(c + ref.offset);
     if (!Readable(mesh)) continue;
     bool hidden = g_off.hidden_game.ok() && (U32(c + g_off.hidden_game.offset) & g_off.hidden_game.mask);
     const uint32_t owner = g_off.owner.ok() ? U32(c + g_off.owner.offset) : 0;
@@ -1218,6 +1222,30 @@ void Live(uint8_t* base) {
       for (uint32_t i = 0; i < mat_count; ++i) lc.materials.push_back(Intern(Path(U32(mats + 4 * i))));
     }
     if (!lc.mesh_path) continue;
+    if (skel) {  // culled by bounds in n1 (the feed's `rendered` flag flickers)
+      HybridScene::Skel& sk = out.skeletal.emplace_back();
+      for (int i = 0; i < 16; ++i) sk.transform[i] = F32(c + g_off.local_to_world.offset + 4 * i);
+      sk.mesh = lc.mesh_path;
+      sk.bone_offset = uint32_t(out.bones.size() / 16);
+      sk.bone_count = 0;
+      if (g_off.space_bases.ok()) {
+        const uint32_t data = U32(c + g_off.space_bases.offset), n = U32(c + g_off.space_bases.offset + 4);
+        if (Readable(data) && n <= 1024) {
+          for (uint32_t i = 0; i < 16 * n; ++i) out.bones.push_back(F32(data + 4 * i));
+          sk.bone_count = n;
+        }
+      }
+      if (g_off.bounds.ok()) {  // FBoxSphereBounds {Origin, BoxExtent, SphereRadius}
+        const uint32_t b = c + g_off.bounds.offset;
+        sk.bounds[0] = F32(b), sk.bounds[1] = F32(b + 4), sk.bounds[2] = F32(b + 8), sk.bounds[3] = F32(b + 24);
+      } else {
+        sk.bounds[0] = sk.bounds[1] = sk.bounds[2] = 0, sk.bounds[3] = 1e30f;  // never culled
+      }
+      sk.mat_offset = uint32_t(out.materials.size());
+      sk.mat_count = uint32_t(lc.materials.size());
+      out.materials.insert(out.materials.end(), lc.materials.begin(), lc.materials.end());
+      continue;
+    }
     HybridScene::Instance& inst = out.instances.emplace_back();
     for (int i = 0; i < 16; ++i) inst.transform[i] = F32(c + g_off.local_to_world.offset + 4 * i);
     inst.mesh = lc.mesh_path;
