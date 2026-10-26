@@ -138,7 +138,7 @@ struct N1Host {
   std::chrono::steady_clock::time_point last_scene{};
   bool any_scene = false;
   uint32_t packages = 0, holds = 0;
-  double load_ms = 8, hold_s = 30, gap_s = 0.5;
+  double load_ms = 4, hold_s = 30, gap_s = 0.5;
 };
 
 // Folds the load counters' change since the last call into the frame note.
@@ -192,7 +192,7 @@ void* Renderer::EnsureN1(VkFormat format) {
   host = new N1Host;
   n1_host_ = host;
   host->budget = uint32_t(std::atoi(EnvOr("BOTS_N1_BUDGET", "8")));
-  host->load_ms = std::atof(EnvOr("BOTS_N1_LOAD_MS", "8"));
+  host->load_ms = std::atof(EnvOr("BOTS_N1_LOAD_MS", "4"));
   host->hold_s = std::atof(EnvOr("BOTS_N1_PRELOAD_HOLD_S", "30"));
   host->log_seconds = std::atof(EnvOr("BOTS_N1_LOG", "5"));
   N1Init init{};
