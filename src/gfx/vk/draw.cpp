@@ -685,23 +685,31 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     ++stats_.draws;
     return;
   }
-  // BOTS_DUMP_DRAW=<n> prints the microcode of draw n (numbered as in the draw trace) - debugging.
-  static const long long dump_draw = [] {
+  // BOTS_DUMP_DRAW=<n> or <first>:<last> prints the microcode and the non-zero vertex and pixel shader constants of
+  // those draws (numbered as in the draw trace) - debugging.
+  static const std::pair<long long, long long> dump_draw = [] {
     const char* v = std::getenv("BOTS_DUMP_DRAW");
-    return v ? std::atoll(v) : -1;
+    if (!v) return std::pair<long long, long long>{-1, -1};
+    const long long a = std::atoll(v);
+    const char* c = std::strchr(v, ':');
+    return std::pair<long long, long long>{a, c ? std::atoll(c + 1) : a};
   }();
-  if (dump_draw == (long long)stats_.draws + 1) {
-    std::fprintf(stderr, "--- draw %lld vertex shader %08X\n%s", dump_draw, vs.address,
+  if ((long long)stats_.draws + 1 >= dump_draw.first && (long long)stats_.draws + 1 <= dump_draw.second) {
+    std::fprintf(stderr, "--- draw %lld vertex shader %08X\n%s", (long long)stats_.draws + 1, vs.address,
                  vshader->ucode_disassembly().c_str());
-    if (pshader) {
-      std::fprintf(stderr, "--- pixel shader %08X\n%s", ps.address, pshader->ucode_disassembly().c_str());
+    const auto consts = [&](uint32_t base, const char* tag) {
       for (uint32_t c = 0; c < 256; ++c) {
-        const uint32_t* v = &regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_256_X + 4 * c];
+        const uint32_t* v = &regs.values[base + 4 * c];
         if (!(v[0] | v[1] | v[2] | v[3])) continue;
         float f[4];
         std::memcpy(f, v, sizeof(f));
-        std::fprintf(stderr, "  c%u = %g %g %g %g\n", c, f[0], f[1], f[2], f[3]);
+        std::fprintf(stderr, "  %s%u = %g %g %g %g\n", tag, c, f[0], f[1], f[2], f[3]);
       }
+    };
+    consts(rg::XE_GPU_REG_SHADER_CONSTANT_000_X, "vc");
+    if (pshader) {
+      std::fprintf(stderr, "--- pixel shader %08X\n%s", ps.address, pshader->ucode_disassembly().c_str());
+      consts(rg::XE_GPU_REG_SHADER_CONSTANT_256_X, "c");
     }
   }
   const reg::RB_DEPTHCONTROL depth_control = du::GetNormalizedDepthControl(regs);
