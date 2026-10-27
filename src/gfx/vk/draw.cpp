@@ -1368,6 +1368,13 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   bool pending = false;
   const VkPipeline pipeline = GetPipeline(key, sync, pending);
   if (!pipeline) {
+    static int drop_log = [] { const char* v = std::getenv("BOTS_HYBRID_DROP_LOG"); return v ? std::atoi(v) : 0; }();
+    if (scene_fill_seq_ && drop_log > 0) {  // B-210 diagnostics: the draw that would carry the scene has no pipeline
+      --drop_log;
+      REXLOG_INFO("hybrid fill: marker {} waits: draw without a pipeline ({}), target {}x{}", scene_fill_seq_,
+                  pending ? "pending" : "failed", pass.color[0] ? pass.color[0]->width : 0,
+                  pass.color[0] ? pass.color[0]->height : 0);
+    }
     ++(pending ? stats_.pending_draws : stats_.skipped_draws);
     if (!pending) ++stats_.failed_pipeline_draws;
     if (pending && log_skips_) {

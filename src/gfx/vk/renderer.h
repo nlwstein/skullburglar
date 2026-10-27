@@ -158,7 +158,7 @@ class Renderer : public Pm4Sink {
   bool ReadTexture(uint32_t address, std::vector<uint8_t>& rgb, uint32_t& width, uint32_t& height);
 
   struct Stats {
-    uint64_t draws = 0, resolves = 0, clears = 0, skipped_draws = 0, dropped_resolves = 0, msaa_resolves = 0;
+    uint64_t draws = 0, resolves = 0, clears = 0, skipped_draws = 0, dropped_resolves = 0, msaa_resolves = 0, fills_at_resolve = 0;
     uint64_t render_passes = 0, pipelines = 0, failed_shaders = 0, unsupported_primitives = 0;
     uint64_t textures = 0, unsupported_textures = 0, transfers = 0;
     uint64_t uploaded_bytes = 0, invalidations = 0, texture_reloads = 0, texture_evictions = 0;  // live

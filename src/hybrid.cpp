@@ -286,6 +286,12 @@ thread_local uint32_t t_render_seq = 0;
 thread_local bool t_suppressed_visibility = false;  // answer GetQueryResult at once (mode 2 and just after)
 std::atomic<uint64_t> g_queries_answered{0};
 
+// B-210 diagnostics (BOTS_HYBRID_TRACE=<n>): log the next n view families and scene renders (what each did).
+int TraceBudget() {
+  static std::atomic<int> left{[] { const char* v = std::getenv("BOTS_HYBRID_TRACE"); return v ? std::atoi(v) : 0; }()};
+  return left.load(std::memory_order_relaxed) > 0 ? left.fetch_sub(1, std::memory_order_relaxed) : 0;
+}
+
 struct Stats {
   uint64_t families = 0, scene_families = 0, renders = 0, suppressed = 0, markers = 0, by_site[4] = {};
   double render_ms = 0;               // inside FSceneRenderer::Render (wall)
@@ -426,6 +432,9 @@ extern "C" void sub_82BB3230(PPCContext& __restrict ctx, uint8_t* base) {
     REXLOG_INFO("hybrid: view family from site {} (lr {:08X}): {} views, scene {:08X}, show flags {:08X}{:08X}", site,
                 uint32_t(ctx.lr), count, scene, U32(base, family + 0x14), U32(base, family + 0x18));
   }
+  if (TraceBudget() > 0)
+    REXLOG_INFO("hybrid trace: family site {} views {} scene {:08X} published {}", site, count, scene,
+                g_state.published.load(std::memory_order_relaxed));
   if (count && Readable(views)) {
     const uint32_t view = U32(base, views);
     if (Readable(view)) {
@@ -524,6 +533,7 @@ extern "C" void sub_82BB1E78(PPCContext& __restrict ctx, uint8_t* base) {
     }
     bool marker = g_state.fill.load(std::memory_order_relaxed) != 0 && t_render_seq != 0;
     if (marker) EmitMarker(ctx, base, t_render_seq);
+    if (TraceBudget() > 0) REXLOG_INFO("hybrid trace: render suppressed, seq {}, marker {}", t_render_seq, marker);
     std::lock_guard lock(g_stats_mutex);
     ++g_stats.suppressed;
     if (marker) ++g_stats.markers;
@@ -542,6 +552,9 @@ extern "C" void sub_82BB1E78(PPCContext& __restrict ctx, uint8_t* base) {
       (fill_now == 3 || (fill_now == 4 && (capturing || g_state.dual.load(std::memory_order_relaxed)))) &&
       t_render_seq != 0;
   if (marker) EmitMarker(ctx, base, t_render_seq);
+  if (TraceBudget() > 0)
+    REXLOG_INFO("hybrid trace: render by the game (suppress {}, capturing {}), seq {}, marker {}", suppress_now, capturing,
+                t_render_seq, marker);
   std::lock_guard lock(g_stats_mutex);
   g_stats.render_ms += ms, ++g_stats.renders;
   if (marker) ++g_stats.markers;

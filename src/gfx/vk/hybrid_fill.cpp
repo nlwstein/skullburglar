@@ -101,7 +101,15 @@ struct FillConstants {
 
 }  // namespace
 
-void Renderer::QueueSceneFill(uint32_t seq) { scene_fill_seq_ = seq; }
+void Renderer::QueueSceneFill(uint32_t seq) {
+  // B-210 diagnostics (BOTS_HYBRID_DROP_LOG=<n>): a marker replaced before any draw reached it drew no scene.
+  static int drop_log = [] { const char* v = std::getenv("BOTS_HYBRID_DROP_LOG"); return v ? std::atoi(v) : 0; }();
+  if (scene_fill_seq_ && drop_log > 0) {
+    --drop_log;
+    REXLOG_INFO("hybrid fill: marker {} drew no scene: no draw before marker {}", scene_fill_seq_, seq);
+  }
+  scene_fill_seq_ = seq;
+}
 
 #ifdef BOTS_N1FFI
 namespace {
@@ -961,11 +969,29 @@ bool Renderer::DrawSceneFill(Image& target) {
   if (!state) return false;
   const uint32_t mode = state->fill.load(std::memory_order_relaxed);
   const HybridCamera& cam = state->cameras[seq % HybridState::kCameras];
-  if (!mode || cam.seq != seq) return false;  // overwritten: the game ran 64 frames ahead
+  // B-210 diagnostics (BOTS_HYBRID_DROP_LOG=<n>): log the first n markers that draw no scene, and why.
+  static int drop_log = [] { const char* v = std::getenv("BOTS_HYBRID_DROP_LOG"); return v ? std::atoi(v) : 0; }();
+  auto dropped = [&](const char* why) {
+    if (drop_log > 0) {
+      --drop_log;
+      REXLOG_INFO("hybrid fill: marker {} drew no scene: {} (cam seq {}, rect {},{} {}x{}, target {}x{})", seq, why,
+                  cam.seq, cam.rect[0], cam.rect[1], cam.rect[2], cam.rect[3], target.width, target.height);
+    }
+    return false;
+  };
+  if (!mode || cam.seq != seq) return dropped("camera overwritten");  // the game ran 64 frames ahead
   // The view rectangle in host pixels; a target smaller than it isn't the back buffer.
   const uint32_t x0 = Host(uint32_t(cam.rect[0])), y0 = Host(uint32_t(cam.rect[1]));
   const uint32_t x1 = Host(uint32_t(cam.rect[0] + cam.rect[2])), y1 = Host(uint32_t(cam.rect[1] + cam.rect[3]));
-  if (x1 <= x0 || y1 <= y0 || target.width < x1 || target.height < y1) return false;
+  if (x1 <= x0 || y1 <= y0 || target.width < x1 || target.height < y1) {
+    // B-210: not the back buffer. While a level fades in, the first draws after the skipped scene go to a small target
+    // (the loading movie's last frames); dropping the marker there left ~0.5 s of black where the original fades the
+    // level in. Keep it for the next draw that fits, unless the next frame's marker replaces it first
+    // (BOTS_HYBRID_FILL_KEEP=0: the old drop).
+    static const bool keep = [] { const char* v = std::getenv("BOTS_HYBRID_FILL_KEEP"); return !v || std::atoi(v) != 0; }();
+    if (keep && x1 > x0 && y1 > y0) scene_fill_seq_ = seq;
+    return dropped("target smaller than the view");
+  }
 
   const VkRect2D area{{int32_t(x0), int32_t(y0)}, {x1 - x0, y1 - y0}};
   if (mode == 4) {
@@ -975,7 +1001,7 @@ bool Renderer::DrawSceneFill(Image& target) {
       state->fills_drawn.fetch_add(1, std::memory_order_relaxed);
       return true;
     }
-    if (!DrawSceneN1(target, cam, area)) return false;
+    if (!DrawSceneN1(target, cam, area)) return dropped("n1 declined");
     state->fills_drawn.fetch_add(1, std::memory_order_relaxed);
     return true;
 #else
