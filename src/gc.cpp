@@ -338,6 +338,8 @@ void HostReachability(PPCContext& ctx, uint8_t* base) {
       ++next;
       static const bool kProf = EnvInt("BOTS_GC_PROF", 0) != 0;
       const double tv = kProf ? NowMs() : 0;
+      ctx.r3.u64 = obj;
+      ctx.r4.u64 = arr;
       CallIndirect(ctx, base, U32(base, U32(base, obj) + 244), 0x825E9CAC);
       if (kProf) g.virt_ms += NowMs() - tv;
       ++g.walk_objs;
