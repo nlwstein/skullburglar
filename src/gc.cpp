@@ -368,7 +368,8 @@ void HostReachability(PPCContext& ctx, uint8_t* base) {
     }
   }
 
-  static const uint32_t kBody = uint32_t(EnvInt("BOTS_GC_PF_BODY", 6)), kRefs = uint32_t(EnvInt("BOTS_GC_PF_REFS", 3));
+  static const uint32_t kBody = uint32_t(EnvInt("BOTS_GC_PF_BODY", 2)), kRefs = uint32_t(EnvInt("BOTS_GC_PF_REFS", 1));
+  static const bool kElems = EnvInt("BOTS_GC_PF_ELEMS", 0) != 0;
   // Pass 2: the reference-token walk. Every object reached is cleared of RF_Unreachable and appended.
   const uint32_t pool0 = U32(base, kPoolStart), pool1 = U32(base, kPoolEnd);
   // GPermanentObjectPool bounds are re-read per reference by the original; nothing in the walk can change them.
@@ -380,13 +381,14 @@ void HostReachability(PPCContext& ctx, uint8_t* base) {
       const uint32_t obj = U32(base, data + 4 * next);
       ++next;
       const uint32_t count_now = U32(base, arr + 4);
-      // Object i+kBody: its body; i+kRefs: its references' flags and its arrays; i+1: its arrays' elements' flags.
+      // Object i+kBody: its body; i+kRefs: its references' flags and its arrays; with kElems, i+1: its arrays'
+      // elements' flags. Defaults measured on a laptop (B-241): 2/1/off; 6/3/on and 12/6/on were slower.
       if (next - 1 + kBody < count_now) {
         const uint32_t o2 = U32(base, data + 4 * (next - 1 + kBody));
         for (uint32_t k = 0; k < 512; k += 64) Prefetch(base, o2 + k);
       }
-      if (next - 1 + kRefs < count_now) PrefetchRefs(base, U32(base, data + 4 * (next - 1 + kRefs)), false);
-      if (next < count_now) PrefetchRefs(base, U32(base, data + 4 * next), true);
+      if (kRefs && next - 1 + kRefs < count_now) PrefetchRefs(base, U32(base, data + 4 * (next - 1 + kRefs)), false);
+      if (kElems && next < count_now) PrefetchRefs(base, U32(base, data + 4 * next), true);
       ctx.r3.u64 = obj;
       ctx.r4.u64 = arr;
       CallIndirect(ctx, base, U32(base, U32(base, obj) + 244), 0x825E9CAC);
