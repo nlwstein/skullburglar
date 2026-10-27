@@ -432,6 +432,7 @@ struct Times {
 // Lights and fog components attached to the world (ActorComponent.bAttached), found by the same walk.
 struct Extras {
   std::vector<uint32_t> lights, fog;
+  std::vector<uint32_t> decals;  // B-228: every DecalComponent, attached or not (they never get a SceneInfo)
 };
 Extras g_extras;
 
@@ -449,6 +450,7 @@ void Enumerate(std::vector<Primitive>& out, Times& t) {
   out.clear();
   g_extras.lights.clear();
   g_extras.fog.clear();
+  g_extras.decals.clear();
   if (!FindObjectTable()) return;
   const uint32_t data = U32(g_objects), count = U32(g_objects + 4);
   t.objects = count;
@@ -464,6 +466,10 @@ void Enumerate(std::vector<Primitive>& out, Times& t) {
       continue;
     }
     if (last->kind == Kind::kNone) continue;
+    if (last->kind == Kind::kDecal) {
+      g_extras.decals.push_back(o);
+      continue;
+    }
     if (!g_off.scene_info.ok() || !U32(o + g_off.scene_info.offset)) continue;  // not attached to a scene
     out.push_back({o, last->kind, i});
   }
@@ -1330,8 +1336,23 @@ struct LiveTree {
   const char* component_path = nullptr;
   const char* asset_path = nullptr;
 };
+// B-228: a DecalComponent the feed knows of (attached or not), and its material path, rebuilt when the material or
+// its parameters change (MaterialFingerprint).
+struct LiveDecal {
+  uint32_t component = 0, index = 0;
+  uint32_t mat = 0;
+  uint64_t fp = 0;
+  const char* material = nullptr;
+};
 struct LiveState {
   std::vector<Primitive> prims;
+  // B-228 decals (BOTS_N1_DECALS=0: none). Tracked like lights (the walks; no hook adds them), sent while attached.
+  std::vector<LiveDecal> decals;
+  bool decals_on = [] {
+    const char* v = std::getenv("BOTS_N1_DECALS");
+    return !(v && v[0] == '0');
+  }();
+  std::unordered_map<uint32_t, uint32_t> inst_of;  // this frame: component -> its index in `instances`
   std::vector<Primitive> particle_prims;
   std::vector<Primitive> tree_prims;
   std::unordered_map<uint32_t, LiveTree> trees;
@@ -1901,7 +1922,7 @@ bool BeyondDrawDistance(uint32_t c, const Camera& cam) {
 // UObject Index), the order the full walk produced. The first frame does one full walk.
 bool Trackable(const LiveState& st, Kind kind) {
   return kind == Kind::kStatic || kind == Kind::kSkeletal || (kind == Kind::kParticle && st.particles) ||
-         (kind == Kind::kSpeedTree && st.trees_on);
+         (kind == Kind::kSpeedTree && st.trees_on) || (kind == Kind::kDecal && st.decals_on);
 }
 
 // <index>: <o>'s object-table position when it was reported (from a walk of the table, or read by the add hook while
@@ -1913,6 +1934,9 @@ bool TrackAdd(LiveState& st, uint32_t o, uint32_t index) {
   if (ci.extra != Extra::kNone) {
     if (!Attached(o, ci, cls)) return false;
     (ci.extra == Extra::kLight ? st.lights : st.fog).push_back(o);
+  } else if (ci.kind == Kind::kDecal) {
+    if (!st.decals_on) return false;
+    st.decals.push_back({o, index});
   } else if (Trackable(st, ci.kind)) {
     if (!g_off.scene_info.ok() || !U32(o + g_off.scene_info.offset)) return false;
     (ci.kind == Kind::kParticle    ? st.particle_prims
@@ -1937,9 +1961,10 @@ void Track(LiveState& st) {
     if (!g_objects) return;
     st.tracking = true;
     st.prims.clear(), st.particle_prims.clear(), st.tree_prims.clear(), st.lights.clear(), st.fog.clear();
-    st.known.clear(), st.pending.clear();
+    st.known.clear(), st.pending.clear(), st.decals.clear();
     for (uint32_t o : g_extras.lights) added |= TrackAdd(st, o);
     for (uint32_t o : g_extras.fog) added |= TrackAdd(st, o);
+    for (uint32_t o : g_extras.decals) added |= TrackAdd(st, o);
     for (const Primitive& p : all) added |= TrackAdd(st, p.component, p.index);
     std::lock_guard lock(g_added_mutex);
     g_added.clear();
@@ -1967,6 +1992,11 @@ void Track(LiveState& st) {
   };
   std::erase_if(st.lights, gone_extra);
   std::erase_if(st.fog, gone_extra);
+  std::erase_if(st.decals, [&st](const LiveDecal& d) {
+    const bool g = !AliveAt(d.component, d.index) || Classify(U32(d.component + 0x34)).kind != Kind::kDecal;
+    if (g) st.known.erase(d.component);
+    return g;
+  });
   // What the game added since the last frame.
   {
     std::vector<AddedComponent> fresh;
@@ -2014,6 +2044,7 @@ void Track(LiveState& st) {
     uint32_t found = 0;
     for (uint32_t o : g_extras.lights) found += TrackAdd(st, o);
     for (uint32_t o : g_extras.fog) found += TrackAdd(st, o);
+    for (uint32_t o : g_extras.decals) found += TrackAdd(st, o);
     for (const Primitive& p : all) found += TrackAdd(st, p.component);
     if (found) {
       added = true;
@@ -2070,6 +2101,8 @@ void Track(LiveState& st) {
         want.insert(p.component);
     for (uint32_t o : g_extras.lights) want.insert(o);
     for (uint32_t o : g_extras.fog) want.insert(o);
+    if (st.decals_on)
+      for (uint32_t o : g_extras.decals) want.insert(o);
     uint32_t missing = 0, extra = 0, missing_pending = 0;
     for (uint32_t o : want)
       if (!st.known.count(o)) ++missing, missing_pending += st.pending.count(o);
@@ -2088,6 +2121,76 @@ void Track(LiveState& st) {
   // LightsPostJson reads g_extras.
   g_extras.lights = st.lights;
   g_extras.fog = st.fog;
+}
+
+
+// B-228: the attached decals that land on something drawn this frame. Static DecalActors are attached for the level's
+// life; the DecalManager pools attach a component per splat (explosion scorch, bullet impacts) and detach it later.
+void LiveDecals(LiveState& st, HybridScene& out) {
+  struct Layout {
+    Field attached, planes, location, tangent, binormal, normal, width, height, tile_x, tile_y, offset_x, offset_y,
+        backface_angle, backfaces, receivers;
+  };
+  static std::unordered_map<uint32_t, Layout> layouts;
+  if (!g_off.decal_material.ok()) return;
+  for (LiveDecal& d : st.decals) {
+    const uint32_t c = d.component, cls = U32(c + 0x34);
+    auto [it, fresh] = layouts.try_emplace(cls);
+    Layout& l = it->second;
+    if (fresh) {
+      l.attached = FindProp(cls, "bAttached"), l.planes = FindProp(cls, "Planes");
+      l.location = FindProp(cls, "HitLocation"), l.tangent = FindProp(cls, "HitTangent");
+      l.binormal = FindProp(cls, "HitBinormal"), l.normal = FindProp(cls, "HitNormal");
+      l.width = FindProp(cls, "Width"), l.height = FindProp(cls, "Height");
+      l.tile_x = FindProp(cls, "TileX"), l.tile_y = FindProp(cls, "TileY");
+      l.offset_x = FindProp(cls, "OffsetX"), l.offset_y = FindProp(cls, "OffsetY");
+      l.backface_angle = FindProp(cls, "BackfaceAngle"), l.backfaces = FindProp(cls, "bProjectOnBackfaces");
+      l.receivers = FindProp(cls, "DecalReceivers");
+    }
+    if (!l.attached.ok() || !l.planes.ok() || !l.receivers.ok() || !l.location.ok() || !l.tangent.ok() ||
+        !l.binormal.ok() || !l.normal.ok() || !l.width.ok() || !l.height.ok())
+      continue;
+    if (!(U32(c + l.attached.offset) & l.attached.mask)) continue;
+    if (U32(c + l.planes.offset + 4) < 6 || !Readable(U32(c + l.planes.offset))) continue;
+    if (g_off.hidden_game.ok() && (U32(c + g_off.hidden_game.offset) & g_off.hidden_game.mask)) continue;
+    // DecalReceivers: TArray of {UPrimitiveComponent*, FDecalRenderData*}.
+    const uint32_t data = U32(c + l.receivers.offset), n = std::min<uint32_t>(U32(c + l.receivers.offset + 4), 256);
+    if (!n || !Readable(data)) continue;
+    const uint32_t first = uint32_t(out.decal_receivers.size());
+    for (uint32_t k = 0; k < n; ++k) {
+      const auto r = st.inst_of.find(U32(data + 8 * k));
+      if (r != st.inst_of.end()) out.decal_receivers.push_back(r->second);
+    }
+    if (out.decal_receivers.size() == first) continue;
+    const uint32_t m = U32(c + g_off.decal_material.offset);
+    const uint64_t fp = MaterialFingerprint(m);
+    if (m != d.mat || fp != d.fp || !d.material) d.mat = m, d.fp = fp, d.material = InternMaterial(MaterialPath(m, true));
+    if (!d.material) {
+      out.decal_receivers.resize(first);
+      continue;
+    }
+    HybridScene::Decal& o = out.decals.emplace_back();
+    o.material = d.material;
+    o.id = c;
+    o.receiver_offset = first;
+    o.receiver_count = uint32_t(out.decal_receivers.size()) - first;
+    // Planes is a TArray<FPlane> (data, num, max), six world-space planes once the decal is attached.
+    const uint32_t planes = U32(c + l.planes.offset);
+    for (int i = 0; i < 24; ++i) o.planes[i] = F32(planes + 4 * i);
+    for (int i = 0; i < 3; ++i) {
+      o.location[i] = F32(c + l.location.offset + 4 * i);
+      o.tangent[i] = F32(c + l.tangent.offset + 4 * i);
+      o.binormal[i] = F32(c + l.binormal.offset + 4 * i);
+      o.normal[i] = F32(c + l.normal.offset + 4 * i);
+    }
+    o.width = F32(c + l.width.offset), o.height = F32(c + l.height.offset);
+    o.tile[0] = l.tile_x.ok() ? F32(c + l.tile_x.offset) : 1.0f;
+    o.tile[1] = l.tile_y.ok() ? F32(c + l.tile_y.offset) : 1.0f;
+    o.offset[0] = l.offset_x.ok() ? F32(c + l.offset_x.offset) : 0.0f;
+    o.offset[1] = l.offset_y.ok() ? F32(c + l.offset_y.offset) : 0.0f;
+    o.backface_angle = l.backface_angle.ok() ? F32(c + l.backface_angle.offset) : 0.001f;
+    o.flags = (l.backfaces.ok() && (U32(c + l.backfaces.offset) & l.backfaces.mask)) ? 1u : 0u;
+  }
 }
 
 void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam) {
@@ -2206,6 +2309,9 @@ void Live(uint8_t* base) {
       if (st.trees_on && p.kind == Kind::kSpeedTree) st.tree_prims.push_back(p);
     }
     std::erase_if(st.prims, [](const Primitive& p) { return p.kind != Kind::kStatic && p.kind != Kind::kSkeletal; });
+    st.decals.clear();
+    if (st.decals_on)
+      for (uint32_t o : g_extras.decals) st.decals.push_back({o, U32(o + 0x04)});
     st.age = 0;
   } else {
     auto gone = [](Primitive& p) {
@@ -2218,6 +2324,7 @@ void Live(uint8_t* base) {
   }
   HybridScene& out = st.building;
   out.instances.clear();
+  st.inst_of.clear();
   out.skeletal.clear();
   out.bones.clear();
   out.materials.clear();
@@ -2315,6 +2422,7 @@ void Live(uint8_t* base) {
       out.materials.insert(out.materials.end(), lc.materials.begin(), lc.materials.end());
       continue;
     }
+    if (st.decals_on) st.inst_of[c] = uint32_t(out.instances.size());
     HybridScene::Instance& inst = out.instances.emplace_back();
     for (int i = 0; i < 16; ++i) inst.transform[i] = F32(c + g_off.local_to_world.offset + 4 * i);
     inst.mesh = lc.mesh_path;
@@ -2325,6 +2433,9 @@ void Live(uint8_t* base) {
     out.materials.insert(out.materials.end(), lc.materials.begin(), lc.materials.end());
   }
   out.walked = uint32_t(st.prims.size());
+  out.decals.clear();
+  out.decal_receivers.clear();
+  if (st.decals_on) LiveDecals(st, out);
   // SpeedTree placements (B-187): the component's LocalToWorld (scale + translation), its tree asset and the actor's
   // rotation, which UE3 keeps out of the component transform for SpeedTree.
   out.trees.clear();

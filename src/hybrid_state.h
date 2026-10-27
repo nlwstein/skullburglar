@@ -139,6 +139,21 @@ struct HybridScene {
     const char* asset;
     int32_t rotation[3];
   };
+  // B-228: an attached DecalComponent (static DecalActors and the DecalManager pools' run-time splats). UE3 never gives
+  // a decal a SceneInfo: it draws as pieces of the primitives it lands on (DecalReceivers), which `receivers` names by
+  // their index in `instances` (receivers not drawn this frame are left out). Vectors and planes are as the component
+  // holds them (Planes: X, Y, Z, W; inside when dot(xyz, p) <= W).
+  struct Decal {
+    const char* material;  // DecalMaterial path (run-time parameters encoded as for `materials`)
+    uint32_t id;           // the component's address
+    uint32_t receiver_offset, receiver_count;  // range in `decal_receivers`
+    float planes[24];
+    float location[3], tangent[3], binormal[3], normal[3];  // HitLocation, HitTangent, HitBinormal, HitNormal
+    float width, height, tile[2], offset[2], backface_angle;
+    uint32_t flags;  // 1: bProjectOnBackfaces
+  };
+  std::vector<Decal> decals;
+  std::vector<uint32_t> decal_receivers;
   std::vector<Tree> trees;
   std::vector<Emitter> emitters;
   std::vector<float> particle_rows;
