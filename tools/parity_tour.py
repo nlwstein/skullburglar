@@ -73,8 +73,10 @@ def main():
                          f"(default {GAME_LOAD_SECS}), wall seconds in wall mode (default {WALL_LOAD_SECS})")
     ap.add_argument("--series", action="append", default=[], metavar="ID:N",
                     help="load checkpoint ID N times in a row, --shots shots each (pooled by the report)")
-    ap.add_argument("--n1-ready", type=float, default=0,
-                    help="before the first shot, wait up to this many seconds for n1's startup step to finish")
+    ap.add_argument("--n1-ready", type=float, default=900,
+                    help="before the first shot, wait up to this many seconds for n1's startup step to finish, and "
+                         "reload the checkpoint if the wait ran past the first shot's time (default 900; 0 = don't "
+                         "wait: shots taken during the step compare the port with itself)")
     ap.add_argument("--gap", type=float, default=None,
                     help=f"seconds of play between shots: game seconds between shot times in game mode (default "
                          f"{GAME_GAP}), wall seconds after a shot in wall mode (default {WALL_GAP})")
@@ -82,6 +84,10 @@ def main():
     ap.add_argument("--freeze", choices=["slomo", "pause", "none"], default="pause",
                     help="hold the world still around each shot: Pause (default; also holds particles, and with the "
                          "game clock waits for in-play first), SloMo 0.01 (particles still move), or nothing")
+    ap.add_argument("--movie", choices=["skip", "wait", "off"], default="skip",
+                    help="a checkpoint that starts with a movie (11005, the intro): skip it by pressing --movie-skip "
+                         "(default), wait for it to end, or do nothing")
+    ap.add_argument("--movie-skip", default="A", help="instrumentation button(s) that skip a movie (default A)")
     ap.add_argument("--play-timeout", type=float, default=180,
                     help="with --freeze pause: seconds to wait for the in_play phase before each shot")
     ap.add_argument("--random", default="1", help="random play between shots (BOTS_INPUT_RANDOM seed; 0 = off)")
@@ -210,15 +216,49 @@ def main():
                 w0 = time.time()
                 log.lines()  # the step can finish before the load does (a warm cache); its line is then already read
                 mark = "hybrid n1: startup step done"
-                got = mark in log.seen or log.wait(lambda l: mark in l, a.n1_ready, alive)
-                print(f"    n1 startup step {'done' if got else 'NOT done'} after {time.time() - w0:.0f} s more",
-                      flush=True)
+                if "hybrid n1: renderer up" not in log.seen:  # a build without n1 (or one that never logs the step)
+                    print("    n1 never came up; not waiting for its startup step", flush=True)
+                    got = True
+                else:
+                    got = mark in log.seen or log.wait(lambda l: mark in l, a.n1_ready, alive)
+                waited = time.time() - w0
+                print(f"    n1 startup step {'done' if got else 'NOT done'} after {waited:.0f} s more", flush=True)
+                # A slow step (a cold n1 cache) runs the level on past the first shot's time, and the round's shots
+                # would then all be taken at once, of one late moment. Load the checkpoint again so this round is
+                # shot at the same game times as every other.
+                late = waited > 2 and (not clock or (clock.world_time() or 0) > load_secs + 2)
+                if got and late:
+                    print("    reloading the checkpoint: the startup step outlasted the first shot's time", flush=True)
+                    loads0 = clock.loads() if clock else None
+                    send(f"LoadChapter {cid}")
+                    if clock:
+                        if not clock.wait_loaded(loads0, load_secs, alive):
+                            print("    game clock: never reached the target; going on", flush=True)
+                    else:
+                        time.sleep(load_secs)
+            if clock and a.movie != "off":
+                # A mission's intro movie (11005) plays over a running level with the HUD up, so it reads as in_play;
+                # Pause doesn't stop it, n1 draws nothing and the port's frame is the movie.
+                drawn, waited, presses = clock.wait_scene(alive, a.movie_skip if a.movie == "skip" else "",
+                                                          a.play_timeout)
+                if waited > 1 or not drawn:
+                    how = f", {presses} skip presses ({a.movie_skip})" if presses else ""
+                    print(f"    movie: world {'drawn' if drawn else 'NOT drawn'} after {waited:.0f} s{how}", flush=True)
+                    wt = clock.world_time() or 0
+                    if drawn and a.movie == "wait" and wt > load_secs + 2:
+                        # waited it out: the level ran on behind the movie, so load it again (it doesn't replay)
+                        print("    reloading the checkpoint after the movie", flush=True)
+                        loads0 = clock.loads()
+                        send(f"LoadChapter {cid}")
+                        if not clock.wait_loaded(loads0, load_secs, alive):
+                            print("    game clock: never reached the target; going on", flush=True)
             send("EnableCheats")  # a new level has a new player controller
             entry = {"chapter": cid, "note": note, "shots": [], "load_at": c0 - t0, "round": rnd}
+            base = load_secs  # shot k is due base + k * gap game seconds after the load
             for k in range(a.shots):
                 tag = f"{cid}_{'r%d' % rnd if rnd else ''}{chr(ord('a') + k)}"
-                if clock and k:  # shot k is due load_secs + k * gap game seconds after the load
-                    clock.wait_time(load_secs + k * gap, loads0 + 1, alive)
+                if clock and k:
+                    clock.wait_time(base + k * gap, loads0 + 1, alive)
                 if a.freeze == "slomo":
                     send("SloMo 0.01")
                 elif a.freeze == "pause":
@@ -227,6 +267,14 @@ def main():
                         if ph != "in_play":
                             print(f"    {tag}: not in play after {a.play_timeout:.0f} s (phase {ph}); pausing anyway",
                                   flush=True)
+                        wt = clock.world_time() or 0
+                        if k == 0 and ph == "in_play" and wt > base + 2:
+                            # A checkpoint that opens on a long cutscene (83650: 92 s) reaches play past every shot's
+                            # time, at the start of the camera fade-in. Shoot after the fade, then gap apart as usual.
+                            base = wt + PLAY_SETTLE
+                            print(f"    in play at world time {wt:.1f} s: shots from {base:.1f} s", flush=True)
+                            clock.wait_time(base, loads0 + 1, alive)
+                            ph = clock.wait_in_play(alive, a.play_timeout)
                     send("Pause")
                 time.sleep(1.0)
                 s0 = time.time()
@@ -290,6 +338,9 @@ def main():
     print(f"tour: {len(record['checkpoints'])} checkpoints, {n} pairs, {record['wall_secs'] / 60:.1f} min -> {out}")
 
 
+PLAY_SETTLE = 2.0  # game seconds after a cutscene hands over to play: the camera fade-in takes about 0.5 s (B-240)
+MOVIE_DRAWS_PER_FRAME = 20  # a movie frame is a few draws; the emptiest level view seen draws hundreds
+MOVIE_SKIP_EVERY = 3.0
 GAME_LOAD_SECS, GAME_GAP = 20.0, 7.7  # shots overshoot their target by 1-3 s, so they read about 22/30/38 s, like the old 25 s wall waits on the Mac
 WALL_LOAD_SECS, WALL_GAP = 25.0, 6.0
 
@@ -355,6 +406,54 @@ class GameClock:
         g = self.status()
         return g["loads"] if g else 0
 
+    def command(self, text):
+        """Sends one instrumentation command; its reply (the first non-event line), or None."""
+        for _ in range(2):
+            if self.sock is None:
+                self._connect()
+                if self.sock is None:
+                    return None
+            try:
+                self.sock.sendall((text + "\n").encode())
+                while True:
+                    while b"\n" not in self.buf:
+                        d = self.sock.recv(65536)
+                        if not d:
+                            raise OSError("closed")
+                        self.buf += d
+                    line, self.buf = self.buf.split(b"\n", 1)
+                    j = json.loads(line)
+                    if j.get("type") not in ("event", "status"):
+                        return j
+            except (OSError, ValueError):
+                self.sock = None
+        return None
+
+    def scene_drawn(self, secs=0.6):
+        """Whether the game is drawing its world: a full-screen movie (the intro movie of a mission start) draws a
+        handful of draws a frame while the HUD and the game clock keep running, so the phase reads in_play."""
+        r0 = self.line()
+        time.sleep(secs)
+        r1 = self.line()
+        if not r0 or not r1 or "render" not in r1:
+            return True  # can't tell: don't hold the tour up
+        frames = r1["render"].get("frames", 0) - r0["render"].get("frames", 0)
+        draws = r1["render"].get("draws", 0) - r0["render"].get("draws", 0)
+        return frames <= 0 or draws / frames >= MOVIE_DRAWS_PER_FRAME
+
+    def wait_scene(self, alive, skip, timeout):
+        """Until the world is drawn (see scene_drawn). With skip (instr buttons, e.g. "A"), presses them every few
+        seconds to skip a movie. Returns (drawn, seconds waited, presses)."""
+        t0, presses, last = time.time(), 0, 0.0
+        while time.time() - t0 < timeout and alive():
+            if self.scene_drawn():
+                return True, time.time() - t0, presses
+            if skip and time.time() - last >= MOVIE_SKIP_EVERY:
+                for b in skip.split(","):
+                    self.command(f"press {b.strip()}")
+                presses, last = presses + 1, time.time()
+        return False, time.time() - t0, presses
+
     def world_time(self):
         g = self.status()
         return g["world_time"] if g else None
@@ -381,7 +480,7 @@ class GameClock:
 class LogFollower:
     """Reads new lines of a growing log file."""
 
-    MARKS = ("hybrid n1: startup step done",)
+    MARKS = ("hybrid n1: startup step done", "hybrid n1: renderer up")
 
     def __init__(self, path):
         self.path, self.pos, self.buf = path, 0, ""
