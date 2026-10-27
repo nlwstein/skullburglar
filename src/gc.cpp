@@ -287,6 +287,8 @@ struct Warmer {
   std::mutex m;
   std::condition_variable cv;
   bool started = false;
+  uint64_t* seen = nullptr;  // BOTS_GC_PROF replay only: one bit per 8 bytes of guest address space
+  std::vector<uint32_t> seen_words;
 
   void Push(uint32_t obj) {
     const uint32_t h = head.load(std::memory_order_relaxed);
@@ -344,7 +346,15 @@ struct Warmer {
     if (!tokens) return 0;
     const uint32_t pool0 = U32(base, kPoolStart), pool1 = U32(base, kPoolEnd);
     auto flags = [&](uint32_t r) {
-      if (r && (r < pool0 || r > pool1)) acc += U32(base, r + 8);
+      if (!r || (r >= pool0 && r <= pool1)) return;
+      if (seen) {  // replay experiment: read each object's flags once
+        uint64_t& word = seen[r >> 9];
+        const uint64_t bit = 1ull << (r >> 3 & 63);
+        if (word & bit) return;
+        word |= bit;
+        seen_words.push_back(r >> 9);
+      }
+      acc += U32(base, r + 8);
     };
     for (uint32_t i = 0, steps = 0; i < count && steps < 512; ++steps) {
       const uint32_t t = U32(base, tokens + 4 * i++);
@@ -770,7 +780,7 @@ extern "C" void sub_825EA258(PPCContext& __restrict ctx, uint8_t* base) {
               was_pending ? " (previous purge was still pending)" : "");
   if (g.host)
     REXLOG_INFO("gc: walk pass {}: {} objects, {} tokens, {} references followed, virtual calls {:.1f} ms, "
-                "read-only replay {:.1f} ms, again {:.1f} ms, again with prefetch {:.1f} ms", g.n, g.walk_objs,
+                "read-only replay {:.1f} ms, again reading each object's flags once {:.1f} ms, and again {:.1f} ms", g.n, g.walk_objs,
                 g.walk_tokens, g.walk_refs, g.virt_ms, g.replay_ms[0], g.replay_ms[1], g.replay_ms[2]);
 }
 
@@ -795,21 +805,18 @@ extern "C" void sub_825E99F0(PPCContext& __restrict ctx, uint8_t* base) {
     Warmer& w = TheWarmer();
     w.base = base;
     volatile uint64_t sink = 0;
+    static uint64_t* bitmap = static_cast<uint64_t*>(std::calloc(size_t(1) << 26, 8));  // 1 bit per 8 bytes
     for (int k = 0; k < 3; ++k) {
+      // k = 0: as the walk reads; k = 1, 2: each referenced object's flags read only once (a host bitmap).
+      w.seen = k ? bitmap : nullptr;
       const double t0 = NowMs();
       const uint32_t data = U32(base, arr), n = U32(base, arr + 4);
-      for (uint32_t i = 0; i < n; ++i) {
-        if (k == 2) {  // the third time with the walk's prefetch pipeline
-          auto at = [&](uint32_t d) { return i + d < n ? U32(base, data + 4 * (i + d)) : 0u; };
-          if (const uint32_t o = at(8)) Prefetch(base, o), Prefetch(base, o + 52);
-          if (const uint32_t o = at(4)) PrefetchStage(base, o, kFieldLines);
-          if (const uint32_t o = at(2)) PrefetchStage(base, o, kRefFlags);
-          if (const uint32_t o = at(1)) PrefetchStage(base, o, kElemFlags);
-        }
-        sink += w.Warm(U32(base, data + 4 * i));
-      }
+      for (uint32_t i = 0; i < n; ++i) sink += w.Warm(U32(base, data + 4 * i));
       g.replay_ms[k] = NowMs() - t0;
+      for (const uint32_t word : w.seen_words) bitmap[word] = 0;
+      w.seen_words.clear();
     }
+    w.seen = nullptr;
   }
 }
 
