@@ -54,6 +54,9 @@ extern "C" void __imp__sub_82E1AC28(PPCContext& __restrict ctx, uint8_t* base);
 namespace bots::slowframe {
 void Tick();  // slow_frame.cpp: BOTS_SLOW_SAMPLE
 }
+namespace bots::gc {
+void Tick();  // gc.cpp: GC timing and slow-frame attribution
+}
 namespace bots::levelstream {
 void Tick(uint8_t* base);  // level_stream.cpp: BOTS_STREAM_LOG=2 streaming-level dump
 }
@@ -354,6 +357,7 @@ extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
   if (split_screen::OffGameThread()) return;
   if (user == 0) {
     bots::slowframe::Tick();
+    bots::gc::Tick();
     bots::levelstream::Tick(base);
     bots::scenefeed::Tick(base);
     if (!bots::scenefeed::LiveAtDraw()) bots::scenefeed::Live(base);
