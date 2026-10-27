@@ -105,6 +105,7 @@ struct Pass {
   bool in_gc = false;         // inside CollectGarbage
   double start = 0;           // CollectGarbage entry (ms since start)
   double mark_ms = 0, prepurge_ms = 0;
+  double table_ms = 0;        // host analysis: the pass over the object table (the rest of mark_ms is the walk)
   uint32_t unreachable = 0;   // ConditionalBeginDestroy calls inside CollectGarbage
   bool purge_pending = false;  // a purge started by this pass has not finished yet
   double purge_ms = 0;        // time-limited purge calls since the pass
@@ -258,6 +259,7 @@ void PrefetchRefs(uint8_t* base, uint32_t obj, bool elems) {
 }
 
 void HostReachability(PPCContext& ctx, uint8_t* base) {
+  const double t_table = NowMs();
   const uint32_t arr = ctx.r3.u32;  // TArray<UObject*>& ObjectsToSerialize
   const uint64_t keep = ctx.r4.u64;  // KeepFlags
   const uint32_t sp_in = ctx.r1.u32;
@@ -340,6 +342,7 @@ void HostReachability(PPCContext& ctx, uint8_t* base) {
     }
   }
 
+  g.table_ms += NowMs() - t_table;
   // The token stack: a TArray of 16-byte frames {base, stride, count, loop token}, 128 of them up front.
   const uint32_t stack = sp + 96;
   S32(base, stack, 0);
@@ -604,7 +607,7 @@ extern "C" void sub_825EA258(PPCContext& __restrict ctx, uint8_t* base) {
   const bool full = ctx.r4.u32 != 0;
   g.in_gc = true;
   g.start = NowMs();
-  g.mark_ms = g.prepurge_ms = 0;
+  g.mark_ms = g.prepurge_ms = g.table_ms = 0;
   g.unreachable = 0;
   const bool was_pending = g.purge_pending;
   __imp__sub_825EA258(ctx, base);
@@ -619,9 +622,9 @@ extern "C" void sub_825EA258(PPCContext& __restrict ctx, uint8_t* base) {
   g.live_after_gc = LiveObjects(base);
   const uint32_t engine = U32(base, kGEngine);
   REXLOG_INFO("gc: pass {} at {:.3f} s: {:.1f} ms (purge {:.1f}, reachability {:.1f}, begin-destroy "
-              "{:.1f}; host {}), {} objects marked, {} unreachable, {} in table, keep {:016X}, full purge {}, "
+              "{:.1f}; host {}, table pass {:.1f}), {} objects marked, {} unreachable, {} in table, keep {:016X}, full purge {}, "
               "caller {:08X}, interval {:.1f} s{}",
-              g.n, g.start / 1000.0, ms, g.prepurge_ms, g.mark_ms, ms - g.mark_ms - g.prepurge_ms, HostOn() ? 1 : 0,
+              g.n, g.start / 1000.0, ms, g.prepurge_ms, g.mark_ms, ms - g.mark_ms - g.prepurge_ms, HostOn() ? 1 : 0, g.table_ms,
               U32(base, kMarkCount), g.unreachable, g.live_after_gc, keep, full ? 1 : 0, caller,
               engine ? F32(base, engine + kTimeBetweenPurging) : 0.0f,
               was_pending ? " (previous purge was still pending)" : "");
