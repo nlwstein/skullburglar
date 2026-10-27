@@ -214,8 +214,8 @@ const ClassInfo& ClassifySlow(uint32_t cls) {
   auto it = g_classes.find(cls);
   if (it != g_classes.end()) return it->second;
   // The per-frame checks read +0x34 of components that may have been freed since the last frame, so <cls> can be
-  // garbage. Only a live UObject is classified (and cached); anything else is "not a component" (a T480 run crashed
-  // in NameText on such a pointer after a chapter load, with tracking off).
+  // garbage. Only a live UClass is classified (and cached); anything else is "not a component" (T480 runs crashed in
+  // NameText and ClassChainHas on such pointers after chapter loads, with tracking off and on).
   if (NotAClass(cls)) return kNotAClass;
   ClassInfo info;
   info.name = Readable(cls) ? NameText(U32(cls + 0x2C)) : "None";
@@ -1060,7 +1060,15 @@ bool IsObject(uint32_t p) {
   const uint32_t index = U32(p + 0x04);
   return index < U32(g_objects + 4) && U32(U32(g_objects) + 4 * index) == p;
 }
-bool NotAClass(uint32_t cls) { return g_objects ? !IsObject(cls) : !Readable(cls); }
+// A live UClass: an object whose class is the class object UClass, the one object that is its own class. (A freed
+// component's +0x34 can hold any pointer, including a live object that is not a class; walking its "superclass" chain
+// read garbage and crashed a T480 run.)
+bool NotAClass(uint32_t cls) {
+  if (!g_objects) return !Readable(cls);
+  if (!IsObject(cls)) return true;
+  const uint32_t meta = U32(cls + 0x34);
+  return !IsObject(meta) || U32(meta + 0x34) != meta;
+}
 
 // Research dump for the native particle structures: every attached ParticleSystemComponent's EmitterInstances,
 // raw (guest memory, big-endian), plus whatever their first 0x200 bytes point at. emitters_<frame>.bin holds
