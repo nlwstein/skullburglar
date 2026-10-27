@@ -412,7 +412,54 @@ const ClassInfo& PrimClass(Primitive& p) {
   return *p.info;
 }
 
+// B-234: the per-frame walks touch about a thousand components, each a handful of cache lines scattered through guest
+// memory, and the loop bodies are long enough that the CPU cannot overlap one component's misses with the next's.
+// Prefetching a few components ahead hides most of that. BOTS_FEED_PREFETCH=0 (or BOTS_FEED_LEGACY=1) turns it off.
+const bool g_prefetch = [] {
+  for (const char* name : {"BOTS_FEED_PREFETCH", "BOTS_FEED_LEGACY"}) {
+    const char* v = std::getenv(name);
+    if (v && *v && (name[10] == 'P' ? *v == '0' : *v != '0')) return false;
+  }
+  return true;
+}();
+inline void Prefetch(uint32_t address) { __builtin_prefetch(Raw(address)); }
+// The lines the walks read from a component: header (class, name, outer, index), and the primitive fields.
+void PrefetchComponent(uint32_t c) {
+  Prefetch(c);
+  Prefetch(c + 0x34);
+  for (const Field* f : {&g_off.scene_info, &g_off.hidden_game, &g_off.bounds, &g_off.local_to_world, &g_off.cull_dist,
+                         &g_off.cached_cull, &g_off.materials, &g_off.owner, &g_off.static_mesh_ref,
+                         &g_off.skeletal_mesh_ref})
+    if (f->ok()) Prefetch(c + f->offset);
+  if (g_off.local_to_world.ok()) Prefetch(c + g_off.local_to_world.offset + 60);
+  if (g_off.bounds.ok()) Prefetch(c + g_off.bounds.offset + 27);
+}
+// The object table's entry for the component (AliveAt reads it).
+void PrefetchEntry(uint32_t index) {
+  if (g_objects) Prefetch(U32(g_objects) + 4 * index);
+}
+// The owning actor's bHidden word, once the component's own lines have arrived.
+void PrefetchOwner(uint32_t c) {
+  if (!g_off.owner.ok() || !g_off.actor_hidden.ok()) return;
+  const uint32_t owner = U32(c + g_off.owner.offset);
+  if (Readable(owner)) Prefetch(owner + g_off.actor_hidden.offset);
+}
+
 // Remove the entries <gone> says to, keeping order (std::erase_if, but the predicate may update the entry's caches).
+// <ahead>(entry) runs on the entry kAhead places later before each test, to prefetch.
+template <typename T, typename F, typename A>
+void DropIf(std::vector<T>& v, F gone, A ahead) {
+  constexpr size_t kAhead = 8;
+  size_t n = 0;
+  for (size_t i = 0; i < v.size(); ++i) {
+    if (g_prefetch && i + kAhead < v.size()) ahead(v[i + kAhead]);
+    if (!gone(v[i])) {
+      if (n != i) v[n] = v[i];
+      ++n;
+    }
+  }
+  v.resize(n);
+}
 template <typename T, typename F>
 void DropIf(std::vector<T>& v, F gone) {
   size_t n = 0;
@@ -2002,9 +2049,10 @@ void Track(LiveState& st) {
     if (g) st.known.erase(p.component);
     return g;
   };
-  DropIf(st.prims, gone);
-  DropIf(st.particle_prims, gone);
-  DropIf(st.tree_prims, gone);
+  const auto ahead = [](const Primitive& p) { PrefetchEntry(p.index), PrefetchComponent(p.component); };
+  DropIf(st.prims, gone, ahead);
+  DropIf(st.particle_prims, gone, ahead);
+  DropIf(st.tree_prims, gone, ahead);
   auto gone_extra = [&st](uint32_t o) {
     const auto k = st.known.find(o);
     bool g = k == st.known.end() || !AliveAt(o, k->second);
@@ -2417,9 +2465,10 @@ void Live(uint8_t* base) {
       return !AliveAt(p.component, p.index) || PrimClass(p).kind != p.kind ||
              !U32(p.component + g_off.scene_info.offset);
     };
-    DropIf(st.prims, gone);
-    DropIf(st.particle_prims, gone);
-    DropIf(st.tree_prims, gone);
+    const auto ahead = [](const Primitive& p) { PrefetchEntry(p.index), PrefetchComponent(p.component); };
+    DropIf(st.prims, gone, ahead);
+    DropIf(st.particle_prims, gone, ahead);
+    DropIf(st.tree_prims, gone, ahead);
   }
   lap(g_prof.track);
   HybridScene& out = st.building;
@@ -2428,7 +2477,13 @@ void Live(uint8_t* base) {
   out.skeletal.clear();
   out.bones.clear();
   out.materials.clear();
+  size_t walk_at = 0;
   for (Primitive& p : st.prims) {
+    if (g_prefetch) {
+      if (walk_at + 8 < st.prims.size()) PrefetchComponent(st.prims[walk_at + 8].component);
+      if (walk_at + 3 < st.prims.size()) PrefetchOwner(st.prims[walk_at + 3].component);
+      ++walk_at;
+    }
     const uint32_t c = p.component;
     const bool skel = p.kind == Kind::kSkeletal;
     const Field& ref = skel ? g_off.skeletal_mesh_ref : g_off.static_mesh_ref;
