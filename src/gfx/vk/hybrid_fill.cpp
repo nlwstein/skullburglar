@@ -125,6 +125,7 @@ struct N1Host {
   std::vector<N1Tree> trees;
   std::vector<N1Emitter> emitters;
   std::vector<N1Instance> instances;
+  std::vector<N1Decal> decals;
   std::vector<N1SkelInstance> skeletal;
   std::vector<uint32_t> skel_materials;
   std::vector<uint32_t> material_handles;
@@ -494,6 +495,26 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
       host->material_handles.push_back(Handle(host->materials, host->scene.materials[in.mat_offset + i], host->r,
                                               n1_material));
   }
+  // B-228 decals: receivers are indices into `instances` (one per scene instance, same order).
+  static_assert(sizeof(N1Decal) == 192, "N1Decal layout");
+  host->decals.clear();
+  for (const HybridScene::Decal& in : host->scene.decals) {
+    N1Decal& out = host->decals.emplace_back();
+    out = {};
+    out.material = Handle(host->materials, in.material, host->r, n1_material);
+    out.id = in.id;
+    out.receiver_offset = in.receiver_offset, out.receiver_count = in.receiver_count;
+    std::memcpy(out.planes, in.planes, sizeof(out.planes));
+    std::memcpy(out.location, in.location, sizeof(out.location));
+    std::memcpy(out.tangent, in.tangent, sizeof(out.tangent));
+    std::memcpy(out.binormal, in.binormal, sizeof(out.binormal));
+    std::memcpy(out.normal, in.normal, sizeof(out.normal));
+    out.width = in.width, out.height = in.height, out.backface_angle = in.backface_angle, out.flags = in.flags;
+    std::memcpy(out.tile, in.tile, sizeof(out.tile));
+    std::memcpy(out.offset, in.offset, sizeof(out.offset));
+  }
+  n1_set_decals(host->r, host->decals.data(), uint32_t(host->decals.size()), host->scene.decal_receivers.data(),
+                uint32_t(host->scene.decal_receivers.size()));
   // Skinned primitives: bones are passed as published (n1 rebuilds unset ones from the reference pose).
   host->skeletal.clear();
   host->skel_materials.clear();
@@ -659,6 +680,10 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
                 st.particle_sprites, st.particle_meshes, st.particle_dropped, st.particle_skipped,
                 st.particle_mats_ready, st.particle_mats_failed, host->particles_ms / n, st.tree_placements, st.tree_instances,
                 st.tree_assets_ready, st.tree_assets_uncaptured, st.tree_assets_failed, st.tree_captured);
+    if (st.decal_builds || st.decals)
+      REXLOG_INFO("hybrid n1 decals: {} this frame -> {} pieces drawn, {} cached; {} built since start ({} tris), {:.3f} ms "
+                  "this frame", st.decals, st.decal_draws, st.decal_cached, st.decal_builds, st.decal_triangles,
+                  st.decal_build_ms);
     REXLOG_INFO("hybrid n1 compile: t={:.1f} s: built {}+{} shaders and {}+{} pipelines (startup+play), {} late "
                 "shaders and {} late pipelines, {} failed; {:.1f} s in the driver (worst {:.0f} ms), spirv cache "
                 "{}/{}; render thread: {} draws skipped, {} on the stand-in, {} partial frames, backlog {}; n1_record "
