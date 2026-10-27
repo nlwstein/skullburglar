@@ -2426,6 +2426,14 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam, bool max_
       e.material = le.material_path, e.mesh = le.mesh_path;
       e.count = drawn, e.row_offset = uint32_t(out.particle_rows.size()), e.row_floats = row_floats;
       for (int k = 0; k < 3; ++k) e.origin[k] = F32(inst + kEmitLocation + 4 * k);
+      // B-247: UE3 sorts translucent primitives by the view depth of their Bounds.Origin (FBoxSphereBounds), which
+      // can sit well away from the emitter location (an explosion's sparks spread its bounds); n1 orders by it.
+      if (g_off.bounds.ok()) {
+        const uint32_t b = c + g_off.bounds.offset;
+        e.sort_origin[0] = F32(b), e.sort_origin[1] = F32(b + 4), e.sort_origin[2] = F32(b + 8), e.sort_origin[3] = 1;
+      } else {
+        std::memset(e.sort_origin, 0, sizeof(e.sort_origin));
+      }
       // LocalToWorld for every emitter: local-space emitters are transformed by it, and UE3 scales every sprite by the
       // component's scale (Particle.Size * Scale x Scale3D x the owner's DrawScale), which it carries.
       if (g_off.local_to_world.ok())

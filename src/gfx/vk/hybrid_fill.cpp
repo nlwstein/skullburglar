@@ -578,6 +578,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     out.count = in.count, out.row_offset = in.row_offset, out.row_floats = in.row_floats;
     std::memcpy(out.origin, in.origin, sizeof(out.origin));
     std::memcpy(out.transform, in.transform, sizeof(out.transform));
+    std::memcpy(out.sort_origin, in.sort_origin, sizeof(out.sort_origin));
     out.pad1 = float(state->n1_variant.load(std::memory_order_acquire));  // B-236 debug A/B (0: none)
   }
   if (state->quad_on.load(std::memory_order_acquire)) {
