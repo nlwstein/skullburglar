@@ -52,6 +52,7 @@ set(BOTS_SOURCES
     src/instr.cpp
     src/idle_backoff.cpp
     src/scene_feed.cpp
+    src/slow_frame.cpp
     src/widescreen.cpp
     src/gfx/d3d_hooks.cpp
     src/gfx/capture.cpp

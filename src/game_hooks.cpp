@@ -51,6 +51,10 @@ bool Command(const std::string& cmd);  // hybrid.cpp
 }
 
 extern "C" void __imp__sub_82E1AC28(PPCContext& __restrict ctx, uint8_t* base);
+namespace bots::slowframe {
+void Tick();  // slow_frame.cpp: BOTS_SLOW_SAMPLE
+}
+
 extern "C" void __imp__sub_823598E0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_823501E0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base);
@@ -346,6 +350,7 @@ extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
   split_screen::Poll(ctx, base, user, ctx.r3.u32 == 0 ? state : 0);
   if (split_screen::OffGameThread()) return;
   if (user == 0) {
+    bots::slowframe::Tick();
     bots::scenefeed::Tick(base);
     if (!bots::scenefeed::LiveAtDraw()) bots::scenefeed::Live(base);
     bots::instr::GameTick(ctx, base);
