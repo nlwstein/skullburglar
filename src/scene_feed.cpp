@@ -870,6 +870,8 @@ void Emitters(std::string& s, uint32_t component) {
                      int32_t(PropU32(required, "SubImages_Horizontal", 1)),
                      int32_t(PropU32(required, "SubImages_Vertical", 1)), PropByte(required, "InterpolationMethod"));
     if (const uint32_t lock = LockAxis(lod)) fmt::format_to(std::back_inserter(s), ",\"lock_axis\":{}", lock);
+    if (IsObject(required) && PropBool(required, "bUseMaxDrawCount"))
+      fmt::format_to(std::back_inserter(s), ",\"max_draw_count\":{}", int32_t(PropU32(required, "MaxDrawCount")));
     if (IsObject(type_data) && std::string_view(type) == "mesh") {
       s += ",\"mesh\":";
       Str(s, Path(PropU32(type_data, "Mesh")));
@@ -1327,6 +1329,7 @@ struct LiveEmitter {
   int kind = -1;  // 0 sprite, 1 mesh, -1 not drawn (beam, trail, other)
   uint32_t align = 0, sub_h = 1, sub_v = 1, sub_method = 0, local_space = 0;
   uint32_t lock_axis = 0;  // EParticleAxisLock (LockAxisFlags of the LOD level's OrientationAxisLock module)
+  uint32_t max_draw = UINT32_MAX;  // B-242: RequiredModule MaxDrawCount when bUseMaxDrawCount, else no cap
   const char* material_path = nullptr;
   const char* mesh_path = nullptr;
 };
@@ -2193,7 +2196,7 @@ void LiveDecals(LiveState& st, HybridScene& out) {
   }
 }
 
-void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam) {
+void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam, bool max_draw) {
   static Field instances;
   constexpr uint32_t kMaxRows = 24576;  // particles per frame; the renderer applies its own (lower) cap
   for (const Primitive& p : st.particle_prims) {
@@ -2231,6 +2234,12 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam) {
           le.sub_h = std::max<int32_t>(1, int32_t(PropU32(required, "SubImages_Horizontal", 1)));
           le.sub_v = std::max<int32_t>(1, int32_t(PropU32(required, "SubImages_Vertical", 1)));
           le.sub_method = PropByte(required, "InterpolationMethod");
+          if (PropBool(required, "bUseMaxDrawCount")) {
+            le.max_draw = uint32_t(std::max<int32_t>(0, int32_t(PropU32(required, "MaxDrawCount"))));
+            static int logged = 0;
+            if (logged < 64 && ++logged)
+              REXLOG_INFO("scenefeed: {} draws at most {} particles (MaxDrawCount)", Path(le.outer), le.max_draw);
+          }
         }
         le.lock_axis = LockAxis(lod);
         le.material_path = Intern(IsObject(material) ? MaterialPath(material)
@@ -2238,9 +2247,13 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam) {
         if (le.kind == 1) le.mesh_path = Intern(Path(PropU32(type_data0, "Mesh")));
       }
       if (le.kind < 0 || !le.material_path || (le.kind == 1 && !le.mesh_path)) continue;
+      // B-242: UE3 hands its renderer only the first MaxDrawCount live particles (FillReplayData). Without the cap n1
+      // drew the newest ones too: a fireball's youngest, brightest sprites, often right at the camera.
+      const uint32_t drawn = max_draw && le.max_draw < active ? le.max_draw : active;
+      if (!drawn) continue;
       const uint32_t pdata = U32(inst + kEmitData), pindex = U32(inst + kEmitIndices);
       if (!Readable(pdata) || !Readable(pindex & ~3u)) continue;
-      if (out.particle_rows.size() / 15 + active > kMaxRows) return;
+      if (out.particle_rows.size() / 15 + drawn > kMaxRows) return;
       // Payload floats: the sub-UV frame data [ImageH, ImageV, Interp, Image2H, Image2V] for sub-UV animation (all
       // of the payload if the instance's offset looks wrong; the renderer then searches it), the rotation for mesh
       // particles, none otherwise. The renderer's search alone picked a later window (the next frame, unblended) in
@@ -2254,7 +2267,7 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam) {
       e.kind = uint32_t(le.kind), e.align = le.align, e.sub_h = le.sub_h, e.sub_v = le.sub_v;
       e.sub_method = le.sub_method, e.local_space = le.local_space, e.lock_axis = le.lock_axis;
       e.material = le.material_path, e.mesh = le.mesh_path;
-      e.count = active, e.row_offset = uint32_t(out.particle_rows.size()), e.row_floats = row_floats;
+      e.count = drawn, e.row_offset = uint32_t(out.particle_rows.size()), e.row_floats = row_floats;
       for (int k = 0; k < 3; ++k) e.origin[k] = F32(inst + kEmitLocation + 4 * k);
       // LocalToWorld for every emitter: local-space emitters are transformed by it, and UE3 scales every sprite by the
       // component's scale (Particle.Size * Scale x Scale3D x the owner's DrawScale), which it carries.
@@ -2262,8 +2275,8 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam) {
         for (int k = 0; k < 16; ++k) e.transform[k] = F32(c + g_off.local_to_world.offset + 4 * k);
       else
         std::memset(e.transform, 0, sizeof(e.transform));
-      out.particle_rows.reserve(out.particle_rows.size() + size_t(active) * row_floats);
-      for (uint32_t k = 0; k < active; ++k) {
+      out.particle_rows.reserve(out.particle_rows.size() + size_t(drawn) * row_floats);
+      for (uint32_t k = 0; k < drawn; ++k) {
         const uint16_t slot = uint16_t(__builtin_bswap16(*reinterpret_cast<const uint16_t*>(Raw(pindex + 2 * k))));
         const uint32_t pp = pdata + slot * stride;
         for (uint32_t off : {0x10u, 0x14u, 0x18u, 0x00u, 0x04u, 0x08u, 0x50u, 0x54u, 0x58u, 0x2Cu, 0x60u, 0x64u, 0x68u,
@@ -2480,7 +2493,7 @@ void Live(uint8_t* base) {
   out.particles_ms = 0;
   if (st.particles && !st.particle_prims.empty()) {
     const auto tp = std::chrono::steady_clock::now();
-    LiveParticles(st, out, cam);
+    LiveParticles(st, out, cam, hs->max_draw.load(std::memory_order_relaxed) != 0);
     out.particles_ms = float(Ms(tp, std::chrono::steady_clock::now()));
   }
   // Lights, fog and post for n1 (properties read live; the component list comes from the last walk). Binary records

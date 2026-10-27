@@ -371,6 +371,12 @@ bool Command(const std::string& cmd) {
     g_state.n1_variant.store(k, std::memory_order_release);
     REXLOG_INFO("hybrid: n1 variant {}", k);
     return true;
+  } else if (cmd.rfind("hybrid maxdraw", 0) == 0) {
+    // B-242 A/B: "hybrid maxdraw <0|1>" turns n1's MaxDrawCount cap off or on (HybridState::max_draw).
+    const unsigned k = unsigned(std::strtoul(cmd.c_str() + 14, nullptr, 10));
+    g_state.max_draw.store(k ? 1 : 0, std::memory_order_release);
+    REXLOG_INFO("hybrid: n1 max draw count {}", k ? "on" : "off");
+    return true;
   } else if (cmd.rfind("hybrid quad", 0) == 0) {
     // B-229: "hybrid quad <word> <n> [<max distance>] [emitter] [v<k>]" or "hybrid quad off" (HybridState::quad_*).
     // B-236: "emitter" gives n1 every particle of each picked particle's emitter, as the port's kept draw has them;
