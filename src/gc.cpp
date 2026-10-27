@@ -14,9 +14,11 @@
 // object (dcbt), which the recompiler drops.
 //
 // Host analysis (default on, BOTS_GC_HOST=0 turns it off): sub_825E99F0 is replaced by a host implementation of the
-// same algorithm (see HostReachability) that prefetches ahead: the next objects' bodies and the flag words of the
-// next object's references. What GC marks, keeps, nulls and frees is unchanged.
+// same algorithm (see HostReachability) that prefetches ahead in stages: the headers of the objects 8 ahead, the lines
+// holding the references of the object 4 ahead, the flag words those references point to 2 ahead, and the flag words
+// of array elements 1 ahead. What GC marks, keeps, nulls and frees is unchanged.
 //   BOTS_GC_HOST=0     the game's own code
+//   BOTS_GC_PF_HEAD / _FIELDS / _REFS / _ELEMS   the look-ahead distances (8 / 4 / 2 / 1; 0 turns a stage off)
 //   BOTS_GC_VERIFY=1   (with the host analysis) run both on every pass and log whether they agree ("gc: verify")
 //
 // Log (BOTS_GC_LOG, default 1; 0 silences it): one line per CollectGarbage ("gc: pass ..."; times, objects in the
@@ -211,50 +213,49 @@ void AddInline(PPCContext& ctx, uint8_t* base, uint32_t arr, uint32_t field, uin
   if (slot) S32(base, slot, U32(base, field));
 }
 
-// Read-only look-ahead: the flag words that object `obj`'s top-level references point to.
-// elems: also prefetch the flag words of the objects in the TArray<UObject*> fields (their data must already be
-// on its way, from an earlier call without it).
-void PrefetchRefs(uint8_t* base, uint32_t obj, bool elems) {
+// Read-only look-ahead over object `obj`'s top-level reference tokens, in stages that each need the previous one's
+// lines in the cache: kFields prefetches the lines of the object that hold its references; kRefs reads those
+// references and prefetches the flag words they point to (and the data of its TArray<UObject*> fields); kElems
+// prefetches the flag words of those arrays' elements. Tokens of arrays of structs (type 4) are skipped; tokens of
+// fixed arrays (type 5) address the first element, which is part of the object.
+enum Stage { kFieldLines, kRefFlags, kElemFlags };
+void PrefetchStage(uint8_t* base, uint32_t obj, Stage stage) {
   const uint32_t cls = U32(base, obj + 52);
   if (!cls) return;
   const uint32_t tokens = U32(base, cls + 480), count = U32(base, cls + 484);
   if (!tokens) return;
   const uint32_t pool0 = U32(base, kPoolStart), pool1 = U32(base, kPoolEnd);
-  int depth = 0;
+  auto flags = [&](uint32_t r) {
+    if (r && (r < pool0 || r > pool1)) Prefetch(base, r + 8);
+  };
   for (uint32_t i = 0, steps = 0; i < count && steps < 512; ++steps) {
     const uint32_t t = U32(base, tokens + 4 * i++);
-    const uint32_t type = t >> 16 & 0xFF, ret = t >> 24, off = t & 0xFFFF;
+    const uint32_t type = t >> 16 & 0xFF, off = t & 0xFFFF;
     if (type == 6) return;
-    if (type == 4) {  // array of structs: skip its tokens
+    if (type == 4) {
       if (i + 1 >= count) return;
-      const uint32_t skip = U32(base, tokens + 4 * (i + 1));
-      const uint32_t target = (skip + i + 1) & 0xFFFFFF;
+      const uint32_t target = (U32(base, tokens + 4 * (i + 1)) + i + 1) & 0xFFFFFF;
       if (target <= i || target > count) return;
       i = target;
       continue;
     }
     if (type == 5) {
       i += 2;
-      ++depth;
       continue;
     }
-    if (depth == 0 && !elems && (type == 1 || type == 2 || type == 7)) {
-      const uint32_t r = U32(base, obj + off);
-      if (r && (r < pool0 || r > pool1)) Prefetch(base, r + 8);
-    } else if (depth == 0 && type == 3) {
-      const uint32_t data = U32(base, obj + off);
-      if (!data) {
-      } else if (!elems) {
+    if (type != 1 && type != 2 && type != 3 && type != 7) continue;
+    if (stage == kFieldLines) {
+      Prefetch(base, obj + off);
+    } else if (type != 3) {
+      if (stage == kRefFlags) flags(U32(base, obj + off));
+    } else if (const uint32_t data = U32(base, obj + off)) {
+      if (stage == kRefFlags) {
         Prefetch(base, data);
       } else {
         const uint32_t n = U32(base, obj + off + 4);
-        for (uint32_t j = 0; j < n && j < 32; ++j) {
-          const uint32_t r = U32(base, data + 4 * j);
-          if (r && (r < pool0 || r > pool1)) Prefetch(base, r + 8);
-        }
+        for (uint32_t j = 0; j < n && j < 16; ++j) flags(U32(base, data + 4 * j));
       }
     }
-    depth = depth > int(ret) ? depth - int(ret) : 0;
   }
 }
 
@@ -371,8 +372,9 @@ void HostReachability(PPCContext& ctx, uint8_t* base) {
     }
   }
 
-  static const uint32_t kBody = uint32_t(EnvInt("BOTS_GC_PF_BODY", 2)), kRefs = uint32_t(EnvInt("BOTS_GC_PF_REFS", 1));
-  static const bool kElems = EnvInt("BOTS_GC_PF_ELEMS", 0) != 0;
+  // Look-ahead distances in objects (0 turns a stage off).
+  static const uint32_t kHead = uint32_t(EnvInt("BOTS_GC_PF_HEAD", 8)), kFields = uint32_t(EnvInt("BOTS_GC_PF_FIELDS", 4)),
+                        kRefs = uint32_t(EnvInt("BOTS_GC_PF_REFS", 2)), kElems = uint32_t(EnvInt("BOTS_GC_PF_ELEMS", 1));
   // Pass 2: the reference-token walk. Every object reached is cleared of RF_Unreachable and appended.
   const uint32_t pool0 = U32(base, kPoolStart), pool1 = U32(base, kPoolEnd);
   // GPermanentObjectPool bounds are re-read per reference by the original; nothing in the walk can change them.
@@ -384,14 +386,17 @@ void HostReachability(PPCContext& ctx, uint8_t* base) {
       const uint32_t obj = U32(base, data + 4 * next);
       ++next;
       const uint32_t count_now = U32(base, arr + 4);
-      // Object i+kBody: its body; i+kRefs: its references' flags and its arrays; with kElems, i+1: its arrays'
-      // elements' flags. Defaults measured on a laptop (B-241): 2/1/off; 6/3/on and 12/6/on were slower.
-      if (next - 1 + kBody < count_now) {
-        const uint32_t o2 = U32(base, data + 4 * (next - 1 + kBody));
-        for (uint32_t k = 0; k < 512; k += 64) Prefetch(base, o2 + k);
+      // A software pipeline over the objects ahead (see PrefetchStage): headers kHead ahead, the lines holding their
+      // references kFields ahead, the referenced objects' flags kRefs ahead, array elements' flags kElems ahead.
+      const uint32_t i = next - 1;
+      auto ahead = [&](uint32_t d) { return d && i + d < count_now ? U32(base, data + 4 * (i + d)) : 0u; };
+      if (const uint32_t o = ahead(kHead)) {
+        Prefetch(base, o);
+        Prefetch(base, o + 52);
       }
-      if (kRefs && next - 1 + kRefs < count_now) PrefetchRefs(base, U32(base, data + 4 * (next - 1 + kRefs)), false);
-      if (kElems && next < count_now) PrefetchRefs(base, U32(base, data + 4 * next), true);
+      if (const uint32_t o = ahead(kFields)) PrefetchStage(base, o, kFieldLines);
+      if (const uint32_t o = ahead(kRefs)) PrefetchStage(base, o, kRefFlags);
+      if (const uint32_t o = ahead(kElems)) PrefetchStage(base, o, kElemFlags);
       ctx.r3.u64 = obj;
       ctx.r4.u64 = arr;
       CallIndirect(ctx, base, U32(base, U32(base, obj) + 244), 0x825E9CAC);
