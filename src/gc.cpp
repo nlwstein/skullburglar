@@ -19,6 +19,7 @@
 // of array elements 1 ahead. What GC marks, keeps, nulls and frees is unchanged.
 //   BOTS_GC_HOST=0     the game's own code
 //   BOTS_GC_HOST=2     (measuring) alternate the two on successive passes
+//   BOTS_GC_HELPER=N   a helper thread loads what the walk will read, N objects ahead (default 24; 0: no helper)
 //   BOTS_GC_PF_HEAD / _FIELDS / _REFS / _ELEMS   the look-ahead distances (8 / 4 / 2 / 1; 0 turns a stage off)
 //   BOTS_GC_VERIFY=1   (with the host analysis) run both on every pass and log whether they agree ("gc: verify")
 //
@@ -29,9 +30,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <utility>
 #include <vector>
 
@@ -262,6 +267,112 @@ void PrefetchStage(uint8_t* base, uint32_t obj, Stage stage) {
   }
 }
 
+// ---- Warming helper thread ------------------------------------------------------------------------------------
+// One core can only have about ten cache misses in flight, and the walk already keeps it near that. A second thread
+// that walks the same objects a little ahead and actually loads what the walk will read (reference fields, the flag
+// words they point to, array elements' flags) brings those lines into the shared L3 with its own core's misses, so
+// the walk finds them there. The helper only reads guest memory, and only objects the walk handed it (entries of
+// ObjectsToSerialize, which stay valid for the whole analysis since nothing is freed until the purge); it never
+// writes guest memory, so what GC does is unchanged. Without it (BOTS_GC_HELPER=0) the walk runs alone.
+struct Warmer {
+  static constexpr uint32_t kRing = 1024;
+  std::atomic<uint32_t> ring[kRing] = {};
+  std::atomic<uint32_t> head{0};    // written by the walk
+  std::atomic<bool> active{false};  // between Start and Stop
+  std::atomic<uint64_t> warmed{0};
+  uint8_t* base = nullptr;
+  std::mutex m;
+  std::condition_variable cv;
+  bool started = false;
+
+  void Push(uint32_t obj) {
+    const uint32_t h = head.load(std::memory_order_relaxed);
+    ring[h % kRing].store(obj, std::memory_order_relaxed);
+    head.store(h + 1, std::memory_order_release);
+  }
+  void Start(uint8_t* b) {
+    if (!started) {
+      started = true;
+      base = b;
+      std::thread([this] { Run(); }).detach();
+    }
+    head.store(0, std::memory_order_relaxed);
+    {
+      std::lock_guard<std::mutex> lk(m);
+      active.store(true, std::memory_order_release);
+    }
+    cv.notify_one();
+  }
+  void Stop() { active.store(false, std::memory_order_release); }
+
+  void Run() {
+    volatile uint64_t sink = 0;
+    for (;;) {
+      {
+        std::unique_lock<std::mutex> lk(m);
+        cv.wait(lk, [this] { return active.load(std::memory_order_acquire); });
+      }
+      uint32_t tail = 0;
+      uint64_t n = 0;
+      while (active.load(std::memory_order_acquire)) {
+        const uint32_t h = head.load(std::memory_order_acquire);
+        if (h == tail || h < tail) {
+          if (h < tail) tail = h;  // a new analysis started
+#if defined(__x86_64__) || defined(_M_X64)
+          __builtin_ia32_pause();
+#endif
+          continue;
+        }
+        if (h - tail > kRing / 2) tail = h - kRing / 2;  // fell behind: skip to recent work
+        const uint32_t obj = ring[tail % kRing].load(std::memory_order_relaxed);
+        ++tail;
+        if (obj) sink += Warm(obj), ++n;
+      }
+      warmed.fetch_add(n, std::memory_order_relaxed);
+    }
+  }
+
+  // Load what the walk will load for `obj` (top-level reference tokens; see PrefetchStage).
+  uint64_t Warm(uint32_t obj) {
+    uint64_t acc = 0;
+    const uint32_t cls = U32(base, obj + 52);
+    if (!cls) return 0;
+    const uint32_t tokens = U32(base, cls + 480), count = U32(base, cls + 484);
+    if (!tokens) return 0;
+    const uint32_t pool0 = U32(base, kPoolStart), pool1 = U32(base, kPoolEnd);
+    auto flags = [&](uint32_t r) {
+      if (r && (r < pool0 || r > pool1)) acc += U32(base, r + 8);
+    };
+    for (uint32_t i = 0, steps = 0; i < count && steps < 512; ++steps) {
+      const uint32_t t = U32(base, tokens + 4 * i++);
+      const uint32_t type = t >> 16 & 0xFF, off = t & 0xFFFF;
+      if (type == 6) break;
+      if (type == 4) {
+        if (i + 1 >= count) break;
+        const uint32_t target = (U32(base, tokens + 4 * (i + 1)) + i + 1) & 0xFFFFFF;
+        if (target <= i || target > count) break;
+        i = target;
+        continue;
+      }
+      if (type == 5) {
+        i += 2;
+        continue;
+      }
+      if (type == 1 || type == 2 || type == 7) {
+        flags(U32(base, obj + off));
+      } else if (type == 3) {
+        const uint32_t data = U32(base, obj + off), n = U32(base, obj + off + 4);
+        for (uint32_t j = 0; data && j < n && j < 64; ++j) flags(U32(base, data + 4 * j));
+      }
+    }
+    return acc;
+  }
+};
+Warmer& TheWarmer() {
+  static Warmer* w = new Warmer();  // never destroyed: its thread lives for the process
+  return *w;
+}
+
 void HostReachability(PPCContext& ctx, uint8_t* base) {
   const double t_table = NowMs();
   const uint32_t arr = ctx.r3.u32;  // TArray<UObject*>& ObjectsToSerialize
@@ -382,6 +493,10 @@ void HostReachability(PPCContext& ctx, uint8_t* base) {
   const uint32_t pool0 = U32(base, kPoolStart), pool1 = U32(base, kPoolEnd);
   // GPermanentObjectPool bounds are re-read per reference by the original; nothing in the walk can change them.
   auto in_pool = [&](uint32_t r) { return !(r < pool0) && r <= pool1; };
+  static const uint32_t kHelperAhead = uint32_t(EnvInt("BOTS_GC_HELPER", 24));  // 0: no helper thread
+  Warmer* warmer = kHelperAhead ? &TheWarmer() : nullptr;
+  uint32_t pushed = 0;  // ObjectsToSerialize entries handed to the helper so far
+  if (warmer) warmer->Start(base);
   if (int32_t(U32(base, arr + 4)) > 0) {
     uint32_t next = 0;  // index of the next object to serialize
     for (;;) {
@@ -400,6 +515,9 @@ void HostReachability(PPCContext& ctx, uint8_t* base) {
       if (const uint32_t o = ahead(kFields)) PrefetchStage(base, o, kFieldLines);
       if (const uint32_t o = ahead(kRefs)) PrefetchStage(base, o, kRefFlags);
       if (const uint32_t o = ahead(kElems)) PrefetchStage(base, o, kElemFlags);
+      if (warmer)
+        for (const uint32_t until = std::min(count_now, i + kHelperAhead); pushed < until; ++pushed)
+          warmer->Push(U32(base, data + 4 * pushed));
       ctx.r3.u64 = obj;
       ctx.r4.u64 = arr;
       CallIndirect(ctx, base, U32(base, U32(base, obj) + 244), 0x825E9CAC);
@@ -520,6 +638,7 @@ void HostReachability(PPCContext& ctx, uint8_t* base) {
       if (int32_t(next) >= int32_t(U32(base, arr + 4))) break;
     }
   }
+  if (warmer) warmer->Stop();
   if (const uint32_t data = U32(base, stack)) {
     uint32_t m = U32(base, kGMalloc);
     if (!m) {
