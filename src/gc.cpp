@@ -115,7 +115,9 @@ struct Pass {
   double start = 0;           // CollectGarbage entry (ms since start)
   double mark_ms = 0, prepurge_ms = 0;
   double table_ms = 0;
-  bool host = false;          // this pass used the host analysis        // host analysis: the pass over the object table (the rest of mark_ms is the walk)
+  bool host = false;          // this pass used the host analysis
+  uint64_t walk_objs = 0, walk_tokens = 0, walk_refs = 0;  // host walk counts
+  double virt_ms = 0;         // BOTS_GC_PROF=1: time in the per-object virtual (vtable +244)        // host analysis: the pass over the object table (the rest of mark_ms is the walk)
   uint32_t unreachable = 0;   // ConditionalBeginDestroy calls inside CollectGarbage
   bool purge_pending = false;  // a purge started by this pass has not finished yet
   double purge_ms = 0;        // time-limited purge calls since the pass
@@ -520,7 +522,11 @@ void HostReachability(PPCContext& ctx, uint8_t* base) {
           warmer->Push(U32(base, data + 4 * pushed));
       ctx.r3.u64 = obj;
       ctx.r4.u64 = arr;
+      static const bool kProf = EnvInt("BOTS_GC_PROF", 0) != 0;
+      const double tv = kProf ? NowMs() : 0;
       CallIndirect(ctx, base, U32(base, U32(base, obj) + 244), 0x825E9CAC);
+      if (kProf) g.virt_ms += NowMs() - tv;
+      ++g.walk_objs;
       uint32_t frame = U32(base, stack);
       uint32_t cur = obj;  // r23: the struct the current tokens address
       uint32_t tok = 0;    // r22
@@ -546,6 +552,7 @@ void HostReachability(PPCContext& ctx, uint8_t* base) {
           cur = U32(base, frame);
         }
         const uint32_t t = U32(base, tokens + 4 * tok);
+        ++g.walk_tokens;
         ++tok;
         S32(base, sp + 80, t);
         const uint32_t type = t >> 16 & 0xFF, off = t & 0xFFFF;
@@ -553,6 +560,7 @@ void HostReachability(PPCContext& ctx, uint8_t* base) {
           returns = t >> 24;
           const uint32_t at = cur + off, r = U32(base, at);
           if (!r || in_pool(r)) continue;
+          ++g.walk_refs;
           const uint64_t f = U64(base, r + 8);
           if (type == 1 && (f & kPendingKill)) {
             NullRef(base, at);
@@ -571,6 +579,7 @@ void HostReachability(PPCContext& ctx, uint8_t* base) {
           for (uint32_t j = 0; int32_t(j) < int32_t(U32(base, a + 4)); ++j) {
             const uint32_t at = U32(base, a) + 4 * j, r = U32(base, at);
             if (!r || in_pool(r)) continue;
+            ++g.walk_refs;
             const uint64_t f = U64(base, r + 8);
             if (f & kPendingKill) {
               NullRef(base, at);
@@ -734,7 +743,8 @@ extern "C" void sub_825EA258(PPCContext& __restrict ctx, uint8_t* base) {
   const bool full = ctx.r4.u32 != 0;
   g.in_gc = true;
   g.start = NowMs();
-  g.mark_ms = g.prepurge_ms = g.table_ms = 0;
+  g.mark_ms = g.prepurge_ms = g.table_ms = g.virt_ms = 0;
+  g.walk_objs = g.walk_tokens = g.walk_refs = 0;
   g.host = false;
   g.unreachable = 0;
   const bool was_pending = g.purge_pending;
@@ -756,6 +766,9 @@ extern "C" void sub_825EA258(PPCContext& __restrict ctx, uint8_t* base) {
               U32(base, kMarkCount), g.unreachable, g.live_after_gc, keep, full ? 1 : 0, caller,
               engine ? F32(base, engine + kTimeBetweenPurging) : 0.0f,
               was_pending ? " (previous purge was still pending)" : "");
+  if (g.host)
+    REXLOG_INFO("gc: walk pass {}: {} objects, {} tokens, {} references followed, virtual calls {:.1f} ms", g.n,
+                g.walk_objs, g.walk_tokens, g.walk_refs, g.virt_ms);
 }
 
 // PerformReachabilityAnalysis(TArray<UObject*>& ObjectsToSerialize, QWORD KeepFlags)
