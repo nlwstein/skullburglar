@@ -11,6 +11,15 @@ the output directory.
 Times: commands go through BOTS_EXEC_FILE (polled every 0.5 s by the game); the driver follows the log and waits
 for each pair to be written before going on, so slow loads and cold pipeline caches only make the tour longer.
 
+Clock (--clock): by default the waits after a load are in GAME time, so a slow machine and a fast one shoot the same
+moment of the scene. The driver starts the game with the instrumentation channel (BOTS_INSTR, a free localhost port,
+src/instr.cpp) and reads game.world_time (the level's TimeSeconds) from its status line. --load-secs is then
+"seconds of game time after the load" and --gap "game seconds between shots". If the channel is not there (an older
+build) the driver says so and falls back to --clock wall: fixed wall-clock sleeps, as before.
+
+Series: --series 71515:8 loads that checkpoint 8 times (with --shots 3, 24 shots), each load shot at the same game
+times. Round 0 keeps the tags <id>_a.. and later rounds are <id>_r<N>a.. so parity_report.py + parity_sheet.py --chapter 71515 pool them.
+
 Test runs never use a player's save: the user-data root is a fresh copy of --user-template (or empty) inside --out.
 """
 import argparse
@@ -19,6 +28,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -55,10 +65,19 @@ def main():
     ap.add_argument("--out", required=True, help="output directory (created)")
     ap.add_argument("--checkpoints", help="comma-separated chapter ids (default: the built-in tour)")
     ap.add_argument("--shots", type=int, default=3, help="pairs per checkpoint")
-    ap.add_argument("--load-secs", type=float, default=25, help="wait after LoadChapter before the first shot")
+    ap.add_argument("--clock", choices=["auto", "game", "wall"], default="auto",
+                    help="what the waits after a load count: game time read from the game (auto: game when the "
+                         "instrumentation channel answers, else wall), or wall-clock seconds")
+    ap.add_argument("--load-secs", type=float, default=None,
+                    help="wait after LoadChapter before the first shot: game seconds since the load in game mode "
+                         f"(default {GAME_LOAD_SECS}), wall seconds in wall mode (default {WALL_LOAD_SECS})")
+    ap.add_argument("--series", action="append", default=[], metavar="ID:N",
+                    help="load checkpoint ID N times in a row, --shots shots each (pooled by the report)")
     ap.add_argument("--n1-ready", type=float, default=0,
                     help="before the first shot, wait up to this many seconds for n1's startup step to finish")
-    ap.add_argument("--gap", type=float, default=6, help="seconds of play between shots")
+    ap.add_argument("--gap", type=float, default=None,
+                    help=f"seconds of play between shots: game seconds between shot times in game mode (default "
+                         f"{GAME_GAP}), wall seconds after a shot in wall mode (default {WALL_GAP})")
     ap.add_argument("--shot-timeout", type=float, default=90, help="give up on a pair after this many seconds")
     ap.add_argument("--freeze", choices=["slomo", "pause", "none"], default="slomo",
                     help="hold the world still around each shot: SloMo 0.01 (default), Pause, or nothing")
@@ -78,6 +97,15 @@ def main():
     if a.checkpoints:
         notes = dict(DEFAULT_TOUR)
         tour = [(c, notes.get(c, "")) for c in a.checkpoints.split(",") if c]
+
+    series = {}
+    for sv in a.series:
+        cid, _, n = sv.partition(":")
+        series[cid] = int(n)
+    unknown = [c for c in series if c not in dict(tour)]
+    if unknown:
+        tour = tour + [(c, "") for c in unknown]
+    tour = [(c, note, r) for c, note in tour for r in range(series.get(c, 1))]
 
     out = os.path.abspath(a.out)
     shots = os.path.join(out, "shots")
@@ -109,6 +137,12 @@ def main():
         "BOTS_INVULNERABLE": "1",
         "BOTS_PRECOMPILE_HOLD": "0",
     })
+    instr_port = 0
+    if a.clock != "wall":
+        with socket.socket() as sk:
+            sk.bind(("127.0.0.1", 0))
+            instr_port = sk.getsockname()[1]
+        env["BOTS_INSTR"] = str(instr_port)
     if a.feed:
         env["BOTS_SCENEFEED_DIR"] = os.path.join(out, "feed")
     if a.random != "0":
@@ -133,26 +167,46 @@ def main():
     def alive():
         return proc.poll() is None
 
+    clock = None
     try:
         if not log.wait(lambda l: "BOTS_EXEC: EnableCheats" in l, 240, alive):
             raise RuntimeError("the game never reached its first console command")
+        if instr_port:
+            clock = GameClock(instr_port)
+            if clock.status() is None:
+                print("game clock: the instrumentation channel did not answer", flush=True)
+                clock = None
+            if clock is None and a.clock == "game":
+                raise RuntimeError("--clock game, but the game's instrumentation channel is not there")
+        mode = "game" if clock else "wall"
+        load_secs = a.load_secs if a.load_secs is not None else (GAME_LOAD_SECS if clock else WALL_LOAD_SECS)
+        gap = a.gap if a.gap is not None else (GAME_GAP if clock else WALL_GAP)
+        record["clock"] = mode
+        print(f"clock: {mode} time, load-secs {load_secs:g}, gap {gap:g}", flush=True)
         time.sleep(5)
-        for cid, note in tour:
+        for cid, note, rnd in tour:
             if not alive():
                 raise RuntimeError("the game exited")
             c0 = time.time()
-            print(f"[{c0 - t0:6.0f} s] LoadChapter {cid} ({note})", flush=True)
+            print(f"[{c0 - t0:6.0f} s] LoadChapter {cid} ({note})" + (f" round {rnd}" if rnd else ""), flush=True)
+            loads0 = clock.loads() if clock else None
             send(f"LoadChapter {cid}")
-            time.sleep(a.load_secs)
+            if clock:
+                if not clock.wait_loaded(loads0, load_secs, alive):
+                    print("    game clock: never reached the target; going on", flush=True)
+            else:
+                time.sleep(load_secs)
             if a.n1_ready > 0 and not record["checkpoints"]:
                 w0 = time.time()
                 got = log.wait(lambda l: "hybrid n1: startup step done" in l, a.n1_ready, alive)
                 print(f"    n1 startup step {'done' if got else 'NOT done'} after {time.time() - w0:.0f} s more",
                       flush=True)
             send("EnableCheats")  # a new level has a new player controller
-            entry = {"chapter": cid, "note": note, "shots": [], "load_at": c0 - t0}
+            entry = {"chapter": cid, "note": note, "shots": [], "load_at": c0 - t0, "round": rnd}
             for k in range(a.shots):
-                tag = f"{cid}_{chr(ord('a') + k)}"
+                tag = f"{cid}_{'r%d' % rnd if rnd else ''}{chr(ord('a') + k)}"
+                if clock and k:  # shot k is due load_secs + k * gap game seconds after the load
+                    clock.wait_time(load_secs + k * gap, loads0 + 1, alive)
                 if a.freeze == "slomo":
                     send("SloMo 0.01")
                 elif a.freeze == "pause":
@@ -172,10 +226,12 @@ def main():
                 if got:
                     stem = rx.search(got).group(1)
                     entry["shots"].append({"tag": tag, "stem": os.path.relpath(stem, out), "secs": time.time() - s0})
-                    print(f"    {tag}: {time.time() - s0:.1f} s", flush=True)
+                    wt = clock.world_time() if clock else None
+                    print(f"    {tag}: {time.time() - s0:.1f} s" + (f", world time {wt:.1f} s" if wt else ""), flush=True)
                 else:
                     print(f"    {tag}: no picture within {a.shot_timeout:.0f} s", flush=True)
-                time.sleep(a.gap)
+                if not clock:
+                    time.sleep(gap)
             entry["secs"] = time.time() - c0
             record["checkpoints"].append(entry)
     finally:
@@ -190,6 +246,74 @@ def main():
                 proc.kill()
     n = sum(len(c["shots"]) for c in record["checkpoints"])
     print(f"tour: {len(record['checkpoints'])} checkpoints, {n} pairs, {record['wall_secs'] / 60:.1f} min -> {out}")
+
+
+GAME_LOAD_SECS, GAME_GAP = 20.0, 7.7  # shots overshoot their target by 1-3 s, so they read about 22/30/38 s, like the old 25 s wall waits on the Mac
+WALL_LOAD_SECS, WALL_GAP = 25.0, 6.0
+
+
+class GameClock:
+    """Reads the level's game time (game.world_time) over the game's instrumentation channel (src/instr.cpp)."""
+
+    def __init__(self, port):
+        self.port, self.sock, self.buf = port, None, b""
+
+    def _connect(self):
+        try:
+            self.sock = socket.create_connection(("127.0.0.1", self.port), timeout=3)
+            self.sock.settimeout(5)
+            self.buf = b""
+        except OSError:
+            self.sock = None
+
+    def status(self):
+        """The `game` object of a fresh status line, or None."""
+        for _ in range(2):
+            if self.sock is None:
+                self._connect()
+                if self.sock is None:
+                    return None
+            try:
+                self.sock.sendall(b"status\n")
+                while True:
+                    while b"\n" not in self.buf:
+                        d = self.sock.recv(65536)
+                        if not d:
+                            raise OSError("closed")
+                        self.buf += d
+                    line, self.buf = self.buf.split(b"\n", 1)
+                    j = json.loads(line)
+                    if j.get("type") == "status":
+                        return j.get("game")
+            except (OSError, ValueError):
+                self.sock = None
+        return None
+
+    def loads(self):
+        g = self.status()
+        return g["loads"] if g else 0
+
+    def world_time(self):
+        g = self.status()
+        return g["world_time"] if g else None
+
+    def wait_loaded(self, loads_before, secs, alive, timeout=None):
+        """After LoadChapter: the load finished and the new level's clock reads >= secs."""
+        return self._wait(loads_before + 1, secs, alive, timeout)
+
+    def wait_time(self, secs, loads_min, alive, timeout=None):
+        return self._wait(loads_min, secs, alive, timeout)
+
+    def _wait(self, loads_min, secs, alive, timeout):
+        end = time.time() + (timeout if timeout else 240 + 3 * secs)
+        while time.time() < end and alive():
+            g = self.status()
+            # since_load_s >= 1: the status has sampled the new level (world_time is read every 200 ms)
+            if (g and g["loads"] >= loads_min and not g["loading"] and g["since_load_s"] >= 1
+                    and g["world_time"] >= secs):
+                return True
+            time.sleep(0.2)
+        return False
 
 
 class LogFollower:
