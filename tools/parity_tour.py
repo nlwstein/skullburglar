@@ -18,7 +18,7 @@ src/instr.cpp) and reads game.world_time (the level's TimeSeconds) from its stat
 build) the driver says so and falls back to --clock wall: fixed wall-clock sleeps, as before.
 
 Series: --series 71515:8 loads that checkpoint 8 times (with --shots 3, 24 shots), each load shot at the same game
-times. Round 0 keeps the tags <id>_a.. and later rounds are <id>_r<N>a.. so tools/parity_report.py pools them.
+times. Round 0 keeps the tags <id>_a.. and later rounds are <id>_r<N>a.. so parity_report.py + parity_sheet.py --chapter 71515 pool them.
 
 Test runs never use a player's save: the user-data root is a fresh copy of --user-template (or empty) inside --out.
 """
