@@ -1000,6 +1000,8 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
                                      pviews = texture_views(ptextures, pview_storage);
 
   profile.Mark(kPhaseRing);
+  // B-218: a scene queued for this frame does what flushes (the n1 preload hold) here, not inside DrawSceneFill below.
+  if (scene_fill_seq_) PrepareSceneN1();
   // Room for this draw's uploads and descriptor sets: flush first rather than mid-draw.
   BeginCommands(kGpuDraw);
   const VkDeviceSize upload_need = 64 * 1024 + VkDeviceSize(count) * 12;
@@ -1478,7 +1480,12 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     return;
   }
 
-  if (scene_fill_seq_ && pass.color[0]) DrawSceneFill(*pass.color[0]);
+  if (scene_fill_seq_ && pass.color[0]) {
+    // B-218: this draw's sets and ring data are in the current submission; a Flush now would strand them.
+    scene_mid_draw_ = true;
+    DrawSceneFill(*pass.color[0]);
+    scene_mid_draw_ = false;
+  }
   profile.Mark(kPhasePass);
   // Render pass: kept open across draws to the same targets, and reopened when a draw samples something written
   // since the last barrier (reopening the same attachments then always barriers: they count as written). An

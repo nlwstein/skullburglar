@@ -809,6 +809,13 @@ void Renderer::EndRendering(const char* why) {
 
 void Renderer::Flush() {
   if (!recording_) return;
+  if (scene_mid_draw_) {  // B-218: the draw being recorded would bind the old submission's sets and ring data
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      REXLOG_ERROR("gfx native: Flush inside a draw (the hybrid scene fill); B-218");
+    }
+  }
   EndRendering("flush");
   GpuMark(kGpuOther, true);  // closes the last span
   if (ring_used_) vmaFlushAllocation(allocator_, ring_.allocation, 0, ring_used_);
