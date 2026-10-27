@@ -447,6 +447,7 @@ void Renderer::ProcessInvalidations() {
 }
 
 void Renderer::EndFrame() {
+  capture_frame_ = false;  // B-220: a capture frame's scene marker that never came (it always should) ends it here
   // Frames in flight: frame N - 2 must be done before frame N is presented, as when kFramesInFlight slots with one
   // submission per frame were the only limit.
   frame_ends_.push_back(stats_.flushes);
@@ -1004,6 +1005,13 @@ Renderer::Image* Renderer::ResolveTexture(uint32_t address, uint32_t format, uin
 void Renderer::OnDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps, const Draw& draw) {
   if (!ok_) return;
   ScopedMicros time(stats_.draw_us);
+  if (capture_frame_) {
+    // Counted but not drawn: an occlusion query over it is then inexact and answers "visible", as the hook does for
+    // suppressed frames, so the next capture frame's culling still draws the trees.
+    if (occlusion_open_ && regs.Get<rg::reg::RB_MODECONTROL>().edram_mode != xe::EdramMode::kCopy) ++occlusion_draws_;
+    CaptureFrameDraw(regs, vs, ps, draw);
+    return;
+  }
   if (regs.Get<rg::reg::RB_MODECONTROL>().edram_mode == xe::EdramMode::kCopy) {
     Resolve(regs);
     return;

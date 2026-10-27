@@ -21,7 +21,8 @@
 //                              e.g. `wait -t 300 phase==in_play && game.levels~=Ambush`
 //   keys                       the flat status keys and their values
 //   shot <path.png>            the presented frame as PNG, plus <path.png>.json (the status line at that moment)
-//   burst <dir> <count>        <count> consecutive presented frames (native renderer; PPM + TSV, as BOTS_CAPTURE_BURST)
+//   burst <dir> <count> [ms]   <count> consecutive presented frames (native renderer; PPM + TSV, as BOTS_CAPTURE_BURST);
+//                              with ms: a trace, every present in the TSV and one frame copied every ms (+ after gaps)
 //   dualshot <tag>             hybrid dual render: NNNN-<tag>.port.png / .n1.png in BOTS_HYBRID_DUAL_DIR (needs
 //                              BOTS_HYBRID_DUAL=1, which changes what is drawn: not for benchmarks)
 //   macro move_to x y [z] [ms] [radius] | path_to x y z|objective|hotspot [ms] [radius] [exact] | aim_at x y z [ms]
@@ -1805,6 +1806,11 @@ std::string BuildStatus(bool window, std::map<std::string, std::string>* flat) {
     g_phase.since_us = now;
   }
   g.in_play = phase == "in_play";
+  {
+    uint64_t packed = 0;
+    for (size_t i = 0; i < 8 && i < phase.size(); ++i) packed |= uint64_t(uint8_t(phase[i])) << (8 * i);
+    g_state.phase8.store(packed, std::memory_order_relaxed);
+  }
   if (!g_phase.first.count(phase)) g_phase.first[phase] = Secs(now);
   if (pc.done && g_phase.precompile_done_s < 0) {
     g_phase.precompile_done_s = Secs(now);
@@ -2480,10 +2486,11 @@ std::string Handle(Client& c, const std::string& line) {
   }
   if (cmd == "shot") return a.size() < 2 ? Fail("shot <path.png>") : Shot(rest);
   if (cmd == "burst") {
-    if (a.size() < 3) return Fail("burst <dir> <count>");
+    if (a.size() < 3) return Fail("burst <dir> <count> [every_ms]");
     if (!g_state.frames) return Fail("burst needs the native renderer");
     std::snprintf(g_state.burst_dir, sizeof(g_state.burst_dir), "%s", a[1].c_str());
     g_state.burst_count = uint32_t(std::clamp(Arg(a, 2, 30), 1.0, 600.0));
+    g_state.burst_every_ms = uint32_t(std::clamp(Arg(a, 3, 0), 0.0, 60000.0));
     g_state.burst_seq.fetch_add(1, std::memory_order_release);
     return Ok(Str("dir", a[1]));
   }

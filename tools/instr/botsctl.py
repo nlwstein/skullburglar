@@ -17,7 +17,8 @@ Scenario files: one step per line, # comments. Steps the driver handles itself:
   until COND [btn=B] [timeout=S]            wait for COND (default 600 s), dismissing dialogs with BTN meanwhile
   expect COND                               fail the run (INVALID) unless COND holds now
   shot NAME                                 DIR/shots/NAME.png (+ .json sidecar with the status at that moment)
-  burst NAME COUNT                          COUNT consecutive frames into DIR/shots/NAME/
+  burst NAME COUNT [MS]                     COUNT consecutive frames into DIR/shots/NAME/; with MS a trace: every
+                                            present in the TSV, a frame copied every MS (and after any 50 ms gap)
   dualshot NAME                             hybrid dual render (port + n1) into the game's BOTS_HYBRID_DUAL_DIR
   sleep SECS                                (only for settling; never to wait for a state: use wait)
   mark NAME                                 a timestamp in the summary
@@ -405,7 +406,8 @@ class Run:
             if not self.do_shot(words[1]).get("ok"):
                 raise RuntimeError("shot failed")
         elif op == "burst":
-            r = self.send(f"burst {self.game_path('shots/' + words[1])} {words[2] if len(words) > 2 else 30}")
+            every = f" {words[3]}" if len(words) > 3 else ""
+            r = self.send(f"burst {self.game_path('shots/' + words[1])} {words[2] if len(words) > 2 else 30}{every}")
             if not r.get("ok"):
                 raise RuntimeError(r.get("error"))
         elif op == "dualshot":  # the pair goes to the game's BOTS_HYBRID_DUAL_DIR, named after the tag

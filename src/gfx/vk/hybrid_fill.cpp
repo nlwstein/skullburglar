@@ -102,6 +102,7 @@ struct FillConstants {
 }  // namespace
 
 void Renderer::QueueSceneFill(uint32_t seq) {
+  capture_frame_ = false;  // B-220: the scene's marker ends a capture frame's scene
   // B-210 diagnostics (BOTS_HYBRID_DROP_LOG=<n>): a marker replaced before any draw reached it drew no scene.
   static int drop_log = [] { const char* v = std::getenv("BOTS_HYBRID_DROP_LOG"); return v ? std::atoi(v) : 0; }();
   if (scene_fill_seq_ && drop_log > 0) {

@@ -72,6 +72,9 @@ class Renderer : public Pm4Sink {
   // Hybrid spike (hybrid_fill.cpp): the game's scene was suppressed at this point of the stream for camera `seq`;
   // the next colour draw first gets a host-drawn stand-in scene.
   void QueueSceneFill(uint32_t seq);
+  // B-220: the game is about to draw its own scene for a tree-capture frame (kHybridCaptureBegin). Until the scene's
+  // marker (QueueSceneFill) its draws only feed the tree capture and its resolves are dropped (CaptureFrameDraw).
+  void BeginCaptureFrame() { capture_frame_ = true; }
 
   // Submits everything recorded so far and waits for it.
   // Submits what's recorded without waiting (up to kSubmissions in flight). Finish also waits for the GPU:
@@ -178,6 +181,8 @@ class Renderer : public Pm4Sink {
              live_pipelines_queued = 0;
     // Occlusion queries ended, and those answered "visible" without counting (occlusion_hidden(): counted 0).
     uint64_t occlusion_queries = 0, occlusion_inexact = 0;
+    // B-220: draws and resolves of the game's own scene in tree-capture frames, handed to the capture only.
+    uint64_t capture_skipped = 0;
     uint64_t draw_phase_ns[12] = {};  // BOTS_DRAW_PROFILE=1: IssueDraw's time by phase (kDrawPhaseNames)
     // Profiling (P5): submits, and microseconds blocked on the GPU fence, inside OnDraw (recording, including
     // texture loads and any flush it triggers) and inside LoadTexture (untile + upload).
@@ -420,6 +425,12 @@ class Renderer : public Pm4Sink {
   bool UploadSharedMemory();
   void IssueDraw(const rex::graphics::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
                  const Draw& draw);
+  // B-187 / B-220 (draw.cpp): a tree draw handed to n1's capture; a capture frame's scene draw (no drawing).
+  void TreeCaptureDraw(const rex::graphics::RegisterFile& regs, ShaderCache::Shader& vshader,
+                       ShaderCache::Shader& pshader, const Draw& draw, uint32_t count, bool index32);
+  void CaptureFrameDraw(const rex::graphics::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
+                        const Draw& draw);
+  bool capture_frame_ = false;
   bool RectListBound(const rex::graphics::RegisterFile& regs, const ShaderCache::Shader& vshader,
                      rex::graphics::xenos::SourceSelect source, uint32_t count, uint32_t& x1, uint32_t& y1) const;
   // Space in this submission's upload ring (uniforms and indices); flushes when full.

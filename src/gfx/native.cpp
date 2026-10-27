@@ -404,11 +404,12 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
                 "ms ({} applied, longest {:.1f} ms, {} textures, {} meshes, {:.2f} MB; {} lazy, {} late skips), "
                 "upload pump {:.1f} ms; late pipelines {} shaders {}, {} draws without a pipeline, {} on the stand-in; "
                 "tree capture {}; port: draws {:.1f} ms, textures {:.1f} ms, GPU wait {:.1f} ms, CP idle {:.1f} ms, "
-                "{} new port pipelines",
+                "{} new port pipelines, {} capture draws not drawn",
                 since, frames_, ms, cause, n1.record_ms, n1.scenes, n1.apply_ms, n1.applied, n1.apply_max_ms,
                 n1.textures, n1.meshes, double(n1.bytes) / 1048576.0, n1.lazy, n1.late_skips, n1.upload_ms,
                 n1.late_pipelines, n1.late_shaders, n1.draws_no_pipe, n1.fallback_draws, n1.tree_capture ? 1 : 0,
-                t(a.draw_us, b.draw_us), port_tex, gpu_wait, idle, b.live_pipelines - a.live_pipelines);
+                t(a.draw_us, b.draw_us), port_tex, gpu_wait, idle, b.live_pipelines - a.live_pipelines,
+                b.capture_skipped - a.capture_skipped);
   }
 
   // One slow frame: where this thread's time went (draw recording, of it texture loads, GPU fence waits, idle
@@ -505,6 +506,10 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
 
   void WriteRegister(uint32_t index, uint32_t value) override {
     if (index == bots::kHybridMarkerRegister) {  // hybrid spike: the game's scene was skipped here (hybrid_state.h)
+      if (value == bots::kHybridCaptureBegin) {
+        if (renderer_) renderer_->BeginCaptureFrame();
+        return;
+      }
       if (bots::HybridState* state = bots::FindHybridState()) {
         state->markers_seen.fetch_add(1, std::memory_order_relaxed);
         if (renderer_) renderer_->QueueSceneFill(value);

@@ -76,6 +76,7 @@ struct Burst {
   struct Window {
     double at;
     uint32_t count;
+    uint32_t every_ms = 0;  // 0: consecutive frames; else a trace (instr_state.h burst_every_ms)
   };
   std::vector<Window> windows;
   size_t next = 0;
@@ -85,7 +86,8 @@ struct Burst {
   VmaAllocation alloc = nullptr;
   uint8_t* map = nullptr;
   VkDeviceSize frame_bytes = 0;
-  uint32_t w = 0, h = 0, count = 0, taken = 0, number = 0;
+  uint32_t w = 0, h = 0, count = 0, taken = 0, number = 0, every_ms = 0;
+  std::chrono::steady_clock::time_point last_copy{}, last_present{};
   VkFormat format = VK_FORMAT_UNDEFINED;
   uint64_t first_drawn = 0;
   std::string lines;
@@ -278,7 +280,8 @@ void Renderer::CaptureBurst(const Image& source) {
       std::filesystem::create_directories(b->dir, ec);
       const double at = std::chrono::duration<double>(now - b->start).count();
       b->windows.insert(b->windows.begin() + std::ptrdiff_t(std::min(b->next, b->windows.size())),
-                        {at, is->burst_count.load(std::memory_order_relaxed)});
+                        {at, is->burst_count.load(std::memory_order_relaxed),
+                         is->burst_every_ms.load(std::memory_order_relaxed)});
     }
   }
   if (!b->buffer) {
@@ -291,6 +294,7 @@ void Renderer::CaptureBurst(const Image& source) {
       b->next = b->windows.size();
       return;
     }
+    b->every_ms = b->windows[b->next].every_ms;
     b->count = b->windows[b->next++].count;
     b->w = source.width, b->h = source.height, b->format = source.format;
     b->frame_bytes = VkDeviceSize(b->w) * b->h * 4;
@@ -308,10 +312,34 @@ void Renderer::CaptureBurst(const Image& source) {
     }
     b->map = static_cast<uint8_t*>(mapped.pMappedData);
     b->taken = 0, b->burst_start = now, b->first_drawn = n1_drawn_;
-    b->lines = "frame\tms\tpresents\tn1_drawn\tmarker_seq\tview_seq\tscene_cam\tscene_frame\n";
-    REXLOG_INFO("capture burst {}: {} frames of {}x{}", b->number, b->count, b->w, b->h);
+    b->last_copy = {}, b->last_present = now;
+    // frame: the copy's index (-1: logged, not copied, trace only); gap_ms: since the previous present; phase: the
+    // instrumentation's phase at that moment.
+    b->lines = "frame\tms\tpresents\tn1_drawn\tmarker_seq\tview_seq\tscene_cam\tscene_frame\tgap_ms\tphase\n";
+    REXLOG_INFO("capture burst {}: {} frames of {}x{}{}", b->number, b->count, b->w, b->h,
+                b->every_ms ? ", one every " + std::to_string(b->every_ms) + " ms (trace)" : std::string());
   }
   if (source.width != b->w || source.height != b->h) return;  // a resize mid-burst: skip those frames
+  const double gap_ms = std::chrono::duration<double, std::milli>(now - b->last_present).count();
+  b->last_present = now;
+  char phase[9] = {};
+  if (InstrState* is = FindInstrState()) {
+    const uint64_t p = is->phase8.load(std::memory_order_relaxed);
+    for (int i = 0; i < 8; ++i) phase[i] = char((p >> (8 * i)) & 0xFF);
+  }
+  const bool copy = !b->every_ms || b->taken == 0 || gap_ms >= 50.0 ||
+                    std::chrono::duration<double, std::milli>(now - b->last_copy).count() >= b->every_ms;
+  if (!copy) {
+    char line[200];
+    std::snprintf(line, sizeof(line), "-1\t%.2f\t%llu\t%llu\t%u\t%u\t%u\t%llu\t%.2f\t%s\n",
+                  std::chrono::duration<double, std::milli>(now - b->burst_start).count(),
+                  (unsigned long long)stats_.presents, (unsigned long long)(n1_drawn_ - b->first_drawn),
+                  n1_marker_seq_, n1_view_seq_, n1_scene_cam_, (unsigned long long)n1_scene_frame_, gap_ms,
+                  phase[0] ? phase : "-");
+    b->lines += line;
+    return;
+  }
+  b->last_copy = now;
   BeginCommands(kGpuOther);
   EndRendering("capture burst");
   Barrier();
@@ -321,11 +349,11 @@ void Renderer::CaptureBurst(const Image& source) {
   region.imageExtent = {b->w, b->h, 1};
   vk_.vkCmdCopyImageToBuffer(cmd_, source.image, VK_IMAGE_LAYOUT_GENERAL, b->buffer, 1, &region);
   Barrier();
-  char line[160];
-  std::snprintf(line, sizeof(line), "%u\t%.2f\t%llu\t%llu\t%u\t%u\t%u\t%llu\n", b->taken,
+  char line[200];
+  std::snprintf(line, sizeof(line), "%u\t%.2f\t%llu\t%llu\t%u\t%u\t%u\t%llu\t%.2f\t%s\n", b->taken,
                 std::chrono::duration<double, std::milli>(now - b->burst_start).count(),
                 (unsigned long long)stats_.presents, (unsigned long long)(n1_drawn_ - b->first_drawn), n1_marker_seq_,
-                n1_view_seq_, n1_scene_cam_, (unsigned long long)n1_scene_frame_);
+                n1_view_seq_, n1_scene_cam_, (unsigned long long)n1_scene_frame_, gap_ms, phase[0] ? phase : "-");
   b->lines += line;
   if (++b->taken < b->count) return;
   // The last frame: wait for the copies, hand the pixels to a writer thread, free the buffer.

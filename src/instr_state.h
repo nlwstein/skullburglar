@@ -63,8 +63,12 @@ struct InstrState {
 
   // Capture requests from the control channel (renderer side, present.cpp): a burst of `burst_count` consecutive
   // presented frames into burst_dir. The game bumps burst_seq after filling the fields; the renderer takes it.
-  std::atomic<uint32_t> burst_seq{0}, burst_count{0};
+  // burst_every_ms > 0 makes it a trace: every present is logged in the TSV, a frame is copied every that many ms (and
+  // the first after any gap of 50 ms or more), up to burst_count copies.
+  std::atomic<uint32_t> burst_seq{0}, burst_count{0}, burst_every_ms{0};
   char burst_dir[512] = {};
+  // The status thread's current phase (instr.cpp ComputePhase), first 8 characters packed, for the burst TSV.
+  std::atomic<uint64_t> phase8{0};
   std::atomic<uint32_t> bursts_written{0};
 
   static uint64_t NowUs() {
