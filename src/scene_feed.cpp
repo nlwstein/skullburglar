@@ -1998,6 +1998,30 @@ bool Trackable(const LiveState& st, Kind kind) {
          (kind == Kind::kSpeedTree && st.trees_on) || (kind == Kind::kDecal && st.decals_on);
 }
 
+// BOTS_FEED_PROF=1: where the game-thread feed walk spends its time (ms per frame, logged every 600 frames).
+struct FeedProf {
+  bool on = [] {
+    const char* v = std::getenv("BOTS_FEED_PROF");
+    return v && *v && *v != '0';
+  }();
+  double slice = 0, track = 0, loop = 0, decals = 0, decal_fp = 0, trees = 0, particles = 0, lighting = 0, total = 0;
+  uint64_t frames = 0, instances = 0, decal_count = 0, decal_fps = 0, receivers = 0;
+  static std::chrono::steady_clock::time_point Now() { return std::chrono::steady_clock::now(); }
+  void Report() {
+    if (!on || ++frames % 600) return;
+    const double n = 600;
+    REXLOG_INFO(
+        "scenefeed prof (ms/frame): total {:.3f} track/enum {:.3f} (table slice {:.3f}) prim-loop {:.3f} decals {:.3f} (fingerprints {:.3f}) "
+        "trees {:.3f} particles {:.3f} lighting {:.3f}; per frame: {} instances, {} decals tracked, {} fingerprints, "
+        "{} receivers",
+        total / n, track / n, slice / n, loop / n, decals / n, decal_fp / n, trees / n, particles / n, lighting / n,
+        instances / 600, decal_count / 600, decal_fps / 600, receivers / 600);
+    slice = track = loop = decals = decal_fp = trees = particles = lighting = total = 0;
+    instances = decal_count = decal_fps = receivers = 0;
+  }
+};
+FeedProf g_prof;
+
 // <index>: <o>'s object-table position when it was reported (from a walk of the table, or read by the add hook while
 // the component was live).
 bool TrackAdd(LiveState& st, uint32_t o, uint32_t index) {
@@ -2133,7 +2157,9 @@ void Track(LiveState& st) {
     if (st.walk_pos >= count) st.walk_pos = 0;
     const uint32_t end = std::min(count, st.walk_pos + n);
     uint32_t found = 0;
+    const auto ps0 = FeedProf::Now();
     for (uint32_t i = st.walk_pos; i < end; ++i) {
+      if (g_prefetch && i + 8 < end) Prefetch(U32(data + 4 * (i + 8)) + 0x34);  // the objects are scattered
       const uint32_t o = U32(data + 4 * i);
       if (!Readable(o)) continue;
       // Most of the table is not a component TrackAdd would take: skip those on the class before the set lookup.
@@ -2142,6 +2168,7 @@ void Track(LiveState& st) {
       if (!st.known.count(o) && TrackAdd(st, o, i)) ++found;
     }
     st.walk_pos = end;
+    if (g_prof.on) g_prof.slice += Ms(ps0, FeedProf::Now());
     if (found) {
       added = true;
       static uint32_t logged = 0;
@@ -2224,30 +2251,6 @@ bool FindInstance(const LiveState& st, uint32_t component, uint32_t& instance) {
   instance = s.index;
   return true;
 }
-
-// BOTS_FEED_PROF=1: where the game-thread feed walk spends its time (ms per frame, logged every 600 frames).
-struct FeedProf {
-  bool on = [] {
-    const char* v = std::getenv("BOTS_FEED_PROF");
-    return v && *v && *v != '0';
-  }();
-  double track = 0, loop = 0, decals = 0, decal_fp = 0, trees = 0, particles = 0, lighting = 0, total = 0;
-  uint64_t frames = 0, instances = 0, decal_count = 0, decal_fps = 0, receivers = 0;
-  static std::chrono::steady_clock::time_point Now() { return std::chrono::steady_clock::now(); }
-  void Report() {
-    if (!on || ++frames % 600) return;
-    const double n = 600;
-    REXLOG_INFO(
-        "scenefeed prof (ms/frame): total {:.3f} track/enum {:.3f} prim-loop {:.3f} decals {:.3f} (fingerprints {:.3f}) "
-        "trees {:.3f} particles {:.3f} lighting {:.3f}; per frame: {} instances, {} decals tracked, {} fingerprints, "
-        "{} receivers",
-        total / n, track / n, loop / n, decals / n, decal_fp / n, trees / n, particles / n, lighting / n,
-        instances / 600, decal_count / 600, decal_fps / 600, receivers / 600);
-    track = loop = decals = decal_fp = trees = particles = lighting = total = 0;
-    instances = decal_count = decal_fps = receivers = 0;
-  }
-};
-FeedProf g_prof;
 
 // B-228: the attached decals that land on something drawn this frame. Static DecalActors are attached for the level's
 // life; the DecalManager pools attach a component per splat (explosion scorch, bullet impacts) and detach it later.
