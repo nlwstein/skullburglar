@@ -467,7 +467,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     N1Emitter& out = host->emitters.emplace_back();
     out = {};
     out.kind = in.kind, out.align = in.align, out.sub_h = in.sub_h, out.sub_v = in.sub_v;
-    out.sub_method = in.sub_method, out.local_space = in.local_space;
+    out.sub_method = in.sub_method, out.local_space = in.local_space, out.lock_axis = in.lock_axis;
     out.material = Handle(host->pmaterials, in.material, host->r, n1_pmaterial);
     out.mesh = Handle(host->pmeshes, in.mesh, host->r, n1_pmesh);
     out.count = in.count, out.row_offset = in.row_offset, out.row_floats = in.row_floats;

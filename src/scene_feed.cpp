@@ -798,6 +798,24 @@ void LightsPostJson(std::string& s, uint32_t world_info, bool live = false, bool
 constexpr uint32_t kEmitLod = 0x10, kEmitLocation = 0x20, kEmitData = 0x30, kEmitIndices = 0x34, kEmitStride = 0xC0,
                    kEmitActive = 0xC4, kEmitMax = 0xC8, kEmitMaterial = 0x130;
 
+// EParticleAxisLock of an LOD level's OrientationAxisLock module (the engine keeps the last enabled one it finds in
+// Modules), 0 (EPAL_NONE) without one. Locked sprites lie in a fixed plane (EPAL_X..EPAL_NEGATIVE_Z: flat glows and
+// scorch cards) or turn only about an axis (EPAL_ROTATE_*), instead of facing the camera.
+uint32_t LockAxis(uint32_t lod) {
+  const Field modules = Prop(lod, "Modules");
+  if (!modules.ok()) return 0;
+  const uint32_t data = U32(lod + modules.offset), n = U32(lod + modules.offset + 4);
+  uint32_t lock = 0;
+  for (uint32_t i = 0; Readable(data) && i < n && i < 64; ++i) {
+    const uint32_t m = U32(data + 4 * i);
+    if (!IsObject(m) || std::strcmp(ClassName(m), "ParticleModuleOrientationAxisLock")) continue;
+    const Field enabled = Prop(m, "bEnabled");
+    if (enabled.ok() && !(U32(m + enabled.offset) & enabled.mask)) continue;
+    lock = PropByte(m, "LockAxisFlags");
+  }
+  return lock;
+}
+
 void Emitters(std::string& s, uint32_t component) {
   static Field instances;
   if (!instances.ok()) instances = FindProp(U32(component + 0x34), "EmitterInstances");
@@ -832,6 +850,7 @@ void Emitters(std::string& s, uint32_t component) {
                      PropByte(required, "ScreenAlignment"), PropBool(required, "bUseLocalSpace"),
                      int32_t(PropU32(required, "SubImages_Horizontal", 1)),
                      int32_t(PropU32(required, "SubImages_Vertical", 1)), PropByte(required, "InterpolationMethod"));
+    if (const uint32_t lock = LockAxis(lod)) fmt::format_to(std::back_inserter(s), ",\"lock_axis\":{}", lock);
     if (IsObject(type_data) && std::string_view(type) == "mesh") {
       s += ",\"mesh\":";
       Str(s, Path(PropU32(type_data, "Mesh")));
@@ -1286,6 +1305,7 @@ struct LiveEmitter {
   uint32_t name = 0, outer = 0, material = 0, type_data = 0;
   int kind = -1;  // 0 sprite, 1 mesh, -1 not drawn (beam, trail, other)
   uint32_t align = 0, sub_h = 1, sub_v = 1, sub_method = 0, local_space = 0;
+  uint32_t lock_axis = 0;  // EParticleAxisLock (LockAxisFlags of the LOD level's OrientationAxisLock module)
   const char* material_path = nullptr;
   const char* mesh_path = nullptr;
 };
@@ -2055,6 +2075,7 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam) {
           le.sub_v = std::max<int32_t>(1, int32_t(PropU32(required, "SubImages_Vertical", 1)));
           le.sub_method = PropByte(required, "InterpolationMethod");
         }
+        le.lock_axis = LockAxis(lod);
         le.material_path = Intern(IsObject(material) ? MaterialPath(material)
                                                       : (IsObject(required) ? MaterialPath(PropU32(required, "Material")) : ""));
         if (le.kind == 1) le.mesh_path = Intern(Path(PropU32(type_data0, "Mesh")));
@@ -2070,7 +2091,7 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam) {
       const uint32_t row_floats = 15 + payload;
       HybridScene::Emitter& e = out.emitters.emplace_back();
       e.kind = uint32_t(le.kind), e.align = le.align, e.sub_h = le.sub_h, e.sub_v = le.sub_v;
-      e.sub_method = le.sub_method, e.local_space = le.local_space;
+      e.sub_method = le.sub_method, e.local_space = le.local_space, e.lock_axis = le.lock_axis;
       e.material = le.material_path, e.mesh = le.mesh_path;
       e.count = active, e.row_offset = uint32_t(out.particle_rows.size()), e.row_floats = row_floats;
       for (int k = 0; k < 3; ++k) e.origin[k] = F32(inst + kEmitLocation + 4 * k);
