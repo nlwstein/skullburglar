@@ -154,6 +154,7 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   float mouse_dx_ = 0, mouse_dy_ = 0;
   rex::input::X_INPUT_STATE last_out_{};  // what GetDeviceState last returned
   float moved_ = 0;                        // mouse travel toward switching the prompts, pixels
+  std::atomic<int64_t> pad_active_ns_{0};  // steady-clock time of the last controller input seen by the game
   std::atomic<float> pointer_x_{-1}, pointer_y_{-1};         // window-relative 0..1, -1 = unknown
   std::atomic<uint32_t> pointer_moves_{0};
   std::vector<bool> enter_events_;         // engine Enter edges for the game thread

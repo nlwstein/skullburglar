@@ -38,6 +38,11 @@ and that is where most of the work in this port has gone.
 - **PlayStation controllers.** DualShock 4 and DualSense show PlayStation buttons in every prompt (cross, circle,
   Options and so on), switching to Xbox or keyboard icons as soon as you use something else. The launcher's
   "Controller button prompts" setting picks one style instead.
+- **Controller feel.** The launcher's Controller section can lower the right stick's dead zone from the game's 20% to
+  nothing, turn off the game's stick acceleration (the speed-up while the stick is held over and the easing in), make
+  the turning response linear instead of squared, and turn vibration off. All default to the game as shipped. The
+  game's own mouse smoothing is off for everyone: it assumes many mouse updates per frame, and with one it made
+  each frame's turn wobble.
 - **60 fps on the Steam Deck.** The Deck holds the 60 fps cap (about 74 fps uncapped in the benchmark scene below),
   where GPU emulation runs at about 21.
 - **Shader precompilation.** On first launch the port compiles the game's shaders for your GPU before the title

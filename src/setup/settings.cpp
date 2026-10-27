@@ -79,6 +79,24 @@ std::vector<Setting> Catalog() {
                "The game slows the crosshair and pulls it toward enemies near it while you move (even through walls, "
                "as on the Xbox 360). Turn off for raw aiming. Applies to the mouse too.",
                {}});
+  s.push_back({"right_stick_deadzone", "", "Right stick dead zone",
+               "How far you push the right stick before the camera moves. 20% is the game's own, applied to each "
+               "direction separately; lower values use a smaller round dead zone, so small and diagonal movements "
+               "register. 0% has none, so a stick that drifts will move the camera. Steam Input's own dead zone, if "
+               "you use it, still applies.",
+               {}});
+  s.back().slider_min = 0, s.back().slider_max = 20, s.back().slider_linear = true, s.back().slider_format = "%.0f%%";
+  s.push_back({"stick_acceleration", "", "Stick acceleration",
+               "The game speeds up turning after you hold the stick fully over, and eases the camera in when you "
+               "push it further, as on the Xbox 360. Turn off for constant turning speed that follows the stick at "
+               "once (the top turning speed is then lower).",
+               {}});
+  s.push_back({"stick_response", "", "Stick response",
+               "How the stick maps to turning left and right. The original curve turns slowly for small movements. "
+               "Linear turns in proportion to the stick, so small movements are faster. Up and down is always "
+               "linear. The game's own Controller Sensitivity option still applies.",
+               {{"original", "Original curve"}, {"linear", "Linear"}}});
+  s.push_back({"vibration", "", "Vibration", "Turn off to stop the controller rumbling.", {}});
   s.push_back({"user_signin_live", "", "LAN co-op",
                "Play the story with another computer on your network. One player starts a story; the other picks "
                "Play Game, then Join COOP, and chooses it from the list. Both computers need this on. On Windows, "

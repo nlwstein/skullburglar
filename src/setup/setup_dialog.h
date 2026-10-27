@@ -252,7 +252,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     ImGui::InputTextWithHint("##iso", "Path to the .iso file", iso_path_, sizeof(iso_path_));
     ImGui::SameLine();
     if (ImGui::Button("Browse...", ImVec2(-1, 0))) {
-      auto picked = PickIsoFile();
+      auto picked = OpenPicker(PickIsoFile);
       if (!picked.empty()) SetIsoPath(picked.string());
     }
     if (!installed_) ImGui::SetItemDefaultFocus();
@@ -290,7 +290,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     }
     ImGui::BeginDisabled(Extracting());
     if (ImGui::SmallButton("Choose another folder...")) {
-      const std::filesystem::path chosen = PickFolder();
+      const std::filesystem::path chosen = OpenPicker(PickFolder);
       if (!chosen.empty()) UseGameDir(ChosenGameDir(chosen, folder_error_));
     }
     if (game_dir_ != default_game_dir_) {
@@ -350,8 +350,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       if (s.slider_max > 0) {
         float v = float(std::strtod(s.value.c_str(), nullptr));
         ImGui::SetNextItemWidth(260.0f);
-        if (ImGui::SliderFloat(s.label.c_str(), &v, float(s.slider_min), float(s.slider_max), "%.2f",
-                               ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp)) {
+        if (ImGui::SliderFloat(s.label.c_str(), &v, float(s.slider_min), float(s.slider_max), s.slider_format.c_str(),
+                               (s.slider_linear ? 0 : ImGuiSliderFlags_Logarithmic) | ImGuiSliderFlags_AlwaysClamp)) {
           char text[32];
           std::snprintf(text, sizeof(text), "%.2f", v);
           s.value = text;
