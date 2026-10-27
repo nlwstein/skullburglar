@@ -363,6 +363,23 @@ bool Command(const std::string& cmd) {
       if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') c = '_';
     std::snprintf(g_state.dual_tag, sizeof(g_state.dual_tag), "%s", tag.c_str());
     g_state.dual_shots.fetch_add(1, std::memory_order_release);
+  } else if (cmd.rfind("hybrid quad", 0) == 0) {
+    // B-229: "hybrid quad <word> <n> [<max distance>]" or "hybrid quad off" (HybridState::quad_*).
+    char word[64] = {};
+    unsigned n = 0;
+    float dist = 0;
+    const int got = std::sscanf(cmd.c_str() + 11, " %63s %u %f", word, &n, &dist);
+    std::lock_guard lock(g_state.quad_mutex);
+    if (got >= 2 && n > 0 && std::strcmp(word, "off") != 0) {
+      g_state.quad_word = word, g_state.quad_n = n, g_state.quad_max_dist = got >= 3 ? dist : 0.0f;
+      g_state.quad_on.store(1, std::memory_order_release);
+    } else {
+      g_state.quad_word.clear(), g_state.quad_n = 0, g_state.quad_keep.clear();
+      g_state.quad_on.store(0, std::memory_order_release);
+    }
+    REXLOG_INFO("hybrid: quad filter {} {} (max distance {})", g_state.quad_on.load() ? g_state.quad_word : "off",
+                g_state.quad_n, g_state.quad_max_dist);
+    return true;
   } else {
     return false;
   }
