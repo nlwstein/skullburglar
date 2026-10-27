@@ -18,6 +18,7 @@
 // holding the references of the object 4 ahead, the flag words those references point to 2 ahead, and the flag words
 // of array elements 1 ahead. What GC marks, keeps, nulls and frees is unchanged.
 //   BOTS_GC_HOST=0     the game's own code
+//   BOTS_GC_HOST=2     (measuring) alternate the two on successive passes
 //   BOTS_GC_PF_HEAD / _FIELDS / _REFS / _ELEMS   the look-ahead distances (8 / 4 / 2 / 1; 0 turns a stage off)
 //   BOTS_GC_VERIFY=1   (with the host analysis) run both on every pass and log whether they agree ("gc: verify")
 //
@@ -84,10 +85,11 @@ int EnvInt(const char* name, int fallback) {
   const char* e = std::getenv(name);
   return e && *e ? std::atoi(e) : fallback;
 }
-bool HostOn() {
-  static const bool v = EnvInt("BOTS_GC_HOST", 1) != 0;
+int HostMode() {
+  static const int v = EnvInt("BOTS_GC_HOST", 1);
   return v;
 }
+bool HostOn() { return HostMode() != 0; }
 bool VerifyOn() {
   static const bool v = EnvInt("BOTS_GC_VERIFY", 0) != 0;
   return v;
@@ -107,7 +109,8 @@ struct Pass {
   bool in_gc = false;         // inside CollectGarbage
   double start = 0;           // CollectGarbage entry (ms since start)
   double mark_ms = 0, prepurge_ms = 0;
-  double table_ms = 0;        // host analysis: the pass over the object table (the rest of mark_ms is the walk)
+  double table_ms = 0;
+  bool host = false;          // this pass used the host analysis        // host analysis: the pass over the object table (the rest of mark_ms is the walk)
   uint32_t unreachable = 0;   // ConditionalBeginDestroy calls inside CollectGarbage
   bool purge_pending = false;  // a purge started by this pass has not finished yet
   double purge_ms = 0;        // time-limited purge calls since the pass
@@ -613,6 +616,7 @@ extern "C" void sub_825EA258(PPCContext& __restrict ctx, uint8_t* base) {
   g.in_gc = true;
   g.start = NowMs();
   g.mark_ms = g.prepurge_ms = g.table_ms = 0;
+  g.host = false;
   g.unreachable = 0;
   const bool was_pending = g.purge_pending;
   __imp__sub_825EA258(ctx, base);
@@ -629,7 +633,7 @@ extern "C" void sub_825EA258(PPCContext& __restrict ctx, uint8_t* base) {
   REXLOG_INFO("gc: pass {} at {:.3f} s: {:.1f} ms (purge {:.1f}, reachability {:.1f}, begin-destroy "
               "{:.1f}; host {}, table pass {:.1f}), {} objects marked, {} unreachable, {} in table, keep {:016X}, full purge {}, "
               "caller {:08X}, interval {:.1f} s{}",
-              g.n, g.start / 1000.0, ms, g.prepurge_ms, g.mark_ms, ms - g.mark_ms - g.prepurge_ms, HostOn() ? 1 : 0, g.table_ms,
+              g.n, g.start / 1000.0, ms, g.prepurge_ms, g.mark_ms, ms - g.mark_ms - g.prepurge_ms, g.host ? 1 : 0, g.table_ms,
               U32(base, kMarkCount), g.unreachable, g.live_after_gc, keep, full ? 1 : 0, caller,
               engine ? F32(base, engine + kTimeBetweenPurging) : 0.0f,
               was_pending ? " (previous purge was still pending)" : "");
@@ -638,7 +642,10 @@ extern "C" void sub_825EA258(PPCContext& __restrict ctx, uint8_t* base) {
 // PerformReachabilityAnalysis(TArray<UObject*>& ObjectsToSerialize, QWORD KeepFlags)
 extern "C" void sub_825E99F0(PPCContext& __restrict ctx, uint8_t* base) {
   const double t = NowMs();
-  if (!HostOn())
+  // BOTS_GC_HOST=2 (measuring): alternate the host analysis and the game's own on successive passes, so both are timed
+  // under the same conditions in one run.
+  g.host = HostMode() == 2 ? (g.n & 1) == 0 : HostOn();
+  if (!g.host)
     __imp__sub_825E99F0(ctx, base);
   else if (VerifyOn())
     VerifiedReachability(ctx, base);
