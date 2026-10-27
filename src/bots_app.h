@@ -81,6 +81,9 @@ void InstallWindowsCrashLogger();  // src/crash_win.cpp
 namespace bots::hybrid {
 void InstallOpenHooks();  // hybrid.cpp (B-199 level preload)
 }
+namespace bots::levelstream {
+void Start(const std::filesystem::path& user_root);  // level_stream.cpp (B-226 level-start prefetch)
+}
 
 class BotsApp : public rex::ReXApp {
  public:
@@ -488,6 +491,7 @@ class BotsApp : public rex::ReXApp {
     SetLaunchCommandLine();
     RegisterFullscreenBind();
     bots::SpawnPlayerTwo(game_data_root(), user_data_root(), cache_root());
+    bots::levelstream::Start(user_data_root());  // level_stream.cpp: level-start prefetch (B-226)
     if (runtime()) bots::SetWidescreenWindow(runtime()->display_window());
     // BOTS_INSTR: status stream and control channel for tests and agents (instr.h).
     if (bots::instr::Enabled())
