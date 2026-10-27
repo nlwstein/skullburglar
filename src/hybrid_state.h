@@ -215,6 +215,13 @@ struct HybridState {
   uint32_t quad_n = 0;
   float quad_max_dist = 0;
   std::atomic<uint32_t> n1_debug_bits{0};  // B-230 debug A/B: n1_set_debug_bits ("hybrid n1debug <bits>")
+  // B-242: n1 draws at most an emitter's RequiredModule MaxDrawCount particles (when bUseMaxDrawCount), the first ones
+  // in the instance's index order, as UE3's sprite and mesh replay data does. BOTS_N1_MAX_DRAW=0 (or the console's
+  // "hybrid maxdraw 0") draws every live particle, as before.
+  std::atomic<uint32_t> max_draw{[] {
+    const char* v = std::getenv("BOTS_N1_MAX_DRAW");
+    return uint32_t(!(v && v[0] == '0'));
+  }()};
   std::atomic<uint32_t> n1_variant{0};  // B-236 debug A/B: variant bits for every emitter ("hybrid n1variant <k>")
   uint32_t quad_variant = 0;      // B-236: n1 sprite orientation variant for the kept emitters (0: as is)
   bool quad_emitter = false;      // B-236: n1 draws the picked particles' whole emitters (the port draws those)
