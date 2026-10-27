@@ -17,6 +17,7 @@
 // 0 itself and pushed a real controller to user 1, which the game ignores. Seen on Windows, 2026-10-01.)
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <random>
@@ -180,6 +181,12 @@ class ScriptInputDriver final : public rex::input::InputDriver {
     else if (c == "RDOWN") st.gamepad.thumb_ry = kMin;
     else if (c == "RLEFT") st.gamepad.thumb_rx = kMin;
     else if (c == "RRIGHT") st.gamepad.thumb_rx = kMax;
+    // RX<percent> / RY<percent>: a partial right-stick deflection, -100..100 (test aid for dead zone and curve).
+    else if ((c.rfind("RX", 0) == 0 || c.rfind("RY", 0) == 0) && c.size() > 2) {
+      const double pct = std::clamp(std::atof(c.c_str() + 2), -100.0, 100.0);
+      const auto v = static_cast<int16_t>(pct >= 0 ? pct * 327.67 : pct * 327.68);
+      (c[1] == 'X' ? st.gamepad.thumb_rx : st.gamepad.thumb_ry) = v;
+    }
   }
 
   // Random soak play: re-roll a "pose" (stick + optional button) at random intervals.

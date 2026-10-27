@@ -350,8 +350,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       if (s.slider_max > 0) {
         float v = float(std::strtod(s.value.c_str(), nullptr));
         ImGui::SetNextItemWidth(260.0f);
-        if (ImGui::SliderFloat(s.label.c_str(), &v, float(s.slider_min), float(s.slider_max), "%.2f",
-                               ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp)) {
+        if (ImGui::SliderFloat(s.label.c_str(), &v, float(s.slider_min), float(s.slider_max), s.slider_format.c_str(),
+                               (s.slider_linear ? 0 : ImGuiSliderFlags_Logarithmic) | ImGuiSliderFlags_AlwaysClamp)) {
           char text[32];
           std::snprintf(text, sizeof(text), "%.2f", v);
           s.value = text;
