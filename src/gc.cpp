@@ -1,4 +1,4 @@
-// UE3 garbage collection: timing, counts and cache warming (B-241).
+// UE3 garbage collection: timing and counts, plus an optional host reachability analysis (B-241).
 //
 // UObject::CollectGarbage (sub_825EA258) runs about every 30 s in play (UWorld::Tick, when
 // TimeSinceLastPendingKillPurge passes GEngine->TimeBetweenPurgingPendingKillObjects) and on map changes. It:
@@ -8,20 +8,17 @@
 //      from the root set, which clears the mark on everything reachable;
 //   3. one more pass over every object: ConditionalBeginDestroy (sub_8247D8B8) on each that is still unreachable;
 // and the next frames' IncrementalPurgeGarbage calls (time-limited) finish destroying and free them.
-// Almost all of a pass is the reachability analysis, and almost all of that is the reference-token walk: for each
-// reachable object, read its body and the flags of every object it references. Each of those is a cache miss on a
-// laptop (the objects are separate heap blocks, ~25-60k of them reachable). The Xbox 360 code prefetches the next
-// object (dcbt), which the recompiler drops.
+// Almost all of a pass is the reference-token walk: for each reachable object (~41k in a level), a virtual call and
+// a read of every reference field (~14 tokens, ~6 references per object) and of the referenced objects' flags.
 //
-// Host analysis (default on, BOTS_GC_HOST=0 turns it off): sub_825E99F0 is replaced by a host implementation of the
-// same algorithm (see HostReachability) that prefetches ahead in stages: the headers of the objects 8 ahead, the lines
-// holding the references of the object 4 ahead, the flag words those references point to 2 ahead, and the flag words
-// of array elements 1 ahead. What GC marks, keeps, nulls and frees is unchanged.
-//   BOTS_GC_HOST=0     the game's own code
-//   BOTS_GC_HOST=2     (measuring) alternate the two on successive passes
-//   BOTS_GC_HELPER=N   a helper thread loads what the walk will read, N objects ahead (default 24; 0: no helper)
-//   BOTS_GC_PF_HEAD / _FIELDS / _REFS / _ELEMS   the look-ahead distances (8 / 4 / 2 / 1; 0 turns a stage off)
-//   BOTS_GC_VERIFY=1   (with the host analysis) run both on every pass and log whether they agree ("gc: verify")
+// Host analysis (off by default; BOTS_GC_HOST=1): sub_825E99F0 replaced by a host implementation of the same
+// algorithm (see HostReachability). It gives the same results (BOTS_GC_VERIFY) but was not measurably faster on a
+// laptop, with or without software prefetch or a helper thread warming the cache, so it stays opt-in as a base for
+// later work and for the counts it logs.
+//   BOTS_GC_HOST=1     the host analysis
+//   BOTS_GC_HOST=2     (measuring) alternate the host analysis and the game's on successive passes
+//   BOTS_GC_VERIFY=1   (with BOTS_GC_HOST=1) run both on every pass and log whether they agree ("gc: verify")
+//   BOTS_GC_PROF=1     (with the host analysis) also time the per-object virtual calls ("gc: walk")
 //
 // Log (BOTS_GC_LOG, default 1; 0 silences it): one line per CollectGarbage ("gc: pass ..."; times, objects in the
 // table, objects found unreachable), one when the purge that follows completes ("gc: purged ..."; live objects
@@ -30,13 +27,9 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
-#include <mutex>
-#include <thread>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <algorithm>
 #include <utility>
 #include <vector>
 
@@ -91,7 +84,7 @@ int EnvInt(const char* name, int fallback) {
   return e && *e ? std::atoi(e) : fallback;
 }
 int HostMode() {
-  static const int v = EnvInt("BOTS_GC_HOST", 1);
+  static const int v = EnvInt("BOTS_GC_HOST", 0);
   return v;
 }
 bool HostOn() { return HostMode() != 0; }
@@ -114,11 +107,10 @@ struct Pass {
   bool in_gc = false;         // inside CollectGarbage
   double start = 0;           // CollectGarbage entry (ms since start)
   double mark_ms = 0, prepurge_ms = 0;
-  double table_ms = 0;
+  double table_ms = 0;         // host analysis: the pass over the object table (the rest of mark_ms is the walk)
   bool host = false;          // this pass used the host analysis
   uint64_t walk_objs = 0, walk_tokens = 0, walk_refs = 0;  // host walk counts
   double virt_ms = 0;         // BOTS_GC_PROF=1: time in the per-object virtual (vtable +244)
-  double replay_ms[3] = {};   // BOTS_GC_PROF=1: a read-only replay of the walk's loads over the final list, twice        // host analysis: the pass over the object table (the rest of mark_ms is the walk)
   uint32_t unreachable = 0;   // ConditionalBeginDestroy calls inside CollectGarbage
   bool purge_pending = false;  // a purge started by this pass has not finished yet
   double purge_ms = 0;        // time-limited purge calls since the pass
@@ -137,12 +129,9 @@ uint32_t LiveObjects(uint8_t* base) {
 }
 
 // ---- Host PerformReachabilityAnalysis --------------------------------------------------------------------------
-// The same algorithm as sub_825E99F0, instruction for instruction in effect: the same loads and stores of guest memory
-// in the same order, the same guest calls (virtuals, TArray growth through the game's allocator, AddItem) with the
-// same arguments. What differs is only how the host gets there: a native token interpreter instead of the
-// recompiled one, and prefetches. Object i+2's first 512 bytes are prefetched while object i is processed (the
-// Xbox 360 code prefetches object i+1 the same way, with dcbt, which the recompiler drops), and object i+1's
-// top-level references are looked up ahead of time so the flag words they point to are already on their way.
+// The same algorithm as sub_825E99F0: the same loads and stores of guest memory in the same order, the same guest calls
+// (virtuals, TArray growth through the game's allocator, AddItem) with the same arguments and return addresses. Only
+// the token interpreter is native. Like the Xbox 360 code, the object-table pass prefetches 10 objects ahead.
 
 constexpr uint32_t kPoolStart = 0x8380B138;  // GPermanentObjectPool (objects in it are never collected)
 constexpr uint32_t kPoolEnd = 0x8380B13C;
@@ -222,168 +211,6 @@ void AddInline(PPCContext& ctx, uint8_t* base, uint32_t arr, uint32_t field, uin
   }
   const uint32_t slot = U32(base, arr) + n * 4;
   if (slot) S32(base, slot, U32(base, field));
-}
-
-// Read-only look-ahead over object `obj`'s top-level reference tokens, in stages that each need the previous one's
-// lines in the cache: kFields prefetches the lines of the object that hold its references; kRefs reads those
-// references and prefetches the flag words they point to (and the data of its TArray<UObject*> fields); kElems
-// prefetches the flag words of those arrays' elements. Tokens of arrays of structs (type 4) are skipped; tokens of
-// fixed arrays (type 5) address the first element, which is part of the object.
-enum Stage { kFieldLines, kRefFlags, kElemFlags };
-void PrefetchStage(uint8_t* base, uint32_t obj, Stage stage) {
-  const uint32_t cls = U32(base, obj + 52);
-  if (!cls) return;
-  const uint32_t tokens = U32(base, cls + 480), count = U32(base, cls + 484);
-  if (!tokens) return;
-  const uint32_t pool0 = U32(base, kPoolStart), pool1 = U32(base, kPoolEnd);
-  auto flags = [&](uint32_t r) {
-    if (r && (r < pool0 || r > pool1)) Prefetch(base, r + 8);
-  };
-  for (uint32_t i = 0, steps = 0; i < count && steps < 512; ++steps) {
-    const uint32_t t = U32(base, tokens + 4 * i++);
-    const uint32_t type = t >> 16 & 0xFF, off = t & 0xFFFF;
-    if (type == 6) return;
-    if (type == 4) {
-      if (i + 1 >= count) return;
-      const uint32_t target = (U32(base, tokens + 4 * (i + 1)) + i + 1) & 0xFFFFFF;
-      if (target <= i || target > count) return;
-      i = target;
-      continue;
-    }
-    if (type == 5) {
-      i += 2;
-      continue;
-    }
-    if (type != 1 && type != 2 && type != 3 && type != 7) continue;
-    if (stage == kFieldLines) {
-      Prefetch(base, obj + off);
-    } else if (type != 3) {
-      if (stage == kRefFlags) flags(U32(base, obj + off));
-    } else if (const uint32_t data = U32(base, obj + off)) {
-      if (stage == kRefFlags) {
-        Prefetch(base, data);
-      } else {
-        const uint32_t n = U32(base, obj + off + 4);
-        for (uint32_t j = 0; j < n && j < 16; ++j) flags(U32(base, data + 4 * j));
-      }
-    }
-  }
-}
-
-// ---- Warming helper thread ------------------------------------------------------------------------------------
-// One core can only have about ten cache misses in flight, and the walk already keeps it near that. A second thread
-// that walks the same objects a little ahead and actually loads what the walk will read (reference fields, the flag
-// words they point to, array elements' flags) brings those lines into the shared L3 with its own core's misses, so
-// the walk finds them there. The helper only reads guest memory, and only objects the walk handed it (entries of
-// ObjectsToSerialize, which stay valid for the whole analysis since nothing is freed until the purge); it never
-// writes guest memory, so what GC does is unchanged. Without it (BOTS_GC_HELPER=0) the walk runs alone.
-struct Warmer {
-  static constexpr uint32_t kRing = 1024;
-  std::atomic<uint32_t> ring[kRing] = {};
-  std::atomic<uint32_t> head{0};    // written by the walk
-  std::atomic<bool> active{false};  // between Start and Stop
-  std::atomic<uint64_t> warmed{0};
-  uint8_t* base = nullptr;
-  std::mutex m;
-  std::condition_variable cv;
-  bool started = false;
-  uint64_t* seen = nullptr;  // BOTS_GC_PROF replay only: one bit per 8 bytes of guest address space
-  std::vector<uint32_t> seen_words;
-
-  void Push(uint32_t obj) {
-    const uint32_t h = head.load(std::memory_order_relaxed);
-    ring[h % kRing].store(obj, std::memory_order_relaxed);
-    head.store(h + 1, std::memory_order_release);
-  }
-  void Start(uint8_t* b) {
-    if (!started) {
-      started = true;
-      base = b;
-      std::thread([this] { Run(); }).detach();
-    }
-    head.store(0, std::memory_order_relaxed);
-    {
-      std::lock_guard<std::mutex> lk(m);
-      active.store(true, std::memory_order_release);
-    }
-    cv.notify_one();
-  }
-  void Stop() { active.store(false, std::memory_order_release); }
-
-  void Run() {
-    volatile uint64_t sink = 0;
-    for (;;) {
-      {
-        std::unique_lock<std::mutex> lk(m);
-        cv.wait(lk, [this] { return active.load(std::memory_order_acquire); });
-      }
-      uint32_t tail = 0;
-      uint64_t n = 0;
-      while (active.load(std::memory_order_acquire)) {
-        const uint32_t h = head.load(std::memory_order_acquire);
-        if (h == tail || h < tail) {
-          if (h < tail) tail = h;  // a new analysis started
-#if defined(__x86_64__) || defined(_M_X64)
-          __builtin_ia32_pause();
-#endif
-          continue;
-        }
-        if (h - tail > kRing / 2) tail = h - kRing / 2;  // fell behind: skip to recent work
-        const uint32_t obj = ring[tail % kRing].load(std::memory_order_relaxed);
-        ++tail;
-        if (obj) sink += Warm(obj), ++n;
-      }
-      warmed.fetch_add(n, std::memory_order_relaxed);
-    }
-  }
-
-  // Load what the walk will load for `obj` (top-level reference tokens; see PrefetchStage).
-  uint64_t Warm(uint32_t obj) {
-    uint64_t acc = 0;
-    const uint32_t cls = U32(base, obj + 52);
-    if (!cls) return 0;
-    const uint32_t tokens = U32(base, cls + 480), count = U32(base, cls + 484);
-    if (!tokens) return 0;
-    const uint32_t pool0 = U32(base, kPoolStart), pool1 = U32(base, kPoolEnd);
-    auto flags = [&](uint32_t r) {
-      if (!r || (r >= pool0 && r <= pool1)) return;
-      if (seen) {  // replay experiment: read each object's flags once
-        uint64_t& word = seen[r >> 9];
-        const uint64_t bit = 1ull << (r >> 3 & 63);
-        if (word & bit) return;
-        word |= bit;
-        seen_words.push_back(r >> 9);
-      }
-      acc += U32(base, r + 8);
-    };
-    for (uint32_t i = 0, steps = 0; i < count && steps < 512; ++steps) {
-      const uint32_t t = U32(base, tokens + 4 * i++);
-      const uint32_t type = t >> 16 & 0xFF, off = t & 0xFFFF;
-      if (type == 6) break;
-      if (type == 4) {
-        if (i + 1 >= count) break;
-        const uint32_t target = (U32(base, tokens + 4 * (i + 1)) + i + 1) & 0xFFFFFF;
-        if (target <= i || target > count) break;
-        i = target;
-        continue;
-      }
-      if (type == 5) {
-        i += 2;
-        continue;
-      }
-      if (type == 1 || type == 2 || type == 7) {
-        flags(U32(base, obj + off));
-      } else if (type == 3) {
-        const uint32_t data = U32(base, obj + off), n = U32(base, obj + off + 4);
-        for (uint32_t j = 0; data && j < n && j < 64; ++j) flags(U32(base, data + 4 * j));
-      }
-    }
-    return acc;
-  }
-};
-Warmer& TheWarmer() {
-  static Warmer* w = new Warmer();  // never destroyed: its thread lives for the process
-  return *w;
 }
 
 void HostReachability(PPCContext& ctx, uint8_t* base) {
@@ -499,40 +326,16 @@ void HostReachability(PPCContext& ctx, uint8_t* base) {
     }
   }
 
-  // Look-ahead distances in objects (0 turns a stage off).
-  static const uint32_t kHead = uint32_t(EnvInt("BOTS_GC_PF_HEAD", 8)), kFields = uint32_t(EnvInt("BOTS_GC_PF_FIELDS", 4)),
-                        kRefs = uint32_t(EnvInt("BOTS_GC_PF_REFS", 2)), kElems = uint32_t(EnvInt("BOTS_GC_PF_ELEMS", 1));
   // Pass 2: the reference-token walk. Every object reached is cleared of RF_Unreachable and appended.
   const uint32_t pool0 = U32(base, kPoolStart), pool1 = U32(base, kPoolEnd);
   // GPermanentObjectPool bounds are re-read per reference by the original; nothing in the walk can change them.
   auto in_pool = [&](uint32_t r) { return !(r < pool0) && r <= pool1; };
-  static const uint32_t kHelperAhead = uint32_t(EnvInt("BOTS_GC_HELPER", 24));  // 0: no helper thread
-  Warmer* warmer = kHelperAhead ? &TheWarmer() : nullptr;
-  uint32_t pushed = 0;  // ObjectsToSerialize entries handed to the helper so far
-  if (warmer) warmer->Start(base);
   if (int32_t(U32(base, arr + 4)) > 0) {
     uint32_t next = 0;  // index of the next object to serialize
     for (;;) {
       const uint32_t data = U32(base, arr);
       const uint32_t obj = U32(base, data + 4 * next);
       ++next;
-      const uint32_t count_now = U32(base, arr + 4);
-      // A software pipeline over the objects ahead (see PrefetchStage): headers kHead ahead, the lines holding their
-      // references kFields ahead, the referenced objects' flags kRefs ahead, array elements' flags kElems ahead.
-      const uint32_t i = next - 1;
-      auto ahead = [&](uint32_t d) { return d && i + d < count_now ? U32(base, data + 4 * (i + d)) : 0u; };
-      if (const uint32_t o = ahead(kHead)) {
-        Prefetch(base, o);
-        Prefetch(base, o + 52);
-      }
-      if (const uint32_t o = ahead(kFields)) PrefetchStage(base, o, kFieldLines);
-      if (const uint32_t o = ahead(kRefs)) PrefetchStage(base, o, kRefFlags);
-      if (const uint32_t o = ahead(kElems)) PrefetchStage(base, o, kElemFlags);
-      if (warmer)
-        for (const uint32_t until = std::min(count_now, i + kHelperAhead); pushed < until; ++pushed)
-          warmer->Push(U32(base, data + 4 * pushed));
-      ctx.r3.u64 = obj;
-      ctx.r4.u64 = arr;
       static const bool kProf = EnvInt("BOTS_GC_PROF", 0) != 0;
       const double tv = kProf ? NowMs() : 0;
       CallIndirect(ctx, base, U32(base, U32(base, obj) + 244), 0x825E9CAC);
@@ -658,7 +461,6 @@ void HostReachability(PPCContext& ctx, uint8_t* base) {
       if (int32_t(next) >= int32_t(U32(base, arr + 4))) break;
     }
   }
-  if (warmer) warmer->Stop();
   if (const uint32_t data = U32(base, stack)) {
     uint32_t m = U32(base, kGMalloc);
     if (!m) {
@@ -756,7 +558,6 @@ extern "C" void sub_825EA258(PPCContext& __restrict ctx, uint8_t* base) {
   g.start = NowMs();
   g.mark_ms = g.prepurge_ms = g.table_ms = g.virt_ms = 0;
   g.walk_objs = g.walk_tokens = g.walk_refs = 0;
-  g.replay_ms[0] = g.replay_ms[1] = g.replay_ms[2] = 0;
   g.host = false;
   g.unreachable = 0;
   const bool was_pending = g.purge_pending;
@@ -779,15 +580,13 @@ extern "C" void sub_825EA258(PPCContext& __restrict ctx, uint8_t* base) {
               engine ? F32(base, engine + kTimeBetweenPurging) : 0.0f,
               was_pending ? " (previous purge was still pending)" : "");
   if (g.host)
-    REXLOG_INFO("gc: walk pass {}: {} objects, {} tokens, {} references followed, virtual calls {:.1f} ms, "
-                "read-only replay {:.1f} ms, again reading each object's flags once {:.1f} ms, and again {:.1f} ms", g.n, g.walk_objs,
-                g.walk_tokens, g.walk_refs, g.virt_ms, g.replay_ms[0], g.replay_ms[1], g.replay_ms[2]);
+    REXLOG_INFO("gc: walk pass {}: {} objects, {} tokens, {} references followed, virtual calls {:.1f} ms", g.n,
+                g.walk_objs, g.walk_tokens, g.walk_refs, g.virt_ms);
 }
 
 // PerformReachabilityAnalysis(TArray<UObject*>& ObjectsToSerialize, QWORD KeepFlags)
 extern "C" void sub_825E99F0(PPCContext& __restrict ctx, uint8_t* base) {
   const double t = NowMs();
-  const uint32_t arr = ctx.r3.u32;
   // BOTS_GC_HOST=2 (measuring): alternate the host analysis and the game's own on successive passes, so both are timed
   // under the same conditions in one run.
   g.host = HostMode() == 2 ? (g.n & 1) == 0 : HostOn();
@@ -798,26 +597,6 @@ extern "C" void sub_825E99F0(PPCContext& __restrict ctx, uint8_t* base) {
   else
     HostReachability(ctx, base);
   g.mark_ms += NowMs() - t;
-  static const bool kProf = EnvInt("BOTS_GC_PROF", 0) != 0;
-  if (kProf && g.host) {
-    // How much of the walk is the memory it reads: replay its loads (fields, referenced flags) over the final
-    // ObjectsToSerialize, read-only, once cold and once warm.
-    Warmer& w = TheWarmer();
-    w.base = base;
-    volatile uint64_t sink = 0;
-    static uint64_t* bitmap = static_cast<uint64_t*>(std::calloc(size_t(1) << 26, 8));  // 1 bit per 8 bytes
-    for (int k = 0; k < 3; ++k) {
-      // k = 0: as the walk reads; k = 1, 2: each referenced object's flags read only once (a host bitmap).
-      w.seen = k ? bitmap : nullptr;
-      const double t0 = NowMs();
-      const uint32_t data = U32(base, arr), n = U32(base, arr + 4);
-      for (uint32_t i = 0; i < n; ++i) sink += w.Warm(U32(base, data + 4 * i));
-      g.replay_ms[k] = NowMs() - t0;
-      for (const uint32_t word : w.seen_words) bitmap[word] = 0;
-      w.seen_words.clear();
-    }
-    w.seen = nullptr;
-  }
 }
 
 // IncrementalPurgeGarbage(UBOOL bUseTimeLimit, FLOAT TimeLimit)
