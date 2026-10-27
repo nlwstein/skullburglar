@@ -2350,8 +2350,11 @@ namespace {
 void Added(uint32_t component) {
   std::lock_guard lock(bots::scenefeed::g_added_mutex);
   if (bots::scenefeed::g_added.size() < (1u << 20))
+    // Before the feed's first frame g_base is not set yet; nothing is tracked then, and the first frame's full walk
+    // finds everything.
     bots::scenefeed::g_added.push_back(
-        {component, bots::scenefeed::Readable(component) ? bots::scenefeed::U32(component + 4) : ~0u});
+        {component, bots::scenefeed::g_base && bots::scenefeed::Readable(component) ? bots::scenefeed::U32(component + 4)
+                                                                                    : ~0u});
 }
 }  // namespace
 #define BOTS_SCENE_ADD_HOOK(addr)                                       \
