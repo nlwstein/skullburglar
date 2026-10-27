@@ -1065,13 +1065,6 @@ bool IsObject(uint32_t p) {
 // A live UClass: an object whose class is the class object UClass, the one object that is its own class. (A freed
 // component's +0x34 can hold any pointer, including a live object that is not a class; walking its "superclass" chain
 // read garbage and crashed a T480 run.)
-// <o> is still the live object at object-table position <index>. Unlike IsObject this reads only the table, never
-// <o>'s own memory: a component freed by a level unload can sit in memory that is no longer mapped (T480 runs crashed
-// reading such components on a chapter load).
-bool AliveAt(uint32_t o, uint32_t index) {
-  return g_objects && index < U32(g_objects + 4) && U32(U32(g_objects) + 4 * index) == o;
-}
-
 bool NotAClass(uint32_t cls) {
   if (!g_objects) return !Readable(cls);
   if (!IsObject(cls)) return true;
