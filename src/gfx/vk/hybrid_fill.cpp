@@ -405,9 +405,10 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     fb.sh = l.sh.data();
     std::memcpy(&fb.fog, &l.fog, sizeof(fb.fog));
     std::memcpy(&fb.post, &l.post, sizeof(fb.post));
-    if (l.has_fog_post && l.post_material) {
+    if (l.has_fog_post && !l.post_materials.empty()) {  // consecutive paths, the count in post flags bits 24..27
       fb.post.material_effect = uint32_t(paths.size());
-      paths.push_back(l.post_material);
+      fb.post.flags |= uint32_t(l.post_materials.size()) << 24;
+      paths.insert(paths.end(), l.post_materials.begin(), l.post_materials.end());
     }
     fb.path_count = uint32_t(paths.size());
     fb.paths = paths.data();
