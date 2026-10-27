@@ -204,6 +204,18 @@ struct HybridState {
   std::atomic<uint32_t> dual{0};
   std::atomic<uint32_t> dual_shots{0};
   char dual_tag[96] = {};
+  // B-229 single-quad debug (console "hybrid quad <word> <n> [<max distance>]", "hybrid quad off"): both renderers
+  // draw only the n sprite particles nearest the camera whose material path contains <word> (no other particles).
+  // n1 gets just those rows; the renderer remembers their positions in quad_keep (world, plus the local position for
+  // local-space emitters), and the port's own renderer skips every single-stream sprite-particle draw without a vertex
+  // at one of them. The port draws a frame's particles before its scene marker, so it filters by the previous frame's
+  // pick: hold the world with Pause (parity_tour --freeze pause; SloMo does not stop particle time).
+  std::mutex quad_mutex;
+  std::string quad_word;
+  uint32_t quad_n = 0;
+  float quad_max_dist = 0;
+  std::vector<float> quad_keep;  // x, y, z per kept position (UE3 units)
+  std::atomic<uint32_t> quad_on{0};
   // B-199 level preload: cooked packages (file stems, e.g. "Ambush_P", "AirlockOne") the game opened, in order. The
   // game appends when it opens a .xxx file (a map, a streamed sublevel, a shared package: the open comes before the
   // level is loaded, let alone visible); the renderer takes them and has n1 load what each holds. `opened` counts

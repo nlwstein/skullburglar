@@ -23,6 +23,7 @@
 
 #include "renderer.h"
 #include "draw_dump.h"
+#include "../../hybrid_state.h"
 #ifdef BOTS_N1FFI
 #include <n1ffi.h>
 #endif
@@ -1624,6 +1625,64 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
                   std::ranges::none_of(attachments.color, std::identity{}) ? " depth-only" : "",
                   samples_x * samples_y > 1 ? " ss4" : "");
     GpuLabel(kGpuDraw, label);
+  }
+  if (const HybridState* hs = FindHybridState(); hs && hs->quad_on.load(std::memory_order_acquire)) {
+    // B-229 single-quad debug (HybridState::quad_*): skip sprite-particle draws that have no vertex at a kept
+    // particle's position. Sprite particles are the draws with one vertex stream of BOTS_HYBRID_QUAD_STRIDES bytes
+    // (default 64, FParticleSpriteVertex, and 88, the sub-UV vertex); mesh particles are not filtered.
+    static const std::vector<uint32_t> strides = [] {
+      std::vector<uint32_t> v;
+      const char* s = std::getenv("BOTS_HYBRID_QUAD_STRIDES");
+      for (const char* p = s ? s : "64,88"; *p;) {
+        char* end = nullptr;
+        const unsigned long x = std::strtoul(p, &end, 10);
+        if (end == p) break;
+        v.push_back(uint32_t(x));
+        p = *end ? end + 1 : end;
+      }
+      return v;
+    }();
+    const auto& b = vshader->vertex_bindings();
+    if (b.size() == 1 && std::ranges::find(strides, b[0].stride_words * 4) != strides.end()) {
+      const auto fetch = regs.GetVertexFetch(b[0].fetch_constant);
+      const uint32_t stride = b[0].stride_words * 4, bytes = std::min<uint32_t>(fetch.size * 4, 1u << 20);
+      const uint8_t* data = fetch.type == xe::FetchConstantType::kVertex ? memory_(fetch.address << 2) : nullptr;
+      bool keep = false;
+      std::vector<float> want;
+      {
+        auto& mut = const_cast<HybridState*>(hs)->quad_mutex;
+        std::lock_guard lock(mut);
+        want = hs->quad_keep;
+      }
+      for (uint32_t v = 0; data && !keep && v + stride <= bytes; v += stride) {
+        float p[3];
+        for (int c = 0; c < 3; ++c) {
+          uint32_t w;
+          std::memcpy(&w, data + v + 4 * c, 4);
+          if (fetch.endian == xe::Endian::k8in32) w = std::byteswap(w);
+          std::memcpy(&p[c], &w, 4);
+        }
+        for (size_t k = 0; k + 2 < want.size() && !keep; k += 3)
+          keep = std::fabs(p[0] - want[k]) < 1.0f && std::fabs(p[1] - want[k + 1]) < 1.0f &&
+                 std::fabs(p[2] - want[k + 2]) < 1.0f;
+      }
+      if (!keep) {
+        ++stats_.skipped_draws;
+        return;
+      }
+      // What the game binds for a kept particle draw: each texture's format and per-component sign (3: gamma).
+      static uint64_t quad_tex_logged = 0;
+      if (pshader && quad_tex_logged++ % 120 == 0) {
+        std::string t;
+        for (const auto& tb : pshader->texture_bindings()) {
+          const auto f = regs.GetTextureFetch(tb.fetch_constant);
+          t += fmt::format(" [fc {} base {:08x} fmt {} sign {}{}{}{} {}x{}]", tb.fetch_constant, f.base_address << 12,
+                           uint32_t(f.format), uint32_t(f.sign_x), uint32_t(f.sign_y), uint32_t(f.sign_z),
+                           uint32_t(f.sign_w), f.size_2d.width + 1, f.size_2d.height + 1);
+        }
+        REXLOG_INFO("hybrid quad: port draw ps {:016x} stride {}{}", pshader->ucode_data_hash(), stride, t);
+      }
+    }
   }
   if (n1_tree_active_ && pshader && dma && !std::ranges::none_of(attachments.color, std::identity{})) {
     TreeCaptureDraw(regs, *vshader, *pshader, draw, count, index32);

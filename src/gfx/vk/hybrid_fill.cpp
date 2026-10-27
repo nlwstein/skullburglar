@@ -124,6 +124,8 @@ struct N1Host {
   std::unordered_map<const char*, uint32_t> tree_comps, tree_assets;
   std::vector<N1Tree> trees;
   std::vector<N1Emitter> emitters;
+  std::vector<float> quad_rows;  // B-229 single-quad debug: the kept particles' rows
+  uint64_t quad_logged = 0;      // scene frame of the last "hybrid quad" log line
   std::vector<N1Instance> instances;
   std::vector<N1Decal> decals;
   std::vector<N1SkelInstance> skeletal;
@@ -557,8 +559,75 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     std::memcpy(out.origin, in.origin, sizeof(out.origin));
     std::memcpy(out.transform, in.transform, sizeof(out.transform));
   }
-  n1_set_particles(host->r, host->emitters.data(), uint32_t(host->emitters.size()), host->scene.particle_rows.data(),
-                   uint32_t(host->scene.particle_rows.size()));
+  if (state->quad_on.load(std::memory_order_acquire)) {
+    // B-229 single-quad debug (HybridState::quad_*): keep the n nearest matching sprite particles, one emitter each.
+    std::string word;
+    uint32_t want = 0;
+    float max_dist = 0;
+    {
+      std::lock_guard lock(state->quad_mutex);
+      word = state->quad_word, want = state->quad_n, max_dist = state->quad_max_dist;
+    }
+    struct Pick {
+      float d2;
+      size_t emitter;
+      uint32_t row;
+      float p[3];
+    };
+    std::vector<Pick> picks;
+    for (size_t i = 0; i < host->scene.emitters.size(); ++i) {
+      const HybridScene::Emitter& in = host->scene.emitters[i];
+      if (in.kind != 0 || !in.material || !std::strstr(in.material, word.c_str()) || in.row_floats < 15) continue;
+      for (uint32_t k = 0; k < in.count; ++k) {
+        const float* r = host->scene.particle_rows.data() + in.row_offset + size_t(k) * in.row_floats;
+        float p[3] = {r[0], r[1], r[2]};
+        if (in.local_space) {
+          const float* m = in.transform;
+          for (int c = 0; c < 3; ++c) p[c] = r[0] * m[c] + r[1] * m[4 + c] + r[2] * m[8 + c] + m[12 + c];
+        }
+        float d2 = 0;
+        for (int c = 0; c < 3; ++c) d2 += (p[c] - cam.location[c]) * (p[c] - cam.location[c]);
+        if (max_dist > 0 && d2 > max_dist * max_dist) continue;
+        picks.push_back({d2, i, k, {p[0], p[1], p[2]}});
+      }
+    }
+    std::sort(picks.begin(), picks.end(), [](const Pick& a, const Pick& b) { return a.d2 < b.d2; });
+    if (picks.size() > want) picks.resize(want);
+    host->quad_rows.clear();
+    std::vector<N1Emitter> kept;
+    std::vector<float> keep_pos;
+    for (const Pick& pk : picks) {
+      const HybridScene::Emitter& in = host->scene.emitters[pk.emitter];
+      N1Emitter e = host->emitters[pk.emitter];
+      e.count = 1, e.row_offset = uint32_t(host->quad_rows.size());
+      const float* r = host->scene.particle_rows.data() + in.row_offset + size_t(pk.row) * in.row_floats;
+      host->quad_rows.insert(host->quad_rows.end(), r, r + in.row_floats);
+      kept.push_back(e);
+      keep_pos.insert(keep_pos.end(), pk.p, pk.p + 3);
+      // A local-space emitter's port vertices carry the local position (the vertex shader applies LocalToWorld).
+      if (in.local_space) keep_pos.insert(keep_pos.end(), r, r + 3);
+      if (host->scene.frame >= host->quad_logged + 60 || host->scene.frame < host->quad_logged) {
+        REXLOG_INFO("hybrid quad: {} d {:.1f} at ({:.1f}, {:.1f}, {:.1f}) row [{}]", in.material, std::sqrt(pk.d2),
+                    pk.p[0], pk.p[1], pk.p[2], [&] {
+                      std::string s;
+                      for (uint32_t c = 0; c < in.row_floats; ++c) s += fmt::format("{}{:.4g}", c ? ", " : "", r[c]);
+                      return s;
+                    }());
+      }
+    }
+    if (host->scene.frame >= host->quad_logged + 60 || host->scene.frame < host->quad_logged)
+      host->quad_logged = host->scene.frame;
+    {
+      std::lock_guard lock(state->quad_mutex);
+      state->quad_keep = std::move(keep_pos);
+    }
+    host->emitters = std::move(kept);
+    n1_set_particles(host->r, host->emitters.data(), uint32_t(host->emitters.size()), host->quad_rows.data(),
+                     uint32_t(host->quad_rows.size()));
+  } else {
+    n1_set_particles(host->r, host->emitters.data(), uint32_t(host->emitters.size()),
+                     host->scene.particle_rows.data(), uint32_t(host->scene.particle_rows.size()));
+  }
   host->trees.clear();
   for (const HybridScene::Tree& in : host->scene.trees) {
     N1Tree& out = host->trees.emplace_back();

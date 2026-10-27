@@ -89,6 +89,10 @@ def main():
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)
     ap.add_argument("--env", action="append", default=[], help="extra VAR=value for the game")
+    ap.add_argument("--also", action="append", default=[], metavar="CMDS|SUFFIX",
+                    help="after each pair, with the world still held: send the console commands CMDS (';'-separated) "
+                         "and take one more pair tagged <tag>_<SUFFIX> (e.g. \"hybrid quad AcridSmoke 1|q1\")")
+    ap.add_argument("--after-also", default="", help="console commands (';'-separated) sent after the --also pairs")
     ap.add_argument("--feed", action="store_true",
                     help="also write the scene feed's JSON for the frame of each pair (<out>/feed, scenefeed dump 1)")
     a = ap.parse_args()
@@ -219,13 +223,35 @@ def main():
                 if got and a.feed:  # the world is still held, so this is the pair's scene to within a frame
                     send("scenefeed dump 1")
                     log.wait(lambda l: "scenefeed: wrote" in l or "frame_" in l, 5, alive)
+                extra = []
+                for spec in a.also if got else []:
+                    cmds, _, suffix = spec.rpartition("|")
+                    for c in cmds.split(";"):
+                        if c.strip():
+                            send(c.strip())
+                    time.sleep(1.0)
+                    xtag = f"{tag}_{suffix}"
+                    send(f"hybrid dualshot {xtag}")
+                    xrx = re.compile(r"hybrid dual: wrote (\S+-" + re.escape(xtag) + r")\.")
+                    xgot = log.wait(lambda l: xrx.search(l), a.shot_timeout, alive)
+                    if xgot:
+                        extra.append({"tag": xtag, "stem": os.path.relpath(xrx.search(xgot).group(1), out)})
+                        if a.feed:
+                            send("scenefeed dump 1")
+                            log.wait(lambda l: "scenefeed: wrote" in l or "frame_" in l, 5, alive)
+                    print(f"    {xtag}: {'ok' if xgot else 'no picture'}", flush=True)
+                if a.also and got:
+                    for c in a.after_also.split(";"):
+                        if c.strip():
+                            send(c.strip())
                 if a.freeze == "slomo":
                     send("SloMo 1")
                 elif a.freeze == "pause":
                     send("Pause")
                 if got:
                     stem = rx.search(got).group(1)
-                    entry["shots"].append({"tag": tag, "stem": os.path.relpath(stem, out), "secs": time.time() - s0})
+                    entry["shots"].append({"tag": tag, "stem": os.path.relpath(stem, out), "secs": time.time() - s0,
+                                           **({"also": extra} if extra else {})})
                     wt = clock.world_time() if clock else None
                     print(f"    {tag}: {time.time() - s0:.1f} s" + (f", world time {wt:.1f} s" if wt else ""), flush=True)
                 else:
