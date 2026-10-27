@@ -52,9 +52,10 @@ struct HybridCamera {
 // B-188: the lighting feed as fixed-layout binary records (no JSON). The layouts are the same as lightfeed::bin in the
 // renderer and N1Feed* in n1ffi.h (sizes asserted on both sides); the game fills them straight from guest memory.
 inline constexpr uint32_t kHybridNone = 0xFFFFFFFFu;
-struct HybridLight {  // 80 bytes
+struct HybridLight {  // 104 bytes
   uint32_t kind;      // 0 point, 1 spot, 2 directional, 3 spherical harmonic, 4 sky
-  uint32_t flags;     // 1 enabled, 2 baked, 4 casts dynamic shadows, 8 lights static, 16 lights dynamic
+  uint32_t flags;     // 1 enabled, 2 baked, 4 casts dynamic shadows, 8 lights static, 16 lights dynamic,
+                      // 32 CastShadows, 64 LightShadowMode == LightShadow_Modulate
   uint32_t env;       // index in HybridLighting::paths (the owner's DynamicLightEnvironmentComponent) or kHybridNone
   float radius, falloff, inner_deg, outer_deg;
   float pos[3];       // LightToWorld translation (UE3 axes)
@@ -62,6 +63,8 @@ struct HybridLight {  // 80 bytes
   float color[3];     // LightColor / 255 * Brightness
   float lower[3];     // LowerColor / 255 * LowerBrightness
   int32_t sh;         // index of its 27 floats (R, G, B x 9) in HybridLighting::sh, or -1
+  float mod_shadow[3];  // ModShadowColor R, G, B (linear; 1 when absent)
+  float mod_fade_exp, shadow_falloff_exp, min_shadow_falloff_radius;  // defaults 3, 2, 0
 };
 struct HybridFog {  // 44 bytes
   uint32_t present;
@@ -78,7 +81,7 @@ struct HybridPost {  // 180 bytes; NaN = property absent
   float god[9];
   float uber_dof[7];  // BloomKernelSize, BlurKernelSize, FalloffExponent, MaxNear/FarBlurAmount, FocusInnerRadius, FocusDistance
 };
-static_assert(sizeof(HybridLight) == 80 && sizeof(HybridFog) == 44 && sizeof(HybridPost) == 180);
+static_assert(sizeof(HybridLight) == 104 && sizeof(HybridFog) == 44 && sizeof(HybridPost) == 180);
 struct HybridLighting {
   bool has_fog_post = false;  // this update carries fog and post (sent only when they change)
   std::vector<HybridLight> lights;

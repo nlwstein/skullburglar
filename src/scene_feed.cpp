@@ -696,7 +696,9 @@ constexpr const char* kLiveLightProps[] = {
     "LightToWorld", "Brightness", "LightColor", "LightAffectsClassification", "LightingChannels",
     "UseDirectLightMap", "LowerBrightness", "LowerColor", "WorldSpaceIncidentLighting", "LightEnvironment",
     "bEnabled", "Radius", "FalloffExponent", "InnerConeAngle", "OuterConeAngle", "CastShadows",
-    "CastDynamicShadows", "LightShadowMode"};
+    "CastDynamicShadows", "LightShadowMode",
+    // B-205: the rest of the shadow light (B-189 modulated shadows).
+    "ModShadowColor", "ModShadowFadeoutExponent", "ShadowFalloffExponent", "MinShadowFalloffRadius"};
 
 // One light as ObjectJson writes it, with only kLiveLightProps (property records cached per class).
 void CompactLightJson(std::string& s, uint32_t light) {
@@ -1553,12 +1555,17 @@ struct ColorLayout {
   }
 };
 
-constexpr uint32_t kLfEnabled = 1, kLfBaked = 2, kLfCast = 4, kLfStatic = 8, kLfDynamic = 16;
+constexpr uint32_t kLfEnabled = 1, kLfBaked = 2, kLfCast = 4, kLfStatic = 8, kLfDynamic = 16, kLfCastShadows = 32,
+                   kLfModulated = 64;
 
 struct LightLayout {
   int kind = -1;  // HybridLight::kind, -1: not a class the renderer reads
   FieldEx l2w, brightness, color, affects, channels, direct, lower_b, lower_c, wsil, env, enabled, radius, falloff,
       inner, outer, cast, ch_static, ch_dynamic;
+  // B-205: the shadow light's fields (modulated shadows). `modulate`: LightShadowMode's value for
+  // LightShadow_Modulate, -1 if the enum has none.
+  FieldEx cast_shadows, shadow_mode, mod_color, mod_r, mod_g, mod_b, mod_fade, shadow_falloff, min_falloff;
+  int modulate = -1;
   ColorLayout color_l, lower_l;
   FieldEx sh_r, sh_g, sh_b, sh_rv, sh_gv, sh_bv;
 };
@@ -1585,6 +1592,15 @@ const LightLayout& LayoutFor(uint32_t light) {
   L.falloff = FindEx(cls, "FalloffExponent"), L.inner = FindEx(cls, "InnerConeAngle");
   L.outer = FindEx(cls, "OuterConeAngle"), L.cast = FindEx(cls, "CastDynamicShadows");
   L.ch_static = Member(L.channels, "Static"), L.ch_dynamic = Member(L.channels, "Dynamic");
+  L.cast_shadows = FindEx(cls, "CastShadows"), L.shadow_mode = FindEx(cls, "LightShadowMode");
+  L.mod_color = FindEx(cls, "ModShadowColor"), L.mod_fade = FindEx(cls, "ModShadowFadeoutExponent");
+  L.shadow_falloff = FindEx(cls, "ShadowFalloffExponent"), L.min_falloff = FindEx(cls, "MinShadowFalloffRadius");
+  L.mod_r = Member(L.mod_color, "R"), L.mod_g = Member(L.mod_color, "G"), L.mod_b = Member(L.mod_color, "B");
+  if (L.shadow_mode.ok() && IsObject(L.shadow_mode.sub)) {  // a byte property's `sub` is its enum
+    const uint32_t names = U32(L.shadow_mode.sub + 0x44), count = U32(L.shadow_mode.sub + 0x48);
+    for (uint32_t k = 0; Readable(names) && k < count && k < 256; ++k)
+      if (!std::strcmp(NameText(U32(names + 8 * k)), "LightShadow_Modulate")) L.modulate = int(k);
+  }
   L.color_l.Init(L.color), L.lower_l.Init(L.lower_c);
   L.sh_r = Member(L.wsil, "R"), L.sh_g = Member(L.wsil, "G"), L.sh_b = Member(L.wsil, "B");
   L.sh_rv = Member(L.sh_r, "V"), L.sh_gv = Member(L.sh_g, "V"), L.sh_bv = Member(L.sh_b, "V");
@@ -1635,6 +1651,14 @@ void LightsBin(HybridLighting& out, uint32_t stamp) {
               (!L.channels.ok() || (L.ch_dynamic.ok() && (U32(l + L.channels.offset + L.ch_dynamic.offset) & L.ch_dynamic.mask))
                    ? kLfDynamic
                    : 0);
+    if (FieldB(l, L.cast_shadows)) h.flags |= kLfCastShadows;
+    if (L.modulate >= 0 && *Raw(l + L.shadow_mode.offset) == L.modulate) h.flags |= kLfModulated;
+    for (int k = 0; k < 3; ++k) {
+      const FieldEx& m = k == 0 ? L.mod_r : k == 1 ? L.mod_g : L.mod_b;
+      h.mod_shadow[k] = L.mod_color.ok() && m.ok() ? F32(l + L.mod_color.offset + m.offset) : 1.f;
+    }
+    h.mod_fade_exp = FieldF(l, L.mod_fade, 3.f), h.shadow_falloff_exp = FieldF(l, L.shadow_falloff, 2.f);
+    h.min_shadow_falloff_radius = FieldF(l, L.min_falloff, 0.f);
     h.env = has_env ? EnvIndex(out, dle, stamp) : kHybridNone;
     h.radius = FieldF(l, L.radius, 0.f), h.falloff = FieldF(l, L.falloff, 2.f);
     h.inner_deg = FieldF(l, L.inner, 0.f), h.outer_deg = FieldF(l, L.outer, 44.f);
