@@ -1801,6 +1801,10 @@ void LightsBin(HybridLighting& out, uint32_t stamp) {
     float lc[3] = {0, 0, 0};
     if (L.lower_c.ok()) L.lower_l.Bytes(l, L.lower_c, lc);
     for (int k = 0; k < 3; ++k) h.lower[k] = (lc[k] / 255.f) * lower_b;
+    // B-230: point and spot lights have no lower colour; they carry the raw LightColor / 255 there, so the renderer
+    // can use UE3's sRGB-decoded light colour, pow(LightColor / 255, 2.2) * Brightness (the port's light pass).
+    if (L.kind == 0 || L.kind == 1)
+      for (int k = 0; k < 3; ++k) h.lower[k] = c[k] / 255.f;
     h.sh = -1;
     if (L.wsil.ok() && L.sh_rv.ok() && L.sh_gv.ok() && L.sh_bv.ok()) {
       const uint32_t w = l + L.wsil.offset;

@@ -9,9 +9,13 @@
 //           u32 fetch constant, u32 guest address, u32 stride bytes, u32 Xenos endian swap, u32 attribute count,
 //           u32 data bytes, attribute count x {u32 offset in words, u32 Xenos vertex
 //           format}, then the stream's data as it is in guest memory (at most kMaxStreamBytes). Headers little-endian.
+//   version 4 adds, after the streams: "PSC1", u32 RB_BLENDCONTROL0, u32 RB_DEPTHCONTROL, u32 RB_STENCILREFMASK, then
+//           1024 floats (pixel shader constants c0.xyzw .. c255.xyzw, register file 256..511). Each shader's microcode
+//           disassembly is written once per hash next to the dump as <dir>/shaders/<hash>.{vs,ps}.txt.
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace bots::gfx::drawdump {
@@ -25,7 +29,14 @@ struct Stream {
   std::vector<Attribute> attributes;
 };
 bool Active();  // a frame is being dumped
+struct PixelState {
+  const uint32_t* ps_constants = nullptr;  // 1024 words, or null
+  uint32_t blend0 = 0, depth = 0, stencil = 0;
+};
 void Record(const uint32_t* vs_constants, uint64_t vs, uint64_t ps, uint32_t width, uint32_t height, uint32_t flags,
-            uint32_t prim, uint32_t count, const std::vector<Stream>& streams);
+            uint32_t prim, uint32_t count, const std::vector<Stream>& streams, const PixelState& pixel);
+// Writes <dir>/shaders/<hash>.<kind>.txt once per hash (kind "vs" or "ps"); `text` is only called the first time.
+bool WantShader(uint64_t hash, const char* kind);
+void WriteShader(uint64_t hash, const char* kind, const std::string& text);
 void OnPresent();  // frame boundary: finish the frame being dumped, pick up a new request
 }  // namespace bots::gfx::drawdump

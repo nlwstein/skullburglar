@@ -98,6 +98,9 @@ def main():
     ap.add_argument("--after-also", default="", help="console commands (';'-separated) sent after the --also pairs")
     ap.add_argument("--feed", action="store_true",
                     help="also write the scene feed's JSON for the frame of each pair (<out>/feed, scenefeed dump 1)")
+    ap.add_argument("--draws", action="store_true",
+                    help="with --feed: also dump the port's draws of that frame (scenefeed draws 1: shader constants, "
+                         "blend state, shader disassembly) next to the JSON")
     a = ap.parse_args()
 
     tour = DEFAULT_TOUR
@@ -233,6 +236,9 @@ def main():
                 if got and a.feed:  # the world is still held, so this is the pair's scene to within a frame
                     send("scenefeed dump 1")
                     log.wait(lambda l: "scenefeed: wrote" in l or "frame_" in l, 5, alive)
+                    if a.draws:
+                        send("scenefeed draws 1")
+                        log.wait(lambda l: "scenefeed: draw dump finished" in l, 10, alive)
                 extra = []
                 for spec in a.also if got else []:
                     cmds, _, suffix = spec.rpartition("|")

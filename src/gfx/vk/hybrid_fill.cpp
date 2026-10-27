@@ -673,6 +673,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     if (sc.seq == host->scene.cam_seq) view_cam = &sc;
   }
   host->cam_seq = view_cam->seq;
+  n1_set_debug_bits(host->r, state->n1_debug_bits.load(std::memory_order_acquire));  // B-230 debug A/B (0: none)
   n1_set_time(host->r, view_cam->time);  // materials' Time is the game's clock (tracer fades compare with it)
   N1Camera camera{};
   std::memcpy(camera.view, view_cam->view, sizeof(camera.view));

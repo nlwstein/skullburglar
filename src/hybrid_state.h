@@ -61,7 +61,7 @@ struct HybridLight {  // 104 bytes
   float pos[3];       // LightToWorld translation (UE3 axes)
   float axis[3];      // LightToWorld Z row
   float color[3];     // LightColor / 255 * Brightness
-  float lower[3];     // LowerColor / 255 * LowerBrightness
+  float lower[3];     // LowerColor / 255 * LowerBrightness; point and spot lights: raw LightColor / 255 (B-230)
   int32_t sh;         // index of its 27 floats (R, G, B x 9) in HybridLighting::sh, or -1
   float mod_shadow[3];  // ModShadowColor R, G, B (linear; 1 when absent)
   float mod_fade_exp, shadow_falloff_exp, min_shadow_falloff_radius;  // defaults 3, 2, 0
@@ -214,6 +214,7 @@ struct HybridState {
   std::string quad_word;
   uint32_t quad_n = 0;
   float quad_max_dist = 0;
+  std::atomic<uint32_t> n1_debug_bits{0};  // B-230 debug A/B: n1_set_debug_bits ("hybrid n1debug <bits>")
   std::atomic<uint32_t> n1_variant{0};  // B-236 debug A/B: variant bits for every emitter ("hybrid n1variant <k>")
   uint32_t quad_variant = 0;      // B-236: n1 sprite orientation variant for the kept emitters (0: as is)
   bool quad_emitter = false;      // B-236: n1 draws the picked particles' whole emitters (the port draws those)

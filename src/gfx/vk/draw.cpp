@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <unordered_set>
 
 #ifdef __APPLE__
 #include <TargetConditionals.h>
@@ -1735,11 +1737,20 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
         st.attributes.push_back({uint32_t(a.fetch_instr.attributes.offset), uint32_t(a.fetch_instr.attributes.data_format)});
       }
     }
+    drawdump::PixelState px;
+    px.ps_constants = pshader ? &regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_256_X] : nullptr;
+    px.blend0 = regs.values[reg::RB_BLENDCONTROL::rt_register_indices[0]];
+    px.depth = regs.values[rg::XE_GPU_REG_RB_DEPTHCONTROL];
+    px.stencil = regs.values[rg::XE_GPU_REG_RB_STENCILREFMASK];
+    if (drawdump::WantShader(vshader->ucode_data_hash(), "vs"))
+      drawdump::WriteShader(vshader->ucode_data_hash(), "vs", vshader->ucode_disassembly());
+    if (pshader && drawdump::WantShader(pshader->ucode_data_hash(), "ps"))
+      drawdump::WriteShader(pshader->ucode_data_hash(), "ps", pshader->ucode_disassembly());
     drawdump::Record(&regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_000_X], vshader->ucode_data_hash(),
                      pshader ? pshader->ucode_data_hash() : 0, open_area_.width, open_area_.height,
                      (std::ranges::none_of(attachments.color, std::identity{}) ? 1u : 0u) |
                          (samples_x * samples_y > 1 ? 2u : 0u) | (rect ? 4u : 0u) | (indexed ? 8u : 0u),
-                     uint32_t(prim), host_count, streams);
+                     uint32_t(prim), host_count, streams, px);
   }
   if (indexed) vk_.vkCmdBindIndexBuffer(cmd_, ring_.buffer, index_offset, index_type);
   BeginDrawQuery();
@@ -1797,7 +1808,7 @@ void Open(DumpState& st) {
   const int64_t now = NowUs();
   st.file = std::fopen((st.dir + "/draws_" + std::to_string(now) + ".bin").c_str(), "wb");
   if (!st.file) return;
-  const uint32_t version = 2;
+  const uint32_t version = 4;
   std::fwrite("DFR1", 1, 4, st.file);
   std::fwrite(&version, 4, 1, st.file);
   std::fwrite(&now, 8, 1, st.file);
@@ -1808,7 +1819,7 @@ void Open(DumpState& st) {
 bool Active() { return State().file != nullptr; }
 
 void Record(const uint32_t* vs_constants, uint64_t vs, uint64_t ps, uint32_t width, uint32_t height, uint32_t flags,
-            uint32_t prim, uint32_t count, const std::vector<Stream>& streams) {
+            uint32_t prim, uint32_t count, const std::vector<Stream>& streams, const PixelState& pixel) {
   DumpState& st = State();
   if (!st.file) return;
   const uint32_t head[] = {0x31575244u /* "DRW1" */, st.draw++};
@@ -1824,6 +1835,28 @@ void Record(const uint32_t* vs_constants, uint64_t vs, uint64_t ps, uint32_t wid
     std::fwrite(h, 4, 6, st.file);
     for (const auto& a : s.attributes) std::fwrite(&a, 4, 2, st.file);
     if (size) std::fwrite(s.data, 1, size, st.file);
+  }
+  const uint32_t px[] = {0x31435350u /* "PSC1" */, pixel.blend0, pixel.depth, pixel.stencil};
+  std::fwrite(px, 4, 4, st.file);
+  static const uint32_t zeros[1024] = {};
+  std::fwrite(pixel.ps_constants ? pixel.ps_constants : zeros, 4, 1024, st.file);
+}
+
+bool WantShader(uint64_t hash, const char* kind) {
+  static std::unordered_set<uint64_t> seen;
+  DumpState& st = State();
+  return st.file && seen.insert(hash ^ (kind[0] == 'p' ? 0x9E3779B97F4A7C15ull : 0)).second;
+}
+
+void WriteShader(uint64_t hash, const char* kind, const std::string& text) {
+  const std::string dir = State().dir + "/shaders";
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  char name[64];
+  std::snprintf(name, sizeof(name), "/%016llx.%s.txt", (unsigned long long)hash, kind);
+  if (FILE* f = std::fopen((dir + name).c_str(), "wb")) {
+    std::fwrite(text.data(), 1, text.size(), f);
+    std::fclose(f);
   }
 }
 
