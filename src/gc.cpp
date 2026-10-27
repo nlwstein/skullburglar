@@ -211,7 +211,9 @@ void AddInline(PPCContext& ctx, uint8_t* base, uint32_t arr, uint32_t field, uin
 }
 
 // Read-only look-ahead: the flag words that object `obj`'s top-level references point to.
-void PrefetchRefs(uint8_t* base, uint32_t obj) {
+// elems: also prefetch the flag words of the objects in the TArray<UObject*> fields (their data must already be
+// on its way, from an earlier call without it).
+void PrefetchRefs(uint8_t* base, uint32_t obj, bool elems) {
   const uint32_t cls = U32(base, obj + 52);
   if (!cls) return;
   const uint32_t tokens = U32(base, cls + 480), count = U32(base, cls + 484);
@@ -235,11 +237,21 @@ void PrefetchRefs(uint8_t* base, uint32_t obj) {
       ++depth;
       continue;
     }
-    if (depth == 0 && (type == 1 || type == 2 || type == 7)) {
+    if (depth == 0 && !elems && (type == 1 || type == 2 || type == 7)) {
       const uint32_t r = U32(base, obj + off);
       if (r && (r < pool0 || r > pool1)) Prefetch(base, r + 8);
     } else if (depth == 0 && type == 3) {
-      if (const uint32_t data = U32(base, obj + off)) Prefetch(base, data);
+      const uint32_t data = U32(base, obj + off);
+      if (!data) {
+      } else if (!elems) {
+        Prefetch(base, data);
+      } else {
+        const uint32_t n = U32(base, obj + off + 4);
+        for (uint32_t j = 0; j < n && j < 32; ++j) {
+          const uint32_t r = U32(base, data + 4 * j);
+          if (r && (r < pool0 || r > pool1)) Prefetch(base, r + 8);
+        }
+      }
     }
     depth = depth > int(ret) ? depth - int(ret) : 0;
   }
@@ -356,6 +368,7 @@ void HostReachability(PPCContext& ctx, uint8_t* base) {
     }
   }
 
+  static const uint32_t kBody = uint32_t(EnvInt("BOTS_GC_PF_BODY", 6)), kRefs = uint32_t(EnvInt("BOTS_GC_PF_REFS", 3));
   // Pass 2: the reference-token walk. Every object reached is cleared of RF_Unreachable and appended.
   const uint32_t pool0 = U32(base, kPoolStart), pool1 = U32(base, kPoolEnd);
   // GPermanentObjectPool bounds are re-read per reference by the original; nothing in the walk can change them.
@@ -367,11 +380,13 @@ void HostReachability(PPCContext& ctx, uint8_t* base) {
       const uint32_t obj = U32(base, data + 4 * next);
       ++next;
       const uint32_t count_now = U32(base, arr + 4);
-      if (next + 1 < count_now) {
-        const uint32_t o2 = U32(base, data + 4 * (next + 1));
+      // Object i+kBody: its body; i+kRefs: its references' flags and its arrays; i+1: its arrays' elements' flags.
+      if (next - 1 + kBody < count_now) {
+        const uint32_t o2 = U32(base, data + 4 * (next - 1 + kBody));
         for (uint32_t k = 0; k < 512; k += 64) Prefetch(base, o2 + k);
       }
-      if (next < count_now) PrefetchRefs(base, U32(base, data + 4 * next));
+      if (next - 1 + kRefs < count_now) PrefetchRefs(base, U32(base, data + 4 * (next - 1 + kRefs)), false);
+      if (next < count_now) PrefetchRefs(base, U32(base, data + 4 * next), true);
       ctx.r3.u64 = obj;
       ctx.r4.u64 = arr;
       CallIndirect(ctx, base, U32(base, U32(base, obj) + 244), 0x825E9CAC);
