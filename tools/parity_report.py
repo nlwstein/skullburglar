@@ -177,6 +177,23 @@ def hints(m):
     return ", ".join(out)
 
 
+POOLED = {"71515": (24, 0.30)}  # chapter: (shots needed, p90 FLIP limit)
+
+
+def pooled_lines(rows):
+    """One line per pooled checkpoint present: n, median, p90, share over 0.30, PASS/FAIL on p90 <= limit."""
+    out = []
+    for chapter, (need, limit) in POOLED.items():
+        fl = np.array([m["flip"] for m in rows if m["chapter"] == chapter])
+        if not len(fl):
+            continue
+        p90 = float(np.percentile(fl, 90))
+        verdict = ("PASS" if p90 <= limit else "FAIL") if len(fl) >= need else f"INCONCLUSIVE (need {need} shots)"
+        out.append(f"pooled {chapter}: n {len(fl)}, FLIP median {np.median(fl):.3f}, p90 {p90:.3f}, "
+                   f"{100 * np.mean(fl > 0.30):.0f} % > 0.30, {verdict} (p90 <= {limit:.2f})")
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("tour", help="tour directory (with shots/ and tour.json)")
@@ -221,6 +238,11 @@ def main():
             wr.writerow([m["stem"], m["chapter"], m["psnr"], m["ssim"], m["flip"], m["flip_tc"], m["content_pct"], m["empty_pct"], m["high_err_pct"],
                          m["luma_ratio"], m["err_top_third"], m["settled"], m["hints"]])
 
+    # Pooled checkpoints (Q-031): 71515's explosion differs shot to shot, so it passes on a pool of >= 24 shots.
+    pooled = pooled_lines(rows)
+    for line in pooled:
+        print(line, flush=True)
+
     # HTML: summary, then per chapter (worst chapter first), each chapter's pairs worst first.
     by = {}
     for m in rows:
@@ -244,7 +266,7 @@ def main():
            f"<tr><td class=l>PSNR dB</td><td>{np.median(ps):.2f}</td><td>{ps.min():.2f}</td><td>{ps.max():.2f}</td></tr>",
            f"<tr><td class=l>SSIM</td><td>{np.median(ss):.3f}</td><td>{ss.min():.3f}</td><td>{ss.max():.3f}</td></tr>",
            f"<tr><td class=l>empty %</td><td>{np.median(em):.2f}</td><td>{em.max():.2f}</td><td>{em.min():.2f}</td></tr>",
-           "</table><h2>Per chapter (worst first)</h2><table><tr><th class=l>chapter</th><th class=l>scene</th>"
+           "</table>" + "".join(f"<p><b>{e(line)}</b></p>" for line in pooled) + "<h2>Per chapter (worst first)</h2><table><tr><th class=l>chapter</th><th class=l>scene</th>"
            "<th>pairs</th><th>FLIP max</th><th>FLIP mean</th><th>PSNR min</th><th>SSIM min</th><th>empty % max</th>"
            "<th class=l>hints</th></tr>"]
     for c in chapters:
