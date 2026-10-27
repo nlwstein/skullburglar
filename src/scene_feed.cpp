@@ -2256,7 +2256,9 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam) {
       e.material = le.material_path, e.mesh = le.mesh_path;
       e.count = active, e.row_offset = uint32_t(out.particle_rows.size()), e.row_floats = row_floats;
       for (int k = 0; k < 3; ++k) e.origin[k] = F32(inst + kEmitLocation + 4 * k);
-      if (le.local_space)
+      // LocalToWorld for every emitter: local-space emitters are transformed by it, and UE3 scales every sprite by the
+      // component's scale (Particle.Size * Scale x Scale3D x the owner's DrawScale), which it carries.
+      if (g_off.local_to_world.ok())
         for (int k = 0; k < 16; ++k) e.transform[k] = F32(c + g_off.local_to_world.offset + 4 * k);
       else
         std::memset(e.transform, 0, sizeof(e.transform));
