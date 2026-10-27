@@ -248,7 +248,7 @@ def main():
     print(f"tour: {len(record['checkpoints'])} checkpoints, {n} pairs, {record['wall_secs'] / 60:.1f} min -> {out}")
 
 
-GAME_LOAD_SECS, GAME_GAP = 21.5, 8.0  # first shots land near 22/30/38 s of game time, as the Mac's did at 25 s wall
+GAME_LOAD_SECS, GAME_GAP = 20.0, 7.7  # shots overshoot their target by 1-3 s, so they read about 22/30/38 s, like the old 25 s wall waits on the Mac
 WALL_LOAD_SECS, WALL_GAP = 25.0, 6.0
 
 
