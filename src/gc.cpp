@@ -11,11 +11,12 @@
 // Almost all of a pass is the reference-token walk: for each reachable object (~41k in a level), a virtual call and
 // a read of every reference field (~14 tokens, ~6 references per object) and of the referenced objects' flags.
 //
-// Host analysis (off by default; BOTS_GC_HOST=1): sub_825E99F0 replaced by a host implementation of the same
-// algorithm (see HostReachability). It gives the same results (BOTS_GC_VERIFY) but was not measurably faster on a
-// laptop, with or without software prefetch or a helper thread warming the cache, so it stays opt-in as a base for
-// later work and for the counts it logs.
-//   BOTS_GC_HOST=1     the host analysis
+// Host analysis (on by default; BOTS_GC_HOST=0 runs the game's own): sub_825E99F0 replaced by a host
+// implementation of the same algorithm (see HostReachability). It gives the same results (BOTS_GC_VERIFY). On a
+// laptop it cut the periodic pass from about 28 to 22 ms in whole-run A/B tests; software prefetch and a helper
+// thread warming the cache did not help further and were dropped.
+//   BOTS_GC_HOST=0     the game's own analysis
+//   BOTS_GC_HOST=1     the host analysis (default)
 //   BOTS_GC_HOST=2     (measuring) alternate the host analysis and the game's on successive passes
 //   BOTS_GC_VERIFY=1   (with BOTS_GC_HOST=1) run both on every pass and log whether they agree ("gc: verify")
 //   BOTS_GC_PROF=1     (with the host analysis) also time the per-object virtual calls ("gc: walk")
@@ -84,7 +85,7 @@ int EnvInt(const char* name, int fallback) {
   return e && *e ? std::atoi(e) : fallback;
 }
 int HostMode() {
-  static const int v = EnvInt("BOTS_GC_HOST", 0);
+  static const int v = EnvInt("BOTS_GC_HOST", 1);
   return v;
 }
 bool HostOn() { return HostMode() != 0; }
