@@ -191,6 +191,10 @@ struct HybridState {
   // capture hook sees the trees' draws. The renderer sets it when a tree asset has no geometry cache yet; Render()
   // counts it down, and the n1 marker is emitted in those frames so the capture session advances.
   std::atomic<int> capture_frames{0};
+  // B-243: n1 has finished its startup step (every shader and pipeline it can need is built). Until then the game
+  // draws its own scene although the port suppresses it (fill 4, not dual), so a cold n1 cache never shows a partial
+  // frame. The renderer sets it (hybrid_fill.cpp PumpN1Warmup); BOTS_N1_PORT_UNTIL_READY=0 lets n1 draw from the start.
+  std::atomic<uint32_t> n1_ready{0};
   std::atomic<uint64_t> markers_seen{0}, fills_drawn{0};  // renderer side, for the log
   HybridCamera cameras[kCameras] = {};
   // Fill 4: the newest scene. The game swaps its finished frame in, the renderer swaps it out (both under the lock).

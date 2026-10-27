@@ -556,6 +556,14 @@ extern "C" void sub_82BB1E78(PPCContext& __restrict ctx, uint8_t* base) {
   int suppress_now = g_suppress.load(std::memory_order_relaxed);
   // B-187: the SpeedTree capture needs the game's own draws; let some real frames through in mode 2.
   bool capturing = false;
+  // B-243: until n1 has built its pipelines (the startup step: minutes on a cold cache, the first run after an update),
+  // its frame would miss whatever has no pipeline yet: its clear colour where the level should be. The game draws its
+  // own scene meanwhile, then hands over. BOTS_N1_PORT_UNTIL_READY=0: n1 draws from the start, as before.
+  static const bool port_until_ready = EnvInt("BOTS_N1_PORT_UNTIL_READY", 1) != 0;
+  if (suppress_now && port_until_ready && g_state.fill.load(std::memory_order_relaxed) == 4 &&
+      !g_state.n1_ready.load(std::memory_order_acquire)) {
+    suppress_now = 0;
+  }
   if (suppress_now == 2 && g_state.capture_frames.load(std::memory_order_relaxed) > 0) {
     g_state.capture_frames.fetch_sub(1, std::memory_order_relaxed);
     suppress_now = 0;
