@@ -1,0 +1,244 @@
+diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
+index 7a711a8..477d0cf 100644
+--- a/src/audio/audio_system.cpp
++++ b/src/audio/audio_system.cpp
+@@ -27,6 +27,10 @@
+ REXCVAR_DEFINE_INT32(
+     audio_maxqframes, 8, "Audio",
+     "Max buffered audio frames (range 4-64). Lower reduces latency but may cause stuttering.");
++REXCVAR_DEFINE_BOOL(
++    audio_worker_high_priority, true, "Audio",
++    "Run the Audio Worker thread (which runs the game's audio callback, its mixer) at the highest normal priority, "
++    "so other busy threads (shader compiles at startup, the game thread) can't starve it into underruns.");
+ 
+ // As with normal Microsoft, there are like twelve different ways to access
+ // the audio APIs. Early games use XMA*() methods almost exclusively to touch
+@@ -92,6 +96,9 @@ X_STATUS AudioSystem::Setup(system::KernelState* kernel_state) {
+ 
+   worker_thread_->set_name("Audio Worker");
+   worker_thread_->Create();
++  if (REXCVAR_GET(audio_worker_high_priority) && worker_thread_->thread()) {
++    worker_thread_->thread()->set_priority(rex::thread::ThreadPriority::kHighest);
++  }
+ 
+   return X_STATUS_SUCCESS;
+ }
+diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
+index 47fe8e2..427bf4e 100644
+--- a/src/audio/sdl/sdl_audio_driver.cpp
++++ b/src/audio/sdl/sdl_audio_driver.cpp
+@@ -13,6 +13,8 @@
+ #include <cstdlib>
+ #include <algorithm>
+ #include <array>
++#include <atomic>
++#include <chrono>
+ #include <cstring>
+ 
+ #include <rex/assert.h>
+@@ -30,6 +32,35 @@ REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
+ 
+ namespace rex::audio::sdl {
+ 
++namespace {
++// Underrun statistics, logged every 10 s once audio has started: frames the device played, silent fills (5.3 ms each)
++// because the guest had not delivered the next frame, how many separate underruns those fills formed, the lowest queue
++// depth a callback found, and the longest gap between two guest frames.
++struct AudioStats {
++  std::atomic<uint64_t> played{0}, silent{0}, underruns{0};
++  std::atomic<int64_t> min_queue{1 << 30}, max_gap_us{0}, last_submit_us{0};
++  bool started = false, starving = false;
++  std::chrono::steady_clock::time_point next_log{};
++};
++AudioStats g_audio_stats;
++int64_t NowUs() {
++  return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
++void LogAudioStats() {
++  auto& st = g_audio_stats;
++  const auto now = std::chrono::steady_clock::now();
++  if (now < st.next_log) return;
++  if (st.next_log != std::chrono::steady_clock::time_point{}) {
++    const int64_t mq = st.min_queue.exchange(1 << 30);
++    REXAPU_INFO("audio: {} frames played, {} silent fills in {} underruns, queue min {}, longest guest frame gap {:.1f} ms",
++                st.played.exchange(0), st.silent.exchange(0), st.underruns.exchange(0), mq == (1 << 30) ? -1 : mq,
++                st.max_gap_us.exchange(0) / 1000.0);
++  }
++  st.next_log = now + std::chrono::seconds(10);
++}
++}  // namespace
++
+ SDLAudioDriver::SDLAudioDriver(memory::Memory* memory, rex::thread::Semaphore* semaphore)
+     : AudioDriver(memory), semaphore_(semaphore) {}
+ 
+@@ -137,6 +168,17 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
+     std::fflush(dump);
+   }
+ 
++  // Debug: REX_AUDIO_DUMP=<path> appends every guest frame verbatim (6 ch sequential,
++  // 256 samples each, big-endian float32) so output can be checked without a speaker.
++  static FILE* dump = [] {
++    const char* p = std::getenv("REX_AUDIO_DUMP");
++    return p && *p ? std::fopen(p, "wb") : nullptr;
++  }();
++  if (dump) {
++    std::fwrite(input_frame, sizeof(float), frame_samples_, dump);
++    std::fflush(dump);
++  }
++
+   static uint32_t sdl_submit_count = 0;
+   if (sdl_submit_count < 10) {
+     REXAPU_DEBUG("SDLAudioDriver::SubmitFrame: frame_ptr={:08X} queued_count={}", frame_ptr,
+@@ -144,6 +186,10 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
+     sdl_submit_count++;
+   }
+ 
++  {
++    const int64_t now = NowUs(), last = g_audio_stats.last_submit_us.exchange(now);
++    if (last && now - last > g_audio_stats.max_gap_us.load()) g_audio_stats.max_gap_us.store(now - last);
++  }
+   {
+     std::unique_lock<std::mutex> guard(frames_mutex_);
+     frames_queued_.push(output_frame);
+@@ -195,6 +241,11 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+     static uint32_t sdl_callback_count = 0;
+     std::unique_lock<std::mutex> guard(driver->frames_mutex_);
+     if (driver->frames_queued_.empty()) {
++      if (g_audio_stats.started) {
++        g_audio_stats.silent++;
++        if (!g_audio_stats.starving) g_audio_stats.underruns++;
++        g_audio_stats.starving = true;
++      }
+       if (sdl_callback_count < 10) {
+         REXAPU_DEBUG("SDLCallback: no frames queued (silence)");
+         sdl_callback_count++;
+@@ -208,6 +259,10 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+     } else {
+       auto buffer = driver->frames_queued_.front();
+       driver->frames_queued_.pop();
++      g_audio_stats.started = true, g_audio_stats.starving = false;
++      g_audio_stats.played++;
++      if (int64_t(driver->frames_queued_.size()) < g_audio_stats.min_queue.load())
++        g_audio_stats.min_queue.store(int64_t(driver->frames_queued_.size()));
+       if (REXCVAR_GET(audio_mute)) {
+         std::memset(data, 0, len);
+       } else {
+@@ -238,6 +293,7 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+     }
+   }
+   SDL_stack_free(data);
++  LogAudioStats();
+ }
+ 
+ }  // namespace rex::audio::sdl
+diff --git a/src/core/timer_queue.cpp b/src/core/timer_queue.cpp
+index 5cfea05..1f729b9 100644
+--- a/src/core/timer_queue.cpp
++++ b/src/core/timer_queue.cpp
+@@ -23,8 +23,42 @@
+ 
+ namespace dp = disruptorplus;
+ 
++#include <chrono>
++#include <cstdlib>
++#include <thread>
++
++#include <rex/platform.h>
++#if REX_PLATFORM_WIN32
++#include "platform_win.h"
++#endif
++
+ namespace rex::thread {
+ 
++namespace {
++constexpr auto kPollInterval = std::chrono::microseconds(1000);
++
++// Sleeps for about `d`. Windows' Sleep and condition variable timeouts round up to the system timer period (up to
++// 15.6 ms); a high-resolution waitable timer (Windows 10 1803+) does not.
++void PreciseSleep(std::chrono::steady_clock::duration d) {
++#if REX_PLATFORM_WIN32
++  thread_local HANDLE timer = [] {
++    HANDLE h = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */,
++                                      TIMER_ALL_ACCESS);
++    return h ? h : CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
++  }();
++  if (timer) {
++    LARGE_INTEGER due;
++    due.QuadPart = -std::max<int64_t>(1, std::chrono::duration_cast<std::chrono::nanoseconds>(d).count() / 100);
++    if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
++      WaitForSingleObject(timer, INFINITE);
++      return;
++    }
++  }
++#endif
++  std::this_thread::sleep_for(d);
++}
++}  // namespace
++
+ using WaitItem = TimerQueueWaitItem;
+ 
+ class TimerQueue {
+@@ -66,10 +100,28 @@ class TimerQueue {
+ 
+     while (!stop_token.stop_requested()) {
+       {
+-        // Consume new wait items and add them to sorted wait queue
+-        dp::sequence_t available = claim_strategy_.wait_until_published(
+-            next_sequence, next_sequence - 1,
+-            wait_queue_.empty() ? clock::time_point::max() : wait_queue_.front()->due_);
++        // Consume new wait items and add them to sorted wait queue. Sleep instead of spinning while nothing is due:
++        // the spin wait strategy kept about a quarter of a CPU busy for the 1 ms KeTimeStampBundle timer alone. New
++        // items are picked up within kPollInterval; a due item fires within the sleep's precision (sub-millisecond).
++        // REX_TIMER_QUEUE_SPIN=1 keeps the old spinning wait (for A/B measurements).
++        static const bool spin = [] {
++          const char* v = std::getenv("REX_TIMER_QUEUE_SPIN");
++          return v && v[0] == '1';
++        }();
++        dp::sequence_t available = next_sequence - 1;
++        if (spin) {
++          available = claim_strategy_.wait_until_published(
++              next_sequence, next_sequence - 1,
++              wait_queue_.empty() ? clock::time_point::max() : wait_queue_.front()->due_);
++        } else for (;;) {
++          available = claim_strategy_.last_published_after(next_sequence - 1);
++          if (available != next_sequence - 1 || stop_token.stop_requested()) break;
++          const auto now = clock::now();
++          if (!wait_queue_.empty() && wait_queue_.front()->due_ <= now) break;
++          auto until = now + kPollInterval;
++          if (!wait_queue_.empty() && wait_queue_.front()->due_ < until) until = wait_queue_.front()->due_;
++          PreciseSleep(until - now);
++        }
+ 
+         // Check for timeout
+         if (available != next_sequence - 1) {
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index a737e4f..a947cc6 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -1019,6 +1019,7 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+     static double worst_ms = 0;
+     static uint32_t hitches = 0;  // swaps more than 100 ms apart
+     static uint32_t slow_frames = 0;  // swaps more than 25 ms apart (a missed 60 Hz vblank)
++    static uint32_t over33 = 0, over50 = 0;  // swaps more than 33 / 50 ms apart (below 30 fps / a visible stutter)
+     static uint32_t windows = 0;
+     ++swaps;
+     clk::time_point now = clk::now();
+@@ -1027,12 +1028,15 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+     worst_ms = std::max(worst_ms, frame_ms);
+     hitches += frame_ms > 100.0;
+     slow_frames += frame_ms > 25.0;
++    over33 += frame_ms > 33.0;
++    over50 += frame_ms > 50.0;
+     double dt = std::chrono::duration<double>(now - t0).count();
+     if (dt >= 5.0) {
+       REXGPU_INFO("guest fps {:.1f} ({} swaps / {:.1f} s), worst frame {:.0f} ms, {} frames >25 ms, "
+-                  "{} hitches >100 ms",
+-                  swaps / dt, swaps, dt, worst_ms, slow_frames, hitches);
++                  "{} hitches >100 ms, {} >33 ms, {} >50 ms",
++                  swaps / dt, swaps, dt, worst_ms, slow_frames, hitches, over33, over50);
+       worst_ms = 0;
++      over33 = over50 = 0;
+       hitches = 0;
+       slow_frames = 0;
+       // Every 30 s: guest memory use, to see a heap creeping toward its limit before a crash.
