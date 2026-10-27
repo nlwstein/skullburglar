@@ -121,6 +121,7 @@ struct HybridScene {
   struct Emitter {
     uint32_t kind;  // 0 sprite, 1 mesh
     uint32_t align, sub_h, sub_v, sub_method, local_space;  // EParticleScreenAlignment, sub-image grid, interpolation
+    uint32_t lock_axis;    // EParticleAxisLock of an enabled OrientationAxisLock module, 0 (EPAL_NONE) without one
     const char* material;  // the material the emitter draws with
     const char* mesh;      // mesh emitters: StaticMesh path
     uint32_t count, row_offset, row_floats;
