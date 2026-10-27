@@ -8,15 +8,16 @@
 //      from the root set, which clears the mark on everything reachable;
 //   3. one more pass over every object: ConditionalBeginDestroy (sub_8247D8B8) on each that is still unreachable;
 // and the next frames' IncrementalPurgeGarbage calls (time-limited) finish destroying and free them.
-// The passes over the object table are cache-miss bound on a laptop: each object is its own heap block, so every
-// header read is a miss. The Xbox 360 code prefetches 10 objects ahead (dcbt), which the recompiler drops.
+// Almost all of a pass is the reachability analysis, and almost all of that is the reference-token walk: for each
+// reachable object, read its body and the flags of every object it references. Each of those is a cache miss on a
+// laptop (the objects are separate heap blocks, ~25-60k of them reachable). The Xbox 360 code prefetches the next
+// object (dcbt), which the recompiler drops.
 //
-// Prefetch (default on, BOTS_GC_PREFETCH=0 turns it off): before the reachability analysis and before the
-// BeginDestroy pass, the host prefetches the header line of every object in the table (a tight loop that issues many
-// misses at once instead of one after another), so the game's own passes find them in the cache. It only reads
-// guest memory and issues prefetch hints: what GC marks, keeps and frees is unchanged.
-//   BOTS_GC_PREFETCH=0   off (the game's code alone)
-//   BOTS_GC_PREFETCH=1   prefetch passes (default)
+// Host analysis (default on, BOTS_GC_HOST=0 turns it off): sub_825E99F0 is replaced by a host implementation of the
+// same algorithm (see HostReachability) that prefetches ahead: the next objects' bodies and the flag words of the
+// next object's references. What GC marks, keeps, nulls and frees is unchanged.
+//   BOTS_GC_HOST=0     the game's own code
+//   BOTS_GC_VERIFY=1   (with the host analysis) run both on every pass and log whether they agree ("gc: verify")
 //
 // Log (BOTS_GC_LOG, default 1; 0 silences it): one line per CollectGarbage ("gc: pass ..."; times, objects in the
 // table, objects found unreachable), one when the purge that follows completes ("gc: purged ..."; live objects
@@ -28,14 +29,26 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
+#include <vector>
 
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
+#include <rex/ppc/func.h>
 
 extern "C" void __imp__sub_825EA258(PPCContext& __restrict ctx, uint8_t* base);  // UObject::CollectGarbage
 extern "C" void __imp__sub_825E99F0(PPCContext& __restrict ctx, uint8_t* base);  // PerformReachabilityAnalysis
 extern "C" void __imp__sub_825E7EB0(PPCContext& __restrict ctx, uint8_t* base);  // IncrementalPurgeGarbage
 extern "C" void __imp__sub_8247D8B8(PPCContext& __restrict ctx, uint8_t* base);  // UObject::ConditionalBeginDestroy
+// Guest helpers the reachability analysis calls.
+extern "C" void sub_82481488(PPCContext& __restrict ctx, uint8_t* base);  // TArray<UObject*>::Empty(slack)
+extern "C" void sub_82481508(PPCContext& __restrict ctx, uint8_t* base);  // TArray<UObject*>::AddItem(const T&)
+extern "C" void sub_82548A78(PPCContext& __restrict ctx, uint8_t* base);  // FArray::CalculateSlack(elem size)
+extern "C" void sub_8234D8D8(PPCContext& __restrict ctx, uint8_t* base);  // FArray::Realloc(elem size, align)
+extern "C" void sub_82350DD8(PPCContext& __restrict ctx, uint8_t* base);  // GMalloc first-use init
+extern "C" void sub_824B7E88(PPCContext& __restrict ctx, uint8_t* base);  // UClass::StaticClass (lazy)
+extern "C" void sub_824B7F60(PPCContext& __restrict ctx, uint8_t* base);  // its registration
+extern "C" void sub_825E9990(PPCContext& __restrict ctx, uint8_t* base);  // UClass::AssembleReferenceTokenStream
 
 namespace bots::gc {
 namespace {
@@ -69,8 +82,12 @@ int EnvInt(const char* name, int fallback) {
   const char* e = std::getenv(name);
   return e && *e ? std::atoi(e) : fallback;
 }
-int PrefetchMode() {
-  static const int v = EnvInt("BOTS_GC_PREFETCH", 1);
+bool HostOn() {
+  static const bool v = EnvInt("BOTS_GC_HOST", 1) != 0;
+  return v;
+}
+bool VerifyOn() {
+  static const bool v = EnvInt("BOTS_GC_VERIFY", 0) != 0;
   return v;
 }
 bool LogOn() {
@@ -87,7 +104,7 @@ struct Pass {
   int n = 0;                  // passes so far
   bool in_gc = false;         // inside CollectGarbage
   double start = 0;           // CollectGarbage entry (ms since start)
-  double mark_ms = 0, prepurge_ms = 0, prefetch_ms = 0;
+  double mark_ms = 0, prepurge_ms = 0;
   uint32_t unreachable = 0;   // ConditionalBeginDestroy calls inside CollectGarbage
   bool purge_pending = false;  // a purge started by this pass has not finished yet
   double purge_ms = 0;        // time-limited purge calls since the pass
@@ -105,22 +122,439 @@ uint32_t LiveObjects(uint8_t* base) {
   return live;
 }
 
-// Prefetch the first line of every object's header (vtable +0, flags +8; Class +52 is on the next line for some),
-// GObjFirstGCIndex onwards. Many prefetches are in flight at once, so this costs about one miss per ten objects.
-void PrefetchObjects(uint8_t* base) {
-  const double t = NowMs();
-  const uint32_t data = U32(base, kObjects), num = U32(base, kObjects + 4);
-  const uint32_t first = U32(base, kFirstGCIndex);
-  if (!data || first >= num) return;
-  const uint32_t* slots = reinterpret_cast<const uint32_t*>(Raw(base, data));
-  for (uint32_t i = first; i < num; ++i) {
-    const uint32_t o = __builtin_bswap32(slots[i]);
-    if (!o) continue;
-    const uint8_t* p = Raw(base, o);
-    __builtin_prefetch(p, 0, 3);
-    __builtin_prefetch(p + 52, 0, 3);
+// ---- Host PerformReachabilityAnalysis --------------------------------------------------------------------------
+// The same algorithm as sub_825E99F0, instruction for instruction in effect: the same loads and stores of guest memory
+// in the same order, the same guest calls (virtuals, TArray growth through the game's allocator, AddItem) with the
+// same arguments. What differs is only how the host gets there: a native token interpreter instead of the
+// recompiled one, and prefetches. Object i+2's first 512 bytes are prefetched while object i is processed (the
+// Xbox 360 code prefetches object i+1 the same way, with dcbt, which the recompiler drops), and object i+1's
+// top-level references are looked up ahead of time so the flag words they point to are already on their way.
+
+constexpr uint32_t kPoolStart = 0x8380B138;  // GPermanentObjectPool (objects in it are never collected)
+constexpr uint32_t kPoolEnd = 0x8380B13C;
+constexpr uint32_t kUClass = 0x8380D280;     // UClass::StaticClass() cache
+constexpr uint32_t kGMalloc = 0x837D4F88;    // GMalloc (FMalloc*)
+constexpr uint64_t kPendingKill = 1ull << 61;
+constexpr uint64_t kUnreachable = 1ull << 33;
+
+void S32(uint8_t* base, uint32_t a, uint32_t v) {
+  v = __builtin_bswap32(v);
+  std::memcpy(Raw(base, a), &v, 4);
+}
+uint64_t U64(uint8_t* base, uint32_t a) {
+  uint64_t v;
+  std::memcpy(&v, Raw(base, a), 8);
+  return __builtin_bswap64(v);
+}
+void S64(uint8_t* base, uint32_t a, uint64_t v) {
+  v = __builtin_bswap64(v);
+  std::memcpy(Raw(base, a), &v, 8);
+}
+uint8_t U8(uint8_t* base, uint32_t a) { return *Raw(base, a); }
+void Prefetch(uint8_t* base, uint32_t a) { __builtin_prefetch(Raw(base, a), 0, 3); }
+
+// Guest function pointers by address: a small direct-mapped cache in front of the dispatcher.
+PPCFunc* Resolve(uint32_t target) {
+  struct Slot {
+    uint32_t addr;
+    PPCFunc* fn;
+  };
+  static Slot cache[512];
+  Slot& s = cache[(target >> 2) & 511];
+  if (s.addr != target || !s.fn) s = {target, rex::runtime::ResolveIndirectFunction(target)};
+  return s.fn;
+}
+void CallIndirect(PPCContext& ctx, uint8_t* base, uint32_t target, uint32_t lr) {
+  ctx.lr = lr;
+  Resolve(target)(ctx, base);
+}
+
+// For BOTS_GC_VERIFY: references the host pass nulled (address, old value), so a verifying pass can undo them.
+struct Undo {
+  bool on = false;
+  std::vector<std::pair<uint32_t, uint32_t>> words;
+  std::vector<std::pair<uint32_t, uint64_t>> dwords;
+} g_undo;
+void NullRef(uint8_t* base, uint32_t at) {
+  if (g_undo.on) g_undo.words.push_back({at, U32(base, at)});
+  S32(base, at, 0);
+}
+
+// ObjectsToSerialize.AddItem(obj), as the token loop inlines it: grow through CalculateSlack + GMalloc->Realloc.
+void AddInline(PPCContext& ctx, uint8_t* base, uint32_t arr, uint32_t field, uint32_t lr_slack, uint32_t lr_realloc) {
+  const uint32_t max = U32(base, arr + 8), n = U32(base, arr + 4);
+  S32(base, arr + 4, n + 1);
+  if (int32_t(n + 1) > int32_t(max)) {
+    ctx.r3.u64 = arr;
+    ctx.r4.u64 = 4;
+    ctx.lr = lr_slack;
+    sub_82548A78(ctx, base);
+    const uint32_t newmax = ctx.r3.u32, data = U32(base, arr);
+    S32(base, arr + 8, newmax);
+    if (data || newmax) {
+      uint32_t m = U32(base, kGMalloc);
+      if (!m) {
+        ctx.lr = lr_realloc;
+        sub_82350DD8(ctx, base);
+        m = U32(base, kGMalloc);
+      }
+      ctx.r3.u64 = m;
+      ctx.r4.u64 = data;
+      ctx.r5.u64 = uint64_t(newmax) << 2 & 0xFFFFFFFCull;
+      ctx.r6.u64 = 8;
+      CallIndirect(ctx, base, U32(base, U32(base, m) + 8), lr_realloc);
+      S32(base, arr, ctx.r3.u32);
+    }
   }
-  g.prefetch_ms += NowMs() - t;
+  const uint32_t slot = U32(base, arr) + n * 4;
+  if (slot) S32(base, slot, U32(base, field));
+}
+
+// Read-only look-ahead: the flag words that object `obj`'s top-level references point to.
+void PrefetchRefs(uint8_t* base, uint32_t obj) {
+  const uint32_t cls = U32(base, obj + 52);
+  if (!cls) return;
+  const uint32_t tokens = U32(base, cls + 480), count = U32(base, cls + 484);
+  if (!tokens) return;
+  const uint32_t pool0 = U32(base, kPoolStart), pool1 = U32(base, kPoolEnd);
+  int depth = 0;
+  for (uint32_t i = 0, steps = 0; i < count && steps < 512; ++steps) {
+    const uint32_t t = U32(base, tokens + 4 * i++);
+    const uint32_t type = t >> 16 & 0xFF, ret = t >> 24, off = t & 0xFFFF;
+    if (type == 6) return;
+    if (type == 4) {  // array of structs: skip its tokens
+      if (i + 1 >= count) return;
+      const uint32_t skip = U32(base, tokens + 4 * (i + 1));
+      const uint32_t target = (skip + i + 1) & 0xFFFFFF;
+      if (target <= i || target > count) return;
+      i = target;
+      continue;
+    }
+    if (type == 5) {
+      i += 2;
+      ++depth;
+      continue;
+    }
+    if (depth == 0 && (type == 1 || type == 2 || type == 7)) {
+      const uint32_t r = U32(base, obj + off);
+      if (r && (r < pool0 || r > pool1)) Prefetch(base, r + 8);
+    } else if (depth == 0 && type == 3) {
+      if (const uint32_t data = U32(base, obj + off)) Prefetch(base, data);
+    }
+    depth = depth > int(ret) ? depth - int(ret) : 0;
+  }
+}
+
+void HostReachability(PPCContext& ctx, uint8_t* base) {
+  const uint32_t arr = ctx.r3.u32;  // TArray<UObject*>& ObjectsToSerialize
+  const uint64_t keep = ctx.r4.u64;  // KeepFlags
+  const uint32_t sp_in = ctx.r1.u32;
+  const uint32_t sp = sp_in - 272;   // the original's frame: +80 scratch, +88 zero pair, +96 the token stack TArray
+  S32(base, sp, sp_in);
+  ctx.r1.u64 = sp;
+
+  S32(base, arr + 12, 0);
+  S32(base, kMarkCount, 0);
+  ctx.r3.u64 = arr;
+  ctx.r4.u64 = uint64_t(int64_t(int32_t(U32(base, kObjects + 4) - U32(base, kFirstGCIndex) + 2)));
+  ctx.lr = 0x825E9A38;
+  sub_82481488(ctx, base);
+  uint32_t uclass = U32(base, kUClass);
+  if (!uclass) {
+    ctx.r3.u64 = 0x820010BC;
+    ctx.lr = 0x825E9A54;
+    sub_824B7E88(ctx, base);
+    S32(base, kUClass, ctx.r3.u32);
+    ctx.lr = 0x825E9A5C;
+    sub_824B7F60(ctx, base);
+    uclass = U32(base, kUClass);
+  }
+
+  // Pass 1: every object from GObjFirstGCIndex: count it; keep the root set and KeepFlags objects, mark the rest
+  // unreachable; build the token streams of classes that have none yet.
+  {
+    int32_t i = int32_t(U32(base, kFirstGCIndex));
+    uint32_t num = U32(base, kObjects + 4);
+    while (i < int32_t(num)) {
+      const uint32_t data = U32(base, kObjects);
+      if (i + 10 < int32_t(num)) {
+        const uint32_t ahead = U32(base, data + 4 * uint32_t(i) + 40);
+        Prefetch(base, ahead);
+        Prefetch(base, ahead + 52);
+      }
+      const uint32_t obj = U32(base, data + 4 * uint32_t(i));
+      S32(base, sp + 80, obj);
+      if (obj) {
+        S32(base, kMarkCount, U32(base, kMarkCount) + 1);
+        if (U64(base, obj + 8) & 0x4000) {  // RF_RootSet
+          const uint32_t n = U32(base, arr + 4), max = U32(base, arr + 8);
+          S32(base, arr + 4, n + 1);
+          if (int32_t(n + 1) > int32_t(max)) {
+            ctx.r3.u64 = arr;
+            ctx.r4.u64 = 4;
+            ctx.lr = 0x825E9AF8;
+            sub_82548A78(ctx, base);
+            S32(base, arr + 8, ctx.r3.u32);
+            ctx.r3.u64 = arr;
+            ctx.r4.u64 = 4;
+            ctx.r5.u64 = 8;
+            ctx.lr = 0x825E9B0C;
+            sub_8234D8D8(ctx, base);
+          }
+          const uint32_t slot = U32(base, arr) + n * 4;
+          if (slot) S32(base, slot, obj);
+        } else {
+          ctx.r3.u64 = obj;
+          CallIndirect(ctx, base, U32(base, U32(base, obj) + 52), 0x825E9B38);
+          if (ctx.r3.u32) S64(base, obj + 8, U64(base, obj + 8) | kPendingKill);
+          const uint64_t f = U64(base, obj + 8);
+          if (((f & keep) || keep == ~0ull) && !(f & kPendingKill)) {
+            ctx.r3.u64 = arr;
+            ctx.r4.u64 = sp + 80;
+            ctx.lr = 0x825E9B84;
+            sub_82481508(ctx, base);
+          } else {
+            S64(base, obj + 8, U64(base, obj + 8) | kUnreachable);
+          }
+        }
+        if (U32(base, obj + 52) == uclass && !(U64(base, obj + 8) & 0x1000)) {
+          ctx.r3.u64 = obj;
+          ctx.lr = 0x825E9BB8;
+          sub_825E9990(ctx, base);
+        }
+        num = U32(base, kObjects + 4);
+      }
+      ++i;
+    }
+  }
+
+  // The token stack: a TArray of 16-byte frames {base, stride, count, loop token}, 128 of them up front.
+  const uint32_t stack = sp + 96;
+  S32(base, stack, 0);
+  S32(base, stack + 8, 0);
+  S32(base, stack + 4, 128);
+  ctx.r3.u64 = stack;
+  ctx.r4.u64 = 16;
+  ctx.lr = 0x825E9BEC;
+  sub_82548A78(ctx, base);
+  {
+    const uint32_t old = U32(base, stack), max = ctx.r3.u32;
+    S32(base, stack + 8, max);
+    if (old || max) {
+      uint32_t m = U32(base, kGMalloc);
+      if (!m) {
+        ctx.lr = 0x825E9C1C;
+        sub_82350DD8(ctx, base);
+        m = U32(base, kGMalloc);
+      }
+      ctx.r3.u64 = m;
+      ctx.r4.u64 = old;
+      ctx.r5.u64 = uint64_t(max) << 4 & 0xFFFFFFF0ull;
+      ctx.r6.u64 = 8;
+      CallIndirect(ctx, base, U32(base, U32(base, m) + 8), 0x825E9C44);
+      S32(base, stack, ctx.r3.u32);
+    }
+  }
+
+  // Pass 2: the reference-token walk. Every object reached is cleared of RF_Unreachable and appended.
+  const uint32_t pool0 = U32(base, kPoolStart), pool1 = U32(base, kPoolEnd);
+  // GPermanentObjectPool bounds are re-read per reference by the original; nothing in the walk can change them.
+  auto in_pool = [&](uint32_t r) { return !(r < pool0) && r <= pool1; };
+  if (int32_t(U32(base, arr + 4)) > 0) {
+    uint32_t next = 0;  // index of the next object to serialize
+    for (;;) {
+      const uint32_t data = U32(base, arr);
+      const uint32_t obj = U32(base, data + 4 * next);
+      ++next;
+      const uint32_t count_now = U32(base, arr + 4);
+      if (next + 1 < count_now) {
+        const uint32_t o2 = U32(base, data + 4 * (next + 1));
+        for (uint32_t k = 0; k < 512; k += 64) Prefetch(base, o2 + k);
+      }
+      if (next < count_now) PrefetchRefs(base, U32(base, data + 4 * next));
+      ctx.r3.u64 = obj;
+      ctx.r4.u64 = arr;
+      CallIndirect(ctx, base, U32(base, U32(base, obj) + 244), 0x825E9CAC);
+      uint32_t frame = U32(base, stack);
+      uint32_t cur = obj;  // r23: the struct the current tokens address
+      uint32_t tok = 0;    // r22
+      S32(base, frame, obj);
+      S32(base, frame + 4, 0);
+      S32(base, frame + 8, ~0u);
+      S32(base, frame + 12, ~0u);
+      const uint32_t tokens = U32(base, U32(base, obj + 52) + 480);
+      uint32_t returns = 0;  // r21
+      for (;;) {
+        // Leave `returns` levels: each one either loops (next element of an array of structs) or pops its frame.
+        for (uint32_t r = 0; int32_t(r) < int32_t(returns);) {
+          const uint32_t c = U32(base, frame + 8) - 1;
+          S32(base, frame + 8, c);
+          if (int32_t(c) > 0) {
+            tok = U32(base, frame + 12);
+            cur = U32(base, frame + 4) + U32(base, frame);
+            S32(base, frame, cur);
+            break;
+          }
+          frame -= 16;
+          ++r;
+          cur = U32(base, frame);
+        }
+        const uint32_t t = U32(base, tokens + 4 * tok);
+        ++tok;
+        S32(base, sp + 80, t);
+        const uint32_t type = t >> 16 & 0xFF, off = t & 0xFFFF;
+        if (type == 1 || type == 2) {  // an object reference (2: never nulled)
+          returns = t >> 24;
+          const uint32_t at = cur + off, r = U32(base, at);
+          if (!r || in_pool(r)) continue;
+          const uint64_t f = U64(base, r + 8);
+          if (type == 1 && (f & kPendingKill)) {
+            NullRef(base, at);
+            continue;
+          }
+          if (!(f & kUnreachable)) continue;
+          S64(base, r + 8, (type == 1 ? U64(base, r + 8) : f) & ~kUnreachable);
+          if (type == 1)
+            AddInline(ctx, base, arr, at, 0x825E9DE4, 0x825E9E2C);
+          else
+            AddInline(ctx, base, arr, at, 0x825EA098, 0x825EA0E0);
+        } else if (type == 3) {  // TArray<UObject*>
+          returns = t >> 24;
+          const uint32_t a = cur + off;
+          if (int32_t(U32(base, a + 4)) <= 0) continue;
+          for (uint32_t j = 0; int32_t(j) < int32_t(U32(base, a + 4)); ++j) {
+            const uint32_t at = U32(base, a) + 4 * j, r = U32(base, at);
+            if (!r || in_pool(r)) continue;
+            const uint64_t f = U64(base, r + 8);
+            if (f & kPendingKill) {
+              NullRef(base, at);
+              continue;
+            }
+            if (!(f & kUnreachable)) continue;
+            S64(base, r + 8, U64(base, r + 8) & ~kUnreachable);
+            AddInline(ctx, base, arr, at, 0x825E9F18, 0x825E9F60);
+          }
+        } else if (type == 4) {  // TArray of structs: push a frame over its elements
+          const uint32_t a = cur + off;
+          const uint32_t stride = U32(base, tokens + 4 * tok), skip = U32(base, tokens + 4 * (tok + 1));
+          const uint32_t after = tok + 2;
+          const uint32_t n = U32(base, a + 4);
+          cur = U32(base, a);
+          frame += 16;
+          S32(base, frame + 12, after);
+          S32(base, frame + 4, stride);
+          S32(base, frame + 8, n);
+          S32(base, frame, cur);
+          if (n != 0) {
+            tok = after;
+            returns = 0;
+          } else {
+            const uint32_t sk = ((skip + tok + 1) & 0x00FFFFFFu) | (skip & 0xFF000000u);
+            tok = sk & 0xFFFFFF;
+            returns = uint32_t(U8(base, tokens + 4 * tok - 4)) - (sk >> 24);
+          }
+        } else if (type == 5) {  // fixed array: push a frame
+          const uint32_t stride = U32(base, tokens + 4 * tok), n = U32(base, tokens + 4 * (tok + 1));
+          tok += 2;
+          frame += 16;
+          S32(base, frame, cur);
+          S32(base, frame + 12, tok);
+          S32(base, frame + 4, stride);
+          S32(base, frame + 8, n);
+          returns = 0;
+        } else if (type == 6) {  // end of stream
+          break;
+        } else if (type == 7) {  // object + interface pointer
+          returns = t >> 24;
+          const uint32_t at = cur + off, r = U32(base, at);
+          const bool was_null = r == 0;
+          if (r && !in_pool(r)) {
+            const uint64_t f = U64(base, r + 8);
+            if (f & kPendingKill) {
+              NullRef(base, at);
+            } else if (f & kUnreachable) {
+              S64(base, r + 8, U64(base, r + 8) & ~kUnreachable);
+              ctx.r3.u64 = arr;
+              ctx.r4.u64 = at;
+              ctx.lr = 0x825EA1E0;
+              sub_82481508(ctx, base);
+            }
+          }
+          if (!was_null && !U32(base, at)) {
+            S32(base, sp + 88, 0);
+            S32(base, sp + 92, 0);
+            if (g_undo.on) g_undo.dwords.push_back({at + 4, U64(base, at + 4)});
+            S64(base, at + 4, U64(base, sp + 88));
+          }
+        }
+        // Any other type: nothing, and `returns` keeps its value (as in the original).
+      }
+      if (int32_t(next) >= int32_t(U32(base, arr + 4))) break;
+    }
+  }
+  if (const uint32_t data = U32(base, stack)) {
+    uint32_t m = U32(base, kGMalloc);
+    if (!m) {
+      ctx.lr = 0x825EA234;
+      sub_82350DD8(ctx, base);
+      m = U32(base, kGMalloc);
+    }
+    ctx.r3.u64 = m;
+    ctx.r4.u64 = data;
+    CallIndirect(ctx, base, U32(base, U32(base, m) + 12), 0x825EA24C);
+  }
+  ctx.r1.u64 = sp_in;
+}
+
+// BOTS_GC_VERIFY=1: run the host analysis, record what it did, undo it, run the game's own code from the same state and
+// compare: the ObjectsToSerialize list (same objects in the same order), every object's RF_Unreachable and
+// RF_PendingKill bits, and the references the host nulled. The game's result is the one that stays.
+void VerifiedReachability(PPCContext& ctx, uint8_t* base) {
+  const uint32_t arr = ctx.r3.u32;
+  const uint64_t keep = ctx.r4.u64;
+  const uint32_t data = U32(base, kObjects), num = U32(base, kObjects + 4);
+  constexpr uint64_t kBits = kPendingKill | kUnreachable;
+  std::vector<uint64_t> before(num, 0), host_bits(num, 0);
+  for (uint32_t i = 0; i < num; ++i)
+    if (const uint32_t o = U32(base, data + 4 * i)) before[i] = U64(base, o + 8) & kBits;
+  g_undo = {};
+  g_undo.on = true;
+  const double t0 = NowMs();
+  PPCContext saved = ctx;
+  HostReachability(ctx, base);
+  const double host_ms = NowMs() - t0;
+  g_undo.on = false;
+  std::vector<uint32_t> host_list(U32(base, arr + 4));
+  for (uint32_t i = 0; i < host_list.size(); ++i) host_list[i] = U32(base, U32(base, arr) + 4 * i);
+  const uint32_t host_count = U32(base, kMarkCount);
+  // Undo: GC bits back as they were, nulled references restored (last first).
+  for (uint32_t i = 0; i < num; ++i)
+    if (const uint32_t o = U32(base, data + 4 * i)) {
+      const uint64_t f = U64(base, o + 8);
+      host_bits[i] = f & kBits;
+      S64(base, o + 8, (f & ~kBits) | before[i]);
+    }
+  for (auto it = g_undo.dwords.rbegin(); it != g_undo.dwords.rend(); ++it) S64(base, it->first, it->second);
+  for (auto it = g_undo.words.rbegin(); it != g_undo.words.rend(); ++it) S32(base, it->first, it->second);
+  const double t1 = NowMs();
+  ctx = saved;
+  ctx.r3.u64 = arr;
+  ctx.r4.u64 = keep;
+  __imp__sub_825E99F0(ctx, base);
+  const double guest_ms = NowMs() - t1;
+  uint32_t list_diff = 0, bit_diff = 0, null_diff = 0;
+  const uint32_t n = U32(base, arr + 4);
+  if (n != host_list.size()) ++list_diff;
+  for (uint32_t i = 0; i < n && i < host_list.size(); ++i) list_diff += U32(base, U32(base, arr) + 4 * i) != host_list[i];
+  for (uint32_t i = 0; i < num && i < U32(base, kObjects + 4); ++i)
+    if (const uint32_t o = U32(base, U32(base, kObjects) + 4 * i)) bit_diff += (U64(base, o + 8) & kBits) != host_bits[i];
+  for (const auto& w : g_undo.words) null_diff += U32(base, w.first) != 0;
+  REXLOG_INFO("gc: verify pass {}: host {:.1f} ms, game {:.1f} ms; list {} vs {} ({} differ), flag words differing {}, "
+              "nulled refs {} ({} not nulled by the game), mark count {} vs {}{}",
+              g.n + 1, host_ms, guest_ms, host_list.size(), n, list_diff, bit_diff, g_undo.words.size(), null_diff,
+              host_count, U32(base, kMarkCount),
+              list_diff || bit_diff || null_diff || host_count != U32(base, kMarkCount) ? " MISMATCH" : " (match)");
+  g_undo = {};
 }
 
 }  // namespace
@@ -153,7 +587,7 @@ extern "C" void sub_825EA258(PPCContext& __restrict ctx, uint8_t* base) {
   const bool full = ctx.r4.u32 != 0;
   g.in_gc = true;
   g.start = NowMs();
-  g.mark_ms = g.prepurge_ms = g.prefetch_ms = 0;
+  g.mark_ms = g.prepurge_ms = 0;
   g.unreachable = 0;
   const bool was_pending = g.purge_pending;
   __imp__sub_825EA258(ctx, base);
@@ -167,10 +601,10 @@ extern "C" void sub_825EA258(PPCContext& __restrict ctx, uint8_t* base) {
   if (!LogOn()) return;
   g.live_after_gc = LiveObjects(base);
   const uint32_t engine = U32(base, kGEngine);
-  REXLOG_INFO("gc: pass {} at {:.3f} s: {:.1f} ms (finish previous purge {:.1f}, reachability {:.1f}, begin-destroy "
-              "{:.1f}; prefetch {:.2f}), {} objects marked, {} unreachable, {} in table, keep {:016X}, full purge {}, "
+  REXLOG_INFO("gc: pass {} at {:.3f} s: {:.1f} ms (purge {:.1f}, reachability {:.1f}, begin-destroy "
+              "{:.1f}; host {}), {} objects marked, {} unreachable, {} in table, keep {:016X}, full purge {}, "
               "caller {:08X}, interval {:.1f} s{}",
-              g.n, g.start / 1000.0, ms, g.prepurge_ms, g.mark_ms, ms - g.mark_ms - g.prepurge_ms, g.prefetch_ms,
+              g.n, g.start / 1000.0, ms, g.prepurge_ms, g.mark_ms, ms - g.mark_ms - g.prepurge_ms, HostOn() ? 1 : 0,
               U32(base, kMarkCount), g.unreachable, g.live_after_gc, keep, full ? 1 : 0, caller,
               engine ? F32(base, engine + kTimeBetweenPurging) : 0.0f,
               was_pending ? " (previous purge was still pending)" : "");
@@ -179,11 +613,13 @@ extern "C" void sub_825EA258(PPCContext& __restrict ctx, uint8_t* base) {
 // PerformReachabilityAnalysis(TArray<UObject*>& ObjectsToSerialize, QWORD KeepFlags)
 extern "C" void sub_825E99F0(PPCContext& __restrict ctx, uint8_t* base) {
   const double t = NowMs();
-  if (PrefetchMode() == 1) PrefetchObjects(base);
-  __imp__sub_825E99F0(ctx, base);
+  if (!HostOn())
+    __imp__sub_825E99F0(ctx, base);
+  else if (VerifyOn())
+    VerifiedReachability(ctx, base);
+  else
+    HostReachability(ctx, base);
   g.mark_ms += NowMs() - t;
-  // The BeginDestroy pass that follows walks the whole table again.
-  if (PrefetchMode() == 1) PrefetchObjects(base);
 }
 
 // IncrementalPurgeGarbage(UBOOL bUseTimeLimit, FLOAT TimeLimit)
