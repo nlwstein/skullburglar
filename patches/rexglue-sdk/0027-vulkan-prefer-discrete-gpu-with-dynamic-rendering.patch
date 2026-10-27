@@ -1,0 +1,81 @@
+diff --git a/src/ui/vulkan/vulkan_provider.cpp b/src/ui/vulkan/vulkan_provider.cpp
+index 9eeb902..578a337 100644
+--- a/src/ui/vulkan/vulkan_provider.cpp
++++ b/src/ui/vulkan/vulkan_provider.cpp
+@@ -10,6 +10,8 @@
+  */
+ 
+ #include <algorithm>
++#include <memory>
++#include <utility>
+ #include <vector>
+ 
+ #include <rex/cvar.h>
+@@ -84,6 +86,27 @@ std::unique_ptr<VulkanProvider> VulkanProvider::Create(const bool with_gpu_emula
+ 
+   if (!provider->vulkan_device_) {
+     std::vector<VkPhysicalDevice> physical_devices_ordered = physical_devices;
++    // Discrete GPUs first, then integrated, virtual and the rest, each group in enumeration order. Windows often
++    // lists a laptop's or a desktop CPU's integrated GPU first, and an integrated GPU with an old OEM or generic
++    // driver can lack what the renderers need.
++    {
++      auto rank = [&ifn](VkPhysicalDevice physical_device) {
++        VkPhysicalDeviceProperties properties;
++        ifn.vkGetPhysicalDeviceProperties(physical_device, &properties);
++        switch (properties.deviceType) {
++          case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
++            return 0;
++          case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
++            return 1;
++          case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
++            return 2;
++          default:
++            return 3;
++        }
++      };
++      std::stable_sort(physical_devices_ordered.begin(), physical_devices_ordered.end(),
++                       [&rank](VkPhysicalDevice a, VkPhysicalDevice b) { return rank(a) < rank(b); });
++    }
+     bool prefer_geometry_shader = REXCVAR_GET(vulkan_prefer_geometry_shader);
+     bool prefer_fragment_stores = REXCVAR_GET(vulkan_prefer_fragment_stores_and_atomics);
+     bool prefer_vertex_stores = REXCVAR_GET(vulkan_prefer_vertex_pipeline_stores_and_atomics);
+@@ -96,8 +119,8 @@ std::unique_ptr<VulkanProvider> VulkanProvider::Create(const bool with_gpu_emula
+         uint32_t score;
+       };
+       std::vector<PhysicalDeviceScore> scored_devices;
+-      scored_devices.reserve(physical_devices.size());
+-      for (const VkPhysicalDevice physical_device : physical_devices) {
++      scored_devices.reserve(physical_devices_ordered.size());
++      for (const VkPhysicalDevice physical_device : physical_devices_ordered) {
+         VkPhysicalDeviceFeatures supported_features = {};
+         ifn.vkGetPhysicalDeviceFeatures(physical_device, &supported_features);
+         uint32_t score = 0;
+@@ -130,9 +153,25 @@ std::unique_ptr<VulkanProvider> VulkanProvider::Create(const bool with_gpu_emula
+       }
+     }
+ 
+-    for (const VkPhysicalDevice physical_device : physical_devices_ordered) {
+-      provider->vulkan_device_ = VulkanDevice::CreateIfSupported(
+-          provider->vulkan_instance_.get(), physical_device, with_gpu_emulation, with_presentation);
++    // The first device that works and supports dynamic rendering (what the native renderer draws with). Devices
++    // that work but lack it are only used when no device has it, as before.
++    for (const bool require_dynamic_rendering : {true, false}) {
++      for (const VkPhysicalDevice physical_device : physical_devices_ordered) {
++        std::unique_ptr<VulkanDevice> device = VulkanDevice::CreateIfSupported(
++            provider->vulkan_instance_.get(), physical_device, with_gpu_emulation, with_presentation);
++        if (!device) {
++          continue;
++        }
++        if (require_dynamic_rendering && !device->properties().dynamicRendering) {
++          VkPhysicalDeviceProperties properties;
++          ifn.vkGetPhysicalDeviceProperties(physical_device, &properties);
++          REXLOG_WARN("Vulkan device '{}' has no dynamic rendering (Vulkan 1.3 or VK_KHR_dynamic_rendering); using it only if no other device does",
++                      properties.deviceName);
++          continue;
++        }
++        provider->vulkan_device_ = std::move(device);
++        break;
++      }
+       if (provider->vulkan_device_) {
+         break;
+       }

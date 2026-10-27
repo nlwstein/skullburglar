@@ -65,6 +65,10 @@ class Renderer : public Pm4Sink {
   Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory memory);
   ~Renderer() override;
   bool ok() const { return ok_; }
+  // Why construction failed (empty when ok()); also logged as an error when it happened.
+  const std::string& failure() const { return failure_; }
+  // "NVIDIA GeForce RTX 3060, driver 552.22, Vulkan 1.3.277" for the device in use (for logs and error messages).
+  std::string DeviceDescription() const;
 
   void OnDraw(const rex::graphics::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
               const Draw& draw) override;
@@ -476,6 +480,8 @@ class Renderer : public Pm4Sink {
   std::vector<std::pair<uint32_t, uint32_t>> invalidated_;
   Api vk_;
   bool ok_ = false;
+  std::string failure_;
+  bool Fail(const std::string& what, VkResult result = VK_SUCCESS);  // records + logs; returns false
   VmaAllocator allocator_ = nullptr;
   struct OcclusionQuery {
     uint32_t address, first, count;  // guest sample-count struct; slots in the submission's pool

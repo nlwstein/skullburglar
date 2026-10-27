@@ -185,20 +185,16 @@ bool Renderer::InitTransfers() {
   VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
   set_info.bindingCount = 2;
   set_info.pBindings = bindings;
-  if (vk_.vkCreateDescriptorSetLayout(device_->device(), &set_info, nullptr, &transfer_set_layout_) != VK_SUCCESS) {
-    return false;
-  }
+  if (const VkResult r_ = vk_.vkCreateDescriptorSetLayout(device_->device(), &set_info, nullptr, &transfer_set_layout_); r_ != VK_SUCCESS) return Fail("vkCreateDescriptorSetLayout failed", r_);
   VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
   const VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 12};
   layout_info.setLayoutCount = 1;
   layout_info.pSetLayouts = &transfer_set_layout_;
   layout_info.pushConstantRangeCount = 1;
   layout_info.pPushConstantRanges = &push;
-  if (vk_.vkCreatePipelineLayout(device_->device(), &layout_info, nullptr, &transfer_layout_) != VK_SUCCESS) {
-    return false;
-  }
+  if (const VkResult r_ = vk_.vkCreatePipelineLayout(device_->device(), &layout_info, nullptr, &transfer_layout_); r_ != VK_SUCCESS) return Fail("vkCreatePipelineLayout failed", r_);
   transfer_vs_ = CreateShaderModule(EShLangVertex, kVertexShader);
-  return transfer_vs_ != VK_NULL_HANDLE;
+  return transfer_vs_ != VK_NULL_HANDLE || Fail("couldn't compile the transfer shader");
 }
 
 void Renderer::DestroyTransfers() {
