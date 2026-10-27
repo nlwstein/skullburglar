@@ -51,6 +51,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <string_view>
 
@@ -363,22 +364,44 @@ bool Command(const std::string& cmd) {
       if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') c = '_';
     std::snprintf(g_state.dual_tag, sizeof(g_state.dual_tag), "%s", tag.c_str());
     g_state.dual_shots.fetch_add(1, std::memory_order_release);
+  } else if (cmd.rfind("hybrid n1variant", 0) == 0) {
+    // B-236 debug A/B: "hybrid n1variant <k>" hands every particle emitter variant bits k (N1Emitter::pad1, n1ffi
+    // particles.rs): 8 puts back n1's old (mirrored) sprite roll sense; 0 is the default.
+    const unsigned k = unsigned(std::strtoul(cmd.c_str() + 16, nullptr, 10));
+    g_state.n1_variant.store(k, std::memory_order_release);
+    REXLOG_INFO("hybrid: n1 variant {}", k);
+    return true;
   } else if (cmd.rfind("hybrid quad", 0) == 0) {
-    // B-229: "hybrid quad <word> <n> [<max distance>]" or "hybrid quad off" (HybridState::quad_*).
+    // B-229: "hybrid quad <word> <n> [<max distance>] [emitter] [v<k>]" or "hybrid quad off" (HybridState::quad_*).
+    // B-236: "emitter" gives n1 every particle of each picked particle's emitter, as the port's kept draw has them;
+    // "v<k>" asks n1 to draw those sprites with orientation variant k (N1Emitter::pad1, n1ffi particles.rs).
     char word[64] = {};
     unsigned n = 0;
+    int used = 0;
+    const int got = std::sscanf(cmd.c_str() + 11, " %63s %u%n", word, &n, &used);
     float dist = 0;
-    const int got = std::sscanf(cmd.c_str() + 11, " %63s %u %f", word, &n, &dist);
+    bool whole = false;
+    unsigned variant = 0;
+    if (got >= 2) {
+      std::istringstream rest(cmd.substr(11 + size_t(used)));
+      for (std::string tok; rest >> tok;) {
+        if (tok == "emitter") whole = true;
+        else if (tok.size() > 1 && tok[0] == 'v') variant = unsigned(std::strtoul(tok.c_str() + 1, nullptr, 10));
+        else dist = std::strtof(tok.c_str(), nullptr);
+      }
+    }
     std::lock_guard lock(g_state.quad_mutex);
     if (got >= 2 && n > 0 && std::strcmp(word, "off") != 0) {
-      g_state.quad_word = word, g_state.quad_n = n, g_state.quad_max_dist = got >= 3 ? dist : 0.0f;
+      g_state.quad_word = word, g_state.quad_n = n, g_state.quad_max_dist = dist;
+      g_state.quad_emitter = whole, g_state.quad_variant = variant;
       g_state.quad_on.store(1, std::memory_order_release);
     } else {
       g_state.quad_word.clear(), g_state.quad_n = 0, g_state.quad_keep.clear();
       g_state.quad_on.store(0, std::memory_order_release);
     }
-    REXLOG_INFO("hybrid: quad filter {} {} (max distance {})", g_state.quad_on.load() ? g_state.quad_word : "off",
-                g_state.quad_n, g_state.quad_max_dist);
+    REXLOG_INFO("hybrid: quad filter {} {} (max distance {}{}, variant {})",
+                g_state.quad_on.load() ? g_state.quad_word : "off", g_state.quad_n, g_state.quad_max_dist,
+                g_state.quad_emitter ? ", whole emitters" : "", g_state.quad_variant);
     return true;
   } else {
     return false;

@@ -1680,7 +1680,38 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
                            uint32_t(f.format), uint32_t(f.sign_x), uint32_t(f.sign_y), uint32_t(f.sign_z),
                            uint32_t(f.sign_w), f.size_2d.width + 1, f.size_2d.height + 1);
         }
-        REXLOG_INFO("hybrid quad: port draw ps {:016x} stride {}{}", pshader->ucode_data_hash(), stride, t);
+        REXLOG_INFO("hybrid quad: port draw ps {:016x} vs {:016x} stride {} prim {} count {}{}",
+                    pshader->ucode_data_hash(), vshader->ucode_data_hash(), stride, uint32_t(prim),
+                    count, t);
+        // B-236: each kept draw's vertex shader once, disassembled (how the game builds the quad from a vertex).
+        static std::vector<uint64_t> quad_vs_logged;
+        if (std::ranges::find(quad_vs_logged, vshader->ucode_data_hash()) == quad_vs_logged.end()) {
+          quad_vs_logged.push_back(vshader->ucode_data_hash());
+          REXLOG_INFO("hybrid quad: vs {:016x} ucode\n{}", vshader->ucode_data_hash(), vshader->ucode_disassembly());
+        }
+        // B-236: the kept draw's vertex constants (camera axes, alignment, sincos range constants).
+        {
+          const float* vc = reinterpret_cast<const float*>(&regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
+          std::string c;
+          for (uint32_t k : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u, 16u, 17u, 22u, 23u,
+                             24u, 253u, 254u, 255u})
+            c += fmt::format(" c{} ({:.4g}, {:.4g}, {:.4g}, {:.4g})", k, vc[4 * k], vc[4 * k + 1], vc[4 * k + 2],
+                             vc[4 * k + 3]);
+          REXLOG_INFO("hybrid quad:   vconst{}", c);
+        }
+        // B-236: the kept draw's vertices as the game wrote them (floats, 64: FParticleSpriteVertex, 88: + sub-UV).
+        for (uint32_t v = 0, i = 0; data && v + stride <= bytes && i < 64; v += stride, ++i) {
+          std::string f;
+          for (uint32_t c = 0; c < stride / 4; ++c) {
+            uint32_t w;
+            std::memcpy(&w, data + v + 4 * c, 4);
+            if (fetch.endian == xe::Endian::k8in32) w = std::byteswap(w);
+            float x;
+            std::memcpy(&x, &w, 4);
+            f += fmt::format("{}{:.4g}", c ? ", " : "", x);
+          }
+          REXLOG_INFO("hybrid quad:   vtx {} [{}]", i, f);
+        }
       }
     }
   }
