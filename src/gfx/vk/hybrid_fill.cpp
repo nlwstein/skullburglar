@@ -298,74 +298,121 @@ void Renderer::PumpN1Uploads() {
   NoteLoads(host, st, n1_note_);
 }
 
+// B-218: runs at IssueDraw's ring reservation (before the draw makes its uploads and descriptor sets), the last point
+// before DrawSceneFill where a Flush is safe. Remakes the renderer for a new target format (DrawSceneN1 can't: it
+// needs the GPU idle) and holds for the level preload at a level start.
+// BOTS_N1_HOLD_IN_DRAW=1: the old behaviour (the hold inside the draw, flushing under it), kept for the B-218 A/B.
+static bool HoldInDraw() {
+  static const bool on = [] { const char* v = std::getenv("BOTS_N1_HOLD_IN_DRAW"); return v && std::atoi(v) != 0; }();
+  return on;
+}
+
+void Renderer::PrepareSceneN1() {
+  HybridState* state = FindHybridState();
+  if (!state || state->fill.load(std::memory_order_relaxed) != 4 || HoldInDraw()) return;
+  // Once per marker: the draws before the one that carries the scene (depth-only, too small) all come through here.
+  if (n1_prepared_seq_ == scene_fill_seq_ && n1_remake_format_ == VK_FORMAT_UNDEFINED) return;
+  n1_prepared_seq_ = scene_fill_seq_;
+  auto* host = static_cast<N1Host*>(n1_host_);
+  if (n1_remake_format_ != VK_FORMAT_UNDEFINED) {
+    const VkFormat format = n1_remake_format_;
+    n1_remake_format_ = VK_FORMAT_UNDEFINED;
+    if (host && host->r && host->format != format) {
+      // The first scene is in another colour format than the one the renderer was made for: make it again (the
+      // shader and pipeline caches make this quick). The GPU must be idle.
+      REXLOG_WARN("hybrid n1: target format {} is not the renderer's {}; remaking it", int(format), int(host->format));
+      Finish();
+      n1_destroy(host->r);
+      delete host;
+      n1_host_ = host = nullptr;
+      n1_warm_started_ = false;
+      n1_warm_total_ = n1_warm_done_ = 0;
+      host = static_cast<N1Host*>(EnsureN1(format));
+      if (host->r) n1_precompile_start(host->r);
+    }
+  }
+  if (!host || !host->r || host->failed) return;
+  TakePackages(host, state);
+  HoldN1Preload(host, true);
+}
+
+// B-199: the first scene after a gap (level start, end of a loading screen) waits, up to BOTS_N1_PRELOAD_HOLD_S, for
+// the level preload: loads applied 8 ms at a time with a submit between (bounds staging memory). The guest waits
+// with it, as for the pipeline warm-up. Streamed sublevels never hold: they load while the level plays.
+// `may_flush` false (B-218: inside a draw): no hold, the scene draws with what has loaded.
+void Renderer::HoldN1Preload(void* h, bool may_flush) {
+  auto* host = static_cast<N1Host*>(h);
+  const auto now = std::chrono::steady_clock::now();
+  const bool resumed = !host->any_scene || std::chrono::duration<double>(now - host->last_scene).count() > host->gap_s;
+  if (!resumed) {
+    host->last_scene = now;
+    return;
+  }
+  n1_resumed_ = now;
+  N1Stats st{};
+  n1_load_stats(host->r, &st);
+  const uint64_t lazy0 = st.lazy_meshes + st.lazy_materials + st.lazy_lights + st.lazy_skel;
+  uint32_t passes = 0;
+  const bool work = st.preload_pending || st.copies_pending || st.preload_scanning;
+  if (work && host->hold_s > 0 && !may_flush)
+    REXLOG_WARN("hybrid n1: level resumed inside a draw: no preload hold ({} loads to go)", st.preload_pending);
+  while (may_flush && host->hold_s > 0 && (st.preload_pending || st.copies_pending || st.preload_scanning)) {
+    if (std::chrono::duration<double>(std::chrono::steady_clock::now() - now).count() > host->hold_s) {
+      REXLOG_WARN("hybrid n1: preload hold gave up after {:.0f} s with {} loads to go", host->hold_s,
+                  st.preload_pending);
+      break;
+    }
+    uint64_t completed = stats_.flushes;
+    for (const Submission& s : submissions_)
+      if (s.pending) completed = std::min(completed, s.serial - 1);
+    BeginCommands(kGpuDraw);
+    EndRendering("n1 preload hold");
+    if (n1_upload(host->r, cmd_, stats_.flushes + 1, completed, 8000, &st) < 0) {
+      REXLOG_WARN("hybrid n1: n1_upload failed: {}", n1_last_error());
+      break;
+    }
+    Flush();
+    ++passes;
+    if (!st.applied || st.preload_pending) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  const auto end = std::chrono::steady_clock::now();
+  const double held = std::chrono::duration<double, std::milli>(end - now).count();
+  NoteLoads(host, st, n1_note_);
+  if (passes) {
+    n1_note_.held = true, n1_note_.hold_ms += held;
+    ++host->holds;
+  }
+  REXLOG_INFO("hybrid n1: level resumed: preload hold {:.0f} ms ({} passes), {} packages scanned, {} preload "
+              "requests, {} loads applied, {:.1f} MB to the GPU ({} textures, {} meshes), {} lazy loads so far, "
+              "{} still pending",
+              held, passes, host->packages, st.preload_requests, st.applied, double(st.upload_bytes) / 1048576.0,
+              st.textures_added, st.meshes_added, lazy0, st.preload_pending);
+  if (passes) BeginCommands(kGpuDraw);
+  // From the end of the hold: from its start, the next scene saw the hold as a gap and "resumed" again.
+  host->any_scene = true, host->last_scene = end;
+}
+
 bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2D& area) {
   HybridState* state = FindHybridState();
   auto* host = static_cast<N1Host*>(n1_host_);
   if (host && host->r && target.format != host->format) {
-    // The first scene is in another colour format than the one the renderer was made for: make it again (the shader
-    // and pipeline caches make this quick). The GPU must be idle.
-    REXLOG_WARN("hybrid n1: target format {} is not the renderer's {}; remaking it", int(target.format),
-                int(host->format));
-    Finish();
-    n1_destroy(host->r);
-    delete host;
-    n1_host_ = host = nullptr;
-    n1_warm_started_ = false;
-    n1_warm_total_ = n1_warm_done_ = 0;
+    if (scene_mid_draw_) {
+      // B-218: remaking needs the GPU idle (a Finish), which can't happen inside a draw: PrepareSceneN1 does it at
+      // the next draw's reservation; this scene is skipped.
+      n1_remake_format_ = target.format;
+      return false;
+    }
+    n1_remake_format_ = target.format;
+    PrepareSceneN1();
+    host = static_cast<N1Host*>(n1_host_);
   }
   if (!host) {
     host = static_cast<N1Host*>(EnsureN1(target.format));
     if (host->r) n1_precompile_start(host->r);
   }
   if (host->failed) return false;
-  // B-199: the first scene after a gap (level start, end of a loading screen) waits, up to BOTS_N1_PRELOAD_HOLD_S, for
-  // the level preload: loads applied 8 ms at a time with a submit between (bounds staging memory). The guest waits
-  // with it, as for the pipeline warm-up. Streamed sublevels never hold: they load while the level plays.
-  {
-    const auto now = std::chrono::steady_clock::now();
-    const bool resumed =
-        !host->any_scene || std::chrono::duration<double>(now - host->last_scene).count() > host->gap_s;
-    TakePackages(host, state);
-    if (resumed) {
-      n1_resumed_ = now;
-      N1Stats st{};
-      n1_load_stats(host->r, &st);
-      const uint64_t lazy0 = st.lazy_meshes + st.lazy_materials + st.lazy_lights + st.lazy_skel;
-      uint32_t passes = 0;
-      while (host->hold_s > 0 && (st.preload_pending || st.copies_pending || st.preload_scanning)) {
-        if (std::chrono::duration<double>(std::chrono::steady_clock::now() - now).count() > host->hold_s) {
-          REXLOG_WARN("hybrid n1: preload hold gave up after {:.0f} s with {} loads to go", host->hold_s,
-                      st.preload_pending);
-          break;
-        }
-        uint64_t completed = stats_.flushes;
-        for (const Submission& s : submissions_)
-          if (s.pending) completed = std::min(completed, s.serial - 1);
-        BeginCommands(kGpuDraw);
-        EndRendering("n1 preload hold");
-        if (n1_upload(host->r, cmd_, stats_.flushes + 1, completed, 8000, &st) < 0) {
-          REXLOG_WARN("hybrid n1: n1_upload failed: {}", n1_last_error());
-          break;
-        }
-        Flush();
-        ++passes;
-        if (!st.applied || st.preload_pending) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
-      const double held = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - now).count();
-      NoteLoads(host, st, n1_note_);
-      if (passes) {
-        n1_note_.held = true, n1_note_.hold_ms += held;
-        ++host->holds;
-      }
-      REXLOG_INFO("hybrid n1: level resumed: preload hold {:.0f} ms ({} passes), {} packages scanned, {} preload "
-                  "requests, {} loads applied, {:.1f} MB to the GPU ({} textures, {} meshes), {} lazy loads so far, "
-                  "{} still pending",
-                  held, passes, host->packages, st.preload_requests, st.applied, double(st.upload_bytes) / 1048576.0,
-                  st.textures_added, st.meshes_added, lazy0, st.preload_pending);
-      if (passes) BeginCommands(kGpuDraw);
-    }
-    host->any_scene = true, host->last_scene = now;
-  }
+  TakePackages(host, state);
+  HoldN1Preload(host, !scene_mid_draw_ || HoldInDraw());
   const auto t0 = std::chrono::steady_clock::now();
   {
     // The marker can reach the render thread before the game has published its frame's scene (the feed runs at the next
@@ -936,6 +983,8 @@ bool Renderer::DrawSceneDual(Image& target, const HybridCamera& cam, const VkRec
 void* Renderer::EnsureN1(VkFormat) { return nullptr; }
 void Renderer::PumpN1Warmup() {}
 void Renderer::PumpN1Uploads() {}
+void Renderer::PrepareSceneN1() {}
+void Renderer::HoldN1Preload(void*, bool) {}
 double Renderer::n1_seconds_since_resume() const { return -1; }
 #endif
 

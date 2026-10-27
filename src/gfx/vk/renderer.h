@@ -486,6 +486,16 @@ class Renderer : public Pm4Sink {
   std::map<std::pair<uint32_t, VkFormat>, VkPipeline> fill_pipelines_;
   // Fill 4: the n1 renderer's host state (hybrid_fill.cpp), or null.
   bool DrawSceneN1(Image& target, const bots::HybridCamera& cam, const VkRect2D& area);
+  // B-218: DrawSceneFill runs inside IssueDraw, after the draw's ring uploads and descriptor sets are made in the
+  // current submission, so nothing it calls may Flush (the next submission slot has its own ring and descriptor pool;
+  // the draw would then bind stale sets and read its index data from the wrong ring: a GPU page fault, a TDR on
+  // Intel/Windows). PrepareSceneN1 runs at IssueDraw's ring reservation, where a flush is safe, and does the work that
+  // flushes there: the level-start preload hold and remaking the renderer for a new target format.
+  void PrepareSceneN1();
+  void HoldN1Preload(void* host, bool may_flush);
+  bool scene_mid_draw_ = false;
+  VkFormat n1_remake_format_ = VK_FORMAT_UNDEFINED;
+  uint32_t n1_prepared_seq_ = 0;
   void* EnsureN1(VkFormat format);
   void PumpN1Warmup();
   void* n1_host_ = nullptr;
