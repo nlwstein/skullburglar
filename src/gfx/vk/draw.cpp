@@ -685,9 +685,19 @@ void Renderer::TreeCaptureDraw(const rg::RegisterFile& regs, ShaderCache::Shader
   td.indices = idx.data();
   td.index_count = count;
   td.index_offset = regs.values[rg::XE_GPU_REG_VGT_INDX_OFFSET];
-  for (const auto& b : pshader.GetTextureBindingsAfterTranslation()) {
-    if (td.tex_count >= 4) break;
-    td.tex_base[td.tex_count++] = regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + 6 * b.fetch_constant + 1];
+  auto add_texture = [&](uint32_t fetch_constant) {
+    if (td.tex_count < 4) {
+      td.tex_base[td.tex_count++] = regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + 6 * fetch_constant + 1];
+    }
+  };
+  if (!pshader.GetTextureBindingsAfterTranslation().empty()) {
+    for (const auto& b : pshader.GetTextureBindingsAfterTranslation()) add_texture(b.fetch_constant);
+  } else {
+    // A capture frame's draw (CaptureFrameDraw) may come before its shader was ever translated: the analysis' list.
+    uint32_t seen = 0;
+    for (const auto& b : pshader.texture_bindings()) {
+      if (!(seen & (1u << b.fetch_constant))) seen |= 1u << b.fetch_constant, add_texture(b.fetch_constant);
+    }
   }
   n1_tree_capture(nr, &td);
 #else
