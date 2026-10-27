@@ -141,7 +141,11 @@ int g_ab_seconds = 0;
 // UE3's field order: +0x00 Family, +0x04 State, +0x24 X, +0x28 Y, +0x2C SizeX, +0x30 SizeY (floats),
 // +0x34..+0x40 RenderTargetX/Y/SizeX/SizeY (ints), then FMatrix ViewMatrix +0x50, ProjectionMatrix +0x90,
 // ViewProjectionMatrix +0x110, InvProjectionMatrix +0x150, InvViewProjectionMatrix +0x190, FVector4 ViewOrigin +0x1D0.
+// B-240: between the projection and the view-projection, FLinearColor BackgroundColor +0xD0, OverlayColor +0xE0 and
+// ColorScale +0xF0 (dumps at 83650's fade-in: OverlayColor (0, 0, 0, 0.6558), ColorScale (1, 1, 1, 1), and the port's
+// composite multiplier c5.rgb = 0.3442 = 1 - 0.6558; after the fade, OverlayColor.a = 0).
 constexpr uint32_t kFamilyTime = 0x1C;
+constexpr uint32_t kOverlayColor = 0xE0, kColorScale = 0xF0;
 constexpr uint32_t kViewRect = 0x24, kViewMatrix = 0x50, kProjMatrix = 0x90, kViewProjMatrix = 0x110,
                    kInvViewProjMatrix = 0x190, kViewOrigin = 0x1D0;
 
@@ -226,6 +230,15 @@ bool ReadCamera(uint8_t* base, uint32_t family, uint32_t view, HybridCamera& cam
   ReadMatrix(base, view + kViewProjMatrix, cam.view_proj);
   ReadMatrix(base, view + kInvViewProjMatrix, cam.inv_view_proj);
   for (int i = 0; i < 4; ++i) cam.rect[i] = F32(base, view + kViewRect + 4 * i);
+  {  // B-240: the screen fade; anything out of range reads as no fade
+    auto unit = [](float x, float d) { return std::isfinite(x) && x >= 0 && x <= 16 ? x : d; };
+    const float a = std::clamp(unit(F32(base, view + kOverlayColor + 12), 0), 0.0f, 1.0f);
+    cam.fade_amount = a;
+    for (int i = 0; i < 3; ++i) {
+      cam.fade_scale[i] = unit(F32(base, view + kColorScale + 4 * i), 1) * (1 - a);
+      cam.fade_overlay[i] = unit(F32(base, view + kOverlayColor + 4 * i), 0) * a;
+    }
+  }
   static bool checked = false;  // once: our product and inverse agree with the stored ones
   if (!checked) {
     checked = true;

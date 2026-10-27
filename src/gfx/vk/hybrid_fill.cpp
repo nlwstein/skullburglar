@@ -695,6 +695,11 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   host->cam_seq = view_cam->seq;
   n1_set_debug_bits(host->r, state->n1_debug_bits.load(std::memory_order_acquire));  // B-230 debug A/B (0: none)
   n1_set_time(host->r, view_cam->time);  // materials' Time is the game's clock (tracer fades compare with it)
+  // B-240: the view's screen fade (level fade-ins, cinematic cuts, death fades). The port applies it in its composite,
+  // which the hybrid skips with the rest of the scene, so without this n1's frame never fades.
+  // BOTS_N1_FADE=0: no fade (the old behaviour).
+  static const bool fade_on = std::atoi(EnvOr("BOTS_N1_FADE", "1")) != 0;
+  if (fade_on) n1_set_fade(host->r, view_cam->fade_scale, view_cam->fade_overlay);
   N1Camera camera{};
   std::memcpy(camera.view, view_cam->view, sizeof(camera.view));
   std::memcpy(camera.proj, view_cam->proj, sizeof(camera.proj));
@@ -1103,7 +1108,8 @@ bool Renderer::DrawSceneDual(Image& target, const HybridCamera& cam, const VkRec
   j = "{\"tag\":\"" + d->tag + "\",\"index\":" + std::to_string(d->index - 1) + ",\"wall\":" + std::to_string(t) +
       ",\"waited\":" + std::to_string(waited) + ",\"settled\":" + (d->settled >= d->settle ? "true" : "false") +
       ",\"seq\":" + std::to_string(cam.seq) + ",\"scene_frame\":" + std::to_string(host->scene.frame) + ",\"scene_cam_seq\":" + std::to_string(host->cam_seq) +
-      ",\"world_time\":" + std::to_string(cam.time) + ",\"camera\":{\"view\":" + Floats(cam.view, 16) +
+      ",\"world_time\":" + std::to_string(cam.time) + ",\"fade\":" + std::to_string(cam.fade_amount) +
+      ",\"camera\":{\"view\":" + Floats(cam.view, 16) +
       ",\"proj\":" + Floats(cam.proj, 16) + ",\"location\":" + Floats(cam.location, 3) +
       ",\"rotation\":[" + std::to_string(cam.rotation[0]) + "," + std::to_string(cam.rotation[1]) + "," +
       std::to_string(cam.rotation[2]) + "],\"fov\":" + std::to_string(cam.fov) + ",\"rect\":" + Floats(cam.rect, 4) +

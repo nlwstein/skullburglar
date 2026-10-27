@@ -44,6 +44,12 @@ struct HybridCamera {
   float rect[4];          // view X, Y, SizeX, SizeY in back-buffer pixels
   float time;             // ViewFamily CurrentWorldTime
   uint32_t seq;
+  // B-240: the view's screen fade (camera / cinematic fades), as the port's composite applies it: out =
+  // pow(saturate(c * fade_scale), 1 / 2.2) + fade_overlay. From FSceneView OverlayColor (+0xE0) and ColorScale (+0xF0):
+  // scale = ColorScale.rgb * (1 - Overlay.a), overlay = Overlay.rgb * Overlay.a. fade_amount = Overlay.a.
+  float fade_scale[3] = {1, 1, 1};
+  float fade_overlay[3] = {0, 0, 0};
+  float fade_amount = 0;
 };
 
 // Fill 4 (n1, hybrid_fill.cpp): the static meshes UE3 has attached to its scene, read from the live engine objects
