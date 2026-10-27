@@ -59,6 +59,7 @@
 #include <rex/ppc/context.h>
 
 #include "hybrid_state.h"
+#include "scene_feed.h"
 
 extern "C" void __imp__sub_82BB3230(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82BB3128(PPCContext& __restrict ctx, uint8_t* base);
@@ -431,9 +432,14 @@ extern "C" void sub_82BB3230(PPCContext& __restrict ctx, uint8_t* base) {
           g_state.published.store(seq, std::memory_order_release);
           if (g_log_camera.exchange(false) || (g_camera_every > 0 && seq % uint32_t(g_camera_every) == 0))
             REXLOG_INFO("hybrid: camera {}", CameraJson(cam));
-          std::lock_guard lock(g_fifo_mutex);
-          g_fifo.push_back(seq);
-          if (g_fifo.size() > 16) g_fifo.pop_front();
+          {
+            std::lock_guard lock(g_fifo_mutex);
+            g_fifo.push_back(seq);
+            if (g_fifo.size() > 16) g_fifo.pop_front();
+          }
+          // The frame's scene, published before the render command that draws it exists: the render thread can no
+          // longer reach this camera's marker first and draw the previous frame's scene (doubling, stutter).
+          if (bots::scenefeed::LiveAtDraw()) bots::scenefeed::Live(base);
         }
       }
     }

@@ -480,7 +480,7 @@ class Renderer : public Pm4Sink {
   // Fill 4 bookkeeping for the burst sidecar: frames n1 drew, the last marker's camera, the camera n1 drew with and
   // the scene it drew.
   uint64_t n1_drawn_ = 0, n1_scene_frame_ = 0;
-  uint32_t n1_marker_seq_ = 0, n1_view_seq_ = 0;
+  uint32_t n1_marker_seq_ = 0, n1_view_seq_ = 0, n1_scene_cam_ = 0;
   size_t n1_warm_total_ = 0, n1_warm_done_ = 0;
   bool n1_warm_started_ = false;
   // B-187: while the tree capture runs (hybrid_fill.cpp sets these) IssueDraw hands tree draws to n1ffi.

@@ -123,6 +123,10 @@ struct N1Host {
   double log_seconds = 5, host_ms = 0, record_ms = 0, build_ms = 0, feed_ms = 0, lighting_ms = 0, particles_ms = 0;
   uint64_t frames = 0, draws = 0, triangles = 0, scenes = 0, light_updates = 0, verified = 0, verify_bad = 0;
   uint32_t cam_seq = 0;  // the camera n1 drew the last frame with
+  // Waits for the marker's own scene (BOTS_N1_SCENE_WAIT_MS) and frames still drawn from an older one, per window.
+  double wait_ms = 0;
+  uint64_t waits = 0, wait_timeouts = 0, drawn_behind = 0;
+  bool wait_off = false;
   // n1_record wall time: worst frame and frames over 20 ms in the window (a compile on the render thread shows here).
   double record_max_ms = 0;
   uint64_t record_over_20 = 0;
@@ -235,7 +239,20 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   if (host->failed) return false;
   const auto t0 = std::chrono::steady_clock::now();
   {
-    std::lock_guard lock(state->scene_mutex);
+    // The marker can reach the render thread before the game has published its frame's scene (the feed runs at the next
+    // tick's input poll). The older scene would then be drawn: with the marker's camera everything riding the camera
+    // (the Humvee, 50 on the gun) jumps back a frame and forward again, the doubling; with the scene's own camera the
+    // last frame repeats and the next is skipped. Wait briefly for it (BOTS_N1_SCENE_WAIT_MS, default 6, 0 off). After a
+    // timeout (menus, a stalled feed) no more waits until a scene catches up with its marker.
+    static const int wait_ms = std::atoi(EnvOr("BOTS_N1_SCENE_WAIT_MS", "6"));
+    std::unique_lock lock(state->scene_mutex);
+    const auto behind = [&] { return std::max(state->scene.cam_seq, host->scene.cam_seq) < cam.seq; };
+    if (wait_ms > 0 && !host->wait_off && host->scene.frame && behind()) {
+      const auto w0 = std::chrono::steady_clock::now();
+      const bool got = state->scene_cv.wait_for(lock, std::chrono::milliseconds(wait_ms), [&] { return !behind(); });
+      host->wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count();
+      ++host->waits, host->wait_timeouts += !got, host->wait_off = !got;
+    }
     if (state->scene.frame > host->scene.frame) {
       std::swap(host->scene, state->scene), ++host->scenes;
       host->lighting_ms += host->scene.lighting_ms;  // every build, changed or not
@@ -343,6 +360,8 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   n1_set_skeletal(host->r, host->skeletal.data(), uint32_t(host->skeletal.size()), host->scene.bones.data(),
                   uint32_t(host->scene.bones.size()), host->skel_materials.data(),
                   uint32_t(host->skel_materials.size()));
+  if (host->scene.cam_seq >= cam.seq) host->wait_off = false;
+  host->drawn_behind += host->scene.cam_seq < cam.seq;
   // The scene's own camera (HybridScene::cam_seq) when the ring still holds it; BOTS_N1_SCENE_CAMERA=0: the marker's.
   static const bool scene_camera = std::atoi(EnvOr("BOTS_N1_SCENE_CAMERA", "1")) != 0;
   const HybridCamera* view_cam = &cam;
@@ -420,6 +439,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     if (us > is->n1_record_worst_us.load(r)) is->n1_record_worst_us.store(us, r);
   }
   ++n1_drawn_, n1_scene_frame_ = host->scene.frame, n1_marker_seq_ = cam.seq, n1_view_seq_ = view_cam->seq;
+  n1_scene_cam_ = host->scene.cam_seq;
   host->host_ms += std::chrono::duration<double, std::milli>(t2 - t0).count();
   host->record_ms += std::chrono::duration<double, std::milli>(t2 - t1).count();
   {
@@ -456,6 +476,10 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
                 double(st.pipeline_ms) / 1e3, double(st.pipeline_max_ms), st.spv_hits, st.spv_hits + st.spv_misses,
                 st.draws_no_pipe, st.fallback_draws, st.partial_frames, st.compile_backlog, host->record_max_ms,
                 host->record_over_20);
+    REXLOG_INFO("hybrid n1 sync: {} frames: {} waited for their scene ({:.2f} ms each, {} timed out), {} drawn from an "
+                "older scene", host->frames, host->waits, host->waits ? host->wait_ms / double(host->waits) : 0.0,
+                host->wait_timeouts, host->drawn_behind);
+    host->wait_ms = 0, host->waits = host->wait_timeouts = host->drawn_behind = 0;
     host->record_max_ms = 0, host->record_over_20 = 0;
     host->since = t2, host->frames = host->draws = host->triangles = host->scenes = 0;
     host->host_ms = host->record_ms = host->build_ms = host->feed_ms = host->lighting_ms = host->particles_ms = 0;

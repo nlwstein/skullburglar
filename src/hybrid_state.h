@@ -12,6 +12,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
@@ -172,6 +173,7 @@ struct HybridState {
   HybridCamera cameras[kCameras] = {};
   // Fill 4: the newest scene. The game swaps its finished frame in, the renderer swaps it out (both under the lock).
   std::mutex scene_mutex;
+  std::condition_variable scene_cv;  // notified when the game swaps a new scene in
   HybridScene scene;
   // Dual render (BOTS_HYBRID_DUAL=1, parity harness): the game's own scene is drawn as usual, the marker follows it,
   // and n1 draws the same frame (fill 4's feed and the marker's camera) into an offscreen target of the same size.

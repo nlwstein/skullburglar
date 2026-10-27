@@ -345,7 +345,11 @@ extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
   if (state && ctx.r3.u32 == 0) quit_option::FilterPad(base, state);
   split_screen::Poll(ctx, base, user, ctx.r3.u32 == 0 ? state : 0);
   if (split_screen::OffGameThread()) return;
-  if (user == 0) bots::scenefeed::Tick(base), bots::scenefeed::Live(base), bots::instr::GameTick(ctx, base);
+  if (user == 0) {
+    bots::scenefeed::Tick(base);
+    if (!bots::scenefeed::LiveAtDraw()) bots::scenefeed::Live(base);
+    bots::instr::GameTick(ctx, base);
+  }
   ExecState* st = Exec();
   if (!st) return;
   auto now = std::chrono::steady_clock::now();
