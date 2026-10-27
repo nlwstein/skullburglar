@@ -34,7 +34,7 @@
 //   BOTS_HYBRID_DUAL=1       parity harness: the game draws its scene as usual (no suppression, no A/B) and n1 (fill
 //                            4) draws the same frame offscreen; pictures of both on request (hybrid_fill.cpp)
 // Console (BOTS_EXEC): "hybrid suppress 0|1|2", "hybrid fill 0..3", "hybrid camera", "hybrid dumpview",
-// "hybrid dualshot <tag>" (one port + n1 pair under BOTS_HYBRID_DUAL).
+// "hybrid dualshot <tag>" (one port + n1 pair under BOTS_HYBRID_DUAL), "hybrid n1variant <k>", "hybrid n1debug <bits>".
 //
 // Mode 2 also hooks sub_82D3E358, UE3's GetQueryResult(query, out, bWait): with the drawing skipped no occlusion
 // query is ever issued, so InitViews' waits would never return. It answers "visible" there and for two real frames
@@ -370,6 +370,14 @@ bool Command(const std::string& cmd) {
     const unsigned k = unsigned(std::strtoul(cmd.c_str() + 16, nullptr, 10));
     g_state.n1_variant.store(k, std::memory_order_release);
     REXLOG_INFO("hybrid: n1 variant {}", k);
+    return true;
+  } else if (cmd.rfind("hybrid n1debug", 0) == 0) {
+    // B-230 debug A/B: "hybrid n1debug <bits>" passes n1 its debug switches (n1_set_debug_bits, next frame on, no new
+    // feed needed): 1 draws level dynamic lights in the plain LightColor / 255 * Brightness colour instead of UE3's
+    // sRGB-decoded one; 0 is the default.
+    const unsigned k = unsigned(std::strtoul(cmd.c_str() + 14, nullptr, 10));
+    g_state.n1_debug_bits.store(k, std::memory_order_release);
+    REXLOG_INFO("hybrid: n1 debug bits {}", k);
     return true;
   } else if (cmd.rfind("hybrid quad", 0) == 0) {
     // B-229: "hybrid quad <word> <n> [<max distance>] [emitter] [v<k>]" or "hybrid quad off" (HybridState::quad_*).

@@ -28,7 +28,8 @@ NCONST = 1024
 
 def load_draws(path):
     """(stamp, draws). Version 2 adds each draw's vertex streams: dicts {fetch, address, stride, endian,
-    attributes [(offset_words, format)], data (bytes as in guest memory)}."""
+    attributes [(offset_words, format)], data (bytes as in guest memory)}. Version 4 adds `pixel`: {blend0, depth,
+    stencil, c (256 x 4 pixel shader constants)} (None before)."""
     data = open(path, "rb").read()
     if data[:4] != b"DFR1":
         raise SystemExit(f"{path}: not a draw dump")
@@ -48,8 +49,15 @@ def load_draws(path):
             streams.append(dict(fetch=fetch, address=address, stride=stride, endian=endian, attributes=attrs,
                                 data=data[off : off + size]))
             off += size
+        pixel = None
+        if version >= 4:  # "PSC1", blend control 0, depth control, stencil ref/mask, 256 pixel shader constants
+            _, blend0, depth, stencil = struct.unpack_from("<4I", data, off)
+            off += 16
+            pc = np.frombuffer(data, dtype="<f4", count=NCONST, offset=off).reshape(256, 4)
+            off += 4 * NCONST
+            pixel = dict(blend0=blend0, depth=depth, stencil=stencil, c=pc)
         draws.append(dict(idx=idx, vs=vs, ps=ps, w=w, h=h, flags=flags, prim=prim, count=count, c=consts,
-                          streams=streams))
+                          streams=streams, pixel=pixel))
     return stamp, draws
 
 
