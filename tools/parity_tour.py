@@ -79,8 +79,11 @@ def main():
                     help=f"seconds of play between shots: game seconds between shot times in game mode (default "
                          f"{GAME_GAP}), wall seconds after a shot in wall mode (default {WALL_GAP})")
     ap.add_argument("--shot-timeout", type=float, default=90, help="give up on a pair after this many seconds")
-    ap.add_argument("--freeze", choices=["slomo", "pause", "none"], default="slomo",
-                    help="hold the world still around each shot: SloMo 0.01 (default), Pause, or nothing")
+    ap.add_argument("--freeze", choices=["slomo", "pause", "none"], default="pause",
+                    help="hold the world still around each shot: Pause (default; also holds particles, and with the "
+                         "game clock waits for in-play first), SloMo 0.01 (particles still move), or nothing")
+    ap.add_argument("--play-timeout", type=float, default=180,
+                    help="with --freeze pause: seconds to wait for the in_play phase before each shot")
     ap.add_argument("--random", default="1", help="random play between shots (BOTS_INPUT_RANDOM seed; 0 = off)")
     ap.add_argument("--user-template", help="copied as the run's user-data root (a test root, never a player's)")
     ap.add_argument("--cache", help="port cache root (default: <out>/cache)")
@@ -205,7 +208,9 @@ def main():
                 time.sleep(load_secs)
             if a.n1_ready > 0 and not record["checkpoints"]:
                 w0 = time.time()
-                got = log.wait(lambda l: "hybrid n1: startup step done" in l, a.n1_ready, alive)
+                log.lines()  # the step can finish before the load does (a warm cache); its line is then already read
+                mark = "hybrid n1: startup step done"
+                got = mark in log.seen or log.wait(lambda l: mark in l, a.n1_ready, alive)
                 print(f"    n1 startup step {'done' if got else 'NOT done'} after {time.time() - w0:.0f} s more",
                       flush=True)
             send("EnableCheats")  # a new level has a new player controller
@@ -217,6 +222,11 @@ def main():
                 if a.freeze == "slomo":
                     send("SloMo 0.01")
                 elif a.freeze == "pause":
+                    if clock:
+                        ph = clock.wait_in_play(alive, a.play_timeout)
+                        if ph != "in_play":
+                            print(f"    {tag}: not in play after {a.play_timeout:.0f} s (phase {ph}); pausing anyway",
+                                  flush=True)
                     send("Pause")
                 time.sleep(1.0)
                 s0 = time.time()
@@ -298,8 +308,8 @@ class GameClock:
         except OSError:
             self.sock = None
 
-    def status(self):
-        """The `game` object of a fresh status line, or None."""
+    def line(self):
+        """A fresh status line (the whole object), or None."""
         for _ in range(2):
             if self.sock is None:
                 self._connect()
@@ -316,10 +326,30 @@ class GameClock:
                     line, self.buf = self.buf.split(b"\n", 1)
                     j = json.loads(line)
                     if j.get("type") == "status":
-                        return j.get("game")
+                        return j
             except (OSError, ValueError):
                 self.sock = None
         return None
+
+    def status(self):
+        """The `game` object of a fresh status line, or None."""
+        j = self.line()
+        return j.get("game") if j else None
+
+    def phase(self):
+        j = self.line()
+        return j.get("phase") if j else None
+
+    def wait_in_play(self, alive, timeout):
+        """Until the player is in play (not a movie, fade-in cutscene or loading): Pause freezes whatever is on screen,
+        so pausing during a level-start movie captures a black port frame. Returns the last phase seen."""
+        end, ph = time.time() + timeout, None
+        while time.time() < end and alive():
+            ph = self.phase()
+            if ph == "in_play":
+                return ph
+            time.sleep(0.25)
+        return ph
 
     def loads(self):
         g = self.status()
@@ -351,8 +381,11 @@ class GameClock:
 class LogFollower:
     """Reads new lines of a growing log file."""
 
+    MARKS = ("hybrid n1: startup step done",)
+
     def __init__(self, path):
         self.path, self.pos, self.buf = path, 0, ""
+        self.seen = set()  # MARKS that any read line contained, including lines another wait consumed
 
     def lines(self):
         try:
@@ -364,6 +397,8 @@ class LogFollower:
             return []
         self.buf += data
         *done, self.buf = self.buf.split("\n")
+        for line in done:
+            self.seen.update(m for m in self.MARKS if m in line)
         return done
 
     def wait(self, pred, timeout, alive):
