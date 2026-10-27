@@ -29,7 +29,8 @@
 //   emitters (particle primitives only; one per FParticleEmitterInstance): {index, type (sprite, mesh, beam, trail or
 //   other, from the LOD level's TypeDataModule class), type_class, vtable, emitter (ParticleEmitter path), material,
 //   screen_alignment (EParticleScreenAlignment), local_space, sub_images [h, v], sub_uv_method, mesh, mesh_alignment,
-//   override_material (mesh emitters only), location[3], active, max, stride, particles [[location 3, old_location 3,
+//   override_material (mesh emitters only), sub_uv_offset (byte offset of a particle's [ImageH, ImageV, Interp,
+//   Image2H, Image2V], sub-UV emitters), location[3], active, max, stride, particles [[location 3, old_location 3,
 //   size 3, rotation (radians), color 4 (linear RGBA), relative_time (0..1 of the lifetime), payload words...]]}.
 //   A sprite particle's quad is centred on location (or old_location, depending on the material's motion blur);
 //   a mesh particle's transform is translation(location) with the mesh emitter's rotation and size.
@@ -797,8 +798,18 @@ void LightsPostJson(std::string& s, uint32_t world_info, bool live = false, bool
 //   +0x1C OneOverMaxLifetime, +0x20 BaseVelocity, +0x2C Rotation, +0x30 Velocity, +0x3C BaseRotationRate,
 //   +0x40 BaseSize, +0x4C RotationRate, +0x50 Size, +0x5C Flags, +0x60 Color (FLinearColor), +0x70 BaseColor;
 //   module payloads follow from +0x80.
-constexpr uint32_t kEmitLod = 0x10, kEmitLocation = 0x20, kEmitData = 0x30, kEmitIndices = 0x34, kEmitStride = 0xC0,
-                   kEmitActive = 0xC4, kEmitMax = 0xC8, kEmitMaterial = 0x130;
+//   +0xB8 SubUVDataOffset: byte offset in a particle of the sub-UV payload [RandomImageTime, ImageH, ImageV, Interp,
+//   Image2H, Image2V] (found by matching each sub-UV emitter's payload words; it sits after the module payloads, so
+//   its place differs per emitter).
+constexpr uint32_t kEmitLod = 0x10, kEmitLocation = 0x20, kEmitData = 0x30, kEmitIndices = 0x34, kEmitSubUV = 0xB8,
+                   kEmitStride = 0xC0, kEmitActive = 0xC4, kEmitMax = 0xC8, kEmitMaterial = 0x130;
+
+// Byte offset in a particle of its sub-UV frame data [ImageH, ImageV, Interp, Image2H, Image2V], or 0 when the
+// instance's SubUVDataOffset is out of range.
+uint32_t SubUVFrameOffset(uint32_t inst, uint32_t stride) {
+  const uint32_t o = U32(inst + kEmitSubUV);
+  return o >= 0x80 && !(o & 3) && o + 4 + 5 * 4 <= stride ? o + 4 : 0;
+}
 
 // EParticleAxisLock of an LOD level's OrientationAxisLock module (the engine keeps the last enabled one it finds in
 // Modules), 0 (EPAL_NONE) without one. Locked sprites lie in a fixed plane (EPAL_X..EPAL_NEGATIVE_Z: flat glows and
@@ -861,6 +872,8 @@ void Emitters(std::string& s, uint32_t component) {
     }
     s += ",\"location\":";
     Floats(s, inst + kEmitLocation, 3);
+    if (const uint32_t sub = stride >= 0x80 && stride <= 0x1000 ? SubUVFrameOffset(inst, stride) : 0)
+      fmt::format_to(std::back_inserter(s), ",\"sub_uv_offset\":{}", sub);
     fmt::format_to(std::back_inserter(s), ",\"active\":{},\"max\":{},\"stride\":{},\"particles\":[", active,
                    U32(inst + kEmitMax), stride);
     const uint32_t pdata = U32(inst + kEmitData), pindex = U32(inst + kEmitIndices);
@@ -2125,10 +2138,14 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam) {
       const uint32_t pdata = U32(inst + kEmitData), pindex = U32(inst + kEmitIndices);
       if (!Readable(pdata) || !Readable(pindex & ~3u)) continue;
       if (out.particle_rows.size() / 15 + active > kMaxRows) return;
-      // Payload floats: all of them for sub-UV animation (the renderer finds the frame data), the rotation for mesh
-      // particles, none otherwise.
+      // Payload floats: the sub-UV frame data [ImageH, ImageV, Interp, Image2H, Image2V] for sub-UV animation (all
+      // of the payload if the instance's offset looks wrong; the renderer then searches it), the rotation for mesh
+      // particles, none otherwise. The renderer's search alone picked a later window (the next frame, unblended) in
+      // most sub-UV emitters.
       const bool subuv = (le.sub_h > 1 || le.sub_v > 1) && le.sub_method != 0;
-      const uint32_t payload = subuv ? (stride - 0x80) / 4 : (le.kind == 1 ? 3 : 0);
+      const uint32_t sub_at = subuv && le.kind == 0 ? SubUVFrameOffset(inst, stride) : 0;
+      const uint32_t payload_at = sub_at ? sub_at : 0x80;
+      const uint32_t payload = sub_at ? 5 : subuv ? (stride - 0x80) / 4 : (le.kind == 1 ? 3 : 0);
       const uint32_t row_floats = 15 + payload;
       HybridScene::Emitter& e = out.emitters.emplace_back();
       e.kind = uint32_t(le.kind), e.align = le.align, e.sub_h = le.sub_h, e.sub_v = le.sub_v;
@@ -2147,7 +2164,7 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam) {
         for (uint32_t off : {0x10u, 0x14u, 0x18u, 0x00u, 0x04u, 0x08u, 0x50u, 0x54u, 0x58u, 0x2Cu, 0x60u, 0x64u, 0x68u,
                              0x6Cu, 0x0Cu})
           out.particle_rows.push_back(F32(pp + off));
-        for (uint32_t q = 0; q < payload; ++q) out.particle_rows.push_back(F32(pp + 0x80 + 4 * q));
+        for (uint32_t q = 0; q < payload; ++q) out.particle_rows.push_back(F32(pp + payload_at + 4 * q));
       }
     }
   }
