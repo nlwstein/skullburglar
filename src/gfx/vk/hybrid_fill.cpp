@@ -147,6 +147,7 @@ struct N1Host {
   // The startup step (n1_precompile_*): when it began, and whether its result has been logged.
   std::chrono::steady_clock::time_point precompile_started{};
   bool precompile_logged = false;
+  double port_note_s = 60;  // B-243: next "the port draws the scene" note, seconds into the step
   N1Stats last{};
   // B-199 level preload: the load counters as of the last note (for per-frame deltas), when n1 last drew a scene,
   // packages handed to n1, and the knobs: render-thread ms per loading-screen frame for loads (BOTS_N1_LOAD_MS), the
@@ -244,11 +245,23 @@ void Renderer::PumpN1Warmup() {
     n1_warm_started_ = true;
     auto* host = static_cast<N1Host*>(EnsureN1(VK_FORMAT_R8G8B8A8_UNORM));
     if (host && host->r) {
-      n1_precompile_start(host->r);
+      if (n1_precompile_start(host->r) != 0) REXLOG_WARN("hybrid n1: startup step failed to start: {}", n1_last_error());
       host->precompile_started = std::chrono::steady_clock::now();
     }
   }
   auto* host = static_cast<N1Host*>(n1_host_);
+  if (host && host->r && !host->precompile_logged && host->precompile_started.time_since_epoch().count()) {
+    // B-243: the game draws its own scene until the step is done (hybrid.cpp); say every minute that it still does.
+    const double waited = std::chrono::duration<double>(std::chrono::steady_clock::now() - host->precompile_started).count();
+    if (waited >= host->port_note_s) {
+      host->port_note_s += 60;
+      HybridState* hs = FindHybridState();
+      static const bool port = [] { const char* v = std::getenv("BOTS_N1_PORT_UNTIL_READY"); return !(v && v[0] == '0'); }();
+      if (hs && !hs->n1_ready.load(std::memory_order_relaxed) && waited >= 60)
+        REXLOG_INFO("hybrid n1: startup step still running after {:.0f} s; {}", waited,
+                    port ? "the port draws the scene" : "n1 draws what it has (BOTS_N1_PORT_UNTIL_READY=0)");
+    }
+  }
   if (!host || !host->r || host->precompile_logged) return;
   uint32_t done = 0, total = 0;
   const uint32_t state = n1_precompile_progress(host->r, &done, &total);
@@ -261,13 +274,20 @@ void Renderer::PumpN1Warmup() {
                                                                               host->precompile_started).count()),
                            std::memory_order_relaxed);
   }
-  if (state == 1) {
+  if (state == 0) {  // B-243: no startup step to wait for (it failed to start): n1 draws from now, as before
+    host->precompile_logged = true;
+    if (HybridState* hs = FindHybridState(); hs && !hs->n1_ready.exchange(1, std::memory_order_release))
+      REXLOG_INFO("hybrid n1: ready without a startup step: n1 draws the scene from here");
+  } else if (state == 1) {
     n1_warm_total_ = std::max<size_t>(total, done + 1), n1_warm_done_ = done;
   } else if (state == 2) {
     n1_warm_total_ = n1_warm_done_ = 0;
     host->precompile_logged = true;
     REXLOG_INFO("hybrid n1: startup step done in {:.1f} s",
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - host->precompile_started).count());
+    // B-243: n1 can draw every frame complete from here; the game stops drawing its own scene (hybrid.cpp).
+    if (HybridState* hs = FindHybridState(); hs && !hs->n1_ready.exchange(1, std::memory_order_release))
+      REXLOG_INFO("hybrid n1: ready: n1 draws the scene from here");
   }
 }
 
