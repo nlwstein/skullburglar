@@ -78,6 +78,10 @@ void InstallWindowsCrashLogger();  // src/crash_win.cpp
 #endif
 #endif
 
+namespace bots::hybrid {
+void InstallOpenHooks();  // hybrid.cpp (B-199 level preload)
+}
+
 class BotsApp : public rex::ReXApp {
  public:
   using rex::ReXApp::ReXApp;
@@ -281,6 +285,7 @@ class BotsApp : public rex::ReXApp {
 
   void OnPostLoadXexImage() override {
     ApplyDataPatches();
+    bots::hybrid::InstallOpenHooks();  // B-199: see the packages the game opens from the first one
     const char* path = std::getenv("BOTS_DUMP_IMAGE");
     if (!path || !*path) return;
     const auto* src = runtime()->memory()->TranslateVirtual<const char*>(

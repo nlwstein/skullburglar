@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -135,7 +136,46 @@ struct N1Host {
   std::chrono::steady_clock::time_point precompile_started{};
   bool precompile_logged = false;
   N1Stats last{};
+  // B-199 level preload: the load counters as of the last note (for per-frame deltas), when n1 last drew a scene,
+  // packages handed to n1, and the knobs: render-thread ms per loading-screen frame for loads (BOTS_N1_LOAD_MS), the
+  // longest hold at level start (BOTS_N1_PRELOAD_HOLD_S, 0: none), the gap that counts as a level start.
+  N1Stats prev{};
+  std::chrono::steady_clock::time_point last_scene{};
+  bool any_scene = false;
+  uint32_t packages = 0, holds = 0;
+  double load_ms = 4, hold_s = 30, gap_s = 0.5;
 };
+
+// Folds the load counters' change since the last call into the frame note.
+void NoteLoads(N1Host* host, const N1Stats& st, Renderer::N1FrameNote& note) {
+  const N1Stats& p = host->prev;
+  note.applied += st.applied - p.applied;
+  note.apply_ms += double(st.apply_ms - p.apply_ms);
+  note.apply_max_ms = std::max(note.apply_max_ms, double(st.apply_max_ms) > double(p.apply_max_ms) ? double(st.apply_max_ms) : 0.0);
+  note.lazy += (st.lazy_meshes + st.lazy_materials + st.lazy_lights + st.lazy_skel + st.lazy_particles + st.lazy_trees) -
+               (p.lazy_meshes + p.lazy_materials + p.lazy_lights + p.lazy_skel + p.lazy_particles + p.lazy_trees);
+  note.late_skips += st.late_skips - p.late_skips;
+  note.textures += st.textures_added - p.textures_added;
+  note.meshes += st.meshes_added - p.meshes_added;
+  note.bytes += st.upload_bytes - p.upload_bytes;
+  host->prev.applied = st.applied, host->prev.apply_ms = st.apply_ms, host->prev.apply_max_ms = st.apply_max_ms;
+  host->prev.lazy_meshes = st.lazy_meshes, host->prev.lazy_materials = st.lazy_materials;
+  host->prev.lazy_lights = st.lazy_lights, host->prev.lazy_skel = st.lazy_skel;
+  host->prev.lazy_particles = st.lazy_particles, host->prev.lazy_trees = st.lazy_trees;
+  host->prev.late_skips = st.late_skips, host->prev.textures_added = st.textures_added;
+  host->prev.meshes_added = st.meshes_added, host->prev.upload_bytes = st.upload_bytes;
+}
+
+// Hands the packages the game opened since the last call to n1 (hybrid.cpp's CreateFile hook).
+void TakePackages(N1Host* host, HybridState* state) {
+  if (!state || !host->r) return;
+  std::vector<std::string> pkgs;
+  {
+    std::lock_guard lock(state->package_mutex);
+    pkgs.swap(state->packages);
+  }
+  for (const std::string& p : pkgs) host->packages += uint32_t(n1_preload_package(host->r, p.c_str()) > 0);
+}
 uint32_t Handle(std::unordered_map<const char*, uint32_t>& map, const char* path, N1Renderer* r,
                 uint32_t (*make)(N1Renderer*, const char*)) {
   if (!path) return N1_NONE;
@@ -157,6 +197,8 @@ void* Renderer::EnsureN1(VkFormat format) {
   host = new N1Host;
   n1_host_ = host;
   host->budget = uint32_t(std::atoi(EnvOr("BOTS_N1_BUDGET", "8")));
+  host->load_ms = std::atof(EnvOr("BOTS_N1_LOAD_MS", "4"));
+  host->hold_s = std::atof(EnvOr("BOTS_N1_PRELOAD_HOLD_S", "30"));
   host->log_seconds = std::atof(EnvOr("BOTS_N1_LOG", "5"));
   N1Init init{};
   init.get_instance_proc_addr = device_->vulkan_instance()->functions().vkGetInstanceProcAddr;
@@ -217,6 +259,37 @@ void Renderer::PumpN1Warmup() {
   }
 }
 
+double Renderer::n1_seconds_since_resume() const {
+  if (n1_resumed_.time_since_epoch().count() == 0) return -1;
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - n1_resumed_).count();
+}
+
+// B-199: from EndFrame (GPU thread), every frame. Hands opened packages to n1; on a frame without a scene (a loading
+// screen, a menu, a movie) applies n1's finished loads for up to BOTS_N1_LOAD_MS and records their texture copies
+// into this frame's commands, so a level's assets come in while it loads instead of after it starts.
+void Renderer::PumpN1Uploads() {
+  auto* host = static_cast<N1Host*>(n1_host_);
+  if (!host || !host->r || host->failed) return;
+  TakePackages(host, FindHybridState());
+  if (n1_drawn_ != n1_drawn_pumped_) {  // n1_record ran this frame and applied loads itself
+    n1_drawn_pumped_ = n1_drawn_;
+    return;
+  }
+  N1Stats st{};
+  n1_load_stats(host->r, &st);
+  if (!st.preload_pending && !st.copies_pending && !st.preload_scanning) return;
+  uint64_t completed = stats_.flushes;
+  for (const Submission& s : submissions_)
+    if (s.pending) completed = std::min(completed, s.serial - 1);
+  BeginCommands(kGpuDraw);
+  EndRendering("n1 upload");
+  const auto t0 = std::chrono::steady_clock::now();
+  const int32_t n = n1_upload(host->r, cmd_, stats_.flushes + 1, completed, uint32_t(host->load_ms * 1000), &st);
+  n1_note_.upload_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  if (n < 0) REXLOG_WARN("hybrid n1: n1_upload failed: {}", n1_last_error());
+  NoteLoads(host, st, n1_note_);
+}
+
 bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2D& area) {
   HybridState* state = FindHybridState();
   auto* host = static_cast<N1Host*>(n1_host_);
@@ -237,6 +310,54 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     if (host->r) n1_precompile_start(host->r);
   }
   if (host->failed) return false;
+  // B-199: the first scene after a gap (level start, end of a loading screen) waits, up to BOTS_N1_PRELOAD_HOLD_S, for
+  // the level preload: loads applied 8 ms at a time with a submit between (bounds staging memory). The guest waits
+  // with it, as for the pipeline warm-up. Streamed sublevels never hold: they load while the level plays.
+  {
+    const auto now = std::chrono::steady_clock::now();
+    const bool resumed =
+        !host->any_scene || std::chrono::duration<double>(now - host->last_scene).count() > host->gap_s;
+    TakePackages(host, state);
+    if (resumed) {
+      n1_resumed_ = now;
+      N1Stats st{};
+      n1_load_stats(host->r, &st);
+      const uint64_t lazy0 = st.lazy_meshes + st.lazy_materials + st.lazy_lights + st.lazy_skel;
+      uint32_t passes = 0;
+      while (host->hold_s > 0 && (st.preload_pending || st.copies_pending || st.preload_scanning)) {
+        if (std::chrono::duration<double>(std::chrono::steady_clock::now() - now).count() > host->hold_s) {
+          REXLOG_WARN("hybrid n1: preload hold gave up after {:.0f} s with {} loads to go", host->hold_s,
+                      st.preload_pending);
+          break;
+        }
+        uint64_t completed = stats_.flushes;
+        for (const Submission& s : submissions_)
+          if (s.pending) completed = std::min(completed, s.serial - 1);
+        BeginCommands(kGpuDraw);
+        EndRendering("n1 preload hold");
+        if (n1_upload(host->r, cmd_, stats_.flushes + 1, completed, 8000, &st) < 0) {
+          REXLOG_WARN("hybrid n1: n1_upload failed: {}", n1_last_error());
+          break;
+        }
+        Flush();
+        ++passes;
+        if (!st.applied || st.preload_pending) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      const double held = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - now).count();
+      NoteLoads(host, st, n1_note_);
+      if (passes) {
+        n1_note_.held = true, n1_note_.hold_ms += held;
+        ++host->holds;
+      }
+      REXLOG_INFO("hybrid n1: level resumed: preload hold {:.0f} ms ({} passes), {} packages scanned, {} preload "
+                  "requests, {} loads applied, {:.1f} MB to the GPU ({} textures, {} meshes), {} lazy loads so far, "
+                  "{} still pending",
+                  held, passes, host->packages, st.preload_requests, st.applied, double(st.upload_bytes) / 1048576.0,
+                  st.textures_added, st.meshes_added, lazy0, st.preload_pending);
+      if (passes) BeginCommands(kGpuDraw);
+    }
+    host->any_scene = true, host->last_scene = now;
+  }
   const auto t0 = std::chrono::steady_clock::now();
   {
     // The marker can reach the render thread before the game has published its frame's scene (the feed runs at the next
@@ -420,7 +541,21 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   {
     const uint32_t cap = n1_tree_end_frame(host->r);
     n1_tree_active_ = cap > 0;
-    if (cap > 0 && state) state->capture_frames.store(int(cap));
+    // Also 0 when a session ends: left at its last count, the game went on drawing its own scene for up to 30 more
+    // frames (35-70 ms each on a UHD 620).
+    if (state && (cap > 0 || state->capture_frames.load(std::memory_order_relaxed) > 0)) state->capture_frames.store(int(cap));
+  }
+  {
+    const N1Stats& p = host->last;
+    N1FrameNote& note = n1_note_;
+    ++note.scenes;
+    note.record_ms += std::chrono::duration<double, std::milli>(t2 - t1).count();
+    note.late_pipelines += st.late_pipelines - p.late_pipelines;
+    note.late_shaders += st.late_shaders - p.late_shaders;
+    note.draws_no_pipe += uint32_t(st.draws_no_pipe - p.draws_no_pipe);
+    note.fallback_draws += uint32_t(st.fallback_draws - p.fallback_draws);
+    note.tree_capture |= n1_tree_active_;
+    NoteLoads(host, st, note);
   }
   host->frames++, host->draws += st.draws, host->triangles += st.triangles, host->last = st;
   if (InstrState* is = FindInstrState()) {  // test instrumentation (instr_state.h)
@@ -480,6 +615,14 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
                 "older scene", host->frames, host->waits, host->waits ? host->wait_ms / double(host->waits) : 0.0,
                 host->wait_timeouts, host->drawn_behind);
     host->wait_ms = 0, host->waits = host->wait_timeouts = host->drawn_behind = 0;
+    REXLOG_INFO("hybrid n1 loads: t={:.1f} s: lazy {} meshes {} materials {} lights {} skeletal {} particle {} tree; {} "
+                "late skips; {} material variants; {} preload requests ({} packages, {} pending, {} scans running); {} applied in {:.1f} ms "
+                "(worst {:.1f} ms); {:.1f} MB to the GPU, {} textures, {} meshes; {} copies waiting ({:.1f} MB staging)",
+                std::chrono::duration<double>(t2 - host->started).count(), st.lazy_meshes, st.lazy_materials,
+                st.lazy_lights, st.lazy_skel, st.lazy_particles, st.lazy_trees, st.late_skips, st.variant_materials, st.preload_requests,
+                host->packages, st.preload_pending, st.preload_scanning, st.applied, double(st.apply_ms),
+                double(st.apply_max_ms), double(st.upload_bytes) / 1048576.0, st.textures_added, st.meshes_added,
+                st.copies_pending, double(st.staging_bytes) / 1048576.0);
     host->record_max_ms = 0, host->record_over_20 = 0;
     host->since = t2, host->frames = host->draws = host->triangles = host->scenes = 0;
     host->host_ms = host->record_ms = host->build_ms = host->feed_ms = host->lighting_ms = host->particles_ms = 0;
@@ -784,6 +927,8 @@ bool Renderer::DrawSceneDual(Image& target, const HybridCamera& cam, const VkRec
 #ifndef BOTS_N1FFI
 void* Renderer::EnsureN1(VkFormat) { return nullptr; }
 void Renderer::PumpN1Warmup() {}
+void Renderer::PumpN1Uploads() {}
+double Renderer::n1_seconds_since_resume() const { return -1; }
 #endif
 
 void Renderer::DestroySceneFill() {
