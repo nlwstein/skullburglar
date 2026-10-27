@@ -2004,19 +2004,19 @@ struct FeedProf {
     const char* v = std::getenv("BOTS_FEED_PROF");
     return v && *v && *v != '0';
   }();
-  double slice = 0, track = 0, loop = 0, decals = 0, decal_fp = 0, trees = 0, particles = 0, lighting = 0, total = 0;
+  double slice = 0, t_prims = 0, t_extras = 0, t_decals = 0, t_adds = 0, track = 0, loop = 0, decals = 0, decal_fp = 0, trees = 0, particles = 0, lighting = 0, total = 0;
   uint64_t frames = 0, instances = 0, decal_count = 0, decal_fps = 0, receivers = 0;
   static std::chrono::steady_clock::time_point Now() { return std::chrono::steady_clock::now(); }
   void Report() {
     if (!on || ++frames % 600) return;
     const double n = 600;
     REXLOG_INFO(
-        "scenefeed prof (ms/frame): total {:.3f} track/enum {:.3f} (table slice {:.3f}) prim-loop {:.3f} decals {:.3f} (fingerprints {:.3f}) "
+        "scenefeed prof (ms/frame): total {:.3f} track/enum {:.3f} (prims {:.3f} lights+fog {:.3f} decals {:.3f} adds {:.3f} table slice {:.3f}) prim-loop {:.3f} decals {:.3f} (fingerprints {:.3f}) "
         "trees {:.3f} particles {:.3f} lighting {:.3f}; per frame: {} instances, {} decals tracked, {} fingerprints, "
         "{} receivers",
-        total / n, track / n, slice / n, loop / n, decals / n, decal_fp / n, trees / n, particles / n, lighting / n,
+        total / n, track / n, t_prims / n, t_extras / n, t_decals / n, t_adds / n, slice / n, loop / n, decals / n, decal_fp / n, trees / n, particles / n, lighting / n,
         instances / 600, decal_count / 600, decal_fps / 600, receivers / 600);
-    slice = track = loop = decals = decal_fp = trees = particles = lighting = total = 0;
+    slice = t_prims = t_extras = t_decals = t_adds = track = loop = decals = decal_fp = trees = particles = lighting = total = 0;
     instances = decal_count = decal_fps = receivers = 0;
   }
 };
@@ -2074,9 +2074,17 @@ void Track(LiveState& st) {
     return g;
   };
   const auto ahead = [](const Primitive& p) { PrefetchEntry(p.index), PrefetchComponent(p.component); };
+  auto tp = FeedProf::Now();
+  const auto tlap = [&tp](double& acc) {
+    if (!g_prof.on) return;
+    const auto now = FeedProf::Now();
+    acc += Ms(tp, now);
+    tp = now;
+  };
   DropIf(st.prims, gone, ahead);
   DropIf(st.particle_prims, gone, ahead);
   DropIf(st.tree_prims, gone, ahead);
+  tlap(g_prof.t_prims);
   auto gone_extra = [&st](uint32_t o) {
     const auto k = st.known.find(o);
     bool g = k == st.known.end() || !AliveAt(o, k->second);
@@ -2090,11 +2098,13 @@ void Track(LiveState& st) {
   };
   std::erase_if(st.lights, gone_extra);
   std::erase_if(st.fog, gone_extra);
+  tlap(g_prof.t_extras);
   std::erase_if(st.decals, [&st](const LiveDecal& d) {
     const bool g = !AliveAt(d.component, d.index) || Classify(U32(d.component + 0x34)).kind != Kind::kDecal;
     if (g) st.known.erase(d.component);
     return g;
   });
+  tlap(g_prof.t_decals);
   // What the game added since the last frame.
   {
     std::vector<AddedComponent> fresh;
@@ -2150,6 +2160,7 @@ void Track(LiveState& st) {
       if (logged++ < 20) REXLOG_INFO("scenefeed: a full walk after a burst of adds found {} component(s)", found);
     }
   }
+  tlap(g_prof.t_adds);
   // The safety-net slice.
   if (FindObjectTable()) {
     const uint32_t data = U32(g_objects), count = U32(g_objects + 4);
