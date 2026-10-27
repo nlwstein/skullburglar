@@ -23,7 +23,12 @@ std::filesystem::path Pick(const wchar_t* title, bool folder) {
       dialog->SetFileTypes(2, filters);
     }
     dialog->SetTitle(title);
-    if (SUCCEEDED(dialog->Show(GetActiveWindow()))) {
+    // Owned by the game window, so it opens in front of it and the window waits for it. GetActiveWindow() alone
+    // gave no owner when the launcher wasn't the active window, and the dialog then opened behind it.
+    HWND owner = static_cast<HWND>(CurrentPickerHost().owner);
+    if (!owner) owner = GetActiveWindow();
+    if (owner) SetForegroundWindow(owner);
+    if (SUCCEEDED(dialog->Show(owner))) {
       IShellItem* item = nullptr;
       if (SUCCEEDED(dialog->GetResult(&item))) {
         PWSTR path = nullptr;

@@ -237,6 +237,7 @@ class BotsApp : public rex::ReXApp {
     REXLOG_INFO("setup: showing the setup window ({})",
                 requested ? "requested" : "no game files");
     bool intro_before = rex::cvar::Query<bool>("intro_movies");
+    SetPickerHost();
     new bots::setup::SetupDialog(
         imgui_drawer(), defaults.game_data_root,
         bots::setup::AutoGameDir(rex::filesystem::GetExecutableFolder()), game_root_given_, config_path_,
@@ -257,6 +258,25 @@ class BotsApp : public rex::ReXApp {
         [this]() { app_context().QuitFromUIThread(); });
     return std::nullopt;
   }
+
+  // The launcher's file dialogs (file_picker.h) belong to the game window, and a fullscreen window steps out of
+  // fullscreen while one is open: a fullscreen window kept them out of sight. macOS keeps its own panel in front.
+  void SetPickerHost() {
+#if !defined(__APPLE__)
+    bots::setup::SetPickerHost({window() ? window()->GetNativeWindowHandle() : nullptr, [this](bool open) {
+                                  rex::ui::Window* w = window();
+                                  if (!w) return;
+                                  if (open) {
+                                    picker_left_fullscreen_ = w->IsFullscreen();
+                                    if (picker_left_fullscreen_) w->SetFullscreen(false);
+                                  } else if (picker_left_fullscreen_) {
+                                    picker_left_fullscreen_ = false;
+                                    w->SetFullscreen(true);
+                                  }
+                                }});
+#endif
+  }
+  bool picker_left_fullscreen_ = false;
 
   // Shader precompile progress (B-053); the dialog deletes itself when done.
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {

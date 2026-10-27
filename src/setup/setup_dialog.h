@@ -252,7 +252,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     ImGui::InputTextWithHint("##iso", "Path to the .iso file", iso_path_, sizeof(iso_path_));
     ImGui::SameLine();
     if (ImGui::Button("Browse...", ImVec2(-1, 0))) {
-      auto picked = PickIsoFile();
+      auto picked = OpenPicker(PickIsoFile);
       if (!picked.empty()) SetIsoPath(picked.string());
     }
     if (!installed_) ImGui::SetItemDefaultFocus();
@@ -290,7 +290,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     }
     ImGui::BeginDisabled(Extracting());
     if (ImGui::SmallButton("Choose another folder...")) {
-      const std::filesystem::path chosen = PickFolder();
+      const std::filesystem::path chosen = OpenPicker(PickFolder);
       if (!chosen.empty()) UseGameDir(ChosenGameDir(chosen, folder_error_));
     }
     if (game_dir_ != default_game_dir_) {
