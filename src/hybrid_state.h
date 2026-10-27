@@ -214,6 +214,9 @@ struct HybridState {
   std::string quad_word;
   uint32_t quad_n = 0;
   float quad_max_dist = 0;
+  std::atomic<uint32_t> n1_variant{0};  // B-236 debug A/B: variant bits for every emitter ("hybrid n1variant <k>")
+  uint32_t quad_variant = 0;      // B-236: n1 sprite orientation variant for the kept emitters (0: as is)
+  bool quad_emitter = false;      // B-236: n1 draws the picked particles' whole emitters (the port draws those)
   std::vector<float> quad_keep;  // x, y, z per kept position (UE3 units)
   std::atomic<uint32_t> quad_on{0};
   // B-199 level preload: cooked packages (file stems, e.g. "Ambush_P", "AirlockOne") the game opened, in order. The

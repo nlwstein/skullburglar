@@ -558,15 +558,19 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     out.count = in.count, out.row_offset = in.row_offset, out.row_floats = in.row_floats;
     std::memcpy(out.origin, in.origin, sizeof(out.origin));
     std::memcpy(out.transform, in.transform, sizeof(out.transform));
+    out.pad1 = float(state->n1_variant.load(std::memory_order_acquire));  // B-236 debug A/B (0: none)
   }
   if (state->quad_on.load(std::memory_order_acquire)) {
     // B-229 single-quad debug (HybridState::quad_*): keep the n nearest matching sprite particles, one emitter each.
     std::string word;
     uint32_t want = 0;
     float max_dist = 0;
+    bool whole = false;
+    uint32_t variant = 0;
     {
       std::lock_guard lock(state->quad_mutex);
-      word = state->quad_word, want = state->quad_n, max_dist = state->quad_max_dist;
+      word = state->quad_word, want = state->quad_n, max_dist = state->quad_max_dist, whole = state->quad_emitter;
+      variant = state->quad_variant;
     }
     struct Pick {
       float d2;
@@ -599,20 +603,38 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     for (const Pick& pk : picks) {
       const HybridScene::Emitter& in = host->scene.emitters[pk.emitter];
       N1Emitter e = host->emitters[pk.emitter];
-      e.count = 1, e.row_offset = uint32_t(host->quad_rows.size());
       const float* r = host->scene.particle_rows.data() + in.row_offset + size_t(pk.row) * in.row_floats;
-      host->quad_rows.insert(host->quad_rows.end(), r, r + in.row_floats);
+      if (whole) {
+        // B-236: the port's kept draw is the whole emitter; give n1 the same particles, once per emitter.
+        if (std::ranges::any_of(picks, [&](const Pick& o) { return &o < &pk && o.emitter == pk.emitter; })) continue;
+        e.row_offset = uint32_t(host->quad_rows.size());
+        const float* all = host->scene.particle_rows.data() + in.row_offset;
+        host->quad_rows.insert(host->quad_rows.end(), all, all + size_t(in.count) * in.row_floats);
+      } else {
+        e.count = 1, e.row_offset = uint32_t(host->quad_rows.size());
+        host->quad_rows.insert(host->quad_rows.end(), r, r + in.row_floats);
+      }
+      if (variant) e.pad1 = float(variant);  // B-236 debug: n1's sprite orientation variant (0: none)
       kept.push_back(e);
       keep_pos.insert(keep_pos.end(), pk.p, pk.p + 3);
       // A local-space emitter's port vertices carry the local position (the vertex shader applies LocalToWorld).
       if (in.local_space) keep_pos.insert(keep_pos.end(), r, r + 3);
       if (host->scene.frame >= host->quad_logged + 60 || host->scene.frame < host->quad_logged) {
+        const auto row_text = [&](const float* x) {
+          std::string s;
+          for (uint32_t c = 0; c < in.row_floats; ++c) s += fmt::format("{}{:.4g}", c ? ", " : "", x[c]);
+          return s;
+        };
         REXLOG_INFO("hybrid quad: {} d {:.1f} at ({:.1f}, {:.1f}, {:.1f}) row [{}]", in.material, std::sqrt(pk.d2),
-                    pk.p[0], pk.p[1], pk.p[2], [&] {
-                      std::string s;
-                      for (uint32_t c = 0; c < in.row_floats; ++c) s += fmt::format("{}{:.4g}", c ? ", " : "", r[c]);
-                      return s;
-                    }());
+                    pk.p[0], pk.p[1], pk.p[2], row_text(r));
+        if (whole) {
+          REXLOG_INFO("hybrid quad: emitter n {} sub {}x{} method {} align {} local {} l2w row0 ({:.3f}, {:.3f}, {:.3f})",
+                      e.count, e.sub_h, e.sub_v, e.sub_method, e.align, e.local_space, e.transform[0],
+                      e.transform[1], e.transform[2]);
+          for (uint32_t k = 0; k < in.count; ++k)
+            REXLOG_INFO("hybrid quad:   row {} [{}]", k,
+                        row_text(host->scene.particle_rows.data() + in.row_offset + size_t(k) * in.row_floats));
+        }
       }
     }
     if (host->scene.frame >= host->quad_logged + 60 || host->scene.frame < host->quad_logged)
