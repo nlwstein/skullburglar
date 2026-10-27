@@ -195,6 +195,12 @@ struct HybridState {
 // The register the marker writes: unknown to the Xenos register table (no side effects in the SDK's command
 // processor) and never written by the D3D runtime.
 inline constexpr uint32_t kHybridMarkerRegister = 0x0030;
+// B-220: the marker value written just before the game draws its own scene for a tree-capture frame (fill 4, not dual
+// render). From there to that frame's scene marker the renderer hands the scene's draws to the tree capture without
+// drawing them: n1 draws over that scene at the marker anyway, and drawing it built the level's scene pipelines and
+// loaded its textures for frames nobody saw. Scene markers carry a camera seq, which never has this bit.
+// BOTS_HYBRID_CAPTURE_SKIP=0 draws the capture frames' scene as before.
+inline constexpr uint32_t kHybridCaptureBegin = 0x80000000u;
 
 inline constexpr const char* kHybridStateEnv = "BOTS_HYBRID_STATE";
 

@@ -640,6 +640,91 @@ void Renderer::LogSkip(const char* why, uint64_t vs, uint64_t ps, const Attachme
               stats_.presents, stats_.draws, vs, ps, targets, workers ? workers->Describe() : "none");
 }
 
+// B-187: hands a colour-pass tree draw of the game's own scene to n1's capture (n1ffi runs the game's vertex shader
+// over it on the CPU). Only while a capture session runs; needs the draw's DMA indices.
+void Renderer::TreeCaptureDraw(const rg::RegisterFile& regs, ShaderCache::Shader& vshader,
+                               ShaderCache::Shader& pshader, const Draw& draw, uint32_t count, bool index32) {
+#ifdef BOTS_N1FFI
+  if (!n1_tree_active_ || !n1_tree_r_) return;
+  auto* nr = static_cast<N1Renderer*>(n1_tree_r_);
+  const float* consts = reinterpret_cast<const float*>(&regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
+  const uint64_t vs_hash = vshader.ucode_data_hash();
+  const uint32_t want = n1_tree_probe(nr, vs_hash, consts, count);
+  if (want & 2) n1_tree_ucode(nr, vs_hash, vshader.ucode_disassembly().c_str());
+  if (!(want & 1)) return;
+  const xe::Endian index_endian = IndexEndian(draw.index_endian, index32);
+  N1TreeDraw td{};
+  td.vs_hash = vs_hash;
+  td.consts = consts;
+  uint32_t k = 0;
+  for (const auto& binding : vshader.vertex_bindings()) {
+    const auto fetch = regs.GetVertexFetch(binding.fetch_constant);
+    if (fetch.type != xe::FetchConstantType::kVertex || k >= 4) continue;
+    td.stream_addr[k] = fetch.address << 2;
+    td.stream[k] = memory_(td.stream_addr[k]);
+    td.stream_bytes[k] = fetch.size * 4;
+    td.stream_stride[k] = binding.stride_words * 4;
+    td.fetch_consts |= (binding.fetch_constant & 0xFF) << (8 * k);
+    ++k;
+  }
+  td.stream_count = k;
+  std::vector<uint32_t> idx(count);
+  const uint8_t* isrc = memory_(draw.index_base);
+  if (!isrc || !td.stream[0]) return;
+  for (uint32_t i = 0; i < count; ++i) {
+    if (index32) {
+      uint32_t v;
+      std::memcpy(&v, isrc + i * 4, 4);
+      idx[i] = xe::GpuSwap(v, index_endian);
+    } else {
+      uint16_t h;
+      std::memcpy(&h, isrc + i * 2, 2);
+      idx[i] = xe::GpuSwap(h, index_endian);
+    }
+  }
+  td.indices = idx.data();
+  td.index_count = count;
+  td.index_offset = regs.values[rg::XE_GPU_REG_VGT_INDX_OFFSET];
+  for (const auto& b : pshader.GetTextureBindingsAfterTranslation()) {
+    if (td.tex_count >= 4) break;
+    td.tex_base[td.tex_count++] = regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + 6 * b.fetch_constant + 1];
+  }
+  n1_tree_capture(nr, &td);
+#else
+  (void)regs, (void)vshader, (void)pshader, (void)draw, (void)count, (void)index32;
+#endif
+}
+
+// B-220: a draw or resolve of the game's own scene in a tree-capture frame (between the capture-begin marker and the
+// scene's marker). n1 draws its scene over that one at the marker, so nothing of it is drawn: the draw only goes to
+// the tree capture, which needs CPU-side data alone. Drawing it compiled the level's scene pipelines and loaded its
+// textures for frames nobody saw (150-560 ms frames on a UHD 620 with a cold cache). A capture frame then looks to the
+// renderer like the suppressed frames around it.
+void Renderer::CaptureFrameDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
+                                const Draw& draw) {
+  ++stats_.capture_skipped;
+  if (!n1_tree_active_) return;
+  if (regs.Get<reg::RB_MODECONTROL>().edram_mode != xe::EdramMode::kColorDepth ||
+      !regs.Get<reg::RB_SURFACE_INFO>().surface_pitch || !ps.dwords || !vs.dwords) {
+    return;
+  }
+  if (draw.initiator.source_select != xe::SourceSelect::kDMA) return;
+  auto ucode = [&](const ShaderLoad& s) {
+    return s.inline_ucode ? s.inline_ucode : reinterpret_cast<const uint32_t*>(memory_(s.address));
+  };
+  if (!ucode(vs) || !ucode(ps)) return;
+  const bool index32 = draw.initiator.index_size == xe::IndexFormat::kInt32;
+  uint32_t count = draw.initiator.num_indices;
+  count = std::min(count, draw.index_words);
+  if (!count) return;
+  ShaderCache::Shader* vshader = shaders_->Get(xe::ShaderType::kVertex, ucode(vs), vs.dwords);
+  if (!du::IsRasterizationPotentiallyDone(regs, du::IsPrimitivePolygonal(regs))) return;
+  ShaderCache::Shader* pshader = shaders_->Get(xe::ShaderType::kPixel, ucode(ps), ps.dwords);
+  if (!du::IsPixelShaderNeededWithRasterization(*pshader, regs)) return;
+  if (!du::GetNormalizedColorMask(regs, pshader->writes_color_targets())) return;  // colour pass only
+  TreeCaptureDraw(regs, *vshader, *pshader, draw, count, index32);
+}
+
 void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
                          const Draw& draw) {
   const auto& props = device_->properties();
@@ -1523,55 +1608,9 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
                   samples_x * samples_y > 1 ? " ss4" : "");
     GpuLabel(kGpuDraw, label);
   }
-#ifdef BOTS_N1FFI
-  if (n1_tree_active_ && n1_tree_r_ && pshader && dma && !std::ranges::none_of(attachments.color, std::identity{})) {
-    auto* nr = static_cast<N1Renderer*>(n1_tree_r_);
-    const float* consts = reinterpret_cast<const float*>(&regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
-    const uint64_t vs_hash = vshader->ucode_data_hash();
-    const uint32_t want = n1_tree_probe(nr, vs_hash, consts, count);
-    if (want & 2) n1_tree_ucode(nr, vs_hash, vshader->ucode_disassembly().c_str());
-    if (want & 1) {
-      N1TreeDraw td{};
-      td.vs_hash = vs_hash;
-      td.consts = consts;
-      uint32_t k = 0;
-      for (const auto& binding : vshader->vertex_bindings()) {
-        const auto fetch = regs.GetVertexFetch(binding.fetch_constant);
-        if (fetch.type != xe::FetchConstantType::kVertex || k >= 4) continue;
-        td.stream_addr[k] = fetch.address << 2;
-        td.stream[k] = memory_(td.stream_addr[k]);
-        td.stream_bytes[k] = fetch.size * 4;
-        td.stream_stride[k] = binding.stride_words * 4;
-        td.fetch_consts |= (binding.fetch_constant & 0xFF) << (8 * k);
-        ++k;
-      }
-      td.stream_count = k;
-      std::vector<uint32_t> idx(count);
-      const uint8_t* isrc = memory_(draw.index_base);
-      if (isrc && td.stream[0]) {
-        for (uint32_t i = 0; i < count; ++i) {
-          if (index32) {
-            uint32_t v;
-            std::memcpy(&v, isrc + i * 4, 4);
-            idx[i] = xe::GpuSwap(v, index_endian);
-          } else {
-            uint16_t h;
-            std::memcpy(&h, isrc + i * 2, 2);
-            idx[i] = xe::GpuSwap(h, index_endian);
-          }
-        }
-        td.indices = idx.data();
-        td.index_count = count;
-        td.index_offset = regs.values[rg::XE_GPU_REG_VGT_INDX_OFFSET];
-        for (const auto& b : pshader->GetTextureBindingsAfterTranslation()) {
-          if (td.tex_count >= 4) break;
-          td.tex_base[td.tex_count++] = regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + 6 * b.fetch_constant + 1];
-        }
-        n1_tree_capture(nr, &td);
-      }
-    }
+  if (n1_tree_active_ && pshader && dma && !std::ranges::none_of(attachments.color, std::identity{})) {
+    TreeCaptureDraw(regs, *vshader, *pshader, draw, count, index32);
   }
-#endif
   if (drawdump::Active()) {
     std::vector<drawdump::Stream> streams;
     for (const auto& binding : vshader->vertex_bindings()) {

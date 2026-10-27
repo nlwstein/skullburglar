@@ -540,16 +540,28 @@ extern "C" void sub_82BB1E78(PPCContext& __restrict ctx, uint8_t* base) {
     return;
   }
   const auto start = std::chrono::steady_clock::now();
+  // B-220: a tree-capture frame's scene is only read by the capture hook, n1 draws over it at the marker, so the
+  // renderer doesn't draw it (kHybridCaptureBegin, hybrid_state.h). BOTS_HYBRID_CAPTURE_SKIP=0 draws it as before.
+  static const bool capture_skip = EnvInt("BOTS_HYBRID_CAPTURE_SKIP", 1) != 0;
+  const bool skip_scene = capture_skip && capturing && t_render_seq != 0 &&
+                          g_state.fill.load(std::memory_order_relaxed) == 4 &&
+                          !g_state.dual.load(std::memory_order_relaxed);
+  if (skip_scene) {
+    PPCContext saved = ctx;
+    EmitMarker(ctx, base, bots::kHybridCaptureBegin);
+    ctx = saved;
+  }
   t_suppressed_visibility = answer_frames > 0;
   __imp__sub_82BB1E78(ctx, base);
   t_suppressed_visibility = false;
   if (answer_frames > 0) --answer_frames;
   const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
   // Fill 3 overlays the camera's grid on the game's own scene, and dual render (or the tree capture) draws n1's copy
-  // of it: the marker goes after the scene, before the HUD.
+  // of it: the marker goes after the scene, before the HUD. A skipped capture scene always gets its marker (it ends
+  // the skipping).
   const uint32_t fill_now = g_state.fill.load(std::memory_order_relaxed);
   const bool marker =
-      (fill_now == 3 || (fill_now == 4 && (capturing || g_state.dual.load(std::memory_order_relaxed)))) &&
+      (skip_scene || fill_now == 3 || (fill_now == 4 && (capturing || g_state.dual.load(std::memory_order_relaxed)))) &&
       t_render_seq != 0;
   if (marker) EmitMarker(ctx, base, t_render_seq);
   if (TraceBudget() > 0)
