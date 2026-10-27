@@ -1342,6 +1342,7 @@ struct LiveDecal {
   uint32_t component = 0, index = 0;
   uint32_t mat = 0;
   uint64_t fp = 0;
+  bool runtime = false;  // the material was made at run time (MaterialPath): re-read its parameters every frame
   const char* material = nullptr;
 };
 struct LiveState {
@@ -1352,7 +1353,18 @@ struct LiveState {
     const char* v = std::getenv("BOTS_N1_DECALS");
     return !(v && v[0] == '0');
   }();
-  std::unordered_map<uint32_t, uint32_t> inst_of;  // this frame: component -> its index in `instances`
+  // B-234: this frame's component -> its index in `instances`, kept as a flat table by the component's UObject index
+  // (no per-frame hash inserts). A slot is current when its component matches and its stamp is this walk's frame.
+  struct InstSlot {
+    uint32_t component = 0, index = 0;
+    uint64_t frame = 0;
+  };
+  std::vector<InstSlot> inst_slots;
+  std::unordered_map<uint32_t, uint32_t> inst_of;  // BOTS_FEED_LEGACY=1: the pre-B-234 map
+  bool legacy = [] {
+    const char* v = std::getenv("BOTS_FEED_LEGACY");
+    return v && *v && *v != '0';
+  }();
   std::vector<Primitive> particle_prims;
   std::vector<Primitive> tree_prims;
   std::unordered_map<uint32_t, LiveTree> trees;
@@ -1532,6 +1544,10 @@ std::string MaterialPath(uint32_t m, bool params, bool* runtime) {
 // path is rebuilt only when one of these changed. The property records are looked up once per class. Texture
 // parameters are hashed by address: a texture freed and another loaded at the same address while the instance
 // keeps pointing at it would be missed (BOTS_N1_MIC_CHECK=1 counts any mismatch).
+const bool g_fingerprint_bytes = [] {  // BOTS_FEED_LEGACY=1: the byte-at-a-time hash
+  const char* v = std::getenv("BOTS_FEED_LEGACY");
+  return v && *v && *v != '0';
+}();
 uint64_t MaterialFingerprint(uint32_t m) {
   struct Layout {
     bool mic = false;
@@ -1562,7 +1578,17 @@ uint64_t MaterialFingerprint(uint32_t m) {
         mix(data), mix(n);
         if (!Readable(data)) continue;
         const uint8_t* bytes = Raw(data);
-        for (uint32_t i = 0, end = n * l.size[k]; i < end; ++i) h = (h ^ bytes[i]) * 1099511628211ull;
+        const uint32_t end = n * l.size[k];
+        uint32_t i = 0;
+        if (!g_fingerprint_bytes) {  // B-234: eight bytes a step (equality only; the guest bytes stay big-endian)
+          for (; i + 8 <= end; i += 8) {
+            uint64_t w;
+            std::memcpy(&w, bytes + i, 8);
+            h = (h ^ w) * 1099511628211ull;
+            h ^= h >> 29;
+          }
+        }
+        for (; i < end; ++i) h = (h ^ bytes[i]) * 1099511628211ull;
       }
     }
     m = PropU32(m, "Parent");
@@ -2124,6 +2150,57 @@ void Track(LiveState& st) {
 }
 
 
+constexpr uint32_t kMaxObjectIndex = 1u << 22;
+void NoteInstance(LiveState& st, uint32_t component, uint32_t instance) {
+  if (st.legacy) {
+    st.inst_of[component] = instance;
+    return;
+  }
+  const uint32_t at = U32(component + 4);
+  if (at >= kMaxObjectIndex) return;
+  if (at >= st.inst_slots.size()) st.inst_slots.resize(std::max<size_t>(at + 1, st.inst_slots.size() * 2));
+  st.inst_slots[at] = {component, instance, st.frame};
+}
+bool FindInstance(const LiveState& st, uint32_t component, uint32_t& instance) {
+  if (st.legacy) {
+    const auto r = st.inst_of.find(component);
+    if (r == st.inst_of.end()) return false;
+    instance = r->second;
+    return true;
+  }
+  if (!Readable(component)) return false;
+  const uint32_t at = U32(component + 4);
+  if (at >= st.inst_slots.size()) return false;
+  const LiveState::InstSlot& s = st.inst_slots[at];
+  if (s.component != component || s.frame != st.frame) return false;
+  instance = s.index;
+  return true;
+}
+
+// BOTS_FEED_PROF=1: where the game-thread feed walk spends its time (ms per frame, logged every 600 frames).
+struct FeedProf {
+  bool on = [] {
+    const char* v = std::getenv("BOTS_FEED_PROF");
+    return v && *v && *v != '0';
+  }();
+  double track = 0, loop = 0, decals = 0, decal_fp = 0, trees = 0, particles = 0, lighting = 0, total = 0;
+  uint64_t frames = 0, instances = 0, decal_count = 0, decal_fps = 0, receivers = 0;
+  static std::chrono::steady_clock::time_point Now() { return std::chrono::steady_clock::now(); }
+  void Report() {
+    if (!on || ++frames % 600) return;
+    const double n = 600;
+    REXLOG_INFO(
+        "scenefeed prof (ms/frame): total {:.3f} track/enum {:.3f} prim-loop {:.3f} decals {:.3f} (fingerprints {:.3f}) "
+        "trees {:.3f} particles {:.3f} lighting {:.3f}; per frame: {} instances, {} decals tracked, {} fingerprints, "
+        "{} receivers",
+        total / n, track / n, loop / n, decals / n, decal_fp / n, trees / n, particles / n, lighting / n,
+        instances / 600, decal_count / 600, decal_fps / 600, receivers / 600);
+    track = loop = decals = decal_fp = trees = particles = lighting = total = 0;
+    instances = decal_count = decal_fps = receivers = 0;
+  }
+};
+FeedProf g_prof;
+
 // B-228: the attached decals that land on something drawn this frame. Static DecalActors are attached for the level's
 // life; the DecalManager pools attach a component per splat (explosion scorch, bullet impacts) and detach it later.
 void LiveDecals(LiveState& st, HybridScene& out) {
@@ -2158,13 +2235,26 @@ void LiveDecals(LiveState& st, HybridScene& out) {
     if (!n || !Readable(data)) continue;
     const uint32_t first = uint32_t(out.decal_receivers.size());
     for (uint32_t k = 0; k < n; ++k) {
-      const auto r = st.inst_of.find(U32(data + 8 * k));
-      if (r != st.inst_of.end()) out.decal_receivers.push_back(r->second);
+      uint32_t at;
+      if (FindInstance(st, U32(data + 8 * k), at)) out.decal_receivers.push_back(at);
     }
     if (out.decal_receivers.size() == first) continue;
     const uint32_t m = U32(c + g_off.decal_material.offset);
-    const uint64_t fp = MaterialFingerprint(m);
-    if (m != d.mat || fp != d.fp || !d.material) d.mat = m, d.fp = fp, d.material = InternMaterial(MaterialPath(m, true));
+    // B-234: a material that was not made at run time never changes, so its fingerprint is read only for the ones that
+    // were (the scorch and impact splats' instances).
+    bool rebuild = !d.material || m != d.mat;
+    if (!rebuild && (d.runtime || st.legacy)) {
+      const auto pf0 = FeedProf::Now();
+      const uint64_t fp = MaterialFingerprint(m);
+      g_prof.decal_fp += Ms(pf0, FeedProf::Now()), ++g_prof.decal_fps;
+      rebuild = fp != d.fp;
+      if (rebuild) d.fp = fp;
+    }
+    if (rebuild) {
+      bool runtime = false;
+      d.mat = m, d.material = InternMaterial(MaterialPath(m, true, &runtime)), d.runtime = runtime;
+      d.fp = runtime || st.legacy ? MaterialFingerprint(m) : 0;
+    }
     if (!d.material) {
       out.decal_receivers.resize(first);
       continue;
@@ -2299,6 +2389,13 @@ void Live(uint8_t* base) {
   if (rt == st.last_real_time) return;
   st.last_real_time = rt;
   const auto t0 = std::chrono::steady_clock::now();
+  auto pm = t0;
+  auto lap = [&pm](double& acc) {
+    if (!g_prof.on) return;
+    const auto now = FeedProf::Now();
+    acc += Ms(pm, now);
+    pm = now;
+  };
   if (st.track) {
     Track(st);
   } else if (++st.age >= st.rescan) {
@@ -2324,9 +2421,10 @@ void Live(uint8_t* base) {
     DropIf(st.particle_prims, gone);
     DropIf(st.tree_prims, gone);
   }
+  lap(g_prof.track);
   HybridScene& out = st.building;
   out.instances.clear();
-  st.inst_of.clear();
+  if (st.legacy) st.inst_of.clear();
   out.skeletal.clear();
   out.bones.clear();
   out.materials.clear();
@@ -2424,7 +2522,7 @@ void Live(uint8_t* base) {
       out.materials.insert(out.materials.end(), lc.materials.begin(), lc.materials.end());
       continue;
     }
-    if (st.decals_on) st.inst_of[c] = uint32_t(out.instances.size());
+    if (st.decals_on) NoteInstance(st, c, uint32_t(out.instances.size()));
     HybridScene::Instance& inst = out.instances.emplace_back();
     for (int i = 0; i < 16; ++i) inst.transform[i] = F32(c + g_off.local_to_world.offset + 4 * i);
     inst.mesh = lc.mesh_path;
@@ -2435,9 +2533,12 @@ void Live(uint8_t* base) {
     out.materials.insert(out.materials.end(), lc.materials.begin(), lc.materials.end());
   }
   out.walked = uint32_t(st.prims.size());
+  lap(g_prof.loop);
   out.decals.clear();
   out.decal_receivers.clear();
   if (st.decals_on) LiveDecals(st, out);
+  lap(g_prof.decals);
+  g_prof.instances += out.instances.size(), g_prof.decal_count += st.decals.size(), g_prof.receivers += out.decal_receivers.size();
   // SpeedTree placements (B-187): the component's LocalToWorld (scale + translation), its tree asset and the actor's
   // rotation, which UE3 keeps out of the component transform for SpeedTree.
   out.trees.clear();
@@ -2475,6 +2576,7 @@ void Live(uint8_t* base) {
         for (int i = 0; i < 3; ++i) t.rotation[i] = int32_t(U32(owner + rot.offset + 4 * i));
     }
   }
+  lap(g_prof.trees);
   out.emitters.clear();
   out.particle_rows.clear();
   out.particles_ms = 0;
@@ -2485,6 +2587,7 @@ void Live(uint8_t* base) {
   }
   // Lights, fog and post for n1 (properties read live; the component list comes from the last walk). Binary records
   // (B-188) unless BOTS_N1_FEED=json; both with BOTS_N1_FEED_VERIFY=1.
+  lap(g_prof.particles);
   out.lighting.clear();
   out.lighting_ms = 0;
   out.light_pending = false;
@@ -2518,9 +2621,11 @@ void Live(uint8_t* base) {
     }
     out.lighting_ms = float(Ms(tl, std::chrono::steady_clock::now()));
   }
+  lap(g_prof.lighting);
   out.frame = ++st.frame;
   out.cam_seq = hs->published.load(std::memory_order_acquire);
   out.build_ms = float(Ms(t0, std::chrono::steady_clock::now()));
+  if (g_prof.on) g_prof.total += out.build_ms, g_prof.Report();
   std::lock_guard lock(hs->scene_mutex);
   // Keep a lighting update the renderer has not taken yet when this frame brings none, and fold an unconsumed fog and
   // post update into a newer lights-only one.
