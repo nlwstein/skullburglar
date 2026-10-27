@@ -1689,6 +1689,26 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
           quad_vs_logged.push_back(vshader->ucode_data_hash());
           REXLOG_INFO("hybrid quad: vs {:016x} ucode\n{}", vshader->ucode_data_hash(), vshader->ucode_disassembly());
         }
+        // B-242: the kept draw's pixel shader once, its non-zero pixel constants, blend and depth state (what the
+        // material does per pixel: fades, depth bias, emissive scale).
+        static std::vector<uint64_t> quad_ps_logged;
+        if (std::ranges::find(quad_ps_logged, pshader->ucode_data_hash()) == quad_ps_logged.end()) {
+          quad_ps_logged.push_back(pshader->ucode_data_hash());
+          REXLOG_INFO("hybrid quad: ps {:016x} ucode\n{}", pshader->ucode_data_hash(), pshader->ucode_disassembly());
+        }
+        {
+          std::string c;
+          for (uint32_t k = 0; k < 256; ++k) {
+            const uint32_t* w = &regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_256_X + 4 * k];
+            if (!(w[0] | w[1] | w[2] | w[3])) continue;
+            float f[4];
+            std::memcpy(f, w, sizeof(f));
+            c += fmt::format(" c{} ({:.4g}, {:.4g}, {:.4g}, {:.4g})", k, f[0], f[1], f[2], f[3]);
+          }
+          REXLOG_INFO("hybrid quad:   pconst{}", c);
+          REXLOG_INFO("hybrid quad:   blend0 {:08x} depth test {} write {} op {}", key.blend[0], key.depth_test,
+                      key.depth_write, key.depth_op);
+        }
         // B-236: the kept draw's vertex constants (camera axes, alignment, sincos range constants).
         {
           const float* vc = reinterpret_cast<const float*>(&regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
