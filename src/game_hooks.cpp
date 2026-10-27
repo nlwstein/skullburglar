@@ -2759,10 +2759,12 @@ void Apply(uint8_t* base, float dt) {
     if (!debug::Readable(pin)) continue;
     if (!f.found) {
       const uint32_t sm = split_screen::FindFunction(base, pin, "bEnableMouseSmoothing");
-      const uint32_t tp = split_screen::Prop(base, pin, "TurnPower"), mp = split_screen::Prop(base, pin, "MaxPowerTurn"),
-                     la = split_screen::Prop(base, pin, "LagAmount");
+      const uint32_t tp = split_screen::Prop(base, pin, "TurnPower");
+      const uint32_t mp = split_screen::Prop(base, pin, "MaxPowerTurn");
+      const uint32_t la = split_screen::Prop(base, pin, "LagAmount");
       if (!sm || tp == 0xFFFFFFFF || mp == 0xFFFFFFFF || la == 0xFFFFFFFF) continue;  // not a C1PlayerInput (yet)
-      f = {LoadU32(base, sm + 0x64), LoadU32(base, sm + 0x84), tp, mp, la, true};  // UProperty Offset, UBoolProperty BitMask
+      // +0x64 UProperty Offset, +0x84 UBoolProperty BitMask.
+      f = {LoadU32(base, sm + 0x64), LoadU32(base, sm + 0x84), tp, mp, la, true};
       REXLOG_INFO("controller feel: PlayerInput fields found (smoothing +{:X} mask {:08X}, TurnPower +{:X}, "
                   "MaxPowerTurn +{:X}, LagAmount +{:X})", f.smooth_off, f.smooth_mask, tp, mp, la);
     }

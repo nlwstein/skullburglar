@@ -147,7 +147,8 @@ uint8_t ToByte(float f) { return uint8_t(std::lround(std::clamp(f, 0.0f, 1.0f) *
 }  // namespace
 
 bool Renderer::Fail(const std::string& what, VkResult result) {
-  if (failure_.empty()) failure_ = what + (result != VK_SUCCESS ? " (VkResult " + std::to_string(int(result)) + ")" : "");
+  if (failure_.empty())
+    failure_ = what + (result != VK_SUCCESS ? " (VkResult " + std::to_string(int(result)) + ")" : "");
   REXLOG_ERROR("gfx native: {}", failure_);
   return false;
 }
