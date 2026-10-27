@@ -304,6 +304,9 @@ void Renderer::PumpN1Uploads() {
 // before DrawSceneFill where a Flush is safe. Remakes the renderer for a new target format (DrawSceneN1 can't: it
 // needs the GPU idle) and holds for the level preload at a level start.
 // BOTS_N1_HOLD_IN_DRAW=1: the old behaviour (the hold inside the draw, flushing under it), kept for the B-218 A/B.
+// BOTS_N1_TEST_REMAKES (B-223): a remake asked for although the format matches; PrepareSceneN1 clears it.
+static bool test_remake_pending = false;
+
 static bool HoldInDraw() {
   static const bool on = [] { const char* v = std::getenv("BOTS_N1_HOLD_IN_DRAW"); return v && std::atoi(v) != 0; }();
   return on;
@@ -319,10 +322,13 @@ void Renderer::PrepareSceneN1() {
   if (n1_remake_format_ != VK_FORMAT_UNDEFINED) {
     const VkFormat format = n1_remake_format_;
     n1_remake_format_ = VK_FORMAT_UNDEFINED;
-    if (host && host->r && host->format != format) {
+    if (host && host->r && (host->format != format || test_remake_pending)) {
+      const bool test = test_remake_pending;
+      test_remake_pending = false;
       // The first scene is in another colour format than the one the renderer was made for: make it again (the
       // shader and pipeline caches make this quick). The GPU must be idle.
-      REXLOG_WARN("hybrid n1: target format {} is not the renderer's {}; remaking it", int(format), int(host->format));
+      REXLOG_WARN("hybrid n1: target format {} is not the renderer's {}; remaking it{}", int(format), int(host->format),
+                  test ? " (BOTS_N1_TEST_REMAKES)" : "");
       Finish();
       n1_destroy(host->r);
       delete host;
@@ -397,7 +403,14 @@ void Renderer::HoldN1Preload(void* h, bool may_flush) {
 bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2D& area) {
   HybridState* state = FindHybridState();
   auto* host = static_cast<N1Host*>(n1_host_);
-  if (host && host->r && target.format != host->format) {
+  // Test knob: BOTS_N1_TEST_REMAKES=N remakes the renderer on the first N scenes as a format change would, so the
+  // renderer is destroyed while its startup step is still running (B-223).
+  static int test_remakes = std::atoi(EnvOr("BOTS_N1_TEST_REMAKES", "0"));
+  if (host && host->r && test_remakes > 0 && !test_remake_pending) {
+    --test_remakes;
+    test_remake_pending = true;
+  }
+  if (host && host->r && (target.format != host->format || test_remake_pending)) {
     if (scene_mid_draw_) {
       // B-218: remaking needs the GPU idle (a Finish), which can't happen inside a draw: PrepareSceneN1 does it at
       // the next draw's reservation; this scene is skipped.
