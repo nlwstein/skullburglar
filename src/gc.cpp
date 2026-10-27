@@ -118,7 +118,7 @@ struct Pass {
   bool host = false;          // this pass used the host analysis
   uint64_t walk_objs = 0, walk_tokens = 0, walk_refs = 0;  // host walk counts
   double virt_ms = 0;         // BOTS_GC_PROF=1: time in the per-object virtual (vtable +244)
-  double replay_ms[2] = {};   // BOTS_GC_PROF=1: a read-only replay of the walk's loads over the final list, twice        // host analysis: the pass over the object table (the rest of mark_ms is the walk)
+  double replay_ms[3] = {};   // BOTS_GC_PROF=1: a read-only replay of the walk's loads over the final list, twice        // host analysis: the pass over the object table (the rest of mark_ms is the walk)
   uint32_t unreachable = 0;   // ConditionalBeginDestroy calls inside CollectGarbage
   bool purge_pending = false;  // a purge started by this pass has not finished yet
   double purge_ms = 0;        // time-limited purge calls since the pass
@@ -746,7 +746,7 @@ extern "C" void sub_825EA258(PPCContext& __restrict ctx, uint8_t* base) {
   g.start = NowMs();
   g.mark_ms = g.prepurge_ms = g.table_ms = g.virt_ms = 0;
   g.walk_objs = g.walk_tokens = g.walk_refs = 0;
-  g.replay_ms[0] = g.replay_ms[1] = 0;
+  g.replay_ms[0] = g.replay_ms[1] = g.replay_ms[2] = 0;
   g.host = false;
   g.unreachable = 0;
   const bool was_pending = g.purge_pending;
@@ -770,8 +770,8 @@ extern "C" void sub_825EA258(PPCContext& __restrict ctx, uint8_t* base) {
               was_pending ? " (previous purge was still pending)" : "");
   if (g.host)
     REXLOG_INFO("gc: walk pass {}: {} objects, {} tokens, {} references followed, virtual calls {:.1f} ms, "
-                "read-only replay {:.1f} ms cold, {:.1f} ms warm", g.n, g.walk_objs, g.walk_tokens, g.walk_refs,
-                g.virt_ms, g.replay_ms[0], g.replay_ms[1]);
+                "read-only replay {:.1f} ms, again {:.1f} ms, again with prefetch {:.1f} ms", g.n, g.walk_objs,
+                g.walk_tokens, g.walk_refs, g.virt_ms, g.replay_ms[0], g.replay_ms[1], g.replay_ms[2]);
 }
 
 // PerformReachabilityAnalysis(TArray<UObject*>& ObjectsToSerialize, QWORD KeepFlags)
@@ -795,11 +795,20 @@ extern "C" void sub_825E99F0(PPCContext& __restrict ctx, uint8_t* base) {
     Warmer& w = TheWarmer();
     w.base = base;
     volatile uint64_t sink = 0;
-    for (double& ms : g.replay_ms) {
+    for (int k = 0; k < 3; ++k) {
       const double t0 = NowMs();
       const uint32_t data = U32(base, arr), n = U32(base, arr + 4);
-      for (uint32_t i = 0; i < n; ++i) sink += w.Warm(U32(base, data + 4 * i));
-      ms = NowMs() - t0;
+      for (uint32_t i = 0; i < n; ++i) {
+        if (k == 2) {  // the third time with the walk's prefetch pipeline
+          auto at = [&](uint32_t d) { return i + d < n ? U32(base, data + 4 * (i + d)) : 0u; };
+          if (const uint32_t o = at(8)) Prefetch(base, o), Prefetch(base, o + 52);
+          if (const uint32_t o = at(4)) PrefetchStage(base, o, kFieldLines);
+          if (const uint32_t o = at(2)) PrefetchStage(base, o, kRefFlags);
+          if (const uint32_t o = at(1)) PrefetchStage(base, o, kElemFlags);
+        }
+        sink += w.Warm(U32(base, data + 4 * i));
+      }
+      g.replay_ms[k] = NowMs() - t0;
     }
   }
 }
