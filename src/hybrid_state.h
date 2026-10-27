@@ -89,7 +89,9 @@ struct HybridLighting {
   std::vector<const char*> paths;  // interned, stable
   HybridFog fog = {};
   HybridPost post = {};
-  const char* post_material = nullptr;  // the post chain's material effect (interned), not in `paths`
+  // The post chain's shown MaterialEffect materials in chain order (interned), not in `paths`. The level's grade is
+  // usually the first; inserted chains (fire damage, scenario modes) add theirs (B-227).
+  std::vector<const char*> post_materials;
   void Clear() {
     has_fog_post = false;
     lights.clear();

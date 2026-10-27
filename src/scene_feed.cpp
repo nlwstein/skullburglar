@@ -1354,7 +1354,7 @@ struct LiveState {
   HybridLighting next_light, last_light;  // the build in progress; the last state the renderer was given
   HybridFog last_fog = {};
   HybridPost last_post = {};
-  const char* last_material = nullptr;
+  std::vector<const char*> last_materials;
   bool have_fog_post = false;
   uint32_t feed_every = [] {
     const char* v = std::getenv("BOTS_N1_FEED_EVERY");
@@ -1752,6 +1752,7 @@ void Triple(uint32_t base, const FieldEx& prop, float out[3]) {
 }
 
 enum : uint32_t { kPfUber = 1, kPfGod = 2, kPfLsBloom = 4, kPfLsBalance = 8, kPfLsScene = 16, kPfLsTone = 32, kPfLast = 64, kPfUberDiffKernel = 128 };
+constexpr uint32_t kMaxPostMaterials = 15;  // post flags bits 24..27: how many MaterialEffect paths follow material_effect
 
 // The player's post chain and blended settings (LightsPostJson's `post`), as raw numbers.
 void PostBin(HybridLighting& out) {
@@ -1766,7 +1767,7 @@ void PostBin(HybridLighting& out) {
   for (float& v : p.god) v = nan;
   for (float& v : p.uber_dof) v = nan;
   p.present = 1;
-  out.post_material = nullptr;
+  out.post_materials.clear();
   const uint32_t engine = Engine();
   const uint32_t players = IsObject(engine) ? PropRecord(engine, "GamePlayers") : 0;
   const uint32_t lp = players && U32(engine + U32(players + 0x64) + 4) ? U32(U32(engine + U32(players + 0x64))) : 0;
@@ -1774,11 +1775,23 @@ void PostBin(HybridLighting& out) {
   if (IsObject(chain)) {
     const Field effects = Prop(chain, "Effects");
     const uint32_t data = effects.ok() ? U32(chain + effects.offset) : 0, n = effects.ok() ? U32(chain + effects.offset + 4) : 0;
+    static uint32_t dbg_chain = 0;
+    const bool dbg = std::getenv("BOTS_N1_POST_LOG") && chain != dbg_chain;
+    if (dbg) {
+      dbg_chain = chain;
+      REXLOG_INFO("post chain {} ({} effects)", Path(chain), n);
+    }
     for (uint32_t i = 0; Readable(data) && i < n && i < 32; ++i) {
       const uint32_t e = U32(data + 4 * i);
       if (!IsObject(e)) continue;
       const uint32_t cls = U32(e + 0x34);
       const std::string_view name = ClassName(e);
+      if (dbg) {
+        const FieldEx m = FindEx(cls, "Material");
+        const uint32_t mat = m.ok() ? U32(e + m.offset) : 0;
+        REXLOG_INFO("  effect {} {} show {} mat {}", name, Path(e), FieldB(e, FindEx(cls, "bShowInGame")),
+                    IsObject(mat) ? Path(mat) : std::string("-"));
+      }
       if (name == "SfUberPostProcessEffect") {
         p.flags |= kPfUber;
         p.uber_bloom_scale = FieldF(e, FindEx(cls, "BloomScale"), nan);
@@ -1788,9 +1801,13 @@ void PostBin(HybridLighting& out) {
         for (int k = 0; k < 7; ++k) p.uber_dof[k] = FieldF(e, FindEx(cls, dof[k]), nan);
         if (FieldB(e, FindEx(cls, "UseDifferentKernelForBloom"))) p.flags |= kPfUberDiffKernel;
       } else if (name == "MaterialEffect") {
+        // Every shown one (B-227): the chain can hold the level's grade and an inserted fire-damage effect; keeping
+        // only the last lost the grade. n1 draws the ones it implements.
+        if (!FieldB(e, FindEx(cls, "bShowInGame"))) continue;
         const FieldEx m = FindEx(cls, "Material");
         const uint32_t mat = m.ok() ? U32(e + m.offset) : 0;
-        out.post_material = IsObject(mat) ? Intern(Path(mat)) : nullptr;
+        if (IsObject(mat) && out.post_materials.size() < kMaxPostMaterials)
+          if (const char* path = Intern(Path(mat))) out.post_materials.push_back(path);
       } else if (name == "SfGodRaysEffect") {
         if (!FieldB(e, FindEx(cls, "Enabled"))) continue;
         p.flags |= kPfGod;
@@ -2358,11 +2375,11 @@ void Live(uint8_t* base) {
         FogBin(nl.fog);
         PostBin(nl);
         post_changed = st.verify_feed || !st.have_fog_post || std::memcmp(&nl.fog, &st.last_fog, sizeof(HybridFog)) ||
-                       std::memcmp(&nl.post, &st.last_post, sizeof(HybridPost)) || nl.post_material != st.last_material;
+                       std::memcmp(&nl.post, &st.last_post, sizeof(HybridPost)) || nl.post_materials != st.last_materials;
       }
       if (st.verify_feed || !SameLights(nl, st.last_light) || post_changed) {
         nl.has_fog_post = post_changed;
-        if (post_changed) st.last_fog = nl.fog, st.last_post = nl.post, st.last_material = nl.post_material;
+        if (post_changed) st.last_fog = nl.fog, st.last_post = nl.post, st.last_materials = nl.post_materials;
         st.have_fog_post |= post_changed;
         st.last_light.lights = nl.lights, st.last_light.sh = nl.sh, st.last_light.paths = nl.paths;
         out.light = nl;
@@ -2385,7 +2402,7 @@ void Live(uint8_t* base) {
     } else if (hs->scene.light.has_fog_post && !out.light.has_fog_post && !st.verify_feed) {  // (verify: JSON is not merged)
       out.light.has_fog_post = true;
       out.light.fog = hs->scene.light.fog, out.light.post = hs->scene.light.post;
-      out.light.post_material = hs->scene.light.post_material;
+      out.light.post_materials = hs->scene.light.post_materials;
     }
   }
   std::swap(hs->scene, out);
