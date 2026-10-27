@@ -569,26 +569,38 @@ void ReadObjective(Snap& s, uint32_t pc) {
 template <typename Fn>
 void ForEachObject(const char* cls, Fn&& fn);
 
+uint32_t ObjectTable();
+// <o> is still the live object at object-table position <index>. Reads only the table, never <o>: an actor kept from
+// an earlier sample may have been freed by a level unload into memory that is no longer mapped.
+bool AliveAt(uint32_t o, uint32_t index) {
+  const uint32_t t = ObjectTable();
+  return t && index < U32(t + 4) && U32(U32(t) + 4 * index) == o;
+}
+
 // GUnitMarker actors are found by a walk of the object table (a few ms), so the list is cached and refreshed every
-// 5 s or on a map change; the per-sample work is only reading the cached actors.
+// 5 s or on a map change; the per-sample work is only reading the cached actors. A streamed level can unload its
+// markers between scans with the map name unchanged, so each is checked by its object-table slot before it is read.
 void ReadHotspot(Snap& s) {
-  static std::vector<uint32_t> markers;
+  struct Marker {
+    uint32_t actor, index;
+  };
+  static std::vector<Marker> markers;
   static uint64_t next_scan = 0;
   static std::string scanned_map;
   if (s.at_us >= next_scan || s.map != scanned_map) {
     markers.clear();
     ForEachObject("GUnitMarker", [](uint32_t o) {
       const std::string n = ObjName(o);
-      if (n.rfind("Default__", 0) != 0 && n.find("Arc") == std::string::npos) markers.push_back(o);
+      if (n.rfind("Default__", 0) != 0 && n.find("Arc") == std::string::npos) markers.push_back({o, U32(o + 4)});
     });
     next_scan = s.at_us + 5000000;
     scanned_map = s.map;
   }
   Hotspot& h = s.hotspot;
   float best = 0;
-  for (const uint32_t o : markers) {
+  for (const auto [o, index] : markers) {
     float p[3];
-    if (!Readable(o) || std::strcmp(ClassName(o), "GUnitMarker") || !PropBool(o, "bIsActivatable") || PropBool(o, "bHidden") ||
+    if (!AliveAt(o, index) || std::strcmp(ClassName(o), "GUnitMarker") || !PropBool(o, "bIsActivatable") || PropBool(o, "bHidden") ||
         PropBool(o, "bDestroyed") || !PropVec(o, "Location", p))
       continue;
     ++h.count;
