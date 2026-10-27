@@ -369,6 +369,7 @@ bool ReadCamera(Camera& cam, uint32_t& world_info_out) {
 struct Primitive {
   uint32_t component;
   Kind kind;
+  uint32_t index = 0;  // the component's UObject Index when it was found (AliveAt)
 };
 
 struct Times {
@@ -411,7 +412,7 @@ void Enumerate(std::vector<Primitive>& out, Times& t) {
     }
     if (last->kind == Kind::kNone) continue;
     if (!g_off.scene_info.ok() || !U32(o + g_off.scene_info.offset)) continue;  // not attached to a scene
-    out.push_back({o, last->kind});
+    out.push_back({o, last->kind, i});
   }
 }
 
@@ -474,6 +475,7 @@ void Skeleton(std::string& s, uint32_t mesh) {
 }
 
 bool IsObject(uint32_t p);
+bool AliveAt(uint32_t o, uint32_t index);
 
 // A property of <object>'s class by name, cached per (class, name).
 Field Prop(uint32_t object, const char* name) {
@@ -993,6 +995,13 @@ bool IsObject(uint32_t p) {
   return index < U32(g_objects + 4) && U32(U32(g_objects) + 4 * index) == p;
 }
 
+// <o> is still the live object at object-table position <index>. Unlike IsObject this reads only the table, never
+// <o>'s own memory: a component kept from an earlier frame may have been freed by a level unload into memory that is
+// no longer mapped, and reading it there faults (chapter loads crashed in Track's per-frame checks).
+bool AliveAt(uint32_t o, uint32_t index) {
+  return g_objects && index < U32(g_objects + 4) && U32(U32(g_objects) + 4 * index) == o;
+}
+
 // Research dump for the native particle structures: every attached ParticleSystemComponent's EmitterInstances,
 // raw (guest memory, big-endian), plus whatever their first 0x200 bytes point at. emitters_<frame>.bin holds
 // regions {u32 address, u32 length, bytes}; emitters_<frame>.json indexes components and names the UObjects those
@@ -1267,7 +1276,7 @@ struct LiveState {
   }();
   bool tracking = false;  // the first full walk has run
   uint32_t walk_pos = 0;
-  std::unordered_set<uint32_t> known;
+  std::unordered_map<uint32_t, uint32_t> known;  // tracked component -> its object-table position (AliveAt)
   std::vector<uint32_t> lights, fog;
 };
 LiveState g_live;
@@ -1275,7 +1284,10 @@ LiveState g_live;
 // Components the game added to a scene (FScene::AddPrimitive / AddLight / AddHeightFog / AddFogVolume, hooked below)
 // since the feed last looked. Filled on the game thread; the mutex only guards against an add from another thread.
 std::mutex g_added_mutex;
-std::vector<uint32_t> g_added;
+struct AddedComponent {
+  uint32_t component, index;  // index: its object-table position, read by the hook while the component is live
+};
+std::vector<AddedComponent> g_added;
 
 const char* Intern(const std::string& v) {
   if (v.empty()) return nullptr;
@@ -1728,8 +1740,10 @@ bool BeyondDrawDistance(uint32_t c, const Camera& cam) {
 // checked every frame exactly as before (still readable, same class kind, still attached) and dropped when it fails,
 // so a detached or freed component leaves the lists on the next frame. The lists are kept in object-table order (by
 // UObject Index), the order the full walk produced. The first frame does one full walk.
-bool TrackAdd(LiveState& st, uint32_t o) {
-  if (!IsObject(o) || st.known.count(o)) return false;
+// <index> is <o>'s object-table position when it was reported (a walk of the table, or the add hook while the component
+// was live): it is checked against the table before <o>'s own memory is read.
+bool TrackAdd(LiveState& st, uint32_t o, uint32_t index) {
+  if (!AliveAt(o, index) || st.known.count(o)) return false;
   const ClassInfo& ci = Classify(U32(o + 0x34));
   if (ci.extra != Extra::kNone) {
     if (!Attached(o)) return false;
@@ -1740,13 +1754,15 @@ bool TrackAdd(LiveState& st, uint32_t o) {
     (ci.kind == Kind::kParticle    ? st.particle_prims
      : ci.kind == Kind::kSpeedTree ? st.tree_prims
                                    : st.prims)
-        .push_back({o, ci.kind});
+        .push_back({o, ci.kind, index});
   } else {
     return false;
   }
-  st.known.insert(o);
+  st.known.emplace(o, index);
   return true;
 }
+// For objects just read from the object table (live, so their memory is readable).
+bool TrackAdd(LiveState& st, uint32_t o) { return Readable(o) && TrackAdd(st, o, U32(o + 0x04)); }
 
 void Track(LiveState& st) {
   bool added = false;
@@ -1760,13 +1776,13 @@ void Track(LiveState& st) {
     st.known.clear();
     for (uint32_t o : g_extras.lights) added |= TrackAdd(st, o);
     for (uint32_t o : g_extras.fog) added |= TrackAdd(st, o);
-    for (const Primitive& p : all) added |= TrackAdd(st, p.component);
+    for (const Primitive& p : all) added |= TrackAdd(st, p.component, p.index);
     std::lock_guard lock(g_added_mutex);
     g_added.clear();
   }
   // Drop what was detached, freed or reused since the last frame.
   auto gone = [&st](const Primitive& p) {
-    const bool g = !Readable(p.component) || Classify(U32(p.component + 0x34)).kind != p.kind ||
+    const bool g = !AliveAt(p.component, p.index) || Classify(U32(p.component + 0x34)).kind != p.kind ||
                    !U32(p.component + g_off.scene_info.offset);
     if (g) st.known.erase(p.component);
     return g;
@@ -1775,7 +1791,9 @@ void Track(LiveState& st) {
   std::erase_if(st.particle_prims, gone);
   std::erase_if(st.tree_prims, gone);
   auto gone_extra = [&st](uint32_t o) {
-    const bool g = !IsObject(o) || Classify(U32(o + 0x34)).extra == Extra::kNone || !Attached(o);
+    const auto k = st.known.find(o);
+    const bool g = k == st.known.end() || !AliveAt(o, k->second) || Classify(U32(o + 0x34)).extra == Extra::kNone ||
+                   !Attached(o);
     if (g) st.known.erase(o);
     return g;
   };
@@ -1783,12 +1801,12 @@ void Track(LiveState& st) {
   std::erase_if(st.fog, gone_extra);
   // What the game added since the last frame.
   {
-    std::vector<uint32_t> fresh;
+    std::vector<AddedComponent> fresh;
     {
       std::lock_guard lock(g_added_mutex);
       fresh.swap(g_added);
     }
-    for (uint32_t o : fresh) added |= TrackAdd(st, o);
+    for (const AddedComponent& a : fresh) added |= TrackAdd(st, a.component, a.index);
   }
   // The safety-net slice.
   if (FindObjectTable()) {
@@ -1837,7 +1855,7 @@ void Track(LiveState& st) {
     for (uint32_t o : g_extras.fog) want.insert(o);
     uint32_t missing = 0, extra = 0;
     for (uint32_t o : want) missing += !st.known.count(o);
-    for (uint32_t o : st.known) extra += !want.count(o);
+    for (const auto& [o, index] : st.known) extra += !want.count(o);
     REXLOG_INFO("scenefeed: tracking check: {} tracked, {} in a full walk, {} missing, {} extra", st.known.size(),
                 want.size(), missing, extra);
   }
@@ -1959,7 +1977,7 @@ void Live(uint8_t* base) {
     st.age = 0;
   } else {
     auto gone = [](const Primitive& p) {
-      return !Readable(p.component) || Classify(U32(p.component + 0x34)).kind != p.kind ||
+      return !AliveAt(p.component, p.index) || Classify(U32(p.component + 0x34)).kind != p.kind ||
              !U32(p.component + g_off.scene_info.offset);
     };
     std::erase_if(st.prims, gone);
@@ -2187,16 +2205,22 @@ void __imp__sub_8277D9D0(PPCContext& __restrict ctx, uint8_t* base);
 void __imp__sub_82783918(PPCContext& __restrict ctx, uint8_t* base);
 }
 namespace {
-void Added(uint32_t component) {
+// The component's UObject Index is read here, while it is certainly live; Track checks the table slot against it
+// before reading the component again (it may be freed by then).
+void Added(uint8_t* base, uint32_t component) {
+  if (!bots::scenefeed::Readable(component)) return;
+  uint32_t index;
+  std::memcpy(&index, base + component + 0x04, 4);
+  index = __builtin_bswap32(index);
   std::lock_guard lock(bots::scenefeed::g_added_mutex);
-  if (bots::scenefeed::g_added.size() < (1u << 20)) bots::scenefeed::g_added.push_back(component);
+  if (bots::scenefeed::g_added.size() < (1u << 20)) bots::scenefeed::g_added.push_back({component, index});
 }
 }  // namespace
 #define BOTS_SCENE_ADD_HOOK(addr)                                       \
   extern "C" void sub_##addr(PPCContext& __restrict ctx, uint8_t* base) { \
     const uint32_t component = ctx.r4.u32;                              \
     __imp__sub_##addr(ctx, base);                                       \
-    Added(component);                                                   \
+    Added(base, component);                                             \
   }
 BOTS_SCENE_ADD_HOOK(827834D0)
 BOTS_SCENE_ADD_HOOK(827836F8)
