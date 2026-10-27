@@ -302,11 +302,16 @@ void Renderer::PumpN1Uploads() {
 bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2D& area) {
   HybridState* state = FindHybridState();
   auto* host = static_cast<N1Host*>(n1_host_);
-  if (host && host->r && target.format != host->format) {
+  // Test knob: BOTS_N1_TEST_REMAKES=N remakes the renderer on the first N scenes as a format change would, so the
+  // renderer is destroyed while its startup step is still running.
+  static int test_remakes = std::atoi(EnvOr("BOTS_N1_TEST_REMAKES", "0"));
+  const bool test_remake = host && host->r && test_remakes > 0;
+  if (test_remake) --test_remakes;
+  if (host && host->r && (target.format != host->format || test_remake)) {
     // The first scene is in another colour format than the one the renderer was made for: make it again (the shader
     // and pipeline caches make this quick). The GPU must be idle.
-    REXLOG_WARN("hybrid n1: target format {} is not the renderer's {}; remaking it", int(target.format),
-                int(host->format));
+    REXLOG_WARN("hybrid n1: target format {} is not the renderer's {}; remaking it{}", int(target.format),
+                int(host->format), test_remake ? " (BOTS_N1_TEST_REMAKES)" : "");
     Finish();
     n1_destroy(host->r);
     delete host;
