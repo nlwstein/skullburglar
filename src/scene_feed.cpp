@@ -1686,7 +1686,7 @@ struct ColorLayout {
 };
 
 constexpr uint32_t kLfEnabled = 1, kLfBaked = 2, kLfCast = 4, kLfStatic = 8, kLfDynamic = 16, kLfCastShadows = 32,
-                   kLfModulated = 64;
+                   kLfModulated = 64, kLfSkyRaw = 128;
 
 struct LightLayout {
   int kind = -1;  // HybridLight::kind, -1: not a class the renderer reads
@@ -1809,6 +1809,12 @@ void LightsBin(HybridLighting& out, uint32_t stamp) {
     // B-245: directional and SH lights too (a light environment's directional pass gets the decoded colour as well).
     if (L.kind >= 0 && L.kind <= 3)
       for (int k = 0; k < 3; ++k) h.lower[k] = c[k] / 255.f;
+    // B-249: a sky light has no use for its position or direction; it carries the raw LightColor / 255 and LowerColor / 255
+    // there instead, so the renderer can decode both as UE3 does (pow(c / 255, 2.2) * brightness, the port's sky pass).
+    if (L.kind == 4) {
+      for (int k = 0; k < 3; ++k) h.pos[k] = c[k] / 255.f, h.axis[k] = lc[k] / 255.f;
+      h.flags |= kLfSkyRaw;
+    }
     h.sh = -1;
     if (L.wsil.ok() && L.sh_rv.ok() && L.sh_gv.ok() && L.sh_bv.ok()) {
       const uint32_t w = l + L.wsil.offset;

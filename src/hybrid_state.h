@@ -61,7 +61,8 @@ inline constexpr uint32_t kHybridNone = 0xFFFFFFFFu;
 struct HybridLight {  // 104 bytes
   uint32_t kind;      // 0 point, 1 spot, 2 directional, 3 spherical harmonic, 4 sky
   uint32_t flags;     // 1 enabled, 2 baked, 4 casts dynamic shadows, 8 lights static, 16 lights dynamic,
-                      // 32 CastShadows, 64 LightShadowMode == LightShadow_Modulate
+                      // 32 CastShadows, 64 LightShadowMode == LightShadow_Modulate, 128 sky light: raw LightColor / 255 in
+                      // pos and raw LowerColor / 255 in axis (B-249)
   uint32_t env;       // index in HybridLighting::paths (the owner's DynamicLightEnvironmentComponent) or kHybridNone
   float radius, falloff, inner_deg, outer_deg;
   float pos[3];       // LightToWorld translation (UE3 axes)
