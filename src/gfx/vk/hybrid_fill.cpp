@@ -145,6 +145,7 @@ struct N1Host {
   double record_max_ms = 0;
   uint64_t record_over_20 = 0;
   std::unordered_set<const char*> grades_asked;  // B-248: MaterialEffect paths (interned) already handed to n1_prewarm_grade
+  bool handover_logged = false;
   uint32_t slow_logged = 0;  // B-248: "slow frame" lines written
   const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
   // The startup step (n1_precompile_*): when it began, and whether its result has been logged.
@@ -820,12 +821,16 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   host->build_ms += host->scene.build_ms;
   host->particles_ms += host->scene.particles_ms;
   {
-    // B-248: one line per n1 frame that took over 30 ms on the render thread (the first 40), with what the lighting
-    // feed and n1_record made of it: the hand-over frame (the first one after n1_ready) is in it.
+    // B-248: one line per n1 frame that took over 12 ms on the render thread (the first 40), with what the lighting
+    // feed and n1_record made of it, and one for the hand-over frame (the first one after n1_ready) whatever it took.
     const double ms = std::chrono::duration<double, std::milli>(t2 - t0).count();
-    if (ms > 30.0 && host->slow_logged < 40) {
+    const bool ready = state && state->n1_ready.load(std::memory_order_relaxed);
+    const bool handover = ready && !host->handover_logged;
+    host->handover_logged |= ready;
+    if ((ms > 12.0 || handover) && host->slow_logged < 40) {
       ++host->slow_logged;
-      REXLOG_INFO("hybrid n1: slow frame {:.1f} ms (lighting feed {:.1f}, n1_record {:.1f}), scene {}, ready {}", ms,
+      REXLOG_INFO("hybrid n1: {} frame {:.1f} ms (lighting feed {:.1f}, n1_record {:.1f}), scene {}, ready {}",
+                  handover ? "hand-over" : "slow", ms,
                   host->feed_ms - feed_ms_before, std::chrono::duration<double, std::milli>(t2 - t1).count(),
                   host->scene.frame, state ? state->n1_ready.load(std::memory_order_relaxed) : 0u);
     }
