@@ -548,7 +548,8 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     if (instr) instr->warm_hold.store(0, std::memory_order_relaxed);
     REXLOG_INFO("gfx native: guest held {:.1f} s for the pipeline warm-up ({} pipelines, {}/{} done)",
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
-                renderer_->warmup_done() - from, renderer_->warmup_done(), renderer_->warmup_total());
+                // n1's share leaves warmup_done() when its startup step ends, so it can drop below `from`
+                std::max(renderer_->warmup_done(), from) - from, renderer_->warmup_done(), renderer_->warmup_total());
   }
 
   void WriteRegister(uint32_t index, uint32_t value) override {

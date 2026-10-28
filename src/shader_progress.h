@@ -7,6 +7,9 @@
 //     native backend holds the game at its next frame so the compile gets the whole CPU (B-098),
 //     like a first-boot shader compile screen,
 //   - then a small progress bar in the bottom-right corner until it finishes.
+// With the new renderer (renderer_choice.h) there is no Play now: a full-screen "Preparing the renderer" screen holds
+// the game until the shaders are built (the port's and n1's startup step), then stays up while the game runs behind it
+// until n1 draws the scene (HybridState::n1_ready), so the scene is never drawn by the pre-1.0 renderer meanwhile.
 // Nothing is shown if compiling finishes within kShowAfter (warm driver cache). The dialog deletes
 // itself (Close) when done, so no imgui layer stays on top of the game afterwards.
 // BOTS_SHADER_PROGRESS_DEMO=<seconds>: fake a precompile of that length (500 pipelines) to check the UI;
@@ -23,8 +26,12 @@
 
 #include <imgui.h>
 
+#include "hybrid_state.h"
+#include "renderer_choice.h"
+
 #include <rex/input/input.h>
 #include <rex/input/input_system.h>
+#include <rex/logging.h>
 #include <rex/system/interfaces/graphics.h>
 #include <rex/ui/imgui_dialog.h>
 
@@ -38,6 +45,7 @@ class ShaderProgressDialog : public rex::ui::ImGuiDialog {
     if (const char* v = std::getenv("BOTS_SHADER_PROGRESS_DEMO")) demo_secs_ = std::atof(v);
     // BOTS_PRECOMPILE_HOLD=0 (scripted runs): start in the background, so the game is never held.
     if (const char* v = std::getenv("BOTS_PRECOMPILE_HOLD"); v && *v == '0') backgrounded_ = true;
+    hold_for_n1_ = !backgrounded_ && bots::UseN1();
   }
 
   // Read by the keyboard/mouse driver (bots_app.h): only the centered panel takes input; the
@@ -57,6 +65,10 @@ class ShaderProgressDialog : public rex::ui::ImGuiDialog {
       done = uint32_t(std::min(t, 1.0) * total);
     } else {
       graphics->GetShaderPrecompileProgress(done, total);
+    }
+    if (hold_for_n1_) {
+      DrawN1Hold(io, graphics, done, total);
+      return;
     }
     // Done, or no stored pipelines at all: remove the dialog (and the imgui layer with it).
     if ((total && done >= total) || (!total && clk::now() - created_ > kNothingQueuedAfter)) {
@@ -119,6 +131,68 @@ class ShaderProgressDialog : public rex::ui::ImGuiDialog {
   }
 
  private:
+  // The new renderer's hold. The game waits while shaders build; after that it has to run (n1's front-end loads
+  // arrive in its frames, hybrid_fill.cpp MaybeSetN1Ready), behind this screen, until n1_ready. That wait is bounded
+  // by BOTS_N1_BOOT_WAIT_S; kN1ReadyTimeout only guards against n1 never reporting ready.
+  void DrawN1Hold(ImGuiIO& io, rex::system::IGraphicsSystem* graphics, uint32_t done, uint32_t total) {
+    using clk = std::chrono::steady_clock;
+    const bool compiling = total && done < total;
+    const bool finished = total ? done >= total : clk::now() - created_ > kNothingQueuedAfter;
+    const bots::HybridState* hs = bots::FindHybridState();
+    bool ready = !hs || hs->fill.load(std::memory_order_relaxed) != 4 || hs->n1_ready.load(std::memory_order_acquire);
+    if (compiling) {
+      compiled_at_ = {};
+      // A warm cache loads in seconds: say "Loading" until the build is clearly a long one.
+      if (clk::now() - created_ > kLongCompileAfter) saw_compile_ = true;
+    } else if (compiled_at_ == clk::time_point{}) {
+      compiled_at_ = clk::now();
+    }
+    if (!ready && !compiling && clk::now() - compiled_at_ > kN1ReadyTimeout) {
+      REXLOG_WARN("renderer hold: the new renderer did not report ready {} s after its shaders; showing the game",
+                  kN1ReadyTimeout.count());
+      ready = true;
+    }
+    if (finished && ready) {
+      if (saw_compile_ || shown_)
+        REXLOG_INFO("renderer hold: done after {:.1f} s",
+                    std::chrono::duration<double>(clk::now() - created_).count());
+      SetForeground(graphics, false);
+      Close();
+      return;
+    }
+    SetForeground(graphics, compiling);
+    if (ready) return;  // nothing to hide; waiting only to see whether anything gets queued
+
+    shown_ = true;
+    ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(1.0f);
+    if (ImGui::Begin("##bots_renderer_hold", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_NoNav)) {
+      const float width = std::min(460.0f, io.DisplaySize.x - 32.0f);
+      ImGui::SetCursorPos(ImVec2((io.DisplaySize.x - width) * 0.5f, io.DisplaySize.y * 0.4f));
+      ImGui::BeginGroup();
+      ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + width);
+      if (saw_compile_) {
+        ImGui::TextUnformatted("Preparing the renderer");
+        ImGui::Spacing();
+        ImGui::TextWrapped(
+            "Building the renderer's shaders for this graphics card. This happens on the first launch and after "
+            "some updates, and can take a few minutes. The game starts when it's done.");
+        ImGui::Spacing();
+        char overlay[64];
+        std::snprintf(overlay, sizeof(overlay), compiling ? "%u / %u" : "Loading", done, total);
+        ImGui::ProgressBar(compiling ? float(done) / float(total) : 1.0f, ImVec2(width, 0), overlay);
+      } else {
+        ImGui::TextUnformatted("Loading");
+      }
+      ImGui::PopTextWrapPos();
+      ImGui::EndGroup();
+    }
+    ImGui::End();
+  }
+
   void SetForeground(rex::system::IGraphicsSystem* graphics, bool foreground) {
     if (foreground == foreground_) return;
     foreground_ = foreground;
@@ -127,6 +201,8 @@ class ShaderProgressDialog : public rex::ui::ImGuiDialog {
 
   static constexpr std::chrono::milliseconds kShowAfter{750};
   static constexpr std::chrono::seconds kNothingQueuedAfter{20};
+  static constexpr std::chrono::seconds kN1ReadyTimeout{60};
+  static constexpr std::chrono::seconds kLongCompileAfter{15};
 
   // Edge-triggered View/Back on any pad. The game sees the press too; Back does nothing on the
   // title screen and menus that appear while compiling.
@@ -153,5 +229,8 @@ class ShaderProgressDialog : public rex::ui::ImGuiDialog {
   double demo_secs_ = 0;
   std::atomic<bool> backgrounded_ = false;  // set on the UI thread, read from input
   bool foreground_ = false;
+  bool hold_for_n1_ = false;  // the new renderer: no Play now, held until n1 draws the scene
+  bool saw_compile_ = false, shown_ = false;
+  std::chrono::steady_clock::time_point compiled_at_{};
   bool back_was_down_ = false;
 };
