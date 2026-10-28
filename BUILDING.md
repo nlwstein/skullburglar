@@ -79,6 +79,17 @@ tools/win-cross/build.sh   # D3D12, clang + xwin -> ~/bots/win/dist/bots-win64.z
 Running the Linux build needs a Vulkan GPU passed into the container (`--gpus all` and
 `NVIDIA_DRIVER_CAPABILITIES=all` for NVIDIA) and a display.
 
+## The n1 renderer
+
+`n1/` is a Rust workspace (the optional "n1" renderer, linked into the native renderer through the C ABI in
+`n1/n1ffi/include/n1ffi.h`). The desktop builds that include the native renderer (`-DBOTS_NATIVE_GFX=ON`) build it
+with cargo as part of the CMake build; install Rust with [rustup](https://rustup.rs) and `n1/rust-toolchain.toml`
+selects the version (the Windows cross build also needs `rustup target add x86_64-pc-windows-msvc`). Options:
+
+- `-DBOTS_N1=OFF` builds without n1 (no Rust needed). It is never built for Android, iOS and tvOS.
+- `-DBOTS_N1FFI_LIBRARY=<libn1ffi.a or n1ffi.lib>` links a prebuilt library instead and skips cargo.
+- `cd n1 && cargo test --release` runs its unit tests; they need no game data.
+
 ## iOS and tvOS (experimental)
 
 An iPhone, iPad or Apple TV build, with Xcode (not just its command line tools) and codegen output already in

@@ -26,3 +26,11 @@ RUN G=/usr/lib/gcc-14/lib/gcc/x86_64-linux-gnu/14 \
  && for t in llvm-ar llvm-ranlib llvm-nm llvm-objcopy llvm-strip; do ln -sf /usr/bin/$t-21 /usr/local/bin/$t; done
 
 ENV CC=/usr/local/bin/clang CXX=/usr/local/bin/clang++
+
+# Rust for n1 (n1/, built by the CMake build with cargo). The version is n1/rust-toolchain.toml's: keep them equal, or
+# the first cargo call in every job downloads the toolchain again. rustup's proxies go on PATH through /usr/local/bin.
+ARG RUST_VERSION=1.97.1
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain ${RUST_VERSION}  \
+ && for t in cargo rustc rustup; do ln -sf /opt/cargo/bin/$t /usr/local/bin/$t; done \
+ && chmod -R a+rwX /opt/rustup /opt/cargo

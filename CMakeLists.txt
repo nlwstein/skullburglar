@@ -269,11 +269,70 @@ if(REXSDK_DIR AND (NOT WIN32 OR REXGLUE_USE_VULKAN))
         endif()
         add_dependencies(bots rexgpu-native)
 
-        # Hybrid spike, fill 4 (src/gfx/vk/hybrid_fill.cpp): an external scene renderer linked into the plugin.
-        # BOTS_N1FFI_LIBRARY: its static library (libn1ffi.a); BOTS_N1FFI_INCLUDE_DIR: the directory with n1ffi.h.
-        set(BOTS_N1FFI_LIBRARY "" CACHE FILEPATH "Hybrid spike: n1 renderer static library")
-        set(BOTS_N1FFI_INCLUDE_DIR "" CACHE PATH "Hybrid spike: directory holding n1ffi.h")
-        if(BOTS_N1FFI_LIBRARY AND BOTS_N1FFI_INCLUDE_DIR)
+        # The n1 renderer (n1/, a Rust workspace; src/gfx/vk/hybrid_fill.cpp), linked into the plugin as a static
+        # library behind the C ABI in n1/n1ffi/include/n1ffi.h. On by default on the desktop platforms; the mobile
+        # builds never reach this block. The library is built here with cargo (release profile, `--locked`), or
+        # BOTS_N1FFI_LIBRARY names a prebuilt one (libn1ffi.a / n1ffi.lib), which skips cargo.
+        # BOTS_N1=OFF builds without n1.
+        option(BOTS_N1 "Build the n1 renderer (Rust, n1/) into the native renderer" ON)
+        set(BOTS_N1FFI_LIBRARY "" CACHE FILEPATH "Prebuilt n1 static library; skips the cargo build")
+        set(BOTS_N1FFI_INCLUDE_DIR "" CACHE PATH "Directory holding n1ffi.h (default: n1/n1ffi/include)")
+        if(BOTS_N1 AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME MATCHES "^(iOS|tvOS)$")
+            if(NOT BOTS_N1FFI_INCLUDE_DIR)
+                set(BOTS_N1FFI_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/n1/n1ffi/include)
+            endif()
+            if(NOT BOTS_N1FFI_LIBRARY)
+                # The Rust target for what this build produces. Left out when it is the host's own.
+                set(_n1_target "")
+                if(WIN32)
+                    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
+                        set(_n1_target aarch64-pc-windows-msvc)
+                    else()
+                        set(_n1_target x86_64-pc-windows-msvc)  # also the Linux -> Windows cross build
+                    endif()
+                    set(_n1_libname n1ffi.lib)
+                else()
+                    set(_n1_libname libn1ffi.a)
+                    if(APPLE)
+                        set(_n1_arch "${CMAKE_OSX_ARCHITECTURES}")
+                        if(NOT _n1_arch)
+                            set(_n1_arch "${CMAKE_HOST_SYSTEM_PROCESSOR}")
+                        endif()
+                        if(_n1_arch MATCHES "arm64")
+                            set(_n1_target aarch64-apple-darwin)
+                        else()
+                            set(_n1_target x86_64-apple-darwin)
+                        endif()
+                    endif()
+                endif()
+                find_program(BOTS_CARGO cargo HINTS "$ENV{CARGO_HOME}/bin" "$ENV{HOME}/.cargo/bin" "$ENV{USERPROFILE}/.cargo/bin"
+                    DOC "cargo, to build n1 (https://rustup.rs); n1/rust-toolchain.toml pins the toolchain")
+                if(NOT BOTS_CARGO)
+                    message(FATAL_ERROR "cargo not found: install Rust (https://rustup.rs), or configure with "
+                        "-DBOTS_N1=OFF (no n1 renderer) or -DBOTS_N1FFI_LIBRARY=<prebuilt n1ffi library>")
+                endif()
+                set(_n1_dir ${CMAKE_CURRENT_BINARY_DIR}/n1-cargo)
+                set(_n1_args build --release --locked --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/n1/Cargo.toml
+                    --target-dir ${_n1_dir} -p n1ffi --lib)
+                if(_n1_target)
+                    list(APPEND _n1_args --target ${_n1_target})
+                    set(BOTS_N1FFI_LIBRARY ${_n1_dir}/${_n1_target}/release/${_n1_libname})
+                else()
+                    set(BOTS_N1FFI_LIBRARY ${_n1_dir}/release/${_n1_libname})
+                endif()
+                set(_n1_env "")
+                if(APPLE AND CMAKE_OSX_DEPLOYMENT_TARGET)  # the object files carry the same minimum macOS as the game
+                    set(_n1_env MACOSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET})
+                endif()
+                # Always run: cargo is incremental and leaves the library alone when nothing changed, so the link
+                # only repeats when n1 does.
+                add_custom_target(n1ffi
+                    COMMAND ${CMAKE_COMMAND} -E env ${_n1_env} ${BOTS_CARGO} ${_n1_args}
+                    BYPRODUCTS ${BOTS_N1FFI_LIBRARY}
+                    COMMENT "Building n1 (cargo, release)"
+                    USES_TERMINAL VERBATIM)
+                add_dependencies(rexgpu-native n1ffi)
+            endif()
             target_compile_definitions(rexgpu-native PRIVATE BOTS_N1FFI=1)
             target_include_directories(rexgpu-native PRIVATE ${BOTS_N1FFI_INCLUDE_DIR})
             target_link_libraries(rexgpu-native PRIVATE ${BOTS_N1FFI_LIBRARY})

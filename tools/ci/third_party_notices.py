@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Write THIRD-PARTY-NOTICES.txt for a release package: this repo's license, the SDK's, and every SDK dependency's.
 
-    python3 tools/ci/third_party_notices.py <sdk dir> <out file>
+    python3 tools/ci/third_party_notices.py <sdk dir> <out file> [<Cargo.toml of the n1 workspace>]
 
 The texts come from the SDK checkout the release was built from (tools/ci/sdk.sh), so they match what was compiled.
+With the n1 workspace's manifest, the license texts of its Rust crates (from the cargo registry, so they must have been
+fetched: build first) are added, grouped by identical text.
 Over-inclusion is harmless; a missing notice is not, so a thirdparty/ directory with no license text that isn't in
 NOTES or SKIP fails the build.
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -75,12 +78,39 @@ def submodule(sdk: Path, name: str) -> tuple[str, str] | None:
     return (url, sha) if url and sha else None
 
 
+def rust_notices(manifest: Path) -> str:
+    """License texts of the crates.io dependencies in a Cargo workspace, one section per distinct text."""
+    meta = json.loads(subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--locked", "--manifest-path", str(manifest)],
+        capture_output=True, text=True, check=True).stdout)
+    by_text: dict[str, list[str]] = {}
+    nolicense = []
+    for pkg in sorted(meta["packages"], key=lambda p: p["name"]):
+        if not pkg["source"]:  # our own crates: covered by the Skullburglar license
+            continue
+        d = Path(pkg["manifest_path"]).parent
+        files = sorted(p for p in d.iterdir() if p.is_file() and LICENSE_NAME.match(p.name))
+        if not files:
+            nolicense.append(f"{pkg['name']} {pkg['version']} ({pkg['license']})")
+            continue
+        text = "\n\n".join(f"--- {f.name} ---\n\n{f.read_text(errors='replace').strip()}" for f in files)
+        by_text.setdefault(text, []).append(f"{pkg['name']} {pkg['version']}")
+    out = []
+    for text, crates in sorted(by_text.items(), key=lambda kv: kv[1][0]):
+        out.append(section("Rust crates: " + ", ".join(crates), text))
+    if nolicense:
+        # Crates whose package has no license file still name their SPDX license (MIT/Apache-2.0 family: the
+        # copyright line is the author's; the text is the standard one).
+        out.append(section("Rust crates without a license file in their package", "\n".join(nolicense)))
+    return "".join(out)
+
+
 def section(title: str, body: str) -> str:
     return f"{'=' * 78}\n{title}\n{'=' * 78}\n\n{body.strip()}\n\n"
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 4):
         print(__doc__.strip().splitlines()[2].strip(), file=sys.stderr)
         return 2
     sdk, out = Path(sys.argv[1]), Path(sys.argv[2])
@@ -116,6 +146,8 @@ def main() -> int:
     kenney = repo / "assets/prompts/LICENSE-kenney.txt"
     if kenney.is_file():
         parts.append(section("Kenney Input Prompts (button prompt icons)", kenney.read_text()))
+    if len(sys.argv) == 4:
+        parts.append(rust_notices(Path(sys.argv[3])))
     if missing:
         print(f"no license text found for thirdparty/{', thirdparty/'.join(missing)}: add it to NOTES or SKIP in "
               f"{Path(__file__).name}", file=sys.stderr)

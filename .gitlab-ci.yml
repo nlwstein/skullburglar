@@ -16,7 +16,8 @@
 # Linux and Windows run on a runner whose executor is Docker with the host's Docker socket: build jobs build their image
 # there (cached) and run it next to the job container, sharing its build directory. macOS needs an Apple silicon Mac:
 # a shell-executor runner tagged `macos` with the Xcode command line tools, cmake, ninja and ccache on its PATH, and
-# CCACHE_DIR set in its job environment.
+# CCACHE_DIR set in its job environment. n1 (n1/, Rust) builds in every desktop job: the images carry a Rust toolchain
+# (docker/*/Dockerfile), and on the Mac tools/ci/build.sh uses the user's rustup, installing it (user-local) if absent.
 #
 # Run a pipeline on main with BUILD=1 to build (and upload as skullburglar/<last>-dev.<sha>) without releasing.
 
@@ -48,6 +49,12 @@ checks:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
+# The desktop builds also run on branches named for n1 (n1-public): they build into skullburglar-branch/0.0.0-branch.<sha>.
+.desktop:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH =~ /(^|\/)n1-public$/
+
 .psr:
   image: python:3.12
   variables:
@@ -78,24 +85,29 @@ plan:
 
 .build:
   stage: build
-  extends: .main
-  needs: [plan]
+  extends: .desktop
+  needs:
+    - job: plan
+      optional: true
   image: docker:29-cli
   interruptible: true
   timeout: 4h
   script:
     - |
-      if [ "$RELEASE" != true ] && [ "${BUILD:-}" != 1 ]; then
+      if [ "$CI_COMMIT_BRANCH" != "$CI_DEFAULT_BRANCH" ]; then
+        export VERSION=0.0.0-branch.$CI_COMMIT_SHORT_SHA PACKAGE=skullburglar-branch
+      elif [ "$RELEASE" != true ] && [ "${BUILD:-}" != 1 ]; then
         echo "Nothing to release: not building."
         exit 0
       fi
+      PACKAGE=${PACKAGE:-skullburglar}
     - docker build -q -t "skullburglar-ci-$PLATFORM" "docker/$IMAGE"
     # This job's container, whose volumes (the checkout) the build container shares.
     - JOB=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.job.id=$CI_JOB_ID" --filter "label=com.gitlab.gitlab-runner.type=build")
     - test -n "$JOB"
     - >-
       docker run --rm --name "skullburglar-ci-$CI_JOB_ID" --volumes-from "$JOB" -w "$CI_PROJECT_DIR"
-      -e CI_JOB_TOKEN -e CI_SERVER_HOST -e CI_API_V4_URL -e CI_PROJECT_ID -e VERSION -e ASSETS_PROJECT -e UPDATE_URL
+      -e CI_JOB_TOKEN -e CI_SERVER_HOST -e CI_API_V4_URL -e CI_PROJECT_ID -e VERSION -e PACKAGE -e ASSETS_PROJECT -e UPDATE_URL
       -e CCACHE_DIR=/ccache -v "skullburglar-ccache-$PLATFORM:/ccache"
       "skullburglar-ci-$PLATFORM" tools/ci/gitlab_build.sh "$PLATFORM"
   after_script:
@@ -116,14 +128,18 @@ build:windows:
 
 build:macos:
   stage: build
-  extends: .main
-  needs: [plan]
+  extends: .desktop
+  needs:
+    - job: plan
+      optional: true
   tags: [macos]
   interruptible: true
   timeout: 4h
   script:
     - |
-      if [ "$RELEASE" != true ] && [ "${BUILD:-}" != 1 ]; then
+      if [ "$CI_COMMIT_BRANCH" != "$CI_DEFAULT_BRANCH" ]; then
+        export VERSION=0.0.0-branch.$CI_COMMIT_SHORT_SHA PACKAGE=skullburglar-branch
+      elif [ "$RELEASE" != true ] && [ "${BUILD:-}" != 1 ]; then
         echo "Nothing to release: not building."
         exit 0
       fi
