@@ -512,7 +512,8 @@ mod tests {
     use super::*;
 
     fn p3(n: &str) -> Option<Frame> {
-        let p = std::env::var("FEED_DIR").unwrap_or_else(|_| format!("{}/repos/bots-recomp/run/scenefeed/p3", std::env::var("HOME").unwrap()));
+        // Captured scene-feed frames (not in the repo): FEED_DIR names their directory; without it the tests skip.
+        let p = std::env::var("FEED_DIR").ok()?;
         Frame::load(&std::path::Path::new(&p).join(n)).ok()
     }
 
