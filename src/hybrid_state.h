@@ -135,6 +135,7 @@ struct HybridScene {
     uint32_t count, row_offset, row_floats;
     float origin[3];       // emitter location (UE3), for far-to-near ordering
     float transform[16];   // the component's LocalToWorld
+    float sort_origin[4];  // B-247: the component's Bounds.Origin (UE3), w = 1 when read: UE3's translucency sort key
   };
   // One SpeedTree placement (B-187): the component's LocalToWorld (scale and translation; the actor's rotation is
   // kept separately), the component's path (its baked vertex light), the tree asset's path and the rotation in UE3
