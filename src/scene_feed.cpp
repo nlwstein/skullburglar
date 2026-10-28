@@ -2611,6 +2611,8 @@ void Live(uint8_t* base) {
           sk.bone_count = n;
         }
       }
+      // B-265: the game updates only the current LOD's bones; n1 rebuilds the others (it draws LOD0).
+      sk.lod = g_off.predicted_lod.ok() ? uint32_t(std::max(0, int32_t(U32(c + g_off.predicted_lod.offset)))) : 0;
       if (g_off.bounds.ok()) {  // FBoxSphereBounds {Origin, BoxExtent, SphereRadius}
         const uint32_t b = c + g_off.bounds.offset;
         sk.bounds[0] = F32(b), sk.bounds[1] = F32(b + 4), sk.bounds[2] = F32(b + 8), sk.bounds[3] = F32(b + 24);
