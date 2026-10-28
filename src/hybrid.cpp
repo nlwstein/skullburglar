@@ -443,12 +443,10 @@ using namespace bots::hybrid;
 using bots::HybridCamera;
 using bots::HybridState;
 
-// BeginRenderingViewFamily(FCanvas* r3, FSceneViewFamily* r4), game thread.
+// The environment-driven mode (suppress, fill, dual) is read once. B-221: InstallOpenHooks reads it at start-up too, so
+// the renderer knows fill 4 from its first frame and can start n1 during the intro movies, not at the first scene.
 namespace bots::hybrid {
-void InstallOpenHooks();  // B-199, end of file
-}
-extern "C" void sub_82BB3230(PPCContext& __restrict ctx, uint8_t* base) {
-  bots::hybrid::InstallOpenHooks();
+void InitFromEnv() {
   static const bool init = [] {
     g_suppress = EnvInt("BOTS_HYBRID_SUPPRESS", 0);
     if (g_suppress) g_suppress_mode = g_suppress;
@@ -468,6 +466,16 @@ extern "C" void sub_82BB3230(PPCContext& __restrict ctx, uint8_t* base) {
     return true;
   }();
   (void)init;
+}
+}  // namespace bots::hybrid
+
+// BeginRenderingViewFamily(FCanvas* r3, FSceneViewFamily* r4), game thread.
+namespace bots::hybrid {
+void InstallOpenHooks();  // B-199, end of file
+}
+extern "C" void sub_82BB3230(PPCContext& __restrict ctx, uint8_t* base) {
+  bots::hybrid::InstallOpenHooks();
+  bots::hybrid::InitFromEnv();
   const auto now = std::chrono::steady_clock::now();
   if (g_ab_seconds > 0) {
     if (g_ab_next == std::chrono::steady_clock::time_point{}) g_ab_next = now + std::chrono::seconds(g_ab_seconds);
@@ -700,6 +708,9 @@ void NtCreateFileHook(PPCContext& __restrict ctx, uint8_t* base) {
 // From OnPostLoadXexImage (before the guest runs), and again from the first game-thread hook in case the dispatch
 // table wasn't ready then. Installs once.
 void InstallOpenHooks() {
+  // B-221: the mode comes from the environment, so it is known now. BOTS_N1_BOOT_SPREAD=0: read at the first scene, as before.
+  static const bool early = EnvInt("BOTS_N1_BOOT_SPREAD", 1) != 0;
+  if (early) InitFromEnv();
   static std::atomic<bool> installed{false};
   static std::mutex mutex;
   if (installed.load(std::memory_order_acquire)) return;

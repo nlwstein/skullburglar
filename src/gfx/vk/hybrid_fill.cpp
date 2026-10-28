@@ -157,6 +157,11 @@ struct N1Host {
   bool any_scene = false;
   uint32_t packages = 0, holds = 0;
   double load_ms = 4, hold_s = 30, gap_s = 0.5;
+  // B-221: the handover to n1 (HybridState::n1_ready) waits, up to `ready_wait_s` after the startup step, for the
+  // front-end preload to drain, so the title is never frozen by the level-resume hold. BOTS_N1_BOOT_SPREAD=0: no wait.
+  double ready_wait_s = 30;
+  bool step_done = false, ready_set = false;
+  std::chrono::steady_clock::time_point step_done_at{};
 };
 
 // Folds the load counters' change since the last call into the frame note.
@@ -212,6 +217,7 @@ void* Renderer::EnsureN1(VkFormat format) {
   host->budget = uint32_t(std::atoi(EnvOr("BOTS_N1_BUDGET", "8")));
   host->load_ms = std::atof(EnvOr("BOTS_N1_LOAD_MS", "4"));
   host->hold_s = std::atof(EnvOr("BOTS_N1_PRELOAD_HOLD_S", "30"));
+  host->ready_wait_s = std::atoi(EnvOr("BOTS_N1_BOOT_SPREAD", "1")) != 0 ? std::atof(EnvOr("BOTS_N1_BOOT_WAIT_S", "30")) : 0;
   host->log_seconds = std::atof(EnvOr("BOTS_N1_LOG", "5"));
   N1Init init{};
   init.get_instance_proc_addr = device_->vulkan_instance()->functions().vkGetInstanceProcAddr;
@@ -234,6 +240,31 @@ void* Renderer::EnsureN1(VkFormat format) {
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), int(format));
   }
   return host;
+}
+
+// B-221: tells the game thread that n1 draws the scene from here (HybridState::n1_ready). With the startup step done,
+// it still waits (up to BOTS_N1_BOOT_WAIT_S, the port drawing the scene meanwhile) while n1 has front-end loads to
+// finish: n1's first scene frame holds the level resume until they are in, and at the title that is a frozen screen.
+// The loads run in the frames the port draws (PumpN1Uploads), the way they do behind a loading screen.
+static void MaybeSetN1Ready(N1Host* host) {
+  HybridState* hs = FindHybridState();
+  if (!hs || host->ready_set) return;
+  const double waited =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - host->step_done_at).count();
+  if (host->ready_wait_s > 0 && waited < host->ready_wait_s) {
+    N1Stats st{};
+    n1_load_stats(host->r, &st);
+    bool queued;
+    {
+      std::lock_guard lock(hs->package_mutex);
+      queued = !hs->packages.empty();
+    }
+    if (queued || st.preload_pending || st.copies_pending || st.preload_scanning) return;
+  }
+  host->ready_set = true;
+  if (!hs->n1_ready.exchange(1, std::memory_order_release))
+    REXLOG_INFO("hybrid n1: ready: n1 draws the scene from here (front-end preload waited {:.1f} s after the startup "
+                "step)", waited);
 }
 
 // The startup step's share of the warm-up (renderer.h warmup_total/done): starts it once the hybrid scene is on, then
@@ -262,6 +293,7 @@ void Renderer::PumpN1Warmup() {
                     port ? "the port draws the scene" : "n1 draws what it has (BOTS_N1_PORT_UNTIL_READY=0)");
     }
   }
+  if (host && host->r && host->step_done && !host->ready_set) MaybeSetN1Ready(host);
   if (!host || !host->r || host->precompile_logged) return;
   uint32_t done = 0, total = 0;
   const uint32_t state = n1_precompile_progress(host->r, &done, &total);
@@ -286,8 +318,9 @@ void Renderer::PumpN1Warmup() {
     REXLOG_INFO("hybrid n1: startup step done in {:.1f} s",
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - host->precompile_started).count());
     // B-243: n1 can draw every frame complete from here; the game stops drawing its own scene (hybrid.cpp).
-    if (HybridState* hs = FindHybridState(); hs && !hs->n1_ready.exchange(1, std::memory_order_release))
-      REXLOG_INFO("hybrid n1: ready: n1 draws the scene from here");
+    // B-221: once the front-end preload is in as well (MaybeSetN1Ready, every frame from here).
+    host->step_done = true, host->step_done_at = std::chrono::steady_clock::now();
+    MaybeSetN1Ready(host);
   }
 }
 
