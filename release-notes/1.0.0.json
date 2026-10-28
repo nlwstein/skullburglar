@@ -1,0 +1,9 @@
+[
+ "Skullburglar 1.0: a new renderer now draws the game's 3D world. It runs 2-3 times faster on Intel laptop graphics and up to 1.9 times faster on the Steam Deck, with far less stutter, and looks like the original.",
+ "The first launch after updating spends a few minutes preparing the new renderer for your machine. You can play meanwhile: the game draws with the pre-1.0 renderer until the new one is ready.",
+ "If the new renderer doesn't work on your graphics card, choose \"Pre-1.0 renderer (deprecated)\" as the Renderer in the launcher, and please open an issue on GitHub so it can be fixed. If the new renderer can't start at all, the game says why and how to switch.",
+ "The emulated Xbox 360 GPU option is gone from the launcher.",
+ "The title screen no longer freezes for a few seconds right after the game starts.",
+ "A short hitch when a level first appears is gone, and so is a short stall about half a second into each level.",
+ "On Windows the screen no longer turns off while you play with a controller."
+]
