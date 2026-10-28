@@ -200,6 +200,11 @@ def main():
         record["clock"] = mode
         print(f"clock: {mode} time, load-secs {load_secs:g}, gap {gap:g}", flush=True)
         time.sleep(5)
+        if clock:
+            # B-067: a LoadChapter sent while the title level (FcStart) is still loading crashes the game (guest null
+            # write). Slow machines (the T480 takes ~45 s) are still loading it 5 s after EnableCheats.
+            if not clock.wait_front_end(alive):
+                print("    front end: not settled after 300 s; going on", flush=True)
         for cid, note, rnd in tour:
             if not alive():
                 raise RuntimeError("the game exited")
@@ -390,6 +395,16 @@ class GameClock:
     def phase(self):
         j = self.line()
         return j.get("phase") if j else None
+
+    def wait_front_end(self, alive, settle=10.0, timeout=300.0):
+        """Wait until the game has sat in the title screen or a menu for `settle` seconds (B-067)."""
+        end = time.time() + timeout
+        while time.time() < end and alive():
+            j = self.line()
+            if j and j.get("phase") in ("front_end", "menu") and float(j.get("phase_s") or 0) >= settle:
+                return True
+            time.sleep(1)
+        return False
 
     def wait_in_play(self, alive, timeout):
         """Until the player is in play (not a movie, fade-in cutscene or loading): Pause freezes whatever is on screen,
