@@ -132,6 +132,7 @@ struct HybridScene {
     uint32_t mat_offset, mat_count;    // range in `materials`
     float bounds[4];                   // world bounding sphere: centre, radius
     const char* env;                   // DynamicLightEnvironmentComponent path, or null
+    uint32_t lod = 0;                  // PredictedLODLevel: SpaceBases holds only this LOD's RequiredBones (B-265)
   };
   // One particle emitter instance (sprite or mesh) with its live particles in `particle_rows`: `count` rows of
   // `row_floats` floats from `row_offset`, each [location 3, old_location 3, size 3, rotation, colour 4,

@@ -622,6 +622,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   n1_set_decals(host->r, host->decals.data(), uint32_t(host->decals.size()), host->scene.decal_receivers.data(),
                 uint32_t(host->scene.decal_receivers.size()));
   // Skinned primitives: bones are passed as published (n1 rebuilds unset ones from the reference pose).
+  static_assert(sizeof(N1SkelInstance) == 108, "N1SkelInstance layout (n1ffi.h with the B-265 lod field)");
   host->skeletal.clear();
   host->skel_materials.clear();
   for (const HybridScene::Skel& in : host->scene.skeletal) {
@@ -631,6 +632,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     out.mesh = Handle(host->skel_meshes, in.mesh, host->r, n1_skel_mesh);
     out.env = Handle(host->envs, in.env, host->r, n1_env);
     out.bone_offset = in.bone_offset, out.bone_count = in.bone_count;
+    out.lod = in.lod;  // B-265: n1 rebuilds bones outside this LOD (BOTS_N1_LOD_BONES=0: off)
     out.mat_offset = uint32_t(host->skel_materials.size());
     out.mat_count = in.mat_count;
     for (uint32_t i = 0; i < in.mat_count; ++i)
