@@ -18,7 +18,8 @@ version.json:
 
 Release notes are the feat/fix/perf commits since LAST, newest first. A commit's `Release-note:` line is its note
 (written for players); `Release-note: none` leaves it out, as do commits scoped `ci` without one. Otherwise the note is
-the subject without its type. --notes-file (a JSON list of strings) replaces them.
+the subject without its type. --notes-file (a JSON list of strings) replaces them, and so does
+release-notes/<VERSION>.json in the tree when it exists (hand-written notes for a release with many internal commits).
 
 Env: VERSION, LAST (optional), DOWNLOADS_BUCKET, DOWNLOADS_PAGE (the site's address), CF_API_TOKEN (with R2 edit),
 CF_ACCOUNT_ID; the registry is read with CI_JOB_TOKEN in CI, else GITLAB_TOKEN; CI_API_V4_URL and CI_PROJECT_ID.
@@ -144,6 +145,9 @@ def main():
     args = ap.parse_args()
     s3 = r2()
     ref = release_ref()
+    notes_file = args.notes_file
+    if not notes_file and os.path.exists(f"release-notes/{VERSION}.json"):
+        notes_file = f"release-notes/{VERSION}.json"
 
     downloads = {}
     with tempfile.TemporaryDirectory() as tmp:
@@ -168,7 +172,7 @@ def main():
     entry = {
         "version": VERSION,
         "date": git("show", "-s", "--format=%cs", ref).strip(),
-        "notes": json.load(open(args.notes_file)) if args.notes_file else notes(ref),
+        "notes": json.load(open(notes_file)) if notes_file else notes(ref),
         "available": True,
         "downloads": downloads,
     }

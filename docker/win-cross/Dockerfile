@@ -22,3 +22,13 @@ RUN curl -fsSL -o /tmp/xwin.tgz \
  && chmod -R a+rwX /w/xwin
 
 ENV CC=clang CXX=clang++
+
+# Rust for n1 (n1/, built by the CMake build with cargo). The version is n1/rust-toolchain.toml's: keep them equal, or
+# the first cargo call in every job downloads the toolchain again. rustup's proxies go on PATH through /usr/local/bin.
+ARG RUST_VERSION=1.97.1
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain ${RUST_VERSION} -t x86_64-pc-windows-msvc \
+ && for t in cargo rustc rustup; do ln -sf /opt/cargo/bin/$t /usr/local/bin/$t; done \
+ && chmod -R a+rwX /opt/rustup /opt/cargo
+# Host build scripts and proc macros link with `cc`.
+RUN ln -sf /usr/bin/clang /usr/local/bin/cc

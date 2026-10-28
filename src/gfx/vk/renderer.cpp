@@ -498,6 +498,7 @@ void Renderer::ProcessInvalidations() {
 }
 
 void Renderer::EndFrame() {
+  capture_frame_ = false;  // B-220: a capture frame's scene marker that never came (it always should) ends it here
   // Frames in flight: frame N - 2 must be done before frame N is presented, as when kFramesInFlight slots with one
   // submission per frame were the only limit.
   frame_ends_.push_back(stats_.flushes);
@@ -509,6 +510,7 @@ void Renderer::EndFrame() {
     }
   }
   PumpWarmup();
+  PumpN1Uploads();
   if (++frame_ % 64) return;
   const auto now = std::chrono::steady_clock::now();
   const std::chrono::seconds idle_time(texture_idle_seconds_);
@@ -858,6 +860,13 @@ void Renderer::EndRendering(const char* why) {
 
 void Renderer::Flush() {
   if (!recording_) return;
+  if (scene_mid_draw_) {  // B-218: the draw being recorded would bind the old submission's sets and ring data
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      REXLOG_ERROR("gfx native: Flush inside a draw (the hybrid scene fill); B-218");
+    }
+  }
   EndRendering("flush");
   GpuMark(kGpuOther, true);  // closes the last span
   if (ring_used_) vmaFlushAllocation(allocator_, ring_.allocation, 0, ring_used_);
@@ -1054,6 +1063,13 @@ Renderer::Image* Renderer::ResolveTexture(uint32_t address, uint32_t format, uin
 void Renderer::OnDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps, const Draw& draw) {
   if (!ok_) return;
   ScopedMicros time(stats_.draw_us);
+  if (capture_frame_) {
+    // Counted but not drawn: an occlusion query over it is then inexact and answers "visible", as the hook does for
+    // suppressed frames, so the next capture frame's culling still draws the trees.
+    if (occlusion_open_ && regs.Get<rg::reg::RB_MODECONTROL>().edram_mode != xe::EdramMode::kCopy) ++occlusion_draws_;
+    CaptureFrameDraw(regs, vs, ps, draw);
+    return;
+  }
   if (regs.Get<rg::reg::RB_MODECONTROL>().edram_mode == xe::EdramMode::kCopy) {
     Resolve(regs);
     return;
@@ -1120,6 +1136,19 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
   if (!source) {
     ++stats_.dropped_resolves;
     return;
+  }
+  // B-210: a frame whose skipped scene no later draw reached (a level fading in with the HUD off: the game draws
+  // nothing into the back buffer after its scene) gets the scene at the back buffer's resolve, before the copy. Without
+  // this, n1 drew nothing for ~0.5 s at every level start and the fade-in showed black
+  // (BOTS_HYBRID_FILL_AT_RESOLVE=0: off).
+  static const bool fill_at_resolve = [] {
+    const char* v = std::getenv("BOTS_HYBRID_FILL_AT_RESOLVE");
+    return !v || std::atoi(v) != 0;
+  }();
+  if (scene_fill_seq_ && fill_at_resolve && !depth_source) {
+    if (DrawSceneFill(*source)) ++stats_.fills_at_resolve;
+    BeginCommands(kGpuResolve);
+    EndRendering("resolve");
   }
   auto clamp_rect = [&](const Image& image, int32_t& w, int32_t& h) {
     w = std::min(x1, int32_t(image.width)) - x0;

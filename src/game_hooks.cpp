@@ -41,9 +41,15 @@
 #include "coop.h"
 #include "widescreen.h"
 #include "gfx/capture.h"
+#include "instr.h"
 #include "input_math.h"
 #include "mnk_input.h"
 #include "prompt_state.h"
+#include "scene_feed.h"
+
+namespace bots::hybrid {
+bool Command(const std::string& cmd);  // hybrid.cpp
+}
 
 // Controller settings (launcher, Controller section). Defaults are the game as shipped.
 REXCVAR_DEFINE_DOUBLE(right_stick_deadzone, 20.0, "bots/Input",
@@ -59,6 +65,16 @@ REXCVAR_DEFINE_STRING(stick_response, "original", "bots/Input",
 REXCVAR_DEFINE_BOOL(vibration, true, "bots/Input", "Controller vibration (rumble)");
 
 extern "C" void __imp__sub_82E1AC28(PPCContext& __restrict ctx, uint8_t* base);
+namespace bots::slowframe {
+void Tick();  // slow_frame.cpp: BOTS_SLOW_SAMPLE
+}
+namespace bots::gc {
+void Tick();  // gc.cpp: GC timing and slow-frame attribution
+}
+namespace bots::levelstream {
+void Tick(uint8_t* base);  // level_stream.cpp: BOTS_STREAM_LOG=2 streaming-level dump
+}
+
 extern "C" void __imp__sub_823598E0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_823501E0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base);
@@ -272,7 +288,7 @@ ExecState* Exec() {
   static ExecState* state = [] {
     const char* timed = std::getenv("BOTS_EXEC");
     const char* file = std::getenv("BOTS_EXEC_FILE");
-    if (!(timed && *timed) && !(file && *file)) return static_cast<ExecState*>(nullptr);
+    if (!(timed && *timed) && !(file && *file) && !bots::instr::Enabled()) return static_cast<ExecState*>(nullptr);
     auto* st = new ExecState;
     if (file) st->file = file;
     for (std::string list = timed ? timed : "", item; !list.empty();) {
@@ -291,6 +307,7 @@ void RunPlayerCommand(PPCContext& ctx, uint8_t* base, ExecState& st, uint32_t pl
                       bool log = true);
 
 void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std::string& cmd) {
+  bots::instr::NoteCommand(cmd);
   // "peek <hex addr> [count]": log guest words (pointers the game fills in at runtime).
   if (cmd.rfind("peek ", 0) == 0) {
     char* end = nullptr;
@@ -299,7 +316,7 @@ void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std:
     for (int i = 0; i < count; ++i, addr += 4) REXLOG_INFO("BOTS_EXEC peek {:08X} = {:08X}", addr, LoadU32(base, addr));
     return;
   }
-  if (split_screen::Command(cmd) || debug::Command(base, cmd)) return;
+  if (split_screen::Command(cmd) || debug::Command(base, cmd) || bots::scenefeed::Command(base, cmd)) return;
   if (!st.buffer) st.buffer = rex::system::kernel_memory()->SystemHeapAlloc(0x400);
   ctx.r3.u64 = LoadU32(base, kGEngine);
   sub_823501E0(ctx, base);  // Cast<UGameEngine>
@@ -368,6 +385,14 @@ extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
   }
   split_screen::Poll(ctx, base, user, ctx.r3.u32 == 0 ? state : 0);
   if (split_screen::OffGameThread()) return;
+  if (user == 0) {
+    bots::slowframe::Tick();
+    bots::gc::Tick();
+    bots::levelstream::Tick(base);
+    bots::scenefeed::Tick(base);
+    if (!bots::scenefeed::LiveAtDraw()) bots::scenefeed::Live(base);
+    bots::instr::GameTick(ctx, base);
+  }
   ExecState* st = Exec();
   if (!st) return;
   auto now = std::chrono::steady_clock::now();
@@ -388,6 +413,7 @@ extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
       std::ofstream(st->file, std::ios::trunc);
     }
   }
+  if (user == 0) bots::instr::TakeCommands(run);
   if (run.empty()) return;
   const PPCRegister r3 = ctx.r3;  // keep the poll's return value
   for (auto& cmd : run) RunConsoleCommand(ctx, base, *st, cmd);
@@ -1591,11 +1617,13 @@ void FilterPad(uint8_t* base, uint32_t state) {
 extern "C" void sub_82E2EB38(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_82E2EB38(ctx, base);
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) kbm->SetPaused(true);
+  bots::instr::SetPaused(true);
 }
 
 extern "C" void sub_82E2EBB8(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_82E2EBB8(ctx, base);
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) kbm->SetPaused(false);
+  bots::instr::SetPaused(false);
 }
 
 // Whether the local player is driving: GEngine +0x2D8 GamePlayers[0] (LocalPlayer) +0x40 Actor (C1PlayerController)
@@ -2538,6 +2566,7 @@ bool Command(uint8_t* base, const std::string& cmd) {
   }
   if (cmd == "renderdiff") return render_diff = true;
   if (cmd == "gfxcapture") return bots::gfx::RequestCapture(), true;
+  if (cmd.rfind("hybrid ", 0) == 0) return bots::hybrid::Command(cmd);
   // "mkexec <function>": flag a function of the local players' controller or pawn classes exec (UFunction +0x94
   // FunctionFlags, FUNC_Exec 0x200) so tests can run it from the console, e.g. "p2:GotoStateReviving".
   if (cmd.rfind("mkexec ", 0) == 0) {
@@ -2661,6 +2690,7 @@ extern "C" void sub_8281D990(PPCContext& __restrict ctx, uint8_t* base) {
 
 extern "C" void sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_82E2E860(ctx, base);
+  bots::instr::HudTick();
   split_screen::Tick(base);
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) {
     kbm->NoteHudTick();
@@ -2886,6 +2916,7 @@ extern "C" void sub_82FA6250(PPCContext& __restrict ctx, uint8_t* base) {
 extern "C" void sub_827CF678(PPCContext& __restrict ctx, uint8_t* base) {
   const uint32_t engine = ctx.r3.u32, type = ctx.r5.u32;
   __imp__sub_827CF678(ctx, base);
+  if (bots::instr::Enabled()) bots::instr::Travel(FStr(base, engine + 0x46C));
   if (TravelTrace())
     REXLOG_INFO("travel trace: SetClientTravel -> TravelURL '{}' type {}", FStr(base, engine + 0x46C), type);
 }
@@ -2920,7 +2951,9 @@ extern "C" void sub_827DA828(PPCContext& __restrict ctx, uint8_t* base) {
   if (TravelTrace())
     REXLOG_INFO("travel trace: Browse enter, TravelURL '{}' LastURL map '{}'", FStr(base, engine + 0x46C),
                 FStr(base, engine + 0x3D8 + 0x1C));
+  if (bots::instr::Enabled()) bots::instr::BrowseBegin(FStr(base, engine + 0x46C));
   __imp__sub_827DA828(ctx, base);
+  bots::instr::BrowseEnd();
   if (TravelTrace())
     REXLOG_INFO("travel trace: Browse -> {} , TravelURL '{}'", ctx.r3.u32, FStr(base, engine + 0x46C));
 }

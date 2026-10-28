@@ -256,6 +256,7 @@ void MouseKeyboardDriver::OnMouseMove(rex::ui::MouseEvent& e) {
     }
     mouse_dx_ += dx;
     mouse_dy_ += dy;
+    if (std::abs(dx) + std::abs(dy) >= 3) human_events_.fetch_add(1, std::memory_order_relaxed);
     moved_ += std::abs(dx) + std::abs(dy);
   }
   if (moved_ > 40) {  // a deliberate move, not a nudged desk
@@ -298,6 +299,7 @@ void MouseKeyboardDriver::OnMouseWheel(rex::ui::MouseEvent& e) {
   accum += e.scroll_y();
   const int32_t detent = rex::ui::MouseEvent::kScrollPerDetent;
   if (std::abs(accum) < detent) return;
+  NoteHuman();
   std::lock_guard lock(mutex_);
   wheel_until_[accum > 0 ? 0 : 1] = std::chrono::steady_clock::now() + kWheelTap;
   accum = 0;

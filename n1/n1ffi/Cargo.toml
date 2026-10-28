@@ -1,0 +1,22 @@
+[package]
+name = "n1ffi"
+version = "0.0.0"
+edition = "2024"
+description = "C ABI for the live UE3 scene renderer: records into a host-owned Vulkan command buffer (ash)"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+anyhow = "1"
+ash = { version = "0.38", default-features = false, features = ["loaded", "debug", "std"] }
+gpu-allocator = { version = "0.28", default-features = false, features = ["std", "vulkan"] }
+assetdb = { path = "../assetdb" }
+scenekit = { path = "../scenekit" }
+scenefmt = { path = "../scenefmt" }
+bytemuck = "1.25"
+matdef = { path = "../matdef" }
+lightfeed = { path = "../lightfeed" }
+serde_json = "1"
+naga = { version = "30.0.1", features = ["wgsl-in", "spv-out"] }
+

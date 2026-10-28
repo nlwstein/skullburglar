@@ -1,0 +1,35 @@
+# Boot to the main menu, wait for the shader step, then load three chapters and measure each after it has settled
+# (sampling starts SETTLE seconds into play, so streaming and first-use pipeline compiles are behind it).
+# After each sample, a dual render (port + n1) for parity.
+# No timed input: every step waits on the game's reported state; `until` dismisses dialogs on the way (B, cancel).
+#   botsctl.py run scenarios/three_chapters.txt --out DIR [--set CH1=.. --set CH2=.. --set CH3=..] [--set SECS=90]
+default CH1=11010
+default CH2=61465
+default CH3=51000
+default SECS=90
+default SETTLE=30
+mark start
+wait -t 1800 phase==front_end || phase==movie || phase==dialog || phase==menu
+press_until "game.scenes~=MainMenu" START every=1000 timeout=120
+dismiss
+wait -t 1800 precompile.done==1
+mark precompile_done
+
+exec LoadChapter ${CH1}
+until "game.chapter==${CH1} && phase==in_play && phase_s>=${SETTLE}" timeout=600
+mark ch1_in_play
+sample ${SECS} shot_every=45 name=ch1
+dualshot ch1-dual
+
+exec LoadChapter ${CH2}
+until "game.chapter==${CH2} && phase==in_play && phase_s>=${SETTLE}" timeout=600
+mark ch2_in_play
+sample ${SECS} shot_every=45 name=ch2
+dualshot ch2-dual
+
+exec LoadChapter ${CH3}
+until "game.chapter==${CH3} && phase==in_play && phase_s>=${SETTLE}" timeout=600
+mark ch3_in_play
+sample ${SECS} shot_every=45 name=ch3
+dualshot ch3-dual
+mark end

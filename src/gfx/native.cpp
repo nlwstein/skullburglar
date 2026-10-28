@@ -33,30 +33,31 @@
 #include <rex/system/xex_module.h>
 #include <rex/system/xmemory.h>
 #include <rex/ui/vulkan/presenter.h>
+
+#include "../instr_state.h"
 #include <rex/ui/vulkan/provider.h>
 
+#include "../hybrid_state.h"
 #include "host_stats.h"
+#include "start_failure.h"
 #include "pm4.h"
 #include "upk.h"
 #include "vk/memory_sync.h"
 #include "vk/renderer.h"
 
 namespace bots::gfx {
-namespace {
-
-namespace rg = rex::graphics;
-namespace xe = rex::graphics::xenos;
 
 // The renderer couldn't start: tell the player which GPU and why (the reason is in the log too), with the log one
 // click away, then quit. Nothing else would show: without a renderer the window stays black. BOTS_NO_DIALOGS=1
 // skips the box (unattended runs).
-[[noreturn]] void ShowStartFailure(const std::string& gpu, const std::string& reason) {
+[[noreturn]] void ShowStartFailure(const std::string& gpu, const std::string& reason, const std::string& advice) {
   const std::string log = rex::cvar::GetFlagByName("log_file");
   if (const char* v = std::getenv("BOTS_NO_DIALOGS"); !(v && *v == '1')) {
     std::string text = "Skullburglar couldn't start its graphics.\n\nGraphics card: " + gpu + "\nReason: " + reason +
-                       "\n\nThis usually means the graphics driver is out of date, or the game picked a different "
-                       "graphics card than you meant it to (for example the one built into the processor). Updating "
-                       "the driver from the maker's website often fixes it.";
+                       (advice.empty() ? "\n\nThis usually means the graphics driver is out of date, or the game picked a "
+                                         "different graphics card than you meant it to (for example the one built into "
+                                         "the processor). Updating the driver from the maker's website often fixes it."
+                                       : "\n\n" + advice);
     if (!log.empty()) text += "\n\nThe log, with more detail, is at:\n" + log;
     const SDL_MessageBoxButtonData buttons[] = {{SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Open log"},
                                                 {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Quit"}};
@@ -78,6 +79,11 @@ namespace xe = rex::graphics::xenos;
   std::_Exit(1);
 }
 
+namespace {
+
+namespace rg = rex::graphics;
+namespace xe = rex::graphics::xenos;
+
 class NativeCommandProcessor final : public rg::CommandProcessor {
  public:
   NativeCommandProcessor(rg::GraphicsSystem* graphics_system, rex::system::KernelState* kernel_state)
@@ -89,6 +95,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     renderer_->EndFrame();
     PublishWarmup();
     HoldForWarmup();
+    if (InstrState* is = FindInstrState()) PublishInstr(*is, frontbuffer_width, frontbuffer_height);
     ++frames_;
     // BOTS_GFX_NO_PRESENT=1 (benchmarking): render everything but never hand the frame to the presenter. Under a
     // GPU-less X server (Xvfb) the Vulkan surface falls back to xcb_put_image and presenting costs more than the
@@ -251,6 +258,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
           }
           return package->second->Read(offset, size, out);
         });
+    renderer_->SetN1Dirs(n1_cooked_dir(), n1_cache_dir_);
     if (!pipeline_cache_path_.empty()) renderer_->LoadPipelineCache(pipeline_cache_path_);
     PublishWarmup();
     const char* occlusion = std::getenv("BOTS_GFX_OCCLUSION");
@@ -269,7 +277,9 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   // Runs on the command processor thread, or before the context is set up while the processor is paused.
   void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id, bool blocking) override {
     pipeline_cache_path_ = cache_root / "native" / fmt::format("{:08X}.pipelines.bin", title_id);
+    n1_cache_dir_ = (cache_root / "n1").string();
     if (renderer_) {
+      renderer_->SetN1Dirs(n1_cooked_dir(), n1_cache_dir_);
       renderer_->LoadPipelineCache(pipeline_cache_path_);
       PublishWarmup();
     }
@@ -331,6 +341,20 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   void PublishWarmup() {
     shader_precompile_total_.store(uint32_t(renderer_->warmup_total()), std::memory_order_relaxed);
     shader_precompile_done_.store(uint32_t(renderer_->warmup_done()), std::memory_order_relaxed);
+    if (InstrState* is = FindInstrState()) {
+      is->warm_total.store(uint32_t(renderer_->port_warmup_total()), std::memory_order_relaxed);
+      is->warm_done.store(uint32_t(renderer_->port_warmup_done()), std::memory_order_relaxed);
+      if (!pipeline_cache_path_.empty()) is->warm_loaded.store(1, std::memory_order_relaxed);
+    }
+  }
+
+  // Test instrumentation (instr_state.h): the renderer's counters, once per swap.
+  void PublishInstr(InstrState& is, uint32_t w, uint32_t h) {
+    constexpr auto r = std::memory_order_relaxed;
+    const auto& st = renderer_->stats();
+    is.draws.store(st.draws, r), is.presents.store(st.presents, r), is.pending_draws.store(st.pending_draws, r);
+    is.live_pipelines.store(st.live_pipelines, r), is.failed_pipeline_draws.store(st.failed_pipeline_draws, r);
+    is.render_w.store(w, r), is.render_h.store(h, r);
   }
 
   // While the panel is in the foreground (the player is waiting on it, not playing) the guest stays at this swap
@@ -359,8 +383,12 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     FrameMark now = MarkFrame();
     const std::string load_max_what = renderer_->texture_load_max_what();  // before the take: read with it
     const uint64_t load_max_us = renderer_->TakeTextureLoadMaxUs();
+    const vk::Renderer::N1FrameNote n1 = renderer_->TakeN1FrameNote();
+    if (n1.held) frame_marked_ = false, frame_avg_ms_ = 0;  // the level preload hold: not playable yet, not a hitch
     if (frame_marked_) {
       const double ms = std::chrono::duration<double, std::milli>(now.time - frame_mark_.time).count();
+      if (InstrState* is = FindInstrState()) is->Frame(ms);
+      LogN1Hitch(ms, now, n1);
       static constexpr double kEdges[] = {20, 25, 33.4, 50, 100, 250};
       size_t bucket = 0;
       while (bucket < std::size(kEdges) && ms > kEdges[bucket]) ++bucket;
@@ -379,6 +407,56 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     }
     frame_mark_ = std::move(now);
     frame_marked_ = true;
+  }
+
+  // B-199: every frame over BOTS_N1_HITCH_MS (33.4) within BOTS_N1_HITCH_WINDOW_S (60; 0: all run) of n1 resuming
+  // after a gap (level start, end of a loading screen), with its likely cause. No relative test: at a level start
+  // every slow frame counts. At most 2000 lines.
+  void LogN1Hitch(double ms, const FrameMark& now, const vk::Renderer::N1FrameNote& n1) {
+    static const double limit = [] {
+      const char* v = std::getenv("BOTS_N1_HITCH_MS");
+      return v && *v ? std::atof(v) : 33.4;
+    }();
+    static const double window = [] {
+      const char* v = std::getenv("BOTS_N1_HITCH_WINDOW_S");
+      return v && *v ? std::atof(v) : 60.0;
+    }();
+    const double since = renderer_->n1_seconds_since_resume();
+    if (limit <= 0 || ms <= limit || since < 0 || (window > 0 && since > window) || n1_hitch_lines_ >= 2000) return;
+    ++n1_hitch_lines_;
+    const auto& a = frame_mark_.stats;
+    const auto& b = now.stats;
+    auto t = [](uint64_t from, uint64_t to) { return double(to - from) / 1000.0; };
+    const double n1_load = n1.apply_ms + n1.upload_ms;
+    const double port_tex = t(a.texture_us, b.texture_us), gpu_wait = t(a.wait_us, b.wait_us);
+    const double idle = t(frame_mark_.idle_us, now.idle_us);
+    const char* cause = "other";
+    if (n1.tree_capture) {
+      cause = "tree capture";
+    } else if (n1_load >= 8 || (n1.applied && n1_load >= 0.25 * ms)) {
+      cause = n1.lazy ? "n1 load (lazy)" : "n1 load (preloaded)";
+    } else if (n1.late_pipelines || n1.late_shaders || n1.draws_no_pipe || b.pending_draws != a.pending_draws ||
+               b.live_pipelines != a.live_pipelines) {
+      cause = "pipeline";
+    } else if (port_tex >= 8) {
+      cause = "port texture upload";
+    } else if (n1.record_ms >= 0.5 * ms) {
+      cause = "n1 record";
+    } else if (gpu_wait >= 0.4 * ms) {
+      cause = "gpu";
+    } else if (idle >= 0.5 * ms) {
+      cause = "game thread";
+    }
+    REXLOG_INFO("n1 hitch: t+{:.1f} s frame {} took {:.1f} ms, cause {}: n1 record {:.1f} ms ({} scenes), loads {:.1f} "
+                "ms ({} applied, longest {:.1f} ms, {} textures, {} meshes, {:.2f} MB; {} lazy, {} late skips), "
+                "upload pump {:.1f} ms; late pipelines {} shaders {}, {} draws without a pipeline, {} on the stand-in; "
+                "tree capture {}; port: draws {:.1f} ms, textures {:.1f} ms, GPU wait {:.1f} ms, CP idle {:.1f} ms, "
+                "{} new port pipelines, {} capture draws not drawn",
+                since, frames_, ms, cause, n1.record_ms, n1.scenes, n1.apply_ms, n1.applied, n1.apply_max_ms,
+                n1.textures, n1.meshes, double(n1.bytes) / 1048576.0, n1.lazy, n1.late_skips, n1.upload_ms,
+                n1.late_pipelines, n1.late_shaders, n1.draws_no_pipe, n1.fallback_draws, n1.tree_capture ? 1 : 0,
+                t(a.draw_us, b.draw_us), port_tex, gpu_wait, idle, b.live_pipelines - a.live_pipelines,
+                b.capture_skipped - a.capture_skipped);
   }
 
   // One slow frame: where this thread's time went (draw recording, of it texture loads, GPU fence waits, idle
@@ -453,6 +531,8 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     const auto start = std::chrono::steady_clock::now();
     auto report = start + std::chrono::seconds(5);
     const size_t from = renderer_->warmup_done();
+    InstrState* instr = FindInstrState();
+    if (instr) instr->warm_hold.store(1, std::memory_order_relaxed);
     while (shader_precompile_foreground_.load(std::memory_order_relaxed) && worker_running_ &&
            renderer_->warmup_done() < renderer_->warmup_total()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -465,12 +545,24 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
       }
     }
     frame_marked_ = false, frame_avg_ms_ = 0;  // not a hitch: the next frame interval starts after the hold
+    if (instr) instr->warm_hold.store(0, std::memory_order_relaxed);
     REXLOG_INFO("gfx native: guest held {:.1f} s for the pipeline warm-up ({} pipelines, {}/{} done)",
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
                 renderer_->warmup_done() - from, renderer_->warmup_done(), renderer_->warmup_total());
   }
 
   void WriteRegister(uint32_t index, uint32_t value) override {
+    if (index == bots::kHybridMarkerRegister) {  // hybrid spike: the game's scene was skipped here (hybrid_state.h)
+      if (value == bots::kHybridCaptureBegin) {
+        if (renderer_) renderer_->BeginCaptureFrame();
+        return;
+      }
+      if (bots::HybridState* state = bots::FindHybridState()) {
+        state->markers_seen.fetch_add(1, std::memory_order_relaxed);
+        if (renderer_) renderer_->QueueSceneFill(value);
+      }
+      return;
+    }
     CommandProcessor::WriteRegister(index, value);
     constant_writes_.Note(index);
   }
@@ -537,6 +629,10 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   std::unique_ptr<vk::Renderer> renderer_;
   std::unique_ptr<vk::MemorySync> sync_;
   std::filesystem::path pipeline_cache_path_;
+  std::string n1_cache_dir_;  // <cache root>/n1: the new renderer's asset cache (hybrid_fill.cpp)
+  std::string n1_cooked_dir() const {
+    return (kernel_state_->emulator()->game_data_root() / "C1Game" / "CookedXenon").string();
+  }
   ShaderLoad vs_, ps_;
   std::vector<uint32_t> vs_inline_, ps_inline_;
   ConstantWriteTracker constant_writes_;
@@ -557,7 +653,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   bool frame_marked_ = false;
   uint32_t frame_hist_[7] = {};  // <=20, 20-25, 25-33, 33-50, 50-100, 100-250, >250 ms
   double frame_max_ms_ = 0, frame_avg_ms_ = 0;  // frame_avg_ms_: moving average, slow frames capped at 100 ms
-  uint32_t hitch_lines_ = 0, hitches_unlogged_ = 0;
+  uint32_t hitch_lines_ = 0, hitches_unlogged_ = 0, n1_hitch_lines_ = 0;
   host::CpuTimes last_cpu_;
   std::chrono::steady_clock::time_point last_cpu_time_;
   std::string last_power_ = "-", last_overlays_ = "-";  // "-": not reported yet

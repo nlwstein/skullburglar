@@ -56,6 +56,11 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   // The live driver, or null. Read by the ProcessInput hook on the game thread.
   static MouseKeyboardDriver* instance() { return instance_.load(std::memory_order_acquire); }
 
+  // Window keyboard / mouse events the game could see (focused window: key and button presses, wheel notches,
+  // mouse moves of a few pixels), counted since start. Test instrumentation reports it: a rise during a scripted run
+  // means a person touched the machine. Synthetic test keys (TestKey) don't count.
+  static uint64_t HumanEvents() { return human_events_.load(std::memory_order_relaxed); }
+
   // Which device the button prompts show (prompt_state.h). Normally the last device used; public for BOTS_PROMPT_TEST.
   static void SetPromptDevice(PromptDevice device);
   // Keyboard/mouse (if kbm_prompts allows), or the controller: PadPromptDevice().
@@ -111,9 +116,15 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
                               rex::input::X_INPUT_KEYSTROKE*) override;
   void OnWindowAvailable(rex::ui::Window* window) override;
 
-  void OnKeyDown(rex::ui::KeyEvent& e) override { SetKey(uint16_t(e.virtual_key()), true); }
+  void OnKeyDown(rex::ui::KeyEvent& e) override {
+    NoteHuman();
+    SetKey(uint16_t(e.virtual_key()), true);
+  }
   void OnKeyUp(rex::ui::KeyEvent& e) override { SetKey(uint16_t(e.virtual_key()), false); }
-  void OnMouseDown(rex::ui::MouseEvent& e) override { SetKey(ButtonKey(e), true); }
+  void OnMouseDown(rex::ui::MouseEvent& e) override {
+    NoteHuman();
+    SetKey(ButtonKey(e), true);
+  }
   void OnMouseUp(rex::ui::MouseEvent& e) override { SetKey(ButtonKey(e), false); }
   void OnMouseMove(rex::ui::MouseEvent& e) override;
   void OnMouseWheel(rex::ui::MouseEvent& e) override;
@@ -143,6 +154,10 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   void Detach();
 
   static inline std::atomic<MouseKeyboardDriver*> instance_{nullptr};
+  static inline std::atomic<uint64_t> human_events_{0};
+  void NoteHuman() {
+    if (has_focus_) human_events_.fetch_add(1, std::memory_order_relaxed);
+  }
 
   rex::ui::Window* window_ = nullptr;  // written on the UI thread only
   mutable std::mutex mutex_;

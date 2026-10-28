@@ -38,6 +38,9 @@
 #include <rex/logging.h>
 #include <rex/rex_app.h>
 #include <rex/system/xmemory.h>
+
+#include "thread_stats.h"
+#include "instr.h"
 #include <rex/ui/presenter.h>
 #include <rex/input/input_system.h>
 #include <rex/kernel/xam/module.h>
@@ -50,6 +53,7 @@
 #include "mnk_input.h"
 #include "coop.h"
 #include "widescreen.h"
+#include "renderer_choice.h"
 #include "script_input.h"
 #include "setup/app_paths.h"
 #include "setup/settings.h"
@@ -74,6 +78,13 @@ void InstallWindowsCrashLogger();  // src/crash_win.cpp
 #include "ios/touch_input.h"
 #endif
 #endif
+
+namespace bots::hybrid {
+void InstallOpenHooks();  // hybrid.cpp (B-199 level preload)
+}
+namespace bots::levelstream {
+void Start(const std::filesystem::path& user_root);  // level_stream.cpp (B-226 level-start prefetch)
+}
 
 class BotsApp : public rex::ReXApp {
  public:
@@ -298,6 +309,7 @@ class BotsApp : public rex::ReXApp {
 
   void OnPostLoadXexImage() override {
     ApplyDataPatches();
+    bots::hybrid::InstallOpenHooks();  // B-199: see the packages the game opens from the first one
     const char* path = std::getenv("BOTS_DUMP_IMAGE");
     if (!path || !*path) return;
     const auto* src = runtime()->memory()->TranslateVirtual<const char*>(
@@ -390,7 +402,7 @@ class BotsApp : public rex::ReXApp {
   // cvars register after this hook and replay env values then; an explicit env var or
   // --flag still wins. (A bots.toml config value loses to these — use the flag instead.)
   //  - gpu_plugin=native: our own Vulkan renderer (src/gfx). xenos, the SDK's emulated Xbox 360
-  //    GPU, stays selectable (launcher "Renderer", bots.toml or --gpu_plugin=xenos).
+  //    GPU, is only on the command line (--gpu_plugin=xenos); the launcher's "Renderer" is new vs pre-1.0 (renderer_choice.h).
   //  - depth_float24_convert_in_pixel_shader: the game's D24FS8 shadow/light-environment
   //    depth compares need exact 24-bit float depth; without it the player renders black
   //    in level 1 (B-035, sweep 2026-10-01).
@@ -420,9 +432,17 @@ class BotsApp : public rex::ReXApp {
       }
     }
 #endif
-    if (config.gpu_plugin.empty()) {
-      config.gpu_plugin = "native";
-      rex::cvar::SetFlagByName("gpu_plugin", "native");  // so the launcher shows the choice in use
+    // The native backend, always. Only --gpu_plugin / REX_GPU_PLUGIN pick the emulated one (xenos, kept for the
+    // README's emulation numbers); a gpu_plugin in bots.toml, which older launchers wrote ("native", or "xenos" for
+    // the emulated choice they offered), is ignored. The player's choice of renderer is the `renderer` setting.
+    {
+      const auto source = rex::cvar::GetFlagSource("gpu_plugin");
+      const bool explicit_choice =
+          source == rex::cvar::Source::kCommandLine || source == rex::cvar::Source::kEnvironment;
+      if (config.gpu_plugin.empty() || !explicit_choice) {
+        config.gpu_plugin = "native";
+        rex::cvar::SetFlagByName("gpu_plugin", "native");
+      }
     }
     SetCvarDefault("depth_float24_convert_in_pixel_shader", "REX_DEPTH_FLOAT24_CONVERT_IN_PIXEL_SHADER", "true");
     // MoltenVK: plain Metal binding instead of Metal3 argument buffers for descriptor sets —
@@ -496,10 +516,15 @@ class BotsApp : public rex::ReXApp {
   // (script_input.h). --pad=N: only pad N drives this instance; --coop: player 1 starts player 2 here,
   // once the launcher (if any) has settled the game files and before the shader cache opens (coop.h).
   void OnPostSetup() override {
+    bots::StartThreadStats();
     SetLaunchCommandLine();
     RegisterFullscreenBind();
     bots::SpawnPlayerTwo(game_data_root(), user_data_root(), cache_root());
+    bots::levelstream::Start(user_data_root());  // level_stream.cpp: level-start prefetch (B-226)
     if (runtime()) bots::SetWidescreenWindow(runtime()->display_window());
+    // BOTS_INSTR: status stream and control channel for tests and agents (instr.h).
+    if (bots::instr::Enabled())
+      bots::instr::Start([this] { return runtime() ? runtime()->graphics_system() : nullptr; });
     if (!runtime() || !runtime()->input_system()) return;
     auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system());
     if (auto assignment = bots::MakePadAssignment()) {
@@ -516,6 +541,7 @@ class BotsApp : public rex::ReXApp {
     input->AddDriver(std::move(kbm));
     const char* script = std::getenv("BOTS_INPUT");
     if (script && *script) input->AddDriver(std::make_unique<bots::ScriptInputDriver>(script));
+    if (bots::instr::Enabled()) input->AddDriver(bots::instr::MakeInputDriver());
 #if TARGET_OS_IPHONE
 #if !TARGET_OS_TV
     // On-screen controller, shown while no game controller is connected.

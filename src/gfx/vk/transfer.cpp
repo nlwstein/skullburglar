@@ -203,6 +203,7 @@ bool Renderer::InitTransfers() {
 
 void Renderer::DestroyTransfers() {
   const VkDevice dev = device_->device();
+  DestroySceneFill();
   for (auto& [k, pipeline] : transfer_pipelines_) vk_.vkDestroyPipeline(dev, pipeline, nullptr);
   for (VkShaderModule module : transfer_modules_) vk_.vkDestroyShaderModule(dev, module, nullptr);
   if (transfer_layout_) vk_.vkDestroyPipelineLayout(dev, transfer_layout_, nullptr);

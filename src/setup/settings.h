@@ -31,7 +31,6 @@ struct Setting {
   // Live state for the window.
   std::string value;              // current value as text
   bool locked = false;            // set by env or command line: shown, not editable
-  bool emulated_only = false;     // only the emulated renderer (gpu_plugin xenos) uses it
 };
 
 // The curated list, with current values read from the cvar registry.

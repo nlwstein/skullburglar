@@ -7,6 +7,11 @@
 Ready-to-play builds for Windows, macOS (Apple silicon), Linux and the Steam Deck. The launcher sets the game up
 from your own disc and updates itself. You don't need to build anything from this repository to play.
 
+> **New in 1.0: a new renderer.** The game's 3D world is now drawn by a renderer written from scratch for this port.
+> It runs **2.3-3.3x the frame rate on Intel laptop graphics** (ThinkPad T480: 27 to 91 fps in mission 7) and **up to
+> 1.9x on the Steam Deck**, with stutter frames all but gone, while looking like the original. [Details and
+> numbers](#new-renderer-vs-the-pre-10-renderer).
+
 A native PC, Mac and Steam Deck port of the 2009 Xbox 360 game *50 Cent: Blood on the Sand*, built by statically
 recompiling the game's executable with the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk).
 
@@ -24,12 +29,23 @@ source, see [BUILDING.md](BUILDING.md).
 A recompiler gets the game's CPU code running. Everything a player actually notices beyond that has to be built on top,
 and that is where most of the work in this port has gone.
 
-- **A native renderer.** Recompiled ports normally keep emulating the Xbox 360's GPU: its command stream, its EDRAM
-  render-target memory and its shader microcode, translated on the fly every frame. That is where emulators spend
-  most of their time, and recompiling the CPU code does nothing about it. Skullburglar instead takes the game's
-  Direct3D calls and renders them directly with Vulkan, like a PC port would. On an RTX 3090 it runs the same scene
-  at 275 fps where Xenia manages 89 and GPU emulation in this port 108, while keeping the GPU a third to a half as
-  busy at 60 fps and using less memory. The emulated GPU stays available as a fallback (`--gpu_plugin=xenos`).
+- **A new renderer (1.0).** The recompiled game still runs the show: it decides what is in the scene, where the
+  camera is and how everything moves. The new renderer reads that scene straight from the game's memory every frame
+  (meshes, materials, lights, skinned characters, particles, trees and the game's own post-processing) and draws it
+  the way a modern PC engine would, instead of replaying the Xbox 360's draw calls one at a time. The game's original
+  renderer then draws only the HUD and menus on top. Every mission is checked shot by shot against the pre-1.0
+  renderer's picture with an image-difference metric (NVIDIA's FLIP). On a ThinkPad T480's Intel UHD 620 it runs
+  mission 1 at 105 fps where the pre-1.0 renderer manages 46, and frames slower than 33 ms (visible stutter) drop
+  from 50-1,170 a minute to 0-2. The new renderer is in `n1/` (Rust and Vulkan). If it doesn't work on your graphics card,
+  the launcher's **Renderer** setting still offers "Pre-1.0 renderer (deprecated)"; please also
+  [open an issue](#reporting-problems).
+- **A native renderer (pre-1.0, still drawing the HUD and menus).** Recompiled ports normally keep emulating the Xbox
+  360's GPU: its command stream, its EDRAM render-target memory and its shader microcode, translated on the fly every
+  frame. That is where emulators spend most of their time, and recompiling the CPU code does nothing about it.
+  Skullburglar instead takes the game's Direct3D calls and renders them directly with Vulkan, like a PC port would. On
+  an RTX 3090 it runs the same scene at 275 fps where Xenia manages 89 and GPU emulation in this port 108, while keeping
+  the GPU a third to a half as busy at 60 fps and using less memory. The emulated GPU is no longer offered in the
+  launcher; it stays on the command line (`--gpu_plugin=xenos`) for comparison.
 - **Keyboard and mouse, done properly.** Mouse look goes through the engine's own PC mouse input rather than a fake
   analog stick, so there is no stick acceleration curve or turn lag. Vehicles drive on W / S like a PC driving game
   instead of the console's trigger throttle. Menus are point-and-click, including toggles and sliders. Every button prompt in the game (menus, HUD, tutorials, pickups) switches to keyboard and mouse icons for
@@ -74,7 +90,8 @@ and that is where most of the work in this port has gone.
 
 ## Status
 
-The whole story is playable from start to finish on Windows, Linux, the Steam Deck and macOS (Apple silicon). A
+Version 1.0. The whole story is playable from start to finish on Windows, Linux, the Steam Deck and macOS (Apple
+silicon), with the new renderer by default on all four. A
 36-minute run through all nine missions on an RTX 3090 held a median of 60 fps in every mission.
 
 ## Upcoming major features
@@ -112,7 +129,8 @@ Median fps with the frame cap lifted (the game normally runs at 60), same scene,
   per game frame.
 - **Emulated GPU**: this port with `--gpu_plugin=xenos` (D3D12 on Windows, Vulkan on Linux). It runs the same recompiled
   CPU code as the native renderer, so the gap between those two columns is the renderer alone.
-- **Native renderer**: this port's default. Measured with the game's own frame counter.
+- **Native renderer**: this port's default before 1.0, now "Pre-1.0 renderer (deprecated)". Measured with the game's
+  own frame counter. These rows predate the new renderer; its comparison is below.
 
 | Machine | Scene | Xenia-canary | Emulated GPU | Native renderer |
 |---|---|---|---|---|
@@ -125,6 +143,26 @@ On the 3090 the native renderer is 3.1x Xenia in both scenes. The emulated-GPU c
 Humvee level; the two use different render-target paths (ours ROV, Xenia's RTV), which we haven't compared yet. Xenia
 on the Deck and the T480 hasn't been measured yet. The native renderer's "auto" render resolution picks 2/3 scale on
 the T480, which gives 34.5 fps; the table uses full scale so the columns match.
+
+### New renderer vs the pre-1.0 renderer
+
+Same build (both renderers ship in it), same scenes, runs alternated between the two renderers, two runs each, 60 s
+in play per chapter. 1280x720 output (1280x800 window on the Deck), default render resolution (Automatic: 67% on
+Intel graphics), vsync and frame cap off, warm caches. Median fps (low: 10th percentile).
+
+| Machine | Scene | Pre-1.0 renderer | New renderer | Speed-up |
+|---|---|---|---|---|
+| ThinkPad T480 (Intel UHD 620, i7-8550U), Windows | Mission 1 | 46 (low 37) | **105** (low 83-87) | **2.3x** |
+| ThinkPad T480 (Intel UHD 620, i7-8550U), Windows | Mission 6, helicopter | 40 (low 29) | **91-95** (low 67-69) | **2.3x** |
+| ThinkPad T480 (Intel UHD 620, i7-8550U), Windows | Mission 7 | 27 (low 21) | **91** (low 74-77) | **3.3x** |
+| Steam Deck | Mission 1 | 118 (low 105-111) | **133** (low 125) | 1.1x |
+| Steam Deck | Mission 6, helicopter | 95 (low 69) | **125-133** (low 91) | 1.3-1.4x |
+| Steam Deck | Mission 7 | 67 (low 57-59) | **125** (low 111) | **1.9x** |
+
+Frames slower than 33 ms in each 60 s sample: on the T480 50-1,170 with the pre-1.0 renderer and 0-2 with the new
+one; on the Deck up to 8 and 0. Frames slower than 50 ms: up to 96 and none. The gain is largest where the old
+renderer was GPU-bound (Intel graphics, the busier missions); where the game's own CPU work sets the pace it is
+smaller.
 
 ### Load at 60 fps
 
@@ -152,6 +190,10 @@ capped presentation (it kept presenting at its uncapped rate). Uncapped, in the 
 Longest wait for the shader precompile before the title screen on a first launch: RTX 3090 7.7 s, Steam Deck 13.4 s,
 Mac mini M4 30.6 s, Apple M2 Pro 34 s. Shaders the shipped list doesn't cover compile in the background during play.
 
+The new renderer also prepares the game's meshes, textures and its own shaders for your machine on its first launch,
+which takes a few minutes (about 4 on an Apple M2 Pro). You can play meanwhile: until it is ready, the pre-1.0
+renderer draws the game. Later launches reuse what it prepared.
+
 ## How it works
 
 ReXGlue translates the game's PowerPC executable (`default.xex`) into C++ at build time and links it
@@ -159,7 +201,10 @@ against a runtime that stands in for the Xbox 360 kernel, GPU and audio. This re
 sits around that translation:
 
 - `bots_manifest.toml`, `config/`: recompiler configuration (function boundaries, jump tables, hooks).
-- `src/`: the host app, the native renderer (`src/gfx`), keyboard and mouse, the launcher, crash reporting, and
+- `n1/`: the new renderer (Rust, Vulkan through `ash`): reads the game's packages, takes the live scene from the
+  game's memory each frame and draws it. Built by CMake through cargo (BUILDING.md).
+- `src/`: the host app, the native renderer (`src/gfx`), the feed that hands the scene to `n1` (`src/scene_feed.cpp`,
+  `src/hybrid.cpp`), keyboard and mouse, the launcher, crash reporting, and
   hooks into game functions.
 - `patches/rexglue-sdk/`: fixes and features applied on top of the pinned SDK release.
 - `tools/`: analysis scripts (disassembly, cross-references, UE3 package and script tools) and build helpers.

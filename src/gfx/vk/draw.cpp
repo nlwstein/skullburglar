@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <unordered_set>
 
 #ifdef __APPLE__
 #include <TargetConditionals.h>
@@ -22,6 +24,12 @@
 #include <rex/logging.h>
 
 #include "renderer.h"
+#include "draw_dump.h"
+#include "../../hybrid_state.h"
+#ifdef BOTS_N1FFI
+#include <n1ffi.h>
+#endif
+#include <string>
 
 namespace bots::gfx::vk {
 namespace {
@@ -648,6 +656,101 @@ void Renderer::LogSkip(const char* why, uint64_t vs, uint64_t ps, const Attachme
               stats_.presents, stats_.draws, vs, ps, targets, workers ? workers->Describe() : "none");
 }
 
+// B-187: hands a colour-pass tree draw of the game's own scene to n1's capture (n1ffi runs the game's vertex shader
+// over it on the CPU). Only while a capture session runs; needs the draw's DMA indices.
+void Renderer::TreeCaptureDraw(const rg::RegisterFile& regs, ShaderCache::Shader& vshader,
+                               ShaderCache::Shader& pshader, const Draw& draw, uint32_t count, bool index32) {
+#ifdef BOTS_N1FFI
+  if (!n1_tree_active_ || !n1_tree_r_) return;
+  auto* nr = static_cast<N1Renderer*>(n1_tree_r_);
+  const float* consts = reinterpret_cast<const float*>(&regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
+  const uint64_t vs_hash = vshader.ucode_data_hash();
+  const uint32_t want = n1_tree_probe(nr, vs_hash, consts, count);
+  if (want & 2) n1_tree_ucode(nr, vs_hash, vshader.ucode_disassembly().c_str());
+  if (!(want & 1)) return;
+  const xe::Endian index_endian = IndexEndian(draw.index_endian, index32);
+  N1TreeDraw td{};
+  td.vs_hash = vs_hash;
+  td.consts = consts;
+  uint32_t k = 0;
+  for (const auto& binding : vshader.vertex_bindings()) {
+    const auto fetch = regs.GetVertexFetch(binding.fetch_constant);
+    if (fetch.type != xe::FetchConstantType::kVertex || k >= 4) continue;
+    td.stream_addr[k] = fetch.address << 2;
+    td.stream[k] = memory_(td.stream_addr[k]);
+    td.stream_bytes[k] = fetch.size * 4;
+    td.stream_stride[k] = binding.stride_words * 4;
+    td.fetch_consts |= (binding.fetch_constant & 0xFF) << (8 * k);
+    ++k;
+  }
+  td.stream_count = k;
+  std::vector<uint32_t> idx(count);
+  const uint8_t* isrc = memory_(draw.index_base);
+  if (!isrc || !td.stream[0]) return;
+  for (uint32_t i = 0; i < count; ++i) {
+    if (index32) {
+      uint32_t v;
+      std::memcpy(&v, isrc + i * 4, 4);
+      idx[i] = xe::GpuSwap(v, index_endian);
+    } else {
+      uint16_t h;
+      std::memcpy(&h, isrc + i * 2, 2);
+      idx[i] = xe::GpuSwap(h, index_endian);
+    }
+  }
+  td.indices = idx.data();
+  td.index_count = count;
+  td.index_offset = regs.values[rg::XE_GPU_REG_VGT_INDX_OFFSET];
+  auto add_texture = [&](uint32_t fetch_constant) {
+    if (td.tex_count < 4) {
+      td.tex_base[td.tex_count++] = regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + 6 * fetch_constant + 1];
+    }
+  };
+  if (!pshader.GetTextureBindingsAfterTranslation().empty()) {
+    for (const auto& b : pshader.GetTextureBindingsAfterTranslation()) add_texture(b.fetch_constant);
+  } else {
+    // A capture frame's draw (CaptureFrameDraw) may come before its shader was ever translated: the analysis' list.
+    uint32_t seen = 0;
+    for (const auto& b : pshader.texture_bindings()) {
+      if (!(seen & (1u << b.fetch_constant))) seen |= 1u << b.fetch_constant, add_texture(b.fetch_constant);
+    }
+  }
+  n1_tree_capture(nr, &td);
+#else
+  (void)regs, (void)vshader, (void)pshader, (void)draw, (void)count, (void)index32;
+#endif
+}
+
+// B-220: a draw or resolve of the game's own scene in a tree-capture frame (between the capture-begin marker and the
+// scene's marker). n1 draws its scene over that one at the marker, so nothing of it is drawn: the draw only goes to
+// the tree capture, which needs CPU-side data alone. Drawing it compiled the level's scene pipelines and loaded its
+// textures for frames nobody saw (150-560 ms frames on a UHD 620 with a cold cache). A capture frame then looks to the
+// renderer like the suppressed frames around it.
+void Renderer::CaptureFrameDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
+                                const Draw& draw) {
+  ++stats_.capture_skipped;
+  if (!n1_tree_active_) return;
+  if (regs.Get<reg::RB_MODECONTROL>().edram_mode != xe::EdramMode::kColorDepth ||
+      !regs.Get<reg::RB_SURFACE_INFO>().surface_pitch || !ps.dwords || !vs.dwords) {
+    return;
+  }
+  if (draw.initiator.source_select != xe::SourceSelect::kDMA) return;
+  auto ucode = [&](const ShaderLoad& s) {
+    return s.inline_ucode ? s.inline_ucode : reinterpret_cast<const uint32_t*>(memory_(s.address));
+  };
+  if (!ucode(vs) || !ucode(ps)) return;
+  const bool index32 = draw.initiator.index_size == xe::IndexFormat::kInt32;
+  uint32_t count = draw.initiator.num_indices;
+  count = std::min(count, draw.index_words);
+  if (!count) return;
+  ShaderCache::Shader* vshader = shaders_->Get(xe::ShaderType::kVertex, ucode(vs), vs.dwords);
+  if (!du::IsRasterizationPotentiallyDone(regs, du::IsPrimitivePolygonal(regs))) return;
+  ShaderCache::Shader* pshader = shaders_->Get(xe::ShaderType::kPixel, ucode(ps), ps.dwords);
+  if (!du::IsPixelShaderNeededWithRasterization(*pshader, regs)) return;
+  if (!du::GetNormalizedColorMask(regs, pshader->writes_color_targets())) return;  // colour pass only
+  TreeCaptureDraw(regs, *vshader, *pshader, draw, count, index32);
+}
+
 void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
                          const Draw& draw) {
   const auto& props = device_->properties();
@@ -696,23 +799,31 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     ++stats_.draws;
     return;
   }
-  // BOTS_DUMP_DRAW=<n> prints the microcode of draw n (numbered as in the draw trace) - debugging.
-  static const long long dump_draw = [] {
+  // BOTS_DUMP_DRAW=<n> or <first>:<last> prints the microcode and the non-zero vertex and pixel shader constants of
+  // those draws (numbered as in the draw trace) - debugging.
+  static const std::pair<long long, long long> dump_draw = [] {
     const char* v = std::getenv("BOTS_DUMP_DRAW");
-    return v ? std::atoll(v) : -1;
+    if (!v) return std::pair<long long, long long>{-1, -1};
+    const long long a = std::atoll(v);
+    const char* c = std::strchr(v, ':');
+    return std::pair<long long, long long>{a, c ? std::atoll(c + 1) : a};
   }();
-  if (dump_draw == (long long)stats_.draws + 1) {
-    std::fprintf(stderr, "--- draw %lld vertex shader %08X\n%s", dump_draw, vs.address,
+  if ((long long)stats_.draws + 1 >= dump_draw.first && (long long)stats_.draws + 1 <= dump_draw.second) {
+    std::fprintf(stderr, "--- draw %lld vertex shader %08X\n%s", (long long)stats_.draws + 1, vs.address,
                  vshader->ucode_disassembly().c_str());
-    if (pshader) {
-      std::fprintf(stderr, "--- pixel shader %08X\n%s", ps.address, pshader->ucode_disassembly().c_str());
+    const auto consts = [&](uint32_t base, const char* tag) {
       for (uint32_t c = 0; c < 256; ++c) {
-        const uint32_t* v = &regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_256_X + 4 * c];
+        const uint32_t* v = &regs.values[base + 4 * c];
         if (!(v[0] | v[1] | v[2] | v[3])) continue;
         float f[4];
         std::memcpy(f, v, sizeof(f));
-        std::fprintf(stderr, "  c%u = %g %g %g %g\n", c, f[0], f[1], f[2], f[3]);
+        std::fprintf(stderr, "  %s%u = %g %g %g %g\n", tag, c, f[0], f[1], f[2], f[3]);
       }
+    };
+    consts(rg::XE_GPU_REG_SHADER_CONSTANT_000_X, "vc");
+    if (pshader) {
+      std::fprintf(stderr, "--- pixel shader %08X\n%s", ps.address, pshader->ucode_disassembly().c_str());
+      consts(rg::XE_GPU_REG_SHADER_CONSTANT_256_X, "c");
     }
   }
   const reg::RB_DEPTHCONTROL depth_control = du::GetNormalizedDepthControl(regs);
@@ -905,6 +1016,8 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
                                      pviews = texture_views(ptextures, pview_storage);
 
   profile.Mark(kPhaseRing);
+  // B-218: a scene queued for this frame does what flushes (the n1 preload hold) here, not inside DrawSceneFill below.
+  if (scene_fill_seq_) PrepareSceneN1();
   // Room for this draw's uploads and descriptor sets: flush first rather than mid-draw.
   BeginCommands(kGpuDraw);
   const VkDeviceSize upload_need = 64 * 1024 + VkDeviceSize(count) * 12;
@@ -1368,6 +1481,13 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   bool pending = false;
   const VkPipeline pipeline = GetPipeline(key, sync, pending);
   if (!pipeline) {
+    static int drop_log = [] { const char* v = std::getenv("BOTS_HYBRID_DROP_LOG"); return v ? std::atoi(v) : 0; }();
+    if (scene_fill_seq_ && drop_log > 0) {  // B-210 diagnostics: the draw that would carry the scene has no pipeline
+      --drop_log;
+      REXLOG_INFO("hybrid fill: marker {} waits: draw without a pipeline ({}), target {}x{}", scene_fill_seq_,
+                  pending ? "pending" : "failed", pass.color[0] ? pass.color[0]->width : 0,
+                  pass.color[0] ? pass.color[0]->height : 0);
+    }
     ++(pending ? stats_.pending_draws : stats_.skipped_draws);
     if (!pending) ++stats_.failed_pipeline_draws;
     if (pending && log_skips_) {
@@ -1376,6 +1496,12 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     return;
   }
 
+  if (scene_fill_seq_ && pass.color[0]) {
+    // B-218: this draw's sets and ring data are in the current submission; a Flush now would strand them.
+    scene_mid_draw_ = true;
+    DrawSceneFill(*pass.color[0]);
+    scene_mid_draw_ = false;
+  }
   profile.Mark(kPhasePass);
   // Render pass: kept open across draws to the same targets, and reopened when a draw samples something written
   // since the last barrier (reopening the same attachments then always barriers: they count as written). An
@@ -1515,6 +1641,150 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
                   samples_x * samples_y > 1 ? " ss4" : "");
     GpuLabel(kGpuDraw, label);
   }
+  if (const HybridState* hs = FindHybridState(); hs && hs->quad_on.load(std::memory_order_acquire)) {
+    // B-229 single-quad debug (HybridState::quad_*): skip sprite-particle draws that have no vertex at a kept
+    // particle's position. Sprite particles are the draws with one vertex stream of BOTS_HYBRID_QUAD_STRIDES bytes
+    // (default 64, FParticleSpriteVertex, and 88, the sub-UV vertex); mesh particles are not filtered.
+    static const std::vector<uint32_t> strides = [] {
+      std::vector<uint32_t> v;
+      const char* s = std::getenv("BOTS_HYBRID_QUAD_STRIDES");
+      for (const char* p = s ? s : "64,88"; *p;) {
+        char* end = nullptr;
+        const unsigned long x = std::strtoul(p, &end, 10);
+        if (end == p) break;
+        v.push_back(uint32_t(x));
+        p = *end ? end + 1 : end;
+      }
+      return v;
+    }();
+    const auto& b = vshader->vertex_bindings();
+    if (b.size() == 1 && std::ranges::find(strides, b[0].stride_words * 4) != strides.end()) {
+      const auto fetch = regs.GetVertexFetch(b[0].fetch_constant);
+      const uint32_t stride = b[0].stride_words * 4, bytes = std::min<uint32_t>(fetch.size * 4, 1u << 20);
+      const uint8_t* data = fetch.type == xe::FetchConstantType::kVertex ? memory_(fetch.address << 2) : nullptr;
+      bool keep = false;
+      std::vector<float> want;
+      {
+        auto& mut = const_cast<HybridState*>(hs)->quad_mutex;
+        std::lock_guard lock(mut);
+        want = hs->quad_keep;
+      }
+      for (uint32_t v = 0; data && !keep && v + stride <= bytes; v += stride) {
+        float p[3];
+        for (int c = 0; c < 3; ++c) {
+          uint32_t w;
+          std::memcpy(&w, data + v + 4 * c, 4);
+          if (fetch.endian == xe::Endian::k8in32) w = std::byteswap(w);
+          std::memcpy(&p[c], &w, 4);
+        }
+        for (size_t k = 0; k + 2 < want.size() && !keep; k += 3)
+          keep = std::fabs(p[0] - want[k]) < 1.0f && std::fabs(p[1] - want[k + 1]) < 1.0f &&
+                 std::fabs(p[2] - want[k + 2]) < 1.0f;
+      }
+      if (!keep) {
+        ++stats_.skipped_draws;
+        return;
+      }
+      // What the game binds for a kept particle draw: each texture's format and per-component sign (3: gamma).
+      static uint64_t quad_tex_logged = 0;
+      if (pshader && quad_tex_logged++ % 120 == 0) {
+        std::string t;
+        for (const auto& tb : pshader->texture_bindings()) {
+          const auto f = regs.GetTextureFetch(tb.fetch_constant);
+          t += fmt::format(" [fc {} base {:08x} fmt {} sign {}{}{}{} {}x{}]", tb.fetch_constant, f.base_address << 12,
+                           uint32_t(f.format), uint32_t(f.sign_x), uint32_t(f.sign_y), uint32_t(f.sign_z),
+                           uint32_t(f.sign_w), f.size_2d.width + 1, f.size_2d.height + 1);
+        }
+        REXLOG_INFO("hybrid quad: port draw ps {:016x} vs {:016x} stride {} prim {} count {}{}",
+                    pshader->ucode_data_hash(), vshader->ucode_data_hash(), stride, uint32_t(prim),
+                    count, t);
+        // B-236: each kept draw's vertex shader once, disassembled (how the game builds the quad from a vertex).
+        static std::vector<uint64_t> quad_vs_logged;
+        if (std::ranges::find(quad_vs_logged, vshader->ucode_data_hash()) == quad_vs_logged.end()) {
+          quad_vs_logged.push_back(vshader->ucode_data_hash());
+          REXLOG_INFO("hybrid quad: vs {:016x} ucode\n{}", vshader->ucode_data_hash(), vshader->ucode_disassembly());
+        }
+        // B-242: the kept draw's pixel shader once, its non-zero pixel constants, blend and depth state (what the
+        // material does per pixel: fades, depth bias, emissive scale).
+        static std::vector<uint64_t> quad_ps_logged;
+        if (std::ranges::find(quad_ps_logged, pshader->ucode_data_hash()) == quad_ps_logged.end()) {
+          quad_ps_logged.push_back(pshader->ucode_data_hash());
+          REXLOG_INFO("hybrid quad: ps {:016x} ucode\n{}", pshader->ucode_data_hash(), pshader->ucode_disassembly());
+        }
+        {
+          std::string c;
+          for (uint32_t k = 0; k < 256; ++k) {
+            const uint32_t* w = &regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_256_X + 4 * k];
+            if (!(w[0] | w[1] | w[2] | w[3])) continue;
+            float f[4];
+            std::memcpy(f, w, sizeof(f));
+            c += fmt::format(" c{} ({:.4g}, {:.4g}, {:.4g}, {:.4g})", k, f[0], f[1], f[2], f[3]);
+          }
+          REXLOG_INFO("hybrid quad:   pconst{}", c);
+          REXLOG_INFO("hybrid quad:   blend0 {:08x} depth test {} write {} op {}", key.blend[0], key.depth_test,
+                      key.depth_write, key.depth_op);
+        }
+        // B-236: the kept draw's vertex constants (camera axes, alignment, sincos range constants).
+        {
+          const float* vc = reinterpret_cast<const float*>(&regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
+          std::string c;
+          for (uint32_t k : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u, 16u, 17u, 22u, 23u,
+                             24u, 253u, 254u, 255u})
+            c += fmt::format(" c{} ({:.4g}, {:.4g}, {:.4g}, {:.4g})", k, vc[4 * k], vc[4 * k + 1], vc[4 * k + 2],
+                             vc[4 * k + 3]);
+          REXLOG_INFO("hybrid quad:   vconst{}", c);
+        }
+        // B-236: the kept draw's vertices as the game wrote them (floats, 64: FParticleSpriteVertex, 88: + sub-UV).
+        for (uint32_t v = 0, i = 0; data && v + stride <= bytes && i < 64; v += stride, ++i) {
+          std::string f;
+          for (uint32_t c = 0; c < stride / 4; ++c) {
+            uint32_t w;
+            std::memcpy(&w, data + v + 4 * c, 4);
+            if (fetch.endian == xe::Endian::k8in32) w = std::byteswap(w);
+            float x;
+            std::memcpy(&x, &w, 4);
+            f += fmt::format("{}{:.4g}", c ? ", " : "", x);
+          }
+          REXLOG_INFO("hybrid quad:   vtx {} [{}]", i, f);
+        }
+      }
+    }
+  }
+  if (n1_tree_active_ && pshader && dma && !std::ranges::none_of(attachments.color, std::identity{})) {
+    TreeCaptureDraw(regs, *vshader, *pshader, draw, count, index32);
+  }
+  if (drawdump::Active()) {
+    std::vector<drawdump::Stream> streams;
+    for (const auto& binding : vshader->vertex_bindings()) {
+      const auto fetch = regs.GetVertexFetch(binding.fetch_constant);
+      if (fetch.type != xe::FetchConstantType::kVertex || streams.size() >= 8) continue;
+      drawdump::Stream& st = streams.emplace_back();
+      st.fetch_constant = binding.fetch_constant;
+      st.address = fetch.address << 2;
+      st.stride = binding.stride_words * 4;
+      st.endian = uint32_t(fetch.endian);
+      st.size = std::min<uint32_t>(fetch.size * 4, drawdump::kMaxStreamBytes);
+      st.data = memory_(st.address);
+      for (const auto& a : binding.attributes) {
+        if (st.attributes.size() >= 16) break;
+        st.attributes.push_back({uint32_t(a.fetch_instr.attributes.offset), uint32_t(a.fetch_instr.attributes.data_format)});
+      }
+    }
+    drawdump::PixelState px;
+    px.ps_constants = pshader ? &regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_256_X] : nullptr;
+    px.blend0 = regs.values[reg::RB_BLENDCONTROL::rt_register_indices[0]];
+    px.depth = regs.values[rg::XE_GPU_REG_RB_DEPTHCONTROL];
+    px.stencil = regs.values[rg::XE_GPU_REG_RB_STENCILREFMASK];
+    if (drawdump::WantShader(vshader->ucode_data_hash(), "vs"))
+      drawdump::WriteShader(vshader->ucode_data_hash(), "vs", vshader->ucode_disassembly());
+    if (pshader && drawdump::WantShader(pshader->ucode_data_hash(), "ps"))
+      drawdump::WriteShader(pshader->ucode_data_hash(), "ps", pshader->ucode_disassembly());
+    drawdump::Record(&regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_000_X], vshader->ucode_data_hash(),
+                     pshader ? pshader->ucode_data_hash() : 0, open_area_.width, open_area_.height,
+                     (std::ranges::none_of(attachments.color, std::identity{}) ? 1u : 0u) |
+                         (samples_x * samples_y > 1 ? 2u : 0u) | (rect ? 4u : 0u) | (indexed ? 8u : 0u),
+                     uint32_t(prim), host_count, streams, px);
+  }
   if (indexed) vk_.vkCmdBindIndexBuffer(cmd_, ring_.buffer, index_offset, index_type);
   BeginDrawQuery();
   if (indexed) {
@@ -1545,3 +1815,108 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
 }
 
 }  // namespace bots::gfx::vk
+
+// Scene-feed draw dump (draw_dump.h).
+namespace bots::gfx::drawdump {
+namespace {
+struct DumpState {
+  std::string dir = [] {
+    const char* v = std::getenv("BOTS_SCENEFEED_DIR");
+    return std::string(v ? v : "");
+  }();
+  FILE* file = nullptr;
+  int frames_left = 0;
+  uint32_t draw = 0;
+  std::chrono::steady_clock::time_point next_check{};
+};
+DumpState& State() {
+  static DumpState st;
+  return st;
+}
+int64_t NowUs() {
+  return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+void Open(DumpState& st) {
+  const int64_t now = NowUs();
+  st.file = std::fopen((st.dir + "/draws_" + std::to_string(now) + ".bin").c_str(), "wb");
+  if (!st.file) return;
+  const uint32_t version = 4;
+  std::fwrite("DFR1", 1, 4, st.file);
+  std::fwrite(&version, 4, 1, st.file);
+  std::fwrite(&now, 8, 1, st.file);
+  st.draw = 0;
+}
+}  // namespace
+
+bool Active() { return State().file != nullptr; }
+
+void Record(const uint32_t* vs_constants, uint64_t vs, uint64_t ps, uint32_t width, uint32_t height, uint32_t flags,
+            uint32_t prim, uint32_t count, const std::vector<Stream>& streams, const PixelState& pixel) {
+  DumpState& st = State();
+  if (!st.file) return;
+  const uint32_t head[] = {0x31575244u /* "DRW1" */, st.draw++};
+  const uint32_t tail[] = {width, height, flags, prim, count, uint32_t(streams.size())};
+  std::fwrite(head, 4, 2, st.file);
+  std::fwrite(&vs, 8, 1, st.file);
+  std::fwrite(&ps, 8, 1, st.file);
+  std::fwrite(tail, 4, 6, st.file);
+  std::fwrite(vs_constants, 4, 1024, st.file);
+  for (const Stream& s : streams) {
+    const uint32_t size = s.data ? s.size & ~3u : 0;
+    const uint32_t h[] = {s.fetch_constant, s.address, s.stride, s.endian, uint32_t(s.attributes.size()), size};
+    std::fwrite(h, 4, 6, st.file);
+    for (const auto& a : s.attributes) std::fwrite(&a, 4, 2, st.file);
+    if (size) std::fwrite(s.data, 1, size, st.file);
+  }
+  const uint32_t px[] = {0x31435350u /* "PSC1" */, pixel.blend0, pixel.depth, pixel.stencil};
+  std::fwrite(px, 4, 4, st.file);
+  static const uint32_t zeros[1024] = {};
+  std::fwrite(pixel.ps_constants ? pixel.ps_constants : zeros, 4, 1024, st.file);
+}
+
+bool WantShader(uint64_t hash, const char* kind) {
+  static std::unordered_set<uint64_t> seen;
+  DumpState& st = State();
+  return st.file && seen.insert(hash ^ (kind[0] == 'p' ? 0x9E3779B97F4A7C15ull : 0)).second;
+}
+
+void WriteShader(uint64_t hash, const char* kind, const std::string& text) {
+  const std::string dir = State().dir + "/shaders";
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  char name[64];
+  std::snprintf(name, sizeof(name), "/%016llx.%s.txt", (unsigned long long)hash, kind);
+  if (FILE* f = std::fopen((dir + name).c_str(), "wb")) {
+    std::fwrite(text.data(), 1, text.size(), f);
+    std::fclose(f);
+  }
+}
+
+void OnPresent() {
+  DumpState& st = State();
+  if (st.dir.empty()) return;
+  if (st.file) {
+    std::fclose(st.file);
+    st.file = nullptr;
+    if (--st.frames_left > 0) Open(st);
+    else REXLOG_INFO("scenefeed: draw dump finished");
+    return;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (now < st.next_check) return;
+  st.next_check = now + std::chrono::milliseconds(250);
+  const std::string req = st.dir + "/draws.req";
+  if (FILE* f = std::fopen(req.c_str(), "rb")) {
+    int n = 0;
+    if (std::fscanf(f, "%d", &n) != 1) n = 0;
+    std::fclose(f);
+    std::remove(req.c_str());
+    if (n > 0) {
+      st.frames_left = n;
+      Open(st);
+      REXLOG_INFO("scenefeed: dumping the next {} frames of draws to {}", n, st.dir);
+    }
+  }
+}
+}  // namespace bots::gfx::drawdump

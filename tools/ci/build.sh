@@ -41,6 +41,22 @@ fi
 
 step() { echo "== $* ($(date -u +%H:%M:%S))"; }
 
+# n1 (n1/, Rust) is built by the CMake build with cargo. The Linux and Windows images carry the toolchain; on the Mac it
+# is the user's rustup, found by its usual places or, when there is none, installed here without touching shell
+# profiles (rustup-init into ~/.cargo, user-local). n1/rust-toolchain.toml selects the version, which rustup fetches
+# on first use.
+if [ "$PLATFORM" = macos ] && ! command -v cargo >/dev/null; then
+  for d in "$HOME/.cargo/bin" /opt/homebrew/opt/rustup/bin /usr/local/opt/rustup/bin; do
+    [ ! -x "$d/cargo" ] || { PATH="$d:$PATH"; break; }
+  done
+  if ! command -v cargo >/dev/null; then
+    step "rustup (user-local install)"
+    curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain none
+    PATH="$HOME/.cargo/bin:$PATH"
+  fi
+  export PATH
+fi
+
 # Codegen output already in generated/ (restored by the caller for an unchanged codegen key) is used as it is: the
 # build's codegen step runs `true` instead of the recompiler. The recompiler's own up-to-date check can't be trusted
 # for this: it misses on some builds and regenerates identical output for half an hour.
@@ -133,7 +149,7 @@ if [ -n "${REFS:-}" ]; then
   cp "$REFS" "$DIST/pipelines/5451083B.refs"
 fi
 cp packaging/README.txt "$DIST/"
-# Our license, the SDK's and every SDK dependency's, from the SDK checkout this was built from.
-python3 tools/ci/third_party_notices.py "$SDK" "$DIST/THIRD-PARTY-NOTICES.txt"
+# Our license, the SDK's and every SDK dependency's, and n1's Rust crates, from the SDK checkout this was built from.
+python3 tools/ci/third_party_notices.py "$SDK" "$DIST/THIRD-PARTY-NOTICES.txt" n1/Cargo.toml
 ls -la "$DIST"
 du -sh "$DIST" "$SYM"

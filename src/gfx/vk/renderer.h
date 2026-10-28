@@ -40,6 +40,7 @@
 #include "vk_api.h"
 
 namespace bots {
+struct HybridCamera;
 enum class PromptDevice : uint32_t;  // prompt_state.h (it pulls in windows.h)
 }
 
@@ -72,6 +73,12 @@ class Renderer : public Pm4Sink {
 
   void OnDraw(const rex::graphics::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
               const Draw& draw) override;
+  // Hybrid spike (hybrid_fill.cpp): the game's scene was suppressed at this point of the stream for camera `seq`;
+  // the next colour draw first gets a host-drawn stand-in scene.
+  void QueueSceneFill(uint32_t seq);
+  // B-220: the game is about to draw its own scene for a tree-capture frame (kHybridCaptureBegin). Until the scene's
+  // marker (QueueSceneFill) its draws only feed the tree capture and its resolves are dropped (CaptureFrameDraw).
+  void BeginCaptureFrame() { capture_frame_ = true; }
 
   // Submits everything recorded so far and waits for it.
   // Submits what's recorded without waiting (up to kSubmissions in flight). Finish also waits for the GPU:
@@ -108,8 +115,11 @@ class Renderer : public Pm4Sink {
     refs_dirs_ = std::move(refs_dirs), refs_reader_ = std::move(reader);
   }
   // Warm-up progress: pipelines recorded in the manifest, and how many of them are created (ready or failed).
-  size_t warmup_total() const { return warm_.size(); }
-  size_t warmup_done() const { return warm_done_; }
+  // Includes the n1 renderer's startup step (hybrid_fill.cpp) while it runs.
+  size_t warmup_total() const { return warm_.size() + n1_warm_total_; }
+  size_t port_warmup_total() const { return warm_.size(); }  // the port's own part (no n1)
+  size_t port_warmup_done() const { return warm_done_; }
+  size_t warmup_done() const { return warm_done_ + n1_warm_done_; }
   // Warm-up outcome so far: pipelines built, and finished without one: the driver failed it, a shader missing from
   // the manifest and refs, a translation failed, or no pipeline layout.
   struct WarmupResult {
@@ -155,7 +165,7 @@ class Renderer : public Pm4Sink {
   bool ReadTexture(uint32_t address, std::vector<uint8_t>& rgb, uint32_t& width, uint32_t& height);
 
   struct Stats {
-    uint64_t draws = 0, resolves = 0, clears = 0, skipped_draws = 0, dropped_resolves = 0, msaa_resolves = 0;
+    uint64_t draws = 0, resolves = 0, clears = 0, skipped_draws = 0, dropped_resolves = 0, msaa_resolves = 0, fills_at_resolve = 0;
     uint64_t render_passes = 0, pipelines = 0, failed_shaders = 0, unsupported_primitives = 0;
     uint64_t textures = 0, unsupported_textures = 0, transfers = 0;
     uint64_t uploaded_bytes = 0, invalidations = 0, texture_reloads = 0, texture_evictions = 0;  // live
@@ -175,6 +185,8 @@ class Renderer : public Pm4Sink {
              live_pipelines_queued = 0;
     // Occlusion queries ended, and those answered "visible" without counting (occlusion_hidden(): counted 0).
     uint64_t occlusion_queries = 0, occlusion_inexact = 0;
+    // B-220: draws and resolves of the game's own scene in tree-capture frames, handed to the capture only.
+    uint64_t capture_skipped = 0;
     uint64_t draw_phase_ns[12] = {};  // BOTS_DRAW_PROFILE=1: IssueDraw's time by phase (kDrawPhaseNames)
     // Profiling (P5): submits, and microseconds blocked on the GPU fence, inside OnDraw (recording, including
     // texture loads and any flush it triggers) and inside LoadTexture (untile + upload).
@@ -186,6 +198,26 @@ class Renderer : public Pm4Sink {
   uint64_t TakeTextureLoadMaxUs() { return std::exchange(texture_load_max_us_, 0); }
   // What that texture was: size, guest format, mips.
   const std::string& texture_load_max_what() const { return texture_load_max_what_; }
+  // B-199: what n1 did since the last take (one presented frame, for the hitch log), and whether the frame held the
+  // guest for the level preload (not a hitch: the level wasn't playable yet). hybrid_fill.cpp fills it.
+  struct N1FrameNote {
+    uint32_t scenes = 0;          // n1_record calls
+    double record_ms = 0;         // in n1_record (applying loads, culling, recording)
+    double upload_ms = 0;         // in n1_upload on frames without a scene
+    double hold_ms = 0;           // the preload hold
+    uint64_t applied = 0;         // loads applied (meshes, materials, lights, skeletal meshes)
+    double apply_ms = 0, apply_max_ms = 0;
+    uint64_t lazy = 0;            // loads first asked for by a draw (all kinds)
+    uint64_t late_skips = 0;      // draws skipped: preloaded but not in yet
+    uint64_t textures = 0, meshes = 0, bytes = 0;
+    uint32_t late_pipelines = 0, late_shaders = 0, draws_no_pipe = 0, fallback_draws = 0;
+    bool tree_capture = false;    // the port drew its own scene for the tree capture
+    bool held = false;
+  };
+  N1FrameNote TakeN1FrameNote() { return std::exchange(n1_note_, N1FrameNote{}); }
+  // Seconds since n1 last resumed drawing after a gap (level start, or after a loading screen); negative before the
+  // first scene.
+  double n1_seconds_since_resume() const;
   // Guest textures held: entries and their image bytes; the budget above which unused ones are evicted (0: evicted by
   // age alone, the behaviour before issue #12).
   size_t texture_count() const { return guest_textures_.size(); }
@@ -354,7 +386,9 @@ class Renderer : public Pm4Sink {
   void GpuMark(GpuCat cat, bool force = false);
   void GpuLabel(GpuCat cat, std::string label);  // a forced mark whose span is reported under its label
   std::unordered_map<std::string, std::pair<uint64_t, uint64_t>> gpu_labels_;  // ns, spans
-  static constexpr uint32_t kMaxGpuMarks = 16384;
+  // Metal counter sample buffers hold at most 32 KB (4096 timestamps); a larger pool makes MoltenVK fall back to
+  // emulated timestamps, which read as zero.
+  static constexpr uint32_t kMaxGpuMarks = 4096;
   bool gpu_timing_ = false;
   uint8_t gpu_cat_ = 0xFF;
   double timestamp_ns_ = 1.0;
@@ -395,6 +429,12 @@ class Renderer : public Pm4Sink {
   bool UploadSharedMemory();
   void IssueDraw(const rex::graphics::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
                  const Draw& draw);
+  // B-187 / B-220 (draw.cpp): a tree draw handed to n1's capture; a capture frame's scene draw (no drawing).
+  void TreeCaptureDraw(const rex::graphics::RegisterFile& regs, ShaderCache::Shader& vshader,
+                       ShaderCache::Shader& pshader, const Draw& draw, uint32_t count, bool index32);
+  void CaptureFrameDraw(const rex::graphics::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
+                        const Draw& draw);
+  bool capture_frame_ = false;
   bool RectListBound(const rex::graphics::RegisterFile& regs, const ShaderCache::Shader& vshader,
                      rex::graphics::xenos::SourceSelect source, uint32_t count, uint32_t& x1, uint32_t& y1) const;
   // Space in this submission's upload ring (uniforms and indices); flushes when full.
@@ -452,6 +492,58 @@ class Renderer : public Pm4Sink {
   bool InitPresent();
   void Transfer(Image& source, uint32_t source_format, Image& dest, uint32_t dest_format,
                 const VkRect2D* rect = nullptr, float scale = 1.0f);
+  // Hybrid spike (hybrid_fill.cpp): draws the queued stand-in scene into `target`; false if there was none to draw.
+  bool DrawSceneFill(Image& target);
+  void DestroySceneFill();
+  uint32_t scene_fill_seq_ = 0;
+  VkPipelineLayout fill_layout_ = VK_NULL_HANDLE;
+  std::vector<VkShaderModule> fill_modules_;
+  std::map<std::pair<uint32_t, VkFormat>, VkPipeline> fill_pipelines_;
+  // Fill 4: the n1 renderer's host state (hybrid_fill.cpp), or null.
+  bool DrawSceneN1(Image& target, const bots::HybridCamera& cam, const VkRect2D& area);
+  // B-218: DrawSceneFill runs inside IssueDraw, after the draw's ring uploads and descriptor sets are made in the
+  // current submission, so nothing it calls may Flush (the next submission slot has its own ring and descriptor pool;
+  // the draw would then bind stale sets and read its index data from the wrong ring: a GPU page fault, a TDR on
+  // Intel/Windows). PrepareSceneN1 runs at IssueDraw's ring reservation, where a flush is safe, and does the work that
+  // flushes there: the level-start preload hold and remaking the renderer for a new target format.
+  void PrepareSceneN1();
+  void HoldN1Preload(void* host, bool may_flush);
+  bool scene_mid_draw_ = false;
+  VkFormat n1_remake_format_ = VK_FORMAT_UNDEFINED;
+  uint32_t n1_prepared_seq_ = 0;
+  void* EnsureN1(VkFormat format);
+ public:
+  // Where the new renderer (n1) reads the game's cooked packages and keeps its asset cache: derived from the game data
+  // root and the cache root by the command processor. BOTS_N1_COOKED / BOTS_N1_CACHE override them.
+  void SetN1Dirs(std::string cooked_dir, std::string cache_dir) {
+    n1_cooked_dir_ = std::move(cooked_dir), n1_cache_dir_ = std::move(cache_dir);
+  }
+ private:
+  std::string n1_cooked_dir_, n1_cache_dir_;
+  void PumpN1Warmup();
+  void* n1_host_ = nullptr;
+  // Dual render (BOTS_HYBRID_DUAL, parity harness): the port's scene stays, n1 draws the same frame offscreen and
+  // both are read back on request (hybrid_fill.cpp).
+  bool DrawSceneDual(Image& target, const bots::HybridCamera& cam, const VkRect2D& area);
+  void* dual_ = nullptr;
+  // BOTS_CAPTURE_BURST (present.cpp): consecutive presented frames to disk; nothing runs while it is unset.
+  void CaptureBurst(const Image& source);
+  void DestroyBurst();
+  void* burst_ = nullptr;
+  // Fill 4 bookkeeping for the burst sidecar: frames n1 drew, the last marker's camera, the camera n1 drew with and
+  // the scene it drew.
+  uint64_t n1_drawn_ = 0, n1_scene_frame_ = 0;
+  uint32_t n1_marker_seq_ = 0, n1_view_seq_ = 0, n1_scene_cam_ = 0;
+  size_t n1_warm_total_ = 0, n1_warm_done_ = 0;
+  bool n1_warm_started_ = false;
+  // B-187: while the tree capture runs (hybrid_fill.cpp sets these) IssueDraw hands tree draws to n1ffi.
+  void* n1_tree_r_ = nullptr;
+  bool n1_tree_active_ = false;
+  N1FrameNote n1_note_;
+  std::chrono::steady_clock::time_point n1_resumed_{};
+  // Frames without a scene: hybrid_fill.cpp applies n1's loads then (loading screens), from EndFrame.
+  void PumpN1Uploads();
+  uint64_t n1_drawn_pumped_ = 0;
 
   // Textures (texture.cpp). TextureView may record an upload, so call it before a draw's ring reservation.
   // Views for the translator's unsigned or signed binding of a fetch: formats with both signednesses get a view of
