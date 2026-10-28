@@ -26,6 +26,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <rex/logging.h>
@@ -143,6 +144,9 @@ struct N1Host {
   // n1_record wall time: worst frame and frames over 20 ms in the window (a compile on the render thread shows here).
   double record_max_ms = 0;
   uint64_t record_over_20 = 0;
+  std::unordered_set<const char*> grades_asked;  // B-248: MaterialEffect paths (interned) already handed to n1_prewarm_grade
+  bool handover_logged = false;
+  uint32_t slow_logged = 0;  // B-248: "slow frame" lines written
   const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
   // The startup step (n1_precompile_*): when it began, and whether its result has been logged.
   std::chrono::steady_clock::time_point precompile_started{};
@@ -329,6 +333,27 @@ double Renderer::n1_seconds_since_resume() const {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - n1_resumed_).count();
 }
 
+// B-248: the colour grade of the level's MaterialEffect is decoded from the packages on the first lighting feed that
+// names it, 47 ms on the Mac, inside the n1 frame that takes the feed: the hand-over frame (n1 becoming ready after the
+// startup step) and every level's first frame. The game publishes that feed before n1 takes it (during port frames
+// too), so peek at it here and have n1 decode the grades on a background thread. BOTS_N1_GRADE_PREWARM=0: off.
+static void PrewarmGrades(N1Host* host, HybridState* state) {
+  static const bool on = [] { const char* v = std::getenv("BOTS_N1_GRADE_PREWARM"); return !(v && v[0] == '0'); }();
+  if (!on || !state) return;
+  std::vector<const char*> fresh;
+  {
+    std::lock_guard lock(state->scene_mutex);
+    const HybridLighting& l = state->scene.light;
+    if (!state->scene.light_pending || !l.has_fog_post) return;
+    for (const char* m : l.post_materials)
+      if (m && host->grades_asked.insert(m).second) fresh.push_back(m);
+  }
+  if (fresh.empty()) return;
+  const int started = n1_prewarm_grade(host->r, fresh.data(), uint32_t(fresh.size()));
+  REXLOG_INFO("hybrid n1: grade prewarm for {} MaterialEffect(s): {}", fresh.size(),
+              started > 0 ? "started" : started == 0 ? "already known" : "failed");
+}
+
 // B-199: from EndFrame (GPU thread), every frame. Hands opened packages to n1; on a frame without a scene (a loading
 // screen, a menu, a movie) applies n1's finished loads for up to BOTS_N1_LOAD_MS and records their texture copies
 // into this frame's commands, so a level's assets come in while it loads instead of after it starts.
@@ -336,6 +361,7 @@ void Renderer::PumpN1Uploads() {
   auto* host = static_cast<N1Host*>(n1_host_);
   if (!host || !host->r || host->failed) return;
   TakePackages(host, FindHybridState());
+  PrewarmGrades(host, FindHybridState());
   if (n1_drawn_ != n1_drawn_pumped_) {  // n1_record ran this frame and applied loads itself
     n1_drawn_pumped_ = n1_drawn_;
     return;
@@ -484,6 +510,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   TakePackages(host, state);
   HoldN1Preload(host, !scene_mid_draw_ || HoldInDraw());
   const auto t0 = std::chrono::steady_clock::now();
+  const double feed_ms_before = host->feed_ms;
   {
     // The marker can reach the render thread before the game has published its frame's scene (the feed runs at the next
     // tick's input poll). The older scene would then be drawn: with the marker's camera everything riding the camera
@@ -826,6 +853,21 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   }
   host->build_ms += host->scene.build_ms;
   host->particles_ms += host->scene.particles_ms;
+  {
+    // B-248: one line per n1 frame that took over 12 ms on the render thread (the first 40), with what the lighting
+    // feed and n1_record made of it, and one for the hand-over frame (the first one after n1_ready) whatever it took.
+    const double ms = std::chrono::duration<double, std::milli>(t2 - t0).count();
+    const bool ready = state && state->n1_ready.load(std::memory_order_relaxed);
+    const bool handover = ready && !host->handover_logged;
+    host->handover_logged |= ready;
+    if ((ms > 12.0 || handover) && host->slow_logged < 40) {
+      ++host->slow_logged;
+      REXLOG_INFO("hybrid n1: {} frame {:.1f} ms (lighting feed {:.1f}, n1_record {:.1f}), scene {}, ready {}",
+                  handover ? "hand-over" : "slow", ms,
+                  host->feed_ms - feed_ms_before, std::chrono::duration<double, std::milli>(t2 - t1).count(),
+                  host->scene.frame, state ? state->n1_ready.load(std::memory_order_relaxed) : 0u);
+    }
+  }
   const double secs = std::chrono::duration<double>(t2 - host->since).count();
   if (host->log_seconds > 0 && secs >= host->log_seconds) {
     const double n = double(host->frames);
