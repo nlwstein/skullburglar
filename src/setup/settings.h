@@ -23,6 +23,8 @@ struct Setting {
   std::string help;
   std::vector<Choice> choices;    // empty = checkbox (bool cvar), unless slider_max is set
   double slider_min = 0, slider_max = 0;  // slider_max > 0: a slider for a double cvar
+  bool slider_linear = false;     // linear instead of the default logarithmic slider
+  std::string slider_format = "%.2f";  // printf format of the slider's value
   std::string section;            // starts a new heading in the window
   bool binding = false;           // a key binding (kbm_*: comma-separated key names), shown in the bindings table
   std::string default_value;      // the cvar's built-in value (Reset)

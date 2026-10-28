@@ -8,12 +8,17 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iterator>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
+#include <SDL3/SDL_messagebox.h>
+#include <SDL3/SDL_misc.h>
+
+#include <rex/cvar.h>
 #include <rex/filesystem.h>
 #include <rex/graphics/command_processor.h>
 #include <rex/graphics/graphics_system.h>
@@ -44,6 +49,37 @@ namespace {
 
 namespace rg = rex::graphics;
 namespace xe = rex::graphics::xenos;
+
+// The renderer couldn't start: tell the player which GPU and why (the reason is in the log too), with the log one
+// click away, then quit. Nothing else would show: without a renderer the window stays black. BOTS_NO_DIALOGS=1
+// skips the box (unattended runs).
+[[noreturn]] void ShowStartFailure(const std::string& gpu, const std::string& reason) {
+  const std::string log = rex::cvar::GetFlagByName("log_file");
+  if (const char* v = std::getenv("BOTS_NO_DIALOGS"); !(v && *v == '1')) {
+    std::string text = "Skullburglar couldn't start its graphics.\n\nGraphics card: " + gpu + "\nReason: " + reason +
+                       "\n\nThis usually means the graphics driver is out of date, or the game picked a different "
+                       "graphics card than you meant it to (for example the one built into the processor). Updating "
+                       "the driver from the maker's website often fixes it.";
+    if (!log.empty()) text += "\n\nThe log, with more detail, is at:\n" + log;
+    const SDL_MessageBoxButtonData buttons[] = {{SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Open log"},
+                                                {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Quit"}};
+    SDL_MessageBoxData box{SDL_MESSAGEBOX_ERROR, nullptr, "Skullburglar", text.c_str(), SDL_arraysize(buttons), buttons,
+                           nullptr};
+    int choice = 0;
+    while (SDL_ShowMessageBox(&box, &choice) && choice == 1 && !log.empty()) {
+      // The log file itself, else its folder (some systems have no program for .log files).
+      auto url = [](const std::filesystem::path& p) {
+        std::string out = "file://", path = p.generic_string();
+        if (path.empty() || path.front() != '/') out += '/';
+        for (const char c : path) out += c == ' ' ? std::string("%20") : std::string(1, c);
+        return out;
+      };
+      const std::filesystem::path path(log);
+      if (!SDL_OpenURL(url(path).c_str())) SDL_OpenURL(url(path.parent_path()).c_str());
+    }
+  }
+  std::_Exit(1);
+}
 
 class NativeCommandProcessor final : public rg::CommandProcessor {
  public:
@@ -179,14 +215,19 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
  protected:
   bool SetupContext() override {
     auto* provider = static_cast<rex::ui::vulkan::VulkanProvider*>(graphics_system_->provider());
-    if (!provider) return false;
+    if (!provider) {
+      REXLOG_ERROR("gfx native: no usable Vulkan graphics device");
+      ShowStartFailure("none found", "no graphics card with a working Vulkan driver was found");
+    }
     rex::memory::Memory* memory = memory_;
     renderer_ = std::make_unique<vk::Renderer>(provider->vulkan_device(), [memory](uint32_t address) {
       return memory->TranslatePhysical<const uint8_t*>(address);
     });
     if (!renderer_->ok()) {
-      REXLOG_ERROR("gfx native: renderer initialisation failed");
+      const std::string gpu = renderer_->DeviceDescription(), reason = renderer_->failure();
+      REXLOG_ERROR("gfx native: renderer initialisation failed on {}: {}", gpu, reason);
       renderer_.reset();
+      ShowStartFailure(gpu, reason);
       return false;
     }
     sync_ = std::make_unique<vk::MemorySync>(*memory_, *renderer_);

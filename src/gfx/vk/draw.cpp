@@ -249,28 +249,34 @@ bool Renderer::InitDrawing() {
   shared_memory_bindings_ = 1u << Translator::GetSharedMemoryStorageBufferCountLog2(props.maxStorageBufferRange);
 
   VkDescriptorSetLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-  if (vk_.vkCreateDescriptorSetLayout(dev, &layout_info, nullptr, &set_layout_empty_) != VK_SUCCESS) return false;
+  if (const VkResult r_ = vk_.vkCreateDescriptorSetLayout(dev, &layout_info, nullptr, &set_layout_empty_);
+      r_ != VK_SUCCESS)
+    return Fail("vkCreateDescriptorSetLayout failed", r_);
   const VkDescriptorSetLayoutBinding shared{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, shared_memory_bindings_, kStages,
                                             nullptr};
   layout_info.bindingCount = 1;
   layout_info.pBindings = &shared;
-  if (vk_.vkCreateDescriptorSetLayout(dev, &layout_info, nullptr, &set_layout_shared_) != VK_SUCCESS) return false;
+  if (const VkResult r_ = vk_.vkCreateDescriptorSetLayout(dev, &layout_info, nullptr, &set_layout_shared_);
+      r_ != VK_SUCCESS)
+    return Fail("vkCreateDescriptorSetLayout failed", r_);
   VkDescriptorSetLayoutBinding constants[Translator::kConstantBufferCount];
   for (uint32_t i = 0; i < Translator::kConstantBufferCount; ++i) {
     constants[i] = {i, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, kStages, nullptr};
   }
   layout_info.bindingCount = Translator::kConstantBufferCount;
   layout_info.pBindings = constants;
-  if (vk_.vkCreateDescriptorSetLayout(dev, &layout_info, nullptr, &set_layout_constants_) != VK_SUCCESS) {
-    return false;
-  }
+  if (const VkResult r_ = vk_.vkCreateDescriptorSetLayout(dev, &layout_info, nullptr, &set_layout_constants_);
+      r_ != VK_SUCCESS)
+    return Fail("vkCreateDescriptorSetLayout failed", r_);
 
   const VkDescriptorPoolSize persistent_sizes[] = {
       {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, shared_memory_bindings_},
       {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kSubmissions * Translator::kConstantBufferCount}};
   VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, 1 + kSubmissions, 2,
                                        persistent_sizes};
-  if (vk_.vkCreateDescriptorPool(dev, &pool_info, nullptr, &persistent_pool_) != VK_SUCCESS) return false;
+  if (const VkResult r_ = vk_.vkCreateDescriptorPool(dev, &pool_info, nullptr, &persistent_pool_);
+      r_ != VK_SUCCESS)
+    return Fail("vkCreateDescriptorPool failed", r_);
   const VkDescriptorPoolSize transient_sizes[] = {
       {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kTransientSetCount * 8},
       {VK_DESCRIPTOR_TYPE_SAMPLER, kTransientSetCount * 8},
@@ -283,11 +289,15 @@ bool Renderer::InitDrawing() {
   pool_info.poolSizeCount = uint32_t(std::size(transient_sizes));
   pool_info.pPoolSizes = transient_sizes;
   for (Submission& submission : submissions_) {
-    if (vk_.vkCreateDescriptorPool(dev, &pool_info, nullptr, &submission.transient_pool) != VK_SUCCESS) return false;
+    if (const VkResult r_ = vk_.vkCreateDescriptorPool(dev, &pool_info, nullptr, &submission.transient_pool);
+        r_ != VK_SUCCESS)
+      return Fail("vkCreateDescriptorPool failed", r_);
   }
   const VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, persistent_pool_, 1,
                                           &set_layout_shared_};
-  if (vk_.vkAllocateDescriptorSets(dev, &alloc, &shared_set_) != VK_SUCCESS) return false;
+  if (const VkResult r_ = vk_.vkAllocateDescriptorSets(dev, &alloc, &shared_set_);
+      r_ != VK_SUCCESS)
+    return Fail("vkAllocateDescriptorSets failed", r_);
 
   // Guest physical memory, as the translated shaders address it (vertex fetch, index loads). GPU-only: it is filled
   // through the ring (UploadGuestMemory), so on a discrete GPU it lives in VRAM, not pinned system memory (B-113).
@@ -302,14 +312,15 @@ bool Renderer::InitDrawing() {
     ring.size = kRingSize;  // what Upload hands out; the slack is only ever read past
   }
   if (!buffers) {
-    std::fprintf(stderr, "native renderer: buffer allocation failed\n");
-    return false;
+    return Fail("couldn't allocate the guest-memory buffer or the upload rings");
   }
   // One constants set per ring.
   for (uint32_t i = 0; i < kSubmissions; ++i) {
     const VkDescriptorSetAllocateInfo constants_alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr,
                                                       persistent_pool_, 1, &set_layout_constants_};
-    if (vk_.vkAllocateDescriptorSets(dev, &constants_alloc, &constant_sets_[i]) != VK_SUCCESS) return false;
+    if (const VkResult r_ = vk_.vkAllocateDescriptorSets(dev, &constants_alloc, &constant_sets_[i]);
+        r_ != VK_SUCCESS)
+      return Fail("vkAllocateDescriptorSets failed", r_);
     VkDescriptorBufferInfo ranges[Translator::kConstantBufferCount];
     for (uint32_t b = 0; b < Translator::kConstantBufferCount; ++b) ranges[b] = {rings_[i].buffer, 0, kConstantRanges[b]};
     const VkWriteDescriptorSet constants_write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, constant_sets_[i], 0, 0,
@@ -332,13 +343,15 @@ bool Renderer::InitDrawing() {
   sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
   sampler.addressModeU = sampler.addressModeV = sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
   sampler.maxLod = VK_LOD_CLAMP_NONE;
-  if (vk_.vkCreateSampler(dev, &sampler, nullptr, &sampler_) != VK_SUCCESS) return false;
+  if (const VkResult r_ = vk_.vkCreateSampler(dev, &sampler, nullptr, &sampler_);
+      r_ != VK_SUCCESS)
+    return Fail("vkCreateSampler failed", r_);
 
   // Bound for textures that aren't available yet.
   if (!CreateImage(null_2d_array_, VK_FORMAT_R8G8B8A8_UNORM, 1, 1, false, VK_IMAGE_VIEW_TYPE_2D_ARRAY) ||
       !CreateImage(null_3d_, VK_FORMAT_R8G8B8A8_UNORM, 1, 1, false, VK_IMAGE_VIEW_TYPE_3D) ||
       !CreateImage(null_cube_, VK_FORMAT_R8G8B8A8_UNORM, 1, 1, false, VK_IMAGE_VIEW_TYPE_CUBE)) {
-    return false;
+    return Fail("couldn't create the placeholder textures");
   }
   // BOTS_NULL_TEXTURE_WHITE=1 shows untextured draws as silhouettes (debugging geometry before textures work).
   const char* white = std::getenv("BOTS_NULL_TEXTURE_WHITE");

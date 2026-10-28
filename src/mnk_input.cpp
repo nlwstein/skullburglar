@@ -109,7 +109,14 @@ PromptDevice MouseKeyboardDriver::PadPromptDevice() {
 
 void MouseKeyboardDriver::NoteGuestPad(uint16_t buttons, uint8_t lt, uint8_t rt, int16_t lx, int16_t ly, int16_t rx,
                                        int16_t ry) {
+  constexpr int kStickMove = 16000, kTriggerMove = 64;
+  const int64_t now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
   if (g_prompt_state.Device() != PromptDevice::kKeyboardMouse) {
+    // Remember controller use, so mouse motion right after it (gyro-as-mouse alongside the sticks) doesn't flip
+    // the prompts to keys. Keys and clicks still do.
+    if (buttons || lt > kTriggerMove || rt > kTriggerMove || std::abs(lx) > kStickMove || std::abs(ly) > kStickMove ||
+        std::abs(rx) > kStickMove || std::abs(ry) > kStickMove)
+      pad_active_ns_.store(now_ns, std::memory_order_relaxed);
     SetPromptDevice(PadPromptDevice());
     return;
   }
@@ -123,7 +130,10 @@ void MouseKeyboardDriver::NoteGuestPad(uint16_t buttons, uint8_t lt, uint8_t rt,
   const bool pad = (buttons & ~g.buttons) || (lt > kTrigger && !g.left_trigger) ||
                    (rt > kTrigger && !g.right_trigger) || (!g.thumb_lx && std::abs(lx) > kStick) ||
                    (!g.thumb_ly && std::abs(ly) > kStick) || std::abs(rx) > kStick || std::abs(ry) > kStick;
-  if (pad) SetPromptMode(false);
+  if (pad) {
+    pad_active_ns_.store(now_ns, std::memory_order_relaxed);
+    SetPromptMode(false);
+  }
 }
 
 MouseKeyboardDriver::MouseKeyboardDriver() : InputDriver(nullptr, 0) {
@@ -251,7 +261,11 @@ void MouseKeyboardDriver::OnMouseMove(rex::ui::MouseEvent& e) {
   }
   if (moved_ > 40) {  // a deliberate move, not a nudged desk
     moved_ = 0;
-    SetPromptMode(true);
+    // Not within 3 s of controller input: gyro-as-mouse next to the sticks would flip the prompts back and forth.
+    const int64_t since = std::chrono::steady_clock::now().time_since_epoch().count() -
+                          pad_active_ns_.load(std::memory_order_relaxed);
+    if (since > std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::seconds(3)).count())
+      SetPromptMode(true);
   }
   prev_x_ = x;
   prev_y_ = y;
