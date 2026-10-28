@@ -72,25 +72,7 @@ index 47fe8e2..427bf4e 100644
  SDLAudioDriver::SDLAudioDriver(memory::Memory* memory, rex::thread::Semaphore* semaphore)
      : AudioDriver(memory), semaphore_(semaphore) {}
  
-@@ -137,6 +168,17 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
-     std::fflush(dump);
-   }
- 
-+  // Debug: REX_AUDIO_DUMP=<path> appends every guest frame verbatim (6 ch sequential,
-+  // 256 samples each, big-endian float32) so output can be checked without a speaker.
-+  static FILE* dump = [] {
-+    const char* p = std::getenv("REX_AUDIO_DUMP");
-+    return p && *p ? std::fopen(p, "wb") : nullptr;
-+  }();
-+  if (dump) {
-+    std::fwrite(input_frame, sizeof(float), frame_samples_, dump);
-+    std::fflush(dump);
-+  }
-+
-   static uint32_t sdl_submit_count = 0;
-   if (sdl_submit_count < 10) {
-     REXAPU_DEBUG("SDLAudioDriver::SubmitFrame: frame_ptr={:08X} queued_count={}", frame_ptr,
-@@ -144,6 +186,10 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
+@@ -144,6 +175,10 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
      sdl_submit_count++;
    }
  
@@ -101,7 +83,7 @@ index 47fe8e2..427bf4e 100644
    {
      std::unique_lock<std::mutex> guard(frames_mutex_);
      frames_queued_.push(output_frame);
-@@ -195,6 +241,11 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+@@ -195,6 +230,11 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
      static uint32_t sdl_callback_count = 0;
      std::unique_lock<std::mutex> guard(driver->frames_mutex_);
      if (driver->frames_queued_.empty()) {
@@ -113,7 +95,7 @@ index 47fe8e2..427bf4e 100644
        if (sdl_callback_count < 10) {
          REXAPU_DEBUG("SDLCallback: no frames queued (silence)");
          sdl_callback_count++;
-@@ -208,6 +259,10 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+@@ -208,6 +248,10 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
      } else {
        auto buffer = driver->frames_queued_.front();
        driver->frames_queued_.pop();
@@ -124,7 +106,7 @@ index 47fe8e2..427bf4e 100644
        if (REXCVAR_GET(audio_mute)) {
          std::memset(data, 0, len);
        } else {
-@@ -238,6 +293,7 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+@@ -238,6 +282,7 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
      }
    }
    SDL_stack_free(data);
