@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -35,6 +36,7 @@
 
 #include "../../hybrid_state.h"
 #include "../../instr_state.h"
+#include "../start_failure.h"
 #include "renderer.h"
 
 #ifdef BOTS_N1FFI
@@ -222,23 +224,37 @@ void* Renderer::EnsureN1(VkFormat format) {
   host->load_ms = std::atof(EnvOr("BOTS_N1_LOAD_MS", "4"));
   host->hold_s = std::atof(EnvOr("BOTS_N1_PRELOAD_HOLD_S", "30"));
   host->ready_wait_s = std::atoi(EnvOr("BOTS_N1_BOOT_SPREAD", "1")) != 0 ? std::atof(EnvOr("BOTS_N1_BOOT_WAIT_S", "30")) : 0;
-  host->log_seconds = std::atof(EnvOr("BOTS_N1_LOG", "5"));
+  host->log_seconds = std::atof(EnvOr("BOTS_N1_LOG", "60"));  // players: a line a minute; test launchers set 5
   N1Init init{};
   init.get_instance_proc_addr = device_->vulkan_instance()->functions().vkGetInstanceProcAddr;
   init.instance = device_->vulkan_instance()->instance();
   init.physical_device = device_->physical_device();
   init.device = device_->device();
   init.color_format = format;
-  init.cooked_dir = EnvOr("BOTS_N1_COOKED", "game/C1Game/CookedXenon");
-  init.cache_dir = EnvOr("BOTS_N1_CACHE", "cache/n1");
+  // Players' defaults: the cooked packages under the game data root, the asset cache under the cache root (beside the
+  // native renderer's shader cache, so a read-only install folder is fine).
+  init.cooked_dir = EnvOr("BOTS_N1_COOKED", n1_cooked_dir_.empty() ? "game/C1Game/CookedXenon" : n1_cooked_dir_.c_str());
+  init.cache_dir = EnvOr("BOTS_N1_CACHE", n1_cache_dir_.empty() ? "cache/n1" : n1_cache_dir_.c_str());
   init.loader_threads = uint32_t(std::atoi(EnvOr("BOTS_N1_THREADS", "2")));
   const auto t0 = std::chrono::steady_clock::now();
-  host->r = n1_create(&init);
+  // The new renderer has no fallback: a start failure ends in the renderer start-failure box (native.cpp), whose text
+  // points the player at the pre-1.0 renderer in the launcher. BOTS_TEST_N1_FAIL=1 forces it (tests).
+  std::string failure;
+  if (const char* v = std::getenv("BOTS_TEST_N1_FAIL"); v && *v == '1') {
+    failure = "test: pretending the new renderer can't start";
+  } else if (std::error_code ec; !std::filesystem::is_directory(init.cooked_dir, ec)) {
+    failure = std::string("the game's data folder wasn't found: ") + init.cooked_dir;
+  } else if ((host->r = n1_create(&init)) == nullptr) {
+    failure = n1_last_error();
+  }
   host->format = format;
   n1_tree_r_ = host->r;
   if (!host->r) {
     host->failed = true;
-    REXLOG_ERROR("hybrid n1: n1_create failed: {}", n1_last_error());
+    REXLOG_ERROR("hybrid n1: n1_create failed: {}", failure);
+    ShowStartFailure(DeviceDescription(), "the new renderer couldn't start: " + failure,
+                     "You can still play: open the launcher, choose \"Pre-1.0 renderer (deprecated)\" as the "
+                     "Renderer, and press Play. If you start the game without the launcher, add --renderer=pre1.");
   } else {
     REXLOG_INFO("hybrid n1: renderer up in {:.1f} ms (target format {})",
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), int(format));

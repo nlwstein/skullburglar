@@ -53,6 +53,7 @@
 #include "mnk_input.h"
 #include "coop.h"
 #include "widescreen.h"
+#include "renderer_choice.h"
 #include "script_input.h"
 #include "setup/app_paths.h"
 #include "setup/settings.h"
@@ -247,6 +248,7 @@ class BotsApp : public rex::ReXApp {
     REXLOG_INFO("setup: showing the setup window ({})",
                 requested ? "requested" : "no game files");
     bool intro_before = rex::cvar::Query<bool>("intro_movies");
+    SetPickerHost();
     new bots::setup::SetupDialog(
         imgui_drawer(), defaults.game_data_root,
         bots::setup::AutoGameDir(rex::filesystem::GetExecutableFolder()), game_root_given_, config_path_,
@@ -267,6 +269,25 @@ class BotsApp : public rex::ReXApp {
         [this]() { app_context().QuitFromUIThread(); });
     return std::nullopt;
   }
+
+  // The launcher's file dialogs (file_picker.h) belong to the game window, and a fullscreen window steps out of
+  // fullscreen while one is open: a fullscreen window kept them out of sight. macOS keeps its own panel in front.
+  void SetPickerHost() {
+#if !defined(__APPLE__)
+    bots::setup::SetPickerHost({window() ? window()->GetNativeWindowHandle() : nullptr, [this](bool open) {
+                                  rex::ui::Window* w = window();
+                                  if (!w) return;
+                                  if (open) {
+                                    picker_left_fullscreen_ = w->IsFullscreen();
+                                    if (picker_left_fullscreen_) w->SetFullscreen(false);
+                                  } else if (picker_left_fullscreen_) {
+                                    picker_left_fullscreen_ = false;
+                                    w->SetFullscreen(true);
+                                  }
+                                }});
+#endif
+  }
+  bool picker_left_fullscreen_ = false;
 
   // Shader precompile progress (B-053); the dialog deletes itself when done.
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
@@ -381,7 +402,7 @@ class BotsApp : public rex::ReXApp {
   // cvars register after this hook and replay env values then; an explicit env var or
   // --flag still wins. (A bots.toml config value loses to these — use the flag instead.)
   //  - gpu_plugin=native: our own Vulkan renderer (src/gfx). xenos, the SDK's emulated Xbox 360
-  //    GPU, stays selectable (launcher "Renderer", bots.toml or --gpu_plugin=xenos).
+  //    GPU, is only on the command line (--gpu_plugin=xenos); the launcher's "Renderer" is new vs pre-1.0 (renderer_choice.h).
   //  - depth_float24_convert_in_pixel_shader: the game's D24FS8 shadow/light-environment
   //    depth compares need exact 24-bit float depth; without it the player renders black
   //    in level 1 (B-035, sweep 2026-10-01).
@@ -411,9 +432,17 @@ class BotsApp : public rex::ReXApp {
       }
     }
 #endif
-    if (config.gpu_plugin.empty()) {
-      config.gpu_plugin = "native";
-      rex::cvar::SetFlagByName("gpu_plugin", "native");  // so the launcher shows the choice in use
+    // The native backend, always. Only --gpu_plugin / REX_GPU_PLUGIN pick the emulated one (xenos, kept for the
+    // README's emulation numbers); a gpu_plugin in bots.toml, which older launchers wrote ("native", or "xenos" for
+    // the emulated choice they offered), is ignored. The player's choice of renderer is the `renderer` setting.
+    {
+      const auto source = rex::cvar::GetFlagSource("gpu_plugin");
+      const bool explicit_choice =
+          source == rex::cvar::Source::kCommandLine || source == rex::cvar::Source::kEnvironment;
+      if (config.gpu_plugin.empty() || !explicit_choice) {
+        config.gpu_plugin = "native";
+        rex::cvar::SetFlagByName("gpu_plugin", "native");
+      }
     }
     SetCvarDefault("depth_float24_convert_in_pixel_shader", "REX_DEPTH_FLOAT24_CONVERT_IN_PIXEL_SHADER", "true");
     // MoltenVK: plain Metal binding instead of Metal3 argument buffers for descriptor sets —

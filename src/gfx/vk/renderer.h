@@ -66,6 +66,10 @@ class Renderer : public Pm4Sink {
   Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory memory);
   ~Renderer() override;
   bool ok() const { return ok_; }
+  // Why construction failed (empty when ok()); also logged as an error when it happened.
+  const std::string& failure() const { return failure_; }
+  // "NVIDIA GeForce RTX 3060, driver 552.22, Vulkan 1.3.277" for the device in use (for logs and error messages).
+  std::string DeviceDescription() const;
 
   void OnDraw(const rex::graphics::RegisterFile& regs, const ShaderLoad& vs, const ShaderLoad& ps,
               const Draw& draw) override;
@@ -508,6 +512,14 @@ class Renderer : public Pm4Sink {
   VkFormat n1_remake_format_ = VK_FORMAT_UNDEFINED;
   uint32_t n1_prepared_seq_ = 0;
   void* EnsureN1(VkFormat format);
+ public:
+  // Where the new renderer (n1) reads the game's cooked packages and keeps its asset cache: derived from the game data
+  // root and the cache root by the command processor. BOTS_N1_COOKED / BOTS_N1_CACHE override them.
+  void SetN1Dirs(std::string cooked_dir, std::string cache_dir) {
+    n1_cooked_dir_ = std::move(cooked_dir), n1_cache_dir_ = std::move(cache_dir);
+  }
+ private:
+  std::string n1_cooked_dir_, n1_cache_dir_;
   void PumpN1Warmup();
   void* n1_host_ = nullptr;
   // Dual render (BOTS_HYBRID_DUAL, parity harness): the port's scene stays, n1 draws the same frame offscreen and
@@ -560,6 +572,8 @@ class Renderer : public Pm4Sink {
   std::vector<std::pair<uint32_t, uint32_t>> invalidated_;
   Api vk_;
   bool ok_ = false;
+  std::string failure_;
+  bool Fail(const std::string& what, VkResult result = VK_SUCCESS);  // records + logs; returns false
   VmaAllocator allocator_ = nullptr;
   struct OcclusionQuery {
     uint32_t address, first, count;  // guest sample-count struct; slots in the submission's pool

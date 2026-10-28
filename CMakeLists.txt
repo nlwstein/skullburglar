@@ -334,6 +334,7 @@ if(REXSDK_DIR AND (NOT WIN32 OR REXGLUE_USE_VULKAN))
                 add_dependencies(rexgpu-native n1ffi)
             endif()
             target_compile_definitions(rexgpu-native PRIVATE BOTS_N1FFI=1)
+            target_compile_definitions(bots PRIVATE BOTS_HAS_N1=1)  # src/renderer_choice.h: the launcher offers n1
             target_include_directories(rexgpu-native PRIVATE ${BOTS_N1FFI_INCLUDE_DIR})
             target_link_libraries(rexgpu-native PRIVATE ${BOTS_N1FFI_LIBRARY})
             if(APPLE)

@@ -42,6 +42,7 @@
 #include "widescreen.h"
 #include "gfx/capture.h"
 #include "instr.h"
+#include "input_math.h"
 #include "mnk_input.h"
 #include "prompt_state.h"
 #include "scene_feed.h"
@@ -49,6 +50,19 @@
 namespace bots::hybrid {
 bool Command(const std::string& cmd);  // hybrid.cpp
 }
+
+// Controller settings (launcher, Controller section). Defaults are the game as shipped.
+REXCVAR_DEFINE_DOUBLE(right_stick_deadzone, 20.0, "bots/Input",
+                      "Right stick dead zone in percent of the stick's travel. 20 is the game's own (per axis); "
+                      "lower values use a smaller round dead zone, 0 has none")
+    .range(0.0, 20.0);
+REXCVAR_DEFINE_BOOL(stick_acceleration, true, "bots/Input",
+                    "The game's stick acceleration: turning speeds up while the stick is held fully over, and the "
+                    "camera eases in when you push further. Off removes both");
+REXCVAR_DEFINE_STRING(stick_response, "original", "bots/Input",
+                      "Stick response curve for turning left and right: original (squared, small movements turn "
+                      "slowly) or linear");
+REXCVAR_DEFINE_BOOL(vibration, true, "bots/Input", "Controller vibration (rumble)");
 
 extern "C" void __imp__sub_82E1AC28(PPCContext& __restrict ctx, uint8_t* base);
 namespace bots::slowframe {
@@ -64,6 +78,8 @@ void Tick(uint8_t* base);  // level_stream.cpp: BOTS_STREAM_LOG=2 streaming-leve
 extern "C" void __imp__sub_823598E0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_823501E0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void __imp__sub_82445388(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void __imp__sub_82445450(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82E2EB38(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82E2EBB8(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base);
@@ -352,7 +368,21 @@ extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
       kbm->NoteGuestPad(uint16_t(i16(4)), s[6], s[7], i16(8), i16(10), i16(12), i16(14));
     }
   }
-  if (state && ctx.r3.u32 == 0) quit_option::FilterPad(base, state);
+  if (state && ctx.r3.u32 == 0) {
+    quit_option::FilterPad(base, state);
+    // Right stick dead zone setting: below the game's own 20% we re-map the stick (input_math.h). Every user.
+    const double dz = REXCVAR_GET(right_stick_deadzone) / 100.0;
+    if (dz < bots::input::kGameStickDeadZone - 1e-9) {
+      uint8_t* s = Raw(base, state);  // big-endian XINPUT_STATE: ... RX at +12, RY at +14
+      const bots::input::Stick in{int16_t(uint16_t(s[12] << 8 | s[13])), int16_t(uint16_t(s[14] << 8 | s[15]))};
+      const bots::input::Stick out = bots::input::RemapRightStick(in, dz);
+      static const bool trace = [] { const char* v = std::getenv("BOTS_FEEL_LOG"); return v && *v == '1'; }();
+      if (trace && user == 0 && (in.x || in.y))
+        REXLOG_INFO("FEELLOG stick ({}, {}) -> ({}, {})", in.x, in.y, out.x, out.y);
+      s[12] = uint8_t(uint16_t(out.x) >> 8), s[13] = uint8_t(out.x);
+      s[14] = uint8_t(uint16_t(out.y) >> 8), s[15] = uint8_t(out.y);
+    }
+  }
   split_screen::Poll(ctx, base, user, ctx.r3.u32 == 0 ? state : 0);
   if (split_screen::OffGameThread()) return;
   if (user == 0) {
@@ -2417,7 +2447,7 @@ void Props(uint8_t* base, uint32_t object, const std::string& tag) {
       const char* type = NameOf(base, LoadU32(base, f + 0x34));
       if (!std::strstr(type, "Property")) continue;
       const uint32_t off = LoadU32(base, f + 0x64), v = LoadU32(base, object + off);
-      if (std::string_view(type) == "BoolProperty")  // UBoolProperty +0x84 BitMask (the record is 0x88 bytes)
+      if (std::string_view(type) == "BoolProperty")  // UBoolProperty +0x84 BitMask (+0x68 is the next-property link)
         REXLOG_INFO("  {} {}.{} {} +{:X} = {:08X} mask {:08X} -> {}", tag, NameOf(base, cls), NameOf(base, f), type,
                     off, v, LoadU32(base, f + 0x84), (v & LoadU32(base, f + 0x84)) != 0);
       else
@@ -2701,6 +2731,113 @@ static void KeyTest(bots::MouseKeyboardDriver& kbm, float dt) {
   }
 }
 
+// Vibration setting. The game's two XInputSetState wrappers (user, XINPUT_VIBRATION*) both end in XamInputSetState;
+// with vibration off the request is zeroed (so any rumble in progress stops too).
+namespace {
+void MuteVibration(uint8_t* base, uint32_t vibration) {
+  static std::atomic<int> logged{-1};
+  const bool on = REXCVAR_GET(vibration);
+  if (logged.exchange(int(on)) != int(on)) REXLOG_INFO("vibration: {}", on ? "on" : "off");
+  if (!on && vibration) std::memset(Raw(base, vibration), 0, 4);
+}
+}  // namespace
+
+extern "C" void sub_82445388(PPCContext& __restrict ctx, uint8_t* base) {
+  MuteVibration(base, ctx.r4.u32);
+  __imp__sub_82445388(ctx, base);
+}
+
+extern "C" void sub_82445450(PPCContext& __restrict ctx, uint8_t* base) {
+  MuteVibration(base, ctx.r4.u32);
+  __imp__sub_82445450(ctx, base);
+}
+
+// Controller feel (GitHub #19, #20, #21). Each local player's PlayerController.PlayerInput (a C1PlayerInput) is a
+// new object after every chapter load, and its config fields start at the Coalesced.ini values, so the writes are
+// redone whenever they read back differently.
+//   - bEnableMouseSmoothing is cleared for everyone. UE3's SmoothMouse expects many mouse samples per frame; we send
+//     one, and it then scales each frame's movement by dt / (running mean frame time), so the turn wobbles with
+//     frame-time noise (measured: ratio sd 0.18; exactly 1.00 with it off).
+//   - Stick acceleration off: MaxPowerTurn 0 (no PowerTurn: 2.6x at full tilt) and a huge LagAmount (no easing; see
+//     input_math.h for why not 0 or 1).
+//   - Stick response linear: TurnPower 1 (yaw is squared as shipped; pitch is already linear).
+namespace {
+namespace feel {
+struct Fields {
+  uint32_t smooth_off = 0, smooth_mask = 0, turn_power = 0, max_power_turn = 0, lag_amount = 0;
+  bool found = false;
+};
+
+float F(uint8_t* base, uint32_t at) { return menu_pointer::LoadF32(base, at); }
+void SetF(uint8_t* base, uint32_t at, float v) { StoreU32(base, at, std::bit_cast<uint32_t>(v)); }
+
+void Apply(uint8_t* base, float dt) {
+  static const bool trace = [] { const char* v = std::getenv("BOTS_FEEL_LOG"); return v && *v == '1'; }();
+  static Fields f;
+  static bool have_original = false;
+  static float original_turn_power = 0, original_max_power_turn = 0, original_lag_amount = 0;
+  static uint32_t logged_pin[4] = {};
+  const bool accel = REXCVAR_GET(stick_acceleration);
+  const bool linear = REXCVAR_GET(stick_response) == "linear";
+  for (uint32_t i = 0, n = std::min<uint32_t>(split_screen::PlayerCount(base), 4); i < n; ++i) {
+    const uint32_t player = split_screen::Player(base, i);
+    const uint32_t pc = debug::Readable(player) ? LoadU32(base, player + 0x40) : 0;
+    if (!debug::Readable(pc)) continue;
+    const uint32_t po = split_screen::Prop(base, pc, "PlayerInput");
+    if (po == 0xFFFFFFFF) continue;
+    const uint32_t pin = LoadU32(base, pc + po);
+    if (!debug::Readable(pin)) continue;
+    if (!f.found) {
+      const uint32_t sm = split_screen::FindFunction(base, pin, "bEnableMouseSmoothing");
+      const uint32_t tp = split_screen::Prop(base, pin, "TurnPower");
+      const uint32_t mp = split_screen::Prop(base, pin, "MaxPowerTurn");
+      const uint32_t la = split_screen::Prop(base, pin, "LagAmount");
+      if (!sm || tp == 0xFFFFFFFF || mp == 0xFFFFFFFF || la == 0xFFFFFFFF) continue;  // not a C1PlayerInput (yet)
+      // +0x64 UProperty Offset, +0x84 UBoolProperty BitMask.
+      f = {LoadU32(base, sm + 0x64), LoadU32(base, sm + 0x84), tp, mp, la, true};
+      REXLOG_INFO("controller feel: PlayerInput fields found (smoothing +{:X} mask {:08X}, TurnPower +{:X}, "
+                  "MaxPowerTurn +{:X}, LagAmount +{:X})", f.smooth_off, f.smooth_mask, tp, mp, la);
+    }
+    // The shipped values are the ini's, the same for every instance: remember them before the first write so a
+    // setting changed back to the original can be restored.
+    if (!have_original) {
+      original_turn_power = F(base, pin + f.turn_power);
+      original_max_power_turn = F(base, pin + f.max_power_turn);
+      original_lag_amount = F(base, pin + f.lag_amount);
+      have_original = true;
+      REXLOG_INFO("controller feel: shipped TurnPower {}, MaxPowerTurn {}, LagAmount {}", original_turn_power,
+                  original_max_power_turn, original_lag_amount);
+    }
+    if (const uint32_t word = LoadU32(base, pin + f.smooth_off); word & f.smooth_mask)
+      StoreU32(base, pin + f.smooth_off, word & ~f.smooth_mask);
+    const float want_power = linear ? 1.0f : original_turn_power;
+    const float want_max = accel ? original_max_power_turn : 0.0f;
+    const float want_lag = accel ? original_lag_amount : bots::input::kNoLagAmount;
+    if (F(base, pin + f.turn_power) != want_power) SetF(base, pin + f.turn_power, want_power);
+    if (F(base, pin + f.max_power_turn) != want_max) SetF(base, pin + f.max_power_turn, want_max);
+    if (F(base, pin + f.lag_amount) != want_lag) SetF(base, pin + f.lag_amount, want_lag);
+    if (trace && i == 0) {
+      // Per frame: dt, yaw (PlayerController.Rotation.Yaw), then the stick as the script sees it and what it makes.
+      const uint32_t ro = split_screen::Prop(base, pc, "Rotation");
+      const int32_t yaw = ro != 0xFFFFFFFF ? int32_t(LoadU32(base, pc + ro + 4)) : 0;
+      auto prop = [&](const char* name) {
+        const uint32_t o = split_screen::Prop(base, pin, name);
+        return o != 0xFFFFFFFF ? F(base, pin + o) : -999.f;
+      };
+      REXLOG_INFO("FEELLOG dt={:.6f} yaw={} raw={:.4f} aTurn={:.4f} powerturn={:.4f} lagprop={:.4f} smooth={}", dt, yaw,
+                  prop("RawJoyLookRight"), prop("aTurn"), prop("PowerTurn"), prop("LagProportion"),
+                  (LoadU32(base, pin + f.smooth_off) & f.smooth_mask) != 0);
+    }
+    if (logged_pin[i] != pin) {
+      logged_pin[i] = pin;
+      REXLOG_INFO("controller feel: player {} PlayerInput {:08X}: mouse smoothing off, stick acceleration {}, stick "
+                  "response {}", i, pin, accel ? "on" : "off", linear ? "linear" : "original");
+    }
+  }
+}
+}  // namespace feel
+}  // namespace
+
 extern "C" void sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base) {
   const uint32_t vp = ctx.r3.u32;
   const float dt = float(ctx.f1.f64);
@@ -2739,6 +2876,7 @@ extern "C" void sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base) {
   }
   if (dx) InputAxis(ctx, base, vp, 0, kKeyMouseX, dx, dt, false);
   if (dy) InputAxis(ctx, base, vp, 0, kKeyMouseY, dy, dt, false);
+  feel::Apply(base, dt);
   if (!test.on) return;
   if (test.dx) InputAxis(ctx, base, vp, test.cid, kKeyMouseX, test.dx, dt, false);
   if (test.dy) InputAxis(ctx, base, vp, test.cid, kKeyMouseY, test.dy, dt, false);

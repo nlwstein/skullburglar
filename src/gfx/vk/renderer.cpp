@@ -146,25 +146,75 @@ uint8_t ToByte(float f) { return uint8_t(std::lround(std::clamp(f, 0.0f, 1.0f) *
 
 }  // namespace
 
+bool Renderer::Fail(const std::string& what, VkResult result) {
+  if (failure_.empty())
+    failure_ = what + (result != VK_SUCCESS ? " (VkResult " + std::to_string(int(result)) + ")" : "");
+  REXLOG_ERROR("gfx native: {}", failure_);
+  return false;
+}
+
+std::string Renderer::DeviceDescription() const {
+  if (!device_) return "no graphics device";
+  VkPhysicalDeviceProperties props;
+  device_->vulkan_instance()->functions().vkGetPhysicalDeviceProperties(device_->physical_device(), &props);
+  // Drivers pack their version differently: NVIDIA 10.8.8.6 bits, Intel on Windows 18.14, the rest as Vulkan does.
+  const uint32_t v = props.driverVersion;
+  char driver[48];
+  if (props.vendorID == 0x10DE) {
+    std::snprintf(driver, sizeof(driver), "%u.%u.%u.%u", v >> 22, (v >> 14) & 0xFF, (v >> 6) & 0xFF, v & 0x3F);
+  } else if (props.vendorID == 0x8086 && props.driverVersion >> 14 >= 10) {
+    std::snprintf(driver, sizeof(driver), "%u.%u", v >> 14, v & 0x3FFF);
+  } else {
+    std::snprintf(driver, sizeof(driver), "%u.%u.%u", VK_API_VERSION_MAJOR(v), VK_API_VERSION_MINOR(v),
+                  VK_API_VERSION_PATCH(v));
+  }
+  char text[256];
+  std::snprintf(text, sizeof(text), "%s, driver %s, Vulkan %u.%u.%u", props.deviceName, driver,
+                VK_API_VERSION_MAJOR(props.apiVersion), VK_API_VERSION_MINOR(props.apiVersion),
+                VK_API_VERSION_PATCH(props.apiVersion));
+  return text;
+}
+
 Renderer::Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory memory)
     : device_(device), memory_(std::move(memory)) {
-  if (!device_ || !vk_.Load(*device_) || !device_->properties().dynamicRendering) {
-    std::fprintf(stderr, "native renderer: Vulkan device lacks a required function or dynamic rendering\n");
+  // BOTS_TEST_RENDERER_FAIL=1: fail as if the driver lacked dynamic rendering (checks the error box and the log).
+  if (const char* v = std::getenv("BOTS_TEST_RENDERER_FAIL"); v && *v == '1') {
+    Fail("test: pretending the GPU's Vulkan driver has no dynamic rendering");
+    return;
+  }
+  if (!device_) {
+    Fail("no Vulkan device");
+    return;
+  }
+  if (!device_->properties().dynamicRendering) {
+    Fail("the GPU's Vulkan driver has no dynamic rendering (Vulkan 1.3, or VK_KHR_dynamic_rendering on 1.2)");
+    return;
+  }
+  if (!vk_.Load(*device_)) {
+    Fail("the GPU's Vulkan driver lacks functions the renderer needs");
     return;
   }
   allocator_ = rex::ui::vulkan::CreateVmaAllocator(device_, false);
-  if (!allocator_) return;
+  if (!allocator_) {
+    Fail("couldn't create the GPU memory allocator");
+    return;
+  }
   const VkCommandPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, nullptr, 0,
                                           device_->queue_family_graphics_compute()};
   const VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
   for (Submission& submission : submissions_) {
     if (vk_.vkCreateCommandPool(device_->device(), &pool_info, nullptr, &submission.pool) != VK_SUCCESS ||
         vk_.vkCreateFence(device_->device(), &fence_info, nullptr, &submission.fence) != VK_SUCCESS) {
+      Fail("couldn't create a command pool or fence");
       return;
     }
     const VkCommandBufferAllocateInfo cmd_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, nullptr,
                                                submission.pool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
-    if (vk_.vkAllocateCommandBuffers(device_->device(), &cmd_info, &submission.cmd) != VK_SUCCESS) return;
+    if (const VkResult r = vk_.vkAllocateCommandBuffers(device_->device(), &cmd_info, &submission.cmd);
+        r != VK_SUCCESS) {
+      Fail("vkAllocateCommandBuffers failed", r);
+      return;
+    }
   }
   // Intel's Windows driver (seen on Gen9, UHD 620, 31.0.101.2135) crashes in vkCmdBeginRendering when a pass
   // without a depth attachment follows one with depth in the same command buffer. There every pass gets one: a
@@ -213,6 +263,7 @@ Renderer::Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory m
   }
   UseSubmission(0);
   ok_ = InitDrawing();
+  if (!ok_ && failure_.empty()) Fail("renderer setup failed");
 }
 
 void Renderer::BeginRendering(const VkRenderingInfo& info, const char* what) {

@@ -1,6 +1,7 @@
 // See settings.h.
 #include "settings.h"
 
+#include "../renderer_choice.h"
 #include "update_check.h"
 
 #include <algorithm>
@@ -23,8 +24,11 @@ REXCVAR_DEFINE_BOOL(launcher, true, "bots",
                     "Show the launcher before starting the game (default: unless --game_data_root is given)");
 REXCVAR_DEFINE_BOOL(check_updates, true, "bots",
                     "Release builds: the launcher checks online for a newer version and offers its download page");
+REXCVAR_DEFINE_STRING(renderer, "new", "bots",
+                      "Which renderer draws the game: new (the default) or pre1, the pre-1.0 renderer (deprecated). Only "
+                      "pre1 selects the old one; any other value, and a missing key, is the new renderer");
 REXCVAR_DEFINE_STRING(render_scale, "auto", "bots",
-                      "Native renderer: render resolution as a multiple of 720p (auto, 3, 2, 1.5, 1.25, 1, 0.75, "
+                      "Render resolution as a multiple of 720p (auto, 3, 2, 1.5, 1.25, 1, 0.75, "
                       "0.667, 0.5); auto is 2/3 on Intel GPUs, else 1");
 REXCVAR_DEFINE_BOOL(present_vsync, true, "bots",
                     "Wait for the display's refresh to show each frame (Vulkan presentation): no tearing. Off presents "
@@ -41,27 +45,19 @@ std::vector<Setting> Catalog() {
   s.push_back({"intro_movies", "", "Play intro movies", "The logo movies before the title screen.", {}});
   s.push_back({"achievement_popups", "", "Achievement popups",
                "Can make the game stutter while one shows. Unlocks are recorded either way.", {}});
-  s.push_back({"gpu_plugin", "", "Renderer", "Takes effect the next time the game starts.",
-               {{"native", "Native (Vulkan, recommended)"}, {"xenos", "Emulated Xbox 360 GPU"}}});
-  s.push_back({"render_scale", "", "Render resolution (native)",
+  s.push_back({"renderer", "", "Renderer",
+               "The new renderer draws the 3D world with the game's rebuilt scene renderer. The pre-1.0 renderer is "
+               "the one earlier versions used; it stays for now in case the new one doesn't work on your PC, and will "
+               "be removed. Takes effect the next time the game starts.",
+               {{"new", "New renderer (recommended)"}, {"pre1", "Pre-1.0 renderer (deprecated)"}}});
+  s.push_back({"render_scale", "", "Render resolution",
                "Higher is sharper and costs GPU time; lower is faster on weak GPUs. Automatic is 720p, or 67% on "
                "Intel graphics.",
                {{"auto", "Automatic"}, {"3", "4K  (2160p)"}, {"2", "1440p"}, {"1.5", "1080p"},
                 {"1.25", "900p"}, {"1", "720p  (original)"}, {"0.75", "75%"}, {"0.667", "67%"}, {"0.5", "50%"}}});
-  s.push_back({"draw_resolution_scale_x", "draw_resolution_scale_y", "Render resolution (emulated)",
-               "Higher is sharper and costs GPU time. 3x needs a fast GPU.",
-               {{"1", "1x  (720p, original)"}, {"2", "2x  (1440p)"}, {"3", "3x  (2160p / 4K)"}}});
-  s.back().emulated_only = true;
-  s.push_back({"swap_post_effect", "", "Anti-aliasing", "",
-               {{"none", "Off"}, {"fxaa", "FXAA"}, {"fxaa_extreme", "FXAA (extreme)"}}});
-  s.back().emulated_only = true;
-  s.push_back({"anisotropic_override", "", "Texture filtering", "Anisotropic filtering for floors and walls.",
-               {{"-1", "Game default"}, {"0", "Off"}, {"1", "1x"}, {"2", "2x"}, {"3", "4x"},
-                {"4", "8x"}, {"5", "16x"}}});
-  s.back().emulated_only = true;
   s.push_back({"aspect_ratio", "", "Aspect ratio",
                "Wider than 16:9 fills an ultrawide screen and shows more at the sides; the HUD and menus stretch. "
-               "Automatic matches the screen in fullscreen, or the window. Native renderer only.",
+               "Automatic matches the screen in fullscreen, or the window.",
                {{"16:9", "16:9 (original)"}, {"auto", "Automatic"}, {"21:9", "21:9"}, {"32:9", "32:9"}}});
   s.push_back({"motion_blur", "", "Motion blur",
                "The smear when the camera turns or things move fast. Off keeps every other effect.",
@@ -72,13 +68,31 @@ std::vector<Setting> Catalog() {
   s.push_back({"check_updates", "", "Check for new versions",
                "When the launcher opens, look online for a newer Skullburglar and offer its download page.", {}});
   s.push_back({"pad_prompts", "", "Controller button prompts",
-               "Which buttons the game shows. Automatic matches the controller you used last. Native renderer only.",
+               "Which buttons the game shows. Automatic matches the controller you used last.",
                {{"auto", "Automatic"}, {"xbox", "Xbox"}, {"ps4", "PlayStation 4"}, {"ps5", "PlayStation 5"}}});
   s.back().section = "Controller";
   s.push_back({"aim_assist", "", "Aim assist",
                "The game slows the crosshair and pulls it toward enemies near it while you move (even through walls, "
                "as on the Xbox 360). Turn off for raw aiming. Applies to the mouse too.",
                {}});
+  s.push_back({"right_stick_deadzone", "", "Right stick dead zone",
+               "How far you push the right stick before the camera moves. 20% is the game's own, applied to each "
+               "direction separately; lower values use a smaller round dead zone, so small and diagonal movements "
+               "register. 0% has none, so a stick that drifts will move the camera. Steam Input's own dead zone, if "
+               "you use it, still applies.",
+               {}});
+  s.back().slider_min = 0, s.back().slider_max = 20, s.back().slider_linear = true, s.back().slider_format = "%.0f%%";
+  s.push_back({"stick_acceleration", "", "Stick acceleration",
+               "The game speeds up turning after you hold the stick fully over, and eases the camera in when you "
+               "push it further, as on the Xbox 360. Turn off for constant turning speed that follows the stick at "
+               "once (the top turning speed is then lower).",
+               {}});
+  s.push_back({"stick_response", "", "Stick response",
+               "How the stick maps to turning left and right. The original curve turns slowly for small movements. "
+               "Linear turns in proportion to the stick, so small movements are faster. Up and down is always "
+               "linear. The game's own Controller Sensitivity option still applies.",
+               {{"original", "Original curve"}, {"linear", "Linear"}}});
+  s.push_back({"vibration", "", "Vibration", "Turn off to stop the controller rumbling.", {}});
   s.push_back({"user_signin_live", "", "LAN co-op",
                "Play the story with another computer on your network. One player starts a story; the other picks "
                "Play Game, then Join COOP, and chooses it from the list. Both computers need this on. On Windows, "
@@ -128,12 +142,6 @@ std::vector<Setting> Catalog() {
     s.push_back({b.cvar, "", b.label, "", {}});
     s.back().binding = true;
   }
-#if defined(_WIN32)
-  s.push_back({"d3d12_present_sync_interval", "", "VSync (emulated, Direct3D 12)",
-               "Off has the lowest latency but can tear.",
-               {{"0", "Off"}, {"1", "On"}}});
-  s.back().emulated_only = true;
-#endif
   return s;
 }
 
@@ -156,14 +164,14 @@ void MarkAppDefault(const std::string& cvar) { AppDefaults().push_back(cvar); }
 
 std::vector<Setting> LoadSettings() {
   auto settings = Catalog();
-  // Settings of the renderer not in use, or whose cvar its plugin didn't register, aren't shown.
-  const bool native = rex::cvar::GetFlagByName("gpu_plugin") == "native";
-  std::erase_if(settings, [native](const Setting& s) {
-    return (native && s.emulated_only) || !rex::cvar::GetFlagInfo(s.cvar) ||
-           (s.cvar == "check_updates" && !UpdateCheckAvailable());
+  // Settings whose cvar the GPU plugin didn't register aren't shown; the renderer choice needs a build with n1.
+  std::erase_if(settings, [](const Setting& s) {
+    return !rex::cvar::GetFlagInfo(s.cvar) || (s.cvar == "check_updates" && !UpdateCheckAvailable()) ||
+           (s.cvar == "renderer" && !bots::kHasN1);
   });
   for (auto& s : settings) {
     s.value = rex::cvar::GetFlagByName(s.cvar);
+    if (s.cvar == "renderer" && s.value != "pre1") s.value = "new";  // anything but pre1 is the new renderer
     s.locked = IsLocked(s.cvar);
     const auto* info = rex::cvar::GetFlagInfo(s.cvar);
     s.default_value = info->default_value;
@@ -226,6 +234,8 @@ std::string SaveSettings(const std::vector<Setting>& settings, const fs::path& c
       }
     }
   }
+  // Older launchers wrote the renderer as gpu_plugin; it is ignored now (bots_app.h), so don't leave it behind.
+  if (const auto* old = table.get("gpu_plugin"); old && old->is_string()) table.erase("gpu_plugin");
   std::string err = WriteConfig(table, config_path);
   if (err.empty()) REXLOG_INFO("setup: settings saved to {}", config_path.string());
   return err;

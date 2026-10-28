@@ -65,6 +65,7 @@
 #include <rex/system/xmemory.h>
 
 #include "hybrid_state.h"
+#include "renderer_choice.h"
 #include "scene_feed.h"
 
 extern "C" void __imp__sub_82BB3230(PPCContext& __restrict ctx, uint8_t* base);
@@ -448,10 +449,13 @@ using bots::HybridState;
 namespace bots::hybrid {
 void InitFromEnv() {
   static const bool init = [] {
-    g_suppress = EnvInt("BOTS_HYBRID_SUPPRESS", 0);
+    // The new renderer's defaults (renderer_choice.h): the game's 3D scene suppressed (mode 2 keeps its visibility
+    // pass) and drawn by n1 (fill 4). The environment overrides both.
+    const bool n1 = bots::UseN1();
+    g_suppress = EnvInt("BOTS_HYBRID_SUPPRESS", n1 ? 2 : 0);
     if (g_suppress) g_suppress_mode = g_suppress;
     if (const int m = EnvInt("BOTS_HYBRID_AB_MODE", 0)) g_suppress_mode = m;
-    g_state.fill = uint32_t(EnvInt("BOTS_HYBRID_FILL", 0));
+    g_state.fill = uint32_t(bots::HybridFill());
     g_camera_every = EnvInt("BOTS_HYBRID_CAMERA", 0);
     g_ab_seconds = EnvInt("BOTS_HYBRID_AB", 0);
     if (EnvInt("BOTS_HYBRID_DUAL", 0)) {
