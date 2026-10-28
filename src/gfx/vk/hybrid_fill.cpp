@@ -302,7 +302,8 @@ void Renderer::PumpN1Warmup() {
   }
   auto* host = static_cast<N1Host*>(n1_host_);
   if (host && host->r && !host->precompile_logged && host->precompile_started.time_since_epoch().count()) {
-    // B-243: the game draws its own scene until the step is done (hybrid.cpp); say every minute that it still does.
+    // B-243: the game draws its own scene until the step is done (hybrid.cpp) if it isn't held behind the renderer
+    // screen (shader_progress.h; BOTS_PRECOMPILE_HOLD=0 skips that); say every minute that the step still runs.
     const double waited = std::chrono::duration<double>(std::chrono::steady_clock::now() - host->precompile_started).count();
     if (waited >= host->port_note_s) {
       host->port_note_s += 60;
@@ -310,7 +311,8 @@ void Renderer::PumpN1Warmup() {
       static const bool port = [] { const char* v = std::getenv("BOTS_N1_PORT_UNTIL_READY"); return !(v && v[0] == '0'); }();
       if (hs && !hs->n1_ready.load(std::memory_order_relaxed) && waited >= 60)
         REXLOG_INFO("hybrid n1: startup step still running after {:.0f} s; {}", waited,
-                    port ? "the port draws the scene" : "n1 draws what it has (BOTS_N1_PORT_UNTIL_READY=0)");
+                    port ? "the game is held, or the port draws the scene (BOTS_PRECOMPILE_HOLD=0)"
+                         : "n1 draws what it has (BOTS_N1_PORT_UNTIL_READY=0)");
     }
   }
   if (host && host->r && host->step_done && !host->ready_set) MaybeSetN1Ready(host);

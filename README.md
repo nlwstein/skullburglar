@@ -191,8 +191,9 @@ Longest wait for the shader precompile before the title screen on a first launch
 Mac mini M4 30.6 s, Apple M2 Pro 34 s. Shaders the shipped list doesn't cover compile in the background during play.
 
 The new renderer also prepares the game's meshes, textures and its own shaders for your machine on its first launch,
-which takes a few minutes (about 4 on an Apple M2 Pro). You can play meanwhile: until it is ready, the pre-1.0
-renderer draws the game. Later launches reuse what it prepared.
+which takes a few minutes (about 4 on an Apple M2 Pro or a ThinkPad T480). A "Preparing the renderer" screen shows the
+progress and the game starts when it is done. Later launches reuse what it prepared; an update that changes the
+renderer's shaders prepares them again.
 
 ## How it works
 
