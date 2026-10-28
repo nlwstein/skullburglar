@@ -512,6 +512,14 @@ class Renderer : public Pm4Sink {
   VkFormat n1_remake_format_ = VK_FORMAT_UNDEFINED;
   uint32_t n1_prepared_seq_ = 0;
   void* EnsureN1(VkFormat format);
+ public:
+  // Where the new renderer (n1) reads the game's cooked packages and keeps its asset cache: derived from the game data
+  // root and the cache root by the command processor. BOTS_N1_COOKED / BOTS_N1_CACHE override them.
+  void SetN1Dirs(std::string cooked_dir, std::string cache_dir) {
+    n1_cooked_dir_ = std::move(cooked_dir), n1_cache_dir_ = std::move(cache_dir);
+  }
+ private:
+  std::string n1_cooked_dir_, n1_cache_dir_;
   void PumpN1Warmup();
   void* n1_host_ = nullptr;
   // Dual render (BOTS_HYBRID_DUAL, parity harness): the port's scene stays, n1 draws the same frame offscreen and

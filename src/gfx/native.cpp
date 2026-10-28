@@ -39,27 +39,25 @@
 
 #include "../hybrid_state.h"
 #include "host_stats.h"
+#include "start_failure.h"
 #include "pm4.h"
 #include "upk.h"
 #include "vk/memory_sync.h"
 #include "vk/renderer.h"
 
 namespace bots::gfx {
-namespace {
-
-namespace rg = rex::graphics;
-namespace xe = rex::graphics::xenos;
 
 // The renderer couldn't start: tell the player which GPU and why (the reason is in the log too), with the log one
 // click away, then quit. Nothing else would show: without a renderer the window stays black. BOTS_NO_DIALOGS=1
 // skips the box (unattended runs).
-[[noreturn]] void ShowStartFailure(const std::string& gpu, const std::string& reason) {
+[[noreturn]] void ShowStartFailure(const std::string& gpu, const std::string& reason, const std::string& advice) {
   const std::string log = rex::cvar::GetFlagByName("log_file");
   if (const char* v = std::getenv("BOTS_NO_DIALOGS"); !(v && *v == '1')) {
     std::string text = "Skullburglar couldn't start its graphics.\n\nGraphics card: " + gpu + "\nReason: " + reason +
-                       "\n\nThis usually means the graphics driver is out of date, or the game picked a different "
-                       "graphics card than you meant it to (for example the one built into the processor). Updating "
-                       "the driver from the maker's website often fixes it.";
+                       (advice.empty() ? "\n\nThis usually means the graphics driver is out of date, or the game picked a "
+                                         "different graphics card than you meant it to (for example the one built into "
+                                         "the processor). Updating the driver from the maker's website often fixes it."
+                                       : "\n\n" + advice);
     if (!log.empty()) text += "\n\nThe log, with more detail, is at:\n" + log;
     const SDL_MessageBoxButtonData buttons[] = {{SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Open log"},
                                                 {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Quit"}};
@@ -80,6 +78,11 @@ namespace xe = rex::graphics::xenos;
   }
   std::_Exit(1);
 }
+
+namespace {
+
+namespace rg = rex::graphics;
+namespace xe = rex::graphics::xenos;
 
 class NativeCommandProcessor final : public rg::CommandProcessor {
  public:
@@ -255,6 +258,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
           }
           return package->second->Read(offset, size, out);
         });
+    renderer_->SetN1Dirs(n1_cooked_dir(), n1_cache_dir_);
     if (!pipeline_cache_path_.empty()) renderer_->LoadPipelineCache(pipeline_cache_path_);
     PublishWarmup();
     const char* occlusion = std::getenv("BOTS_GFX_OCCLUSION");
@@ -273,7 +277,9 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   // Runs on the command processor thread, or before the context is set up while the processor is paused.
   void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id, bool blocking) override {
     pipeline_cache_path_ = cache_root / "native" / fmt::format("{:08X}.pipelines.bin", title_id);
+    n1_cache_dir_ = (cache_root / "n1").string();
     if (renderer_) {
+      renderer_->SetN1Dirs(n1_cooked_dir(), n1_cache_dir_);
       renderer_->LoadPipelineCache(pipeline_cache_path_);
       PublishWarmup();
     }
@@ -623,6 +629,10 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   std::unique_ptr<vk::Renderer> renderer_;
   std::unique_ptr<vk::MemorySync> sync_;
   std::filesystem::path pipeline_cache_path_;
+  std::string n1_cache_dir_;  // <cache root>/n1: the new renderer's asset cache (hybrid_fill.cpp)
+  std::string n1_cooked_dir() const {
+    return (kernel_state_->emulator()->game_data_root() / "C1Game" / "CookedXenon").string();
+  }
   ShaderLoad vs_, ps_;
   std::vector<uint32_t> vs_inline_, ps_inline_;
   ConstantWriteTracker constant_writes_;
