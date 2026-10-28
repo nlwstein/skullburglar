@@ -29,7 +29,7 @@ and that is where most of the work in this port has gone.
   most of their time, and recompiling the CPU code does nothing about it. Skullburglar instead takes the game's
   Direct3D calls and renders them directly with Vulkan, like a PC port would. On an RTX 3090 it runs the same scene
   at 275 fps where Xenia manages 89 and GPU emulation in this port 108, while keeping the GPU a third to a half as
-  busy at 60 fps and using less memory. The emulated GPU stays available as a fallback (`--gpu_plugin=xenos`).
+  busy at 60 fps and using less memory. The emulated GPU is no longer offered in the launcher; it stays on the command line (`--gpu_plugin=xenos`) for comparison.
 - **Keyboard and mouse, done properly.** Mouse look goes through the engine's own PC mouse input rather than a fake
   analog stick, so there is no stick acceleration curve or turn lag. Vehicles drive on W / S like a PC driving game
   instead of the console's trigger throttle. Menus are point-and-click, including toggles and sliders. Every button prompt in the game (menus, HUD, tutorials, pickups) switches to keyboard and mouse icons for

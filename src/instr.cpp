@@ -98,6 +98,7 @@
 #include "app_quit.h"
 #include "instr_state.h"
 #include "mnk_input.h"
+#include "renderer_choice.h"
 #include "thread_stats.h"
 
 // UWorld::SingleLineCheck(FCheckResult& Hit, AActor* Source, const FVector& End, const FVector& Start, DWORD
@@ -1702,10 +1703,7 @@ PrecompileInfo Precompile() {
   if (auto* gfx = g_graphics ? g_graphics() : nullptr) gfx->GetShaderPrecompileProgress(p.gfx_done, p.gfx_total);
   // The native renderer logs the end of its warm-up (and of n1's startup step, when the hybrid's n1 fill is on);
   // the totals alone can't tell "not started" from "nothing to do". Other renderers: their background progress.
-  static const bool n1_expected = [] {
-    const char* v = std::getenv("BOTS_HYBRID_FILL");
-    return v && std::atoi(v) == 4;
-  }();
+  static const bool n1_expected = bots::HybridFill() == 4;
   const bool port = g.port_warm_done || (g_state.warm_loaded && p.port_done >= p.port_total);
   // The native renderer publishes nothing before its first frame, so its 0/0 then means "not started".
   static const bool native = rex::cvar::GetFlagByName("gpu_plugin") == "native";

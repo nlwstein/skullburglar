@@ -275,6 +275,7 @@ if(REXSDK_DIR AND (NOT WIN32 OR REXGLUE_USE_VULKAN))
         set(BOTS_N1FFI_INCLUDE_DIR "" CACHE PATH "Hybrid spike: directory holding n1ffi.h")
         if(BOTS_N1FFI_LIBRARY AND BOTS_N1FFI_INCLUDE_DIR)
             target_compile_definitions(rexgpu-native PRIVATE BOTS_N1FFI=1)
+            target_compile_definitions(bots PRIVATE BOTS_HAS_N1=1)  # src/renderer_choice.h: the launcher offers n1
             target_include_directories(rexgpu-native PRIVATE ${BOTS_N1FFI_INCLUDE_DIR})
             target_link_libraries(rexgpu-native PRIVATE ${BOTS_N1FFI_LIBRARY})
             if(APPLE)
