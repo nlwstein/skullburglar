@@ -89,6 +89,15 @@ struct HybridPost {  // 180 bytes; NaN = property absent
   float uber_dof[7];  // BloomKernelSize, BlurKernelSize, FalloffExponent, MaxNear/FarBlurAmount, FocusInnerRadius, FocusDistance
 };
 static_assert(sizeof(HybridLight) == 104 && sizeof(HybridFog) == 44 && sizeof(HybridPost) == 180);
+// B-266: a scalar parameter of a post-chain MaterialEffect material, read live (the game drives them: Gangsta Fire's
+// PARAMAmount, the low-health fade, the death effect's StartTime). `material` indexes HybridLighting::post_materials,
+// `name` is interned. The outermost MaterialInstanceConstant's value wins.
+struct HybridPostParam {
+  uint32_t material;
+  const char* name;
+  float value;
+  bool operator==(const HybridPostParam&) const = default;
+};
 struct HybridLighting {
   bool has_fog_post = false;  // this update carries fog and post (sent only when they change)
   std::vector<HybridLight> lights;
@@ -99,6 +108,7 @@ struct HybridLighting {
   // The post chain's shown MaterialEffect materials in chain order (interned), not in `paths`. The level's grade is
   // usually the first; inserted chains (fire damage, scenario modes) add theirs (B-227).
   std::vector<const char*> post_materials;
+  std::vector<HybridPostParam> post_params;  // B-266, empty with BOTS_N1_POST_MATS=0
   void Clear() {
     has_fog_post = false;
     lights.clear();

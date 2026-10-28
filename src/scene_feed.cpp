@@ -1451,6 +1451,8 @@ struct LiveState {
   HybridFog last_fog = {};
   HybridPost last_post = {};
   std::vector<const char*> last_materials;
+  std::vector<HybridPostParam> last_params;
+  uint64_t post_quick = 0;  // B-266: PostQuick() after the last post read
   bool have_fog_post = false;
   uint32_t feed_every = [] {
     const char* v = std::getenv("BOTS_N1_FEED_EVERY");
@@ -1874,6 +1876,98 @@ void Triple(uint32_t base, const FieldEx& prop, float out[3]) {
 
 enum : uint32_t { kPfUber = 1, kPfGod = 2, kPfLsBloom = 4, kPfLsBalance = 8, kPfLsScene = 16, kPfLsTone = 32, kPfLast = 64, kPfUberDiffKernel = 128 };
 constexpr uint32_t kMaxPostMaterials = 15;  // post flags bits 24..27: how many MaterialEffect paths follow material_effect
+constexpr uint32_t kMaxPostParams = 32;     // B-266: scalar parameters fed for all post materials together
+
+// B-266: n1 draws the game's post-process materials (Gangsta Fire, the low-health and death effects) from their live
+// scalar parameters. BOTS_N1_POST_MATS=0 feeds none (and n1 then draws none).
+bool PostMatsOn() {
+  static const bool on = [] {
+    const char* v = std::getenv("BOTS_N1_POST_MATS");
+    return !(v && v[0] == '0');
+  }();
+  return on;
+}
+
+// Where a MaterialInstanceConstant class keeps ScalarParameterValues (FScalarParameterValue: ParameterName,
+// ParameterValue, ExpressionGUID), looked up once per class.
+struct ScalarLayout {
+  bool ok = false;
+  uint32_t offset = 0, size = 0, name = 0, value = 0;
+};
+const ScalarLayout& ScalarParamsOf(uint32_t mic) {
+  static std::unordered_map<uint32_t, ScalarLayout> layouts;
+  auto [it, fresh] = layouts.try_emplace(U32(mic + 0x34));
+  if (fresh) {
+    const uint32_t rec = PropRecord(mic, "ScalarParameterValues");
+    const uint32_t inner = rec ? U32(rec + 0x84) : 0;  // UArrayProperty Inner: a StructProperty
+    const uint32_t st = Readable(inner) ? U32(inner + 0x84) : 0;
+    if (Readable(st)) {
+      const Field name = FindProp(st, "ParameterName"), value = FindProp(st, "ParameterValue");
+      const uint32_t size = U32(inner + 0x48);
+      if (name.ok() && value.ok() && size && size <= 0x200)
+        it->second = ScalarLayout{true, U32(rec + 0x64), size, name.offset, value.offset};
+    }
+  }
+  return it->second;
+}
+
+// The parameter arrays PostBin last read, so a lighting build between its every-16th post reads can tell that the
+// chain or a parameter changed (PostQuick) and read the post again at once: Gangsta Fire ramps PARAMAmount over 0.25 s.
+struct PostSpan {
+  uint32_t mic, offset, size;
+};
+std::vector<PostSpan> g_post_spans;
+
+// A post material's scalar parameters up its MaterialInstanceConstant chain (the outermost value of a name wins).
+void PostParams(HybridLighting& out, uint32_t mat, uint32_t index) {
+  std::vector<uint32_t> seen;
+  for (int depth = 0; depth < 8 && IsObject(mat) && !std::strcmp(ClassName(mat), "MaterialInstanceConstant"); ++depth) {
+    const ScalarLayout& l = ScalarParamsOf(mat);
+    if (l.ok) {
+      g_post_spans.push_back({mat, l.offset, l.size});
+      const uint32_t data = U32(mat + l.offset), n = U32(mat + l.offset + 4);
+      for (uint32_t k = 0; Readable(data) && k < n && k < 16; ++k) {
+        const uint32_t e = data + k * l.size, nm = U32(e + l.name);
+        if (std::find(seen.begin(), seen.end(), nm) != seen.end()) continue;
+        seen.push_back(nm);
+        if (out.post_params.size() >= kMaxPostParams) return;
+        if (const char* name = Intern(NameText(nm))) out.post_params.push_back({index, name, F32(e + l.value)});
+      }
+    }
+    mat = PropU32(mat, "Parent");
+  }
+}
+
+uint32_t PlayerPostChain() {
+  const uint32_t engine = Engine();
+  const Field players = IsObject(engine) ? Prop(engine, "GamePlayers") : Field{};
+  const uint32_t lp =
+      players.ok() && U32(engine + players.offset + 4) ? U32(U32(engine + players.offset)) : 0;
+  return IsObject(lp) ? PropU32(lp, "PlayerPostProcess") : 0;
+}
+
+// B-266: a hash of the post chain's effect list and of the post materials' scalar parameter bytes. Cheap (no name
+// lookups), so it runs on every lighting build.
+uint64_t PostQuick() {
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&h](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+  const uint32_t chain = PlayerPostChain();
+  mix(chain);
+  if (IsObject(chain)) {
+    const Field effects = Prop(chain, "Effects");
+    const uint32_t data = effects.ok() ? U32(chain + effects.offset) : 0, n = effects.ok() ? U32(chain + effects.offset + 4) : 0;
+    mix(data), mix(n);
+    for (uint32_t i = 0; Readable(data) && i < n && i < 32; ++i) mix(U32(data + 4 * i));
+  }
+  for (const PostSpan& sp : g_post_spans) {
+    if (!IsObject(sp.mic)) continue;
+    const uint32_t data = U32(sp.mic + sp.offset), n = std::min<uint32_t>(U32(sp.mic + sp.offset + 4), 16);
+    mix(data), mix(n);
+    if (!Readable(data)) continue;
+    for (uint32_t i = 0; i + 4 <= n * sp.size; i += 4) mix(U32(data + i));
+  }
+  return h;
+}
 
 // The player's post chain and blended settings (LightsPostJson's `post`), as raw numbers.
 void PostBin(HybridLighting& out) {
@@ -1889,6 +1983,8 @@ void PostBin(HybridLighting& out) {
   for (float& v : p.uber_dof) v = nan;
   p.present = 1;
   out.post_materials.clear();
+  out.post_params.clear();
+  g_post_spans.clear();
   const uint32_t engine = Engine();
   const uint32_t players = IsObject(engine) ? PropRecord(engine, "GamePlayers") : 0;
   const uint32_t lp = players && U32(engine + U32(players + 0x64) + 4) ? U32(U32(engine + U32(players + 0x64))) : 0;
@@ -1928,7 +2024,10 @@ void PostBin(HybridLighting& out) {
         const FieldEx m = FindEx(cls, "Material");
         const uint32_t mat = m.ok() ? U32(e + m.offset) : 0;
         if (IsObject(mat) && out.post_materials.size() < kMaxPostMaterials)
-          if (const char* path = Intern(Path(mat))) out.post_materials.push_back(path);
+          if (const char* path = Intern(Path(mat))) {
+            out.post_materials.push_back(path);
+            if (PostMatsOn()) PostParams(out, mat, uint32_t(out.post_materials.size() - 1));
+          }
       } else if (name == "SfGodRaysEffect") {
         if (!FieldB(e, FindEx(cls, "Enabled"))) continue;
         p.flags |= kPfGod;
@@ -2694,7 +2793,9 @@ void Live(uint8_t* base) {
   out.light_pending = false;
   if (st.feed_every && st.frame % st.feed_every == 0) {
     const auto tl = std::chrono::steady_clock::now();
-    const bool fp = st.lighting_builds++ % 16 == 0;
+    bool fp = st.lighting_builds++ % 16 == 0;
+    // B-266: the chain or a post material's parameter changed since the last read: read the post now.
+    if (!fp && PostMatsOn() && st.have_fog_post) fp = PostQuick() != st.post_quick;
     if (st.json_feed || st.verify_feed) {
       out.lighting = "{\"v\":1";
       LightsPostJson(out.lighting, world_info, true, fp);
@@ -2708,12 +2809,15 @@ void Live(uint8_t* base) {
       if (fp) {
         FogBin(nl.fog);
         PostBin(nl);
+        if (PostMatsOn()) st.post_quick = PostQuick();
         post_changed = st.verify_feed || !st.have_fog_post || std::memcmp(&nl.fog, &st.last_fog, sizeof(HybridFog)) ||
-                       std::memcmp(&nl.post, &st.last_post, sizeof(HybridPost)) || nl.post_materials != st.last_materials;
+                       std::memcmp(&nl.post, &st.last_post, sizeof(HybridPost)) || nl.post_materials != st.last_materials ||
+                       nl.post_params != st.last_params;
       }
       if (st.verify_feed || !SameLights(nl, st.last_light) || post_changed) {
         nl.has_fog_post = post_changed;
-        if (post_changed) st.last_fog = nl.fog, st.last_post = nl.post, st.last_materials = nl.post_materials;
+        if (post_changed)
+          st.last_fog = nl.fog, st.last_post = nl.post, st.last_materials = nl.post_materials, st.last_params = nl.post_params;
         st.have_fog_post |= post_changed;
         st.last_light.lights = nl.lights, st.last_light.sh = nl.sh, st.last_light.paths = nl.paths;
         out.light = nl;
@@ -2739,6 +2843,7 @@ void Live(uint8_t* base) {
       out.light.has_fog_post = true;
       out.light.fog = hs->scene.light.fog, out.light.post = hs->scene.light.post;
       out.light.post_materials = hs->scene.light.post_materials;
+      out.light.post_params = hs->scene.light.post_params;
     }
   }
   std::swap(hs->scene, out);

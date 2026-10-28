@@ -553,6 +553,17 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
       fb.post.flags |= uint32_t(l.post_materials.size()) << 24;
       paths.insert(paths.end(), l.post_materials.begin(), l.post_materials.end());
     }
+#if N1_FEED_VERSION >= 3
+    // B-266: the post materials' live scalar parameters; names go in the path table.
+    std::vector<N1FeedParam> params;
+    if (l.has_fog_post && !l.post_materials.empty())
+      for (const HybridPostParam& q : l.post_params) {
+        params.push_back({q.material, uint32_t(paths.size()), q.value});
+        paths.push_back(q.name);
+      }
+    fb.param_count = uint32_t(params.size());
+    fb.params = params.data();
+#endif
     fb.path_count = uint32_t(paths.size());
     fb.paths = paths.data();
     if (n1_set_feed_bin(host->r, &fb) != 0) REXLOG_WARN("hybrid n1: n1_set_feed_bin failed: {}", n1_last_error());
