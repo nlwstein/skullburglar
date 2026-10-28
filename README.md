@@ -218,3 +218,7 @@ developer or publisher, or Microsoft. All trademarks belong to their owners.
 ## License
 
 [BSD 3-Clause](LICENSE). Contributions: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+<sub>Skullburglar is free and will stay open source. If you'd like to say thanks for the work on it, you can
+[sponsor me on GitHub](https://github.com/sponsors/nlwstein). It's never needed to play, and nothing is held back for
+sponsors.</sub>
