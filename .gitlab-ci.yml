@@ -50,11 +50,12 @@ checks:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
-# The desktop builds also run on branches named for n1 (n1-public): they build into skullburglar-branch/0.0.0-branch.<sha>.
+# The desktop builds also run on release/* branches (a release MR's full build before merging): they build into
+# skullburglar-branch/0.0.0-branch.<sha>.
 .desktop:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-    - if: $CI_COMMIT_BRANCH =~ /(^|\/)n1-public$/
+    - if: $CI_COMMIT_BRANCH =~ /^release\//
 
 .psr:
   image: python:3.12
