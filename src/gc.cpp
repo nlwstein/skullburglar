@@ -14,10 +14,13 @@
 // Host analysis (on by default; BOTS_GC_HOST=0 runs the game's own): sub_825E99F0 replaced by a host
 // implementation of the same algorithm (see HostReachability). It gives the same results (BOTS_GC_VERIFY). On a
 // laptop it cut the periodic pass from about 28 to 22 ms in whole-run A/B tests; software prefetch and a helper
-// thread warming the cache did not help further and were dropped.
+// thread warming the cache did not help further and were dropped. The walk itself runs on several threads (B-252,
+// ParallelWalk below): the pass stays stop-the-world but takes about 14 ms instead of 23 ms on the same laptop.
 //   BOTS_GC_HOST=0     the game's own analysis
 //   BOTS_GC_HOST=1     the host analysis (default)
 //   BOTS_GC_HOST=2     (measuring) alternate the host analysis and the game's on successive passes
+//   BOTS_GC_PAR=0      (with the host analysis) walk on the game thread only; the default splits the walk across threads
+//   BOTS_GC_THREADS=n  threads for the parallel walk, the game thread included (default: up to 4 of the logical CPUs)
 //   BOTS_GC_VERIFY=1   (with BOTS_GC_HOST=1) run both on every pass and log whether they agree ("gc: verify")
 //   BOTS_GC_PROF=1     (with the host analysis) also time the per-object virtual calls ("gc: walk")
 //
