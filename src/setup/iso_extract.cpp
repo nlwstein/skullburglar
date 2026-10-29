@@ -1,4 +1,5 @@
 // See iso_extract.h.
+#include "../path_utf8.h"
 #include "iso_extract.h"
 #include "game_swap.h"
 
@@ -53,7 +54,7 @@ bool CopyEntry(const DiscImageEntry* e, const fs::path& out_path, ExtractProgres
   }
   std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
   if (!out) {
-    error = fmt::format("Can't create {}", out_path.string());
+    error = fmt::format("Can't create {}", bots::PathUtf8(out_path));
     return false;
   }
   constexpr size_t kChunk = 4 << 20;
@@ -62,7 +63,7 @@ bool CopyEntry(const DiscImageEntry* e, const fs::path& out_path, ExtractProgres
     size_t n = std::min(kChunk, size - pos);
     out.write(reinterpret_cast<const char*>(src + pos), std::streamsize(n));
     if (!out) {
-      error = fmt::format("Write failed for {} (disk full?)", out_path.string());
+      error = fmt::format("Write failed for {} (disk full?)", bots::PathUtf8(out_path));
       return false;
     }
     progress.bytes_done += n;
@@ -75,7 +76,7 @@ bool ExtractDir(const Entry* dir, const fs::path& out_dir, ExtractProgress& prog
   std::error_code ec;
   fs::create_directories(out_dir, ec);
   if (ec) {
-    error = fmt::format("Can't create folder {}: {}", out_dir.string(), ec.message());
+    error = fmt::format("Can't create folder {}: {}", bots::PathUtf8(out_dir), ec.message());
     return false;
   }
   for (const auto& child : dir->children()) {
@@ -156,11 +157,11 @@ ExtractResult ExtractIso(const fs::path& iso, const fs::path& dest, ExtractProgr
   auto space = fs::space(parent, ec);
   if (!ec && space.available < bytes + (256ull << 20)) {
     result.error = fmt::format("Not enough free space in {}: needs {:.1f} GB, {:.1f} GB free.",
-                               parent.string(), bytes / 1e9, space.available / 1e9);
+                               bots::PathUtf8(parent), bytes / 1e9, space.available / 1e9);
     return result;
   }
   REXLOG_INFO("setup: extracting {} files ({:.2f} GB) from {} to {}", files, bytes / 1e9,
-              iso.string(), dest.string());
+              bots::PathUtf8(iso), bots::PathUtf8(dest));
 
   fs::path partial = dest;
   partial += ".partial";

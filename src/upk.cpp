@@ -1,3 +1,4 @@
+#include "path_utf8.h"
 #include "upk.h"
 
 #include <algorithm>
@@ -148,7 +149,7 @@ bool LzoDecompress(const uint8_t* in, size_t in_size, uint8_t* out, size_t out_s
   }
 }
 
-Package::Package(const std::filesystem::path& path) : file_(std::fopen(path.string().c_str(), "rb")) {
+Package::Package(const std::filesystem::path& path) : file_(bots::OpenFile(path, "rb")) {
   if (!file_) return;
   Seek(file_, 0, SEEK_END);
   size_ = Tell(file_);

@@ -14,6 +14,8 @@
 #include <string>
 #include <system_error>
 
+#include "../path_utf8.h"
+
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
@@ -23,20 +25,14 @@ namespace bots::setup {
 inline std::filesystem::path AppDataDir() {
   namespace fs = std::filesystem;
 #if defined(_WIN32)
-  if (const char* local = std::getenv("LOCALAPPDATA"); local && *local) {
-    return fs::path(local) / "bots-recomp";
-  }
+  if (const fs::path local = bots::EnvPath("LOCALAPPDATA"); !local.empty()) return local / "bots-recomp";
 #elif defined(__APPLE__)
-  if (const char* home = std::getenv("HOME"); home && *home) {
-    return fs::path(home) / "Library" / "Application Support" / "bots-recomp";
+  if (const fs::path home = bots::EnvPath("HOME"); !home.empty()) {
+    return home / "Library" / "Application Support" / "bots-recomp";
   }
 #else
-  if (const char* xdg = std::getenv("XDG_DATA_HOME"); xdg && *xdg) {
-    return fs::path(xdg) / "bots-recomp";
-  }
-  if (const char* home = std::getenv("HOME"); home && *home) {
-    return fs::path(home) / ".local" / "share" / "bots-recomp";
-  }
+  if (const fs::path xdg = bots::EnvPath("XDG_DATA_HOME"); !xdg.empty()) return xdg / "bots-recomp";
+  if (const fs::path home = bots::EnvPath("HOME"); !home.empty()) return home / ".local" / "share" / "bots-recomp";
 #endif
   return fs::current_path() / "bots-recomp";
 }
@@ -58,8 +54,8 @@ inline bool InAppBundle(const std::filesystem::path& exe_dir) {
 inline std::filesystem::path BundleLogDir(const std::filesystem::path& exe_dir) {
 #if defined(__APPLE__)
   if (InAppBundle(exe_dir)) {
-    if (const char* home = std::getenv("HOME"); home && *home) {
-      return std::filesystem::path(home) / "Library" / "Logs" / "Skullburglar";
+    if (const std::filesystem::path home = bots::EnvPath("HOME"); !home.empty()) {
+      return home / "Library" / "Logs" / "Skullburglar";
     }
   }
 #endif
@@ -106,7 +102,7 @@ inline std::filesystem::path ChosenGameDir(const std::filesystem::path& chosen, 
   if (IsGameDir(target)) return target;
   std::error_code ec;
   if (fs::exists(target, ec) && !(fs::is_directory(target, ec) && fs::is_empty(target, ec))) {
-    error = target.string() + " already exists and doesn't hold the game's files. Choose another folder.";
+    error = bots::PathUtf8(target) + " already exists and doesn't hold the game's files. Choose another folder.";
     return {};
   }
   return target;

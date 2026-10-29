@@ -1,4 +1,5 @@
 // See settings.h.
+#include "../path_utf8.h"
 #include "settings.h"
 
 #include "../renderer_choice.h"
@@ -189,13 +190,21 @@ std::vector<Setting> LoadSettings() {
 
 namespace {
 
+// Opens the file by its path (the wide name on Windows), not toml::parse_file's narrow name, which can't hold every
+// folder name. A file that can't be opened reads as empty; the path in parse errors is UTF-8.
+toml::table ParseToml(const fs::path& config_path) {
+  std::ifstream in(config_path, std::ios::binary);
+  if (!in) return {};
+  return toml::parse(in, bots::PathUtf8(config_path));
+}
+
 toml::table ReadConfig(const fs::path& config_path) {
   std::error_code ec;
   if (fs::exists(config_path, ec)) {
     try {
-      return toml::parse_file(config_path.string());
+      return ParseToml(config_path);
     } catch (const toml::parse_error& err) {
-      REXLOG_WARN("setup: {} unreadable ({}), rewriting it", config_path.string(), err.what());
+      REXLOG_WARN("setup: {} unreadable ({}), rewriting it", bots::PathUtf8(config_path), err.what());
     }
   }
   return {};
@@ -205,7 +214,7 @@ std::string WriteConfig(const toml::table& table, const fs::path& config_path) {
   std::error_code ec;
   fs::create_directories(config_path.parent_path(), ec);
   std::ofstream out(config_path, std::ios::trunc);
-  if (!out) return "Can't write " + config_path.string();
+  if (!out) return "Can't write " + bots::PathUtf8(config_path);
   out << "# bots settings (also editable in the launcher, which opens on start)\n" << table << "\n";
   return {};
 }
@@ -237,7 +246,7 @@ std::string SaveSettings(const std::vector<Setting>& settings, const fs::path& c
   // Older launchers wrote the renderer as gpu_plugin; it is ignored now (bots_app.h), so don't leave it behind.
   if (const auto* old = table.get("gpu_plugin"); old && old->is_string()) table.erase("gpu_plugin");
   std::string err = WriteConfig(table, config_path);
-  if (err.empty()) REXLOG_INFO("setup: settings saved to {}", config_path.string());
+  if (err.empty()) REXLOG_INFO("setup: settings saved to {}", bots::PathUtf8(config_path));
   return err;
 }
 
@@ -245,7 +254,7 @@ bool ConfigHasKey(const fs::path& config_path, const std::string& key) {
   std::error_code ec;
   if (!fs::exists(config_path, ec)) return false;
   try {
-    return toml::parse_file(config_path.string()).contains(key);
+    return ParseToml(config_path).contains(key);
   } catch (const toml::parse_error&) {
     return false;
   }
@@ -255,7 +264,7 @@ std::string ConfigString(const fs::path& config_path, const std::string& key) {
   std::error_code ec;
   if (!fs::exists(config_path, ec)) return {};
   try {
-    return toml::parse_file(config_path.string())[key].value_or(std::string());
+    return ParseToml(config_path)[key].value_or(std::string());
   } catch (const toml::parse_error&) {
     return {};
   }

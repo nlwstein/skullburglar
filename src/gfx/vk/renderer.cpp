@@ -1,3 +1,4 @@
+#include "../../path_utf8.h"
 #include "renderer.h"
 
 #include <algorithm>
@@ -315,7 +316,7 @@ void Renderer::LoadPipelineCache(const std::filesystem::path& path) {
   pipeline_cache_path_ = path;
   if (device_) LoadManifest(std::filesystem::path(path).replace_extension().replace_extension(".manifest.bin"));
   std::vector<char> data;
-  if (FILE* f = std::fopen(path.string().c_str(), "rb")) {
+  if (FILE* f = bots::OpenFile(path, "rb")) {
     std::fseek(f, 0, SEEK_END);
     const long size = std::ftell(f);
     std::fseek(f, 0, SEEK_SET);
@@ -336,7 +337,7 @@ void Renderer::LoadPipelineCache(const std::filesystem::path& path) {
   if (vk_.vkGetPipelineCacheData(device_->device(), pipeline_cache_, &merged, nullptr) == VK_SUCCESS) {
     cache_bytes_saved_.store(merged);
   }
-  std::fprintf(stderr, "native renderer: pipeline cache %s (%zu KB)\n", path.string().c_str(), data.size() / 1024);
+  std::fprintf(stderr, "native renderer: pipeline cache %s (%zu KB)\n", bots::PathUtf8(path).c_str(), data.size() / 1024);
 }
 
 void Renderer::SavePipelineCache(bool wait) {
@@ -379,8 +380,9 @@ void Renderer::WritePipelineCache(uint64_t pipelines) {
   if (result != VK_SUCCESS) return;
   std::error_code ec;
   std::filesystem::create_directories(pipeline_cache_path_.parent_path(), ec);
-  const std::filesystem::path temp = pipeline_cache_path_.string() + ".tmp";
-  FILE* f = std::fopen(temp.string().c_str(), "wb");
+  std::filesystem::path temp = pipeline_cache_path_;
+  temp += ".tmp";
+  FILE* f = bots::OpenFile(temp, "wb");
   if (!f) return;
   // BOTS_GFX_CACHE_SAVE_SLEEP_MS (tests): stop halfway through the write for that long, to quit or kill a run
   // mid-save.

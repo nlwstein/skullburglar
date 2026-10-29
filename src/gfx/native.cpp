@@ -4,6 +4,7 @@
 // WAIT_REG_MEM, coherency, gamma-ramp registers, occlusion-query events); draws, resolves and presents go to the
 // native renderer instead of the emulated EDRAM backend. A plugin rather than part of the game so its SDK sources
 // and their cvars live in their own module, as the xenos plugin's do.
+#include "../path_utf8.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -79,12 +80,15 @@ namespace bots::gfx {
     while (SDL_ShowMessageBox(&box, &choice) && choice == 1 && !log.empty()) {
       // The log file itself, else its folder (some systems have no program for .log files).
       auto url = [](const std::filesystem::path& p) {
-        std::string out = "file://", path = p.generic_string();
+        std::string out = "file://", path = bots::PathUtf8(p);
+#if defined(_WIN32)
+        std::replace(path.begin(), path.end(), '\\', '/');
+#endif
         if (path.empty() || path.front() != '/') out += '/';
         for (const char c : path) out += c == ' ' ? std::string("%20") : std::string(1, c);
         return out;
       };
-      const std::filesystem::path path(log);
+      const std::filesystem::path path = bots::PathFromUtf8(log);
       if (!SDL_OpenURL(url(path).c_str())) SDL_OpenURL(url(path.parent_path()).c_str());
     }
   }
@@ -289,7 +293,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   // Runs on the command processor thread, or before the context is set up while the processor is paused.
   void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id, bool blocking) override {
     pipeline_cache_path_ = cache_root / "native" / fmt::format("{:08X}.pipelines.bin", title_id);
-    n1_cache_dir_ = (cache_root / "n1").string();
+    n1_cache_dir_ = bots::PathUtf8(cache_root / "n1");
     if (renderer_) {
       renderer_->SetN1Dirs(n1_cooked_dir(), n1_cache_dir_);
       renderer_->LoadPipelineCache(pipeline_cache_path_);
@@ -644,7 +648,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   std::filesystem::path pipeline_cache_path_;
   std::string n1_cache_dir_;  // <cache root>/n1: the new renderer's asset cache (hybrid_fill.cpp)
   std::string n1_cooked_dir() const {
-    return (kernel_state_->emulator()->game_data_root() / "C1Game" / "CookedXenon").string();
+    return bots::PathUtf8(kernel_state_->emulator()->game_data_root() / "C1Game" / "CookedXenon");
   }
   ShaderLoad vs_, ps_;
   std::vector<uint32_t> vs_inline_, ps_inline_;

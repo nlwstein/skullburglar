@@ -1,6 +1,7 @@
 // Moves a finished extraction into the game folder (ExtractIso). Kept free of SDK headers so it can be tested alone.
 #pragma once
 
+#include "../path_utf8.h"
 #include <filesystem>
 #include <string>
 #include <system_error>
@@ -18,7 +19,7 @@ inline bool SwapInGameFiles(const std::filesystem::path& partial, const std::fil
   std::error_code ec;
   if (!fs::exists(dest, ec)) {
     fs::rename(partial, dest, ec);
-    if (ec) error = "Can't finish installing to " + dest.string() + ": " + ec.message();
+    if (ec) error = "Can't finish installing to " + bots::PathUtf8(dest) + ": " + ec.message();
     return !ec;
   }
   fs::path old = dest;
@@ -26,13 +27,13 @@ inline bool SwapInGameFiles(const std::filesystem::path& partial, const std::fil
   fs::remove_all(old, ec);
   fs::create_directory(old, ec);
   if (ec) {
-    error = "Can't create " + old.string() + ": " + ec.message();
+    error = "Can't create " + bots::PathUtf8(old) + ": " + ec.message();
     return false;
   }
   std::vector<fs::path> names;
   for (const auto& entry : fs::directory_iterator(partial, ec)) names.push_back(entry.path().filename());
   if (ec) {
-    error = "Can't read " + partial.string() + ": " + ec.message();
+    error = "Can't read " + bots::PathUtf8(partial) + ": " + ec.message();
     fs::remove_all(old, ec);
     return false;
   }
@@ -48,7 +49,7 @@ inline bool SwapInGameFiles(const std::filesystem::path& partial, const std::fil
       placed.push_back(name);
       continue;
     }
-    error = "Can't replace the old " + (dest / name).string() + ": " + ec.message();
+    error = "Can't replace the old " + bots::PathUtf8(dest / name) + ": " + ec.message();
     // Put the old install back as it was.
     std::error_code ignored;
     for (const auto& n : placed) fs::rename(dest / n, partial / n, ignored);

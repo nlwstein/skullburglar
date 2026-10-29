@@ -16,6 +16,7 @@
 //             BOTS_N1_LOG      seconds between stats lines (default 5)
 // It records into the frame's command buffer like a format transfer: its own one-attachment rendering, so the game's
 // pass simply reopens for the HUD.
+#include "../../path_utf8.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -242,7 +243,7 @@ void* Renderer::EnsureN1(VkFormat format) {
   std::string failure;
   if (const char* v = std::getenv("BOTS_TEST_N1_FAIL"); v && *v == '1') {
     failure = "test: pretending the new renderer can't start";
-  } else if (std::error_code ec; !std::filesystem::is_directory(init.cooked_dir, ec)) {
+  } else if (std::error_code ec; !std::filesystem::is_directory(bots::PathFromUtf8(init.cooked_dir), ec)) {
     failure = std::string("the game's data folder wasn't found: ") + init.cooked_dir;
   } else if ((host->r = n1_create(&init)) == nullptr) {
     failure = n1_last_error();
