@@ -215,6 +215,14 @@ impl<'a> Cg<'a> {
                 let hi = match self.input(e, "Max") { Some((r, _)) => r, None => self.let_(format!("vec4<f32>({})", flt(dhi))) };
                 (self.let_(format!("clamp({a}, {lo}, {hi})")), w)
             }
+            // ConstantClamp: Input clamped to the constant Min (default 0) .. Max (default 1). Before this it fell
+            // through to the unknown-expression arm (constant 1.0), which turned the blood-spray mask into a solid
+            // Modulate quad. BOTS_N1_PARTICLE_CONSTCLAMP=0 restores the old fallback for A/B.
+            "ConstantClamp" if std::env::var("BOTS_N1_PARTICLE_CONSTCLAMP").map_or(true, |v| v != "0") => {
+                let (a, w) = self.input(e, "Input").unwrap_or_else(|| (self.let_("vec4<f32>(0.0)".into()), 1));
+                let (lo, hi) = (self.prop_f(e, "Min", 0.0), self.prop_f(e, "Max", 1.0));
+                (self.let_(format!("clamp({a}, vec4<f32>({}), vec4<f32>({}))", flt(lo), flt(hi))), w)
+            }
             "Floor" | "Frac" => {
                 let (a, w) = self.input(e, "Input").unwrap_or_else(|| (self.let_("vec4<f32>(0.0)".into()), 1));
                 (self.let_(format!("{}({a})", if class == "Floor" { "floor" } else { "fract" })), w)
@@ -480,5 +488,19 @@ mod tests {
         });
         let c = compile(&mat);
         assert!(c.wgsl.contains("vec4<f32>(0.1)") && c.wgsl.contains("vec4<f32>(0.3)"), "{}", c.wgsl);
+    }
+
+    #[test]
+    fn constant_clamp_is_supported() {
+        let mat = serde_json::json!({
+            "props": {"BlendMode": "BLEND_Translucent", "Opacity": {"Expression": {"obj": 1}}},
+            "expressions": {
+                "1": {"class": "MaterialExpressionConstantClamp", "props": {"Input": {"Expression": {"obj": 2}}, "Min": 0.2, "Max": 0.9}},
+                "2": {"class": "MaterialExpressionVertexColor", "props": {}}
+            }
+        });
+        let c = compile(&mat);
+        assert!(c.unknown.is_empty(), "{:?}", c.unknown);
+        assert!(c.wgsl.contains("clamp(") && c.wgsl.contains("vec4<f32>(0.2)") && c.wgsl.contains("vec4<f32>(0.9)"), "{}", c.wgsl);
     }
 }
