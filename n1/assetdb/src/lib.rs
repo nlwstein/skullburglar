@@ -173,6 +173,9 @@ pub struct AssetDb {
     index: Index,
     open: Mutex<Vec<(String, Arc<Package>)>>, // most recently used last
     max_open: usize,
+    /// How many packages `package` has opened (decompressed) and the wall ms that took, summed over threads.
+    pub opens: std::sync::atomic::AtomicU64,
+    pub open_ms: std::sync::atomic::AtomicU64,
     tfc: ue3::texture::TfcCache,
     meshes: Mutex<HashMap<String, Option<Arc<MeshAsset>>>>,
     skeletals: Mutex<HashMap<String, Option<Arc<SkelAsset>>>>,
@@ -262,7 +265,12 @@ impl AssetDb {
             cache: cache.to_path_buf(),
             index,
             open: Mutex::new(Vec::new()),
-            max_open: 16,
+            max_open: std::env::var("BOTS_N1_MAX_OPEN")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(16),
+            opens: Default::default(),
+            open_ms: Default::default(),
             tfc: ue3::texture::TfcCache::new(cooked),
             meshes: Mutex::new(HashMap::new()),
             skeletals: Mutex::new(HashMap::new()),
@@ -438,7 +446,14 @@ impl AssetDb {
             }
         }
         let path = self.cooked.join(format!("{name}.xxx"));
+        let t = std::time::Instant::now();
         let p = Arc::new(Package::open(&path)?);
+        self.opens
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.open_ms.fetch_add(
+            t.elapsed().as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let mut open = self.open.lock().unwrap();
         open.push((name.to_string(), p.clone()));
         while open.len() > self.max_open {

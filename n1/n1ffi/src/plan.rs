@@ -132,6 +132,7 @@ pub fn enumerate(
     bc5_ok: bool,
     threads: usize,
     progress: &(dyn Fn(usize, usize) + Sync),
+    on_plan: &(dyn Fn(&str, &Plan) + Sync),
 ) -> Vec<(String, Plan)> {
     let paths = db.paths_of_classes(&[
         "Material",
@@ -158,6 +159,8 @@ pub fn enumerate(
                     let pl = plan(features, &m, diffuse, &|k| {
                         metas.get(k).and_then(|x| x.as_ref()).map(|x| TexInfo::from_meta(x, bc5_ok)).unwrap_or_default()
                     });
+                    // B-248: the startup step queues each plan's shader now, not after the whole pass.
+                    on_plan(p, &pl);
                     out.lock().unwrap().push((i, p.clone(), pl));
                     let d = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     progress(d, total);

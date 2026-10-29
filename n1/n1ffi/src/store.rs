@@ -112,7 +112,7 @@ pub struct Counters {
     pub saved_pipes: AtomicU32,
 }
 
-type Task = Box<dyn FnOnce(&Arc<Store>) + Send>;
+pub type Task = Box<dyn FnOnce(&Arc<Store>) + Send>;
 
 #[derive(Default)]
 struct Queue {
@@ -135,6 +135,11 @@ pub struct Store {
     inner: Mutex<Inner>,
     queue: Mutex<Queue>,
     wake: Condvar,
+    /// Where workers above `max_active` wait (B-248): off `wake`, so a `notify_one` is never spent on a parked worker.
+    park: Condvar,
+    /// B-248: only workers with an index below this take tasks. The startup step may use more workers while the
+    /// game is held; `set_max_active` lowers it to the play-time count when the step ends.
+    max_active: std::sync::atomic::AtomicUsize,
     idle: Condvar,
     threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     pub ctr: Counters,
@@ -224,6 +229,8 @@ impl Store {
             inner: Mutex::new(Inner::default()),
             queue: Mutex::new(Queue::default()),
             wake: Condvar::new(),
+            park: Condvar::new(),
+            max_active: std::sync::atomic::AtomicUsize::new(usize::MAX),
             idle: Condvar::new(),
             threads: Mutex::new(Vec::new()),
             ctr: Counters::default(),
@@ -303,19 +310,34 @@ impl Store {
             t.push(
                 std::thread::Builder::new()
                     .name(format!("n1-compile-{k}"))
-                    .spawn(move || s.worker())
+                    .spawn(move || s.worker(k))
                     .expect("spawn n1 compile worker"),
             );
         }
     }
 
-    fn worker(self: Arc<Self>) {
+    /// B-248: workers with an index at or above `n` stop taking tasks (they finish the one they run).
+    pub fn set_max_active(&self, n: usize) {
+        let _q = self.queue.lock().unwrap();
+        self.max_active.store(n, Relaxed);
+        self.wake.notify_all();
+    }
+
+    fn worker(self: Arc<Self>, k: usize) {
         loop {
             let task = {
                 let mut q = self.queue.lock().unwrap();
                 loop {
                     if q.stop {
                         return;
+                    }
+                    if k >= self.max_active.load(Relaxed) {
+                        q = self
+                            .park
+                            .wait_timeout(q, std::time::Duration::from_millis(250))
+                            .unwrap()
+                            .0;
+                        continue;
                     }
                     if let Some(t) = q.urgent.pop_front().or_else(|| q.normal.pop_front()) {
                         q.running += 1;
@@ -368,6 +390,7 @@ impl Store {
             q.urgent.clear();
             q.normal.clear();
             self.wake.notify_all();
+            self.park.notify_all();
         }
         let ts: Vec<_> = self.threads.lock().unwrap().drain(..).collect();
         for t in ts {
@@ -506,16 +529,10 @@ impl Store {
     }
 
     /// The module for `key`, waiting (briefly) for whoever claimed it to finish.
-    fn wait_module(&self, key: u64) -> Option<u32> {
-        for _ in 0..2000 {
-            match self.inner.lock().unwrap().by_key.get(&key) {
-                Some(MState::Ready(id)) => return Some(*id),
-                Some(MState::Building) => {}
-                _ => return None,
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        None
+    fn wait_module(&self, key: u64, origin: Origin) -> Option<u32> {
+        // B-248: the startup step's jobs must not give up on a module another worker is still building (a cold naga
+        // build can take seconds under load): the pipelines after it would be skipped and built late, in play.
+        wait_ready(&self.inner, key, if origin == Origin::Startup { 120_000 } else { 2000 })
     }
 
     /// Claims `key` for building: true when the caller must build it (nobody has).
@@ -561,7 +578,7 @@ impl Store {
     /// module id when it is, or becomes, ready; `None` when another thread is still building it, or it failed.
     pub fn build_scene_shader(&self, key: u64, c: &Compiled, flags: ShaderFlags, origin: Origin) -> Option<u32> {
         if !self.claim_module(key) {
-            return self.wait_module(key);
+            return self.wait_module(key, origin);
         }
         self.build_scene_shader_claimed(key, c, flags, origin)
     }
@@ -580,7 +597,7 @@ impl Store {
     /// isn't there (the caller falls back to enumeration) or it failed.
     pub fn build_scene_shader_cached(&self, key: u64, spv: u64, ntex: usize, origin: Origin) -> Option<u32> {
         if !self.claim_module(key) {
-            return self.wait_module(key);
+            return self.wait_module(key, origin);
         }
         let t = std::time::Instant::now();
         let r = match self.read_spv(&format!("{spv:016x}")) {
@@ -600,7 +617,7 @@ impl Store {
     /// A particle module from the disk cache (a manifest entry).
     pub fn build_particle_module_cached(&self, key: u64, origin: Origin) -> Option<u32> {
         if !self.claim_module(key) {
-            return self.wait_module(key);
+            return self.wait_module(key, origin);
         }
         let r = match self.read_spv(&format!("p{key:016x}")) {
             Some(w) => self.make_module(&w).map(|m| (m, 0, key)).map_err(Into::into),
@@ -615,7 +632,7 @@ impl Store {
     /// A module from SPIR-V words already in hand (particle materials), keyed by `key` (hash of its WGSL).
     pub fn module_from_spv(&self, key: u64, words: &[u32], origin: Origin) -> Option<u32> {
         if !self.claim_module(key) {
-            return self.wait_module(key);
+            return self.wait_module(key, origin);
         }
         if let Some(f) = self.spv_path(&format!("p{key:016x}"))
             && !f.exists()
@@ -1077,4 +1094,63 @@ impl Store {
 pub enum AnyKeyRef {
     Scene(SceneKey),
     Part(PartKey),
+}
+
+/// Polls (1 ms apart, at most `limit` times) until `key` is ready; `None` if it failed, isn't known, or is still
+/// building at the end.
+fn wait_ready(inner: &Mutex<Inner>, key: u64, limit: u32) -> Option<u32> {
+    for _ in 0..limit {
+        match inner.lock().unwrap().by_key.get(&key) {
+            Some(MState::Ready(id)) => return Some(*id),
+            Some(MState::Building) => {}
+            _ => return None,
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    None
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+
+    fn building(key: u64) -> Arc<Mutex<Inner>> {
+        let inner = Arc::new(Mutex::new(Inner::default()));
+        inner.lock().unwrap().by_key.insert(key, MState::Building);
+        inner
+    }
+
+    fn ready_after(inner: &Arc<Mutex<Inner>>, key: u64, ms: u64) -> std::thread::JoinHandle<()> {
+        let i = inner.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            i.lock().unwrap().by_key.insert(key, MState::Ready(5));
+        })
+    }
+
+    #[test]
+    fn waits_for_a_module_another_worker_is_building() {
+        let inner = building(1);
+        let h = ready_after(&inner, 1, 300);
+        assert_eq!(wait_ready(&inner, 1, 5000), Some(5));
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn a_short_limit_gives_up_while_it_is_still_building() {
+        // What the 2 s limit did to a startup job whose module took longer: the caller saw `None` and skipped the
+        // pipelines.
+        let inner = building(1);
+        let h = ready_after(&inner, 1, 300);
+        assert_eq!(wait_ready(&inner, 1, 50), None);
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn a_failed_or_unknown_module_returns_at_once() {
+        let inner = Arc::new(Mutex::new(Inner::default()));
+        inner.lock().unwrap().by_key.insert(1, MState::Failed);
+        assert_eq!(wait_ready(&inner, 1, 120_000), None);
+        assert_eq!(wait_ready(&inner, 2, 120_000), None);
+    }
 }

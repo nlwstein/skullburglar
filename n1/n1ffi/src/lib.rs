@@ -631,15 +631,24 @@ pub unsafe extern "C" fn n1_precompile_start(r: *const N1Renderer) -> i32 {
         return -1;
     };
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let threads = std::env::var("BOTS_N1_COMPILE_THREADS")
+    let play_threads = std::env::var("BOTS_N1_COMPILE_THREADS")
         .ok()
         .and_then(|v| v.parse().ok())
         // Up to 8 logical CPUs (a 4-core laptop) the startup step gets 2 workers, not 4: on a laptop 4 workers left the
         // game's audio short of CPU (670-1468 underruns over the 85 s cold-cache step, against 288-567 with 2, for a
-        // 92-98 s step).
+        // 92-98 s step). That was with the game running behind the step (BOTS_PRECOMPILE_HOLD=0).
         .unwrap_or(if cores <= 8 { 2 } else { (cores / 2).clamp(2, 8) });
+    // B-248: while the player waits at "Preparing the renderer" the game is held, so nothing needs the CPU or plays
+    // audio: the step may use half the logical CPUs (4 on a 4-core laptop). The workers above `play_threads` park when
+    // it ends. BOTS_N1_HOLD_THREADS=<n> picks the count, 0 turns it off.
+    let held = std::env::var("BOTS_PRECOMPILE_HOLD").map(|v| v != "0").unwrap_or(true);
+    let hold_threads: usize = std::env::var("BOTS_N1_HOLD_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or((cores / 2).clamp(2, 8));
+    let threads = if held && hold_threads > play_threads { hold_threads } else { play_threads };
     let pregrade = spawn_grade_pass(db.clone(), grades);
-    *pre = Some(precompile::start(store, db, precompile::Opts { features, bc5_ok, threads, pregrade }));
+    *pre = Some(precompile::start(store, db, precompile::Opts { features, bc5_ok, threads, play_threads, pregrade }));
     0
 }
 
