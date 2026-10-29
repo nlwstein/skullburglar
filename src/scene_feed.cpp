@@ -2099,6 +2099,46 @@ bool BeyondDrawDistance(uint32_t c, const Camera& cam) {
   return dx * dx + dy * dy + dz * dz > limit * limit;
 }
 
+// BOTS_N1_SKIPLOG=<min radius>: log, for every static or skeletal primitive whose bounds sphere is at least that big
+// (uu; 0 = all), each change of why the feed leaves it out (or feeds it): hidden component, hidden owner, beyond the
+// cull distance, unreadable mesh. B-274: a vanishing floor needs "was it fed, and if not, why" per frame.
+enum SkipReason : uint8_t { kFed, kHiddenComponent, kHiddenOwner, kBeyondDistance, kNoMesh };
+const char* SkipName(uint8_t r) {
+  static const char* n[] = {"fed", "hidden component", "hidden owner", "beyond cull distance", "mesh unreadable"};
+  return n[r];
+}
+void NoteSkip(uint32_t c, uint8_t reason, const Camera& cam) {
+  static const float min_radius = [] {
+    const char* v = std::getenv("BOTS_N1_SKIPLOG");
+    return v && *v ? float(std::atof(v)) : -1.0f;
+  }();
+  if (min_radius < 0 || !g_off.bounds.ok()) return;
+  static std::unordered_map<uint32_t, uint8_t> last;
+  static uint64_t events = 0;
+  auto it = last.find(c);
+  if (it == last.end()) {
+    if (reason == kFed) {  // first sighting while fed: nothing to report
+      last.emplace(c, reason);
+      return;
+    }
+    it = last.emplace(c, uint8_t(kFed)).first;
+  }
+  if (it->second == reason) return;
+  const uint32_t b = c + g_off.bounds.offset;
+  const float radius = F32(b + 24);
+  const uint8_t was = it->second;
+  it->second = reason;
+  if (radius < min_radius) return;
+  const float dx = F32(b) - cam.location[0], dy = F32(b + 4) - cam.location[1], dz = F32(b + 8) - cam.location[2];
+  float cull = 0, cached = 0;
+  if (g_off.cull_dist.ok()) cull = F32(c + g_off.cull_dist.offset);
+  if (g_off.cached_cull.ok()) cached = F32(c + g_off.cached_cull.offset);
+  REXLOG_INFO("scenefeed skip #{}: {} -> {}: {} radius {:.0f} centre ({:.0f} {:.0f} {:.0f}) cam ({:.0f} {:.0f} {:.0f}) "
+              "dist {:.0f} cull {:.0f} cached {:.0f}",
+              ++events, SkipName(was), SkipName(reason), Path(c), radius, F32(b), F32(b + 4), F32(b + 8),
+              cam.location[0], cam.location[1], cam.location[2], std::sqrt(dx * dx + dy * dy + dz * dz), cull, cached);
+}
+
 // Tracking: keep the primitive, light and fog lists without walking the whole object table (about 110k objects,
 // 3-4 ms on a laptop CPU) every few frames. A component enters the lists when the game adds it to a scene (the hooks at
 // the end of this file) or when a slow walk of 1/BOTS_N1_TRACK_SLICES of the table per frame finds it attached (a
@@ -2634,8 +2674,12 @@ void Live(uint8_t* base) {
     const Field& ref = skel ? g_off.skeletal_mesh_ref : g_off.static_mesh_ref;
     if (!ref.ok()) continue;
     const uint32_t mesh = U32(c + ref.offset);
-    if (!Readable(mesh)) continue;
-    bool hidden = g_off.hidden_game.ok() && (U32(c + g_off.hidden_game.offset) & g_off.hidden_game.mask);
+    if (!Readable(mesh)) {
+      NoteSkip(c, kNoMesh, cam);
+      continue;
+    }
+    const bool hidden_comp = g_off.hidden_game.ok() && (U32(c + g_off.hidden_game.offset) & g_off.hidden_game.mask);
+    bool hidden = hidden_comp;
     const uint32_t owner = g_off.owner.ok() ? U32(c + g_off.owner.offset) : 0;
     if (Readable(owner)) {
       if (!g_off.actor) {
@@ -2644,7 +2688,15 @@ void Live(uint8_t* base) {
       }
       if (g_off.actor_hidden.ok()) hidden |= (U32(owner + g_off.actor_hidden.offset) & g_off.actor_hidden.mask) != 0;
     }
-    if (hidden || BeyondDrawDistance(c, cam)) continue;
+    if (hidden) {
+      NoteSkip(c, hidden_comp ? kHiddenComponent : kHiddenOwner, cam);
+      continue;
+    }
+    if (BeyondDrawDistance(c, cam)) {
+      NoteSkip(c, kBeyondDistance, cam);
+      continue;
+    }
+    NoteSkip(c, kFed, cam);
     uint32_t mats = 0, mat_count = 0;
     if (g_off.materials.ok()) {
       mats = U32(c + g_off.materials.offset);
