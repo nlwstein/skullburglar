@@ -4,6 +4,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <set>
 #include <vector>
 
@@ -21,6 +22,9 @@
 #include <dirent.h>
 #include <sys/resource.h>
 #include <fstream>
+#endif
+#if defined(__APPLE__)
+#include <mach/mach.h>
 #endif
 
 namespace bots::gfx::host {
@@ -73,6 +77,25 @@ CpuTimes ProcessCpuTimes() {
   }
 #endif
   return t;
+}
+
+double ProcessMemoryMB() {
+#if defined(_WIN32)
+  PROCESS_MEMORY_COUNTERS pmc{};
+  if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) return double(pmc.WorkingSetSize) / 1048576.0;
+#elif defined(__APPLE__)
+  task_vm_info_data_t info{};
+  mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+  if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS) {
+    return double(info.phys_footprint) / 1048576.0;
+  }
+#else
+  std::ifstream f("/proc/self/status");
+  for (std::string line; std::getline(f, line);) {
+    if (line.rfind("VmRSS:", 0) == 0) return std::strtod(line.c_str() + 6, nullptr) / 1024.0;  // kB
+  }
+#endif
+  return 0;
 }
 
 CpuClock CpuClockMhz() {

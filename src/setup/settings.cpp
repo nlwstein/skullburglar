@@ -24,9 +24,9 @@ REXCVAR_DEFINE_BOOL(launcher, true, "bots",
                     "Show the launcher before starting the game (default: unless --game_data_root is given)");
 REXCVAR_DEFINE_BOOL(check_updates, true, "bots",
                     "Release builds: the launcher checks online for a newer version and offers its download page");
-REXCVAR_DEFINE_STRING(renderer, "new", "bots",
-                      "Which renderer draws the game: new (the default) or pre1, the pre-1.0 renderer (deprecated). Only "
-                      "pre1 selects the old one; any other value, and a missing key, is the new renderer");
+REXCVAR_DEFINE_STRING(renderer, bots::kDefaultRenderer, "bots",
+                      "Which renderer draws the game: new (the default; on tvOS pre1 is) or pre1, the pre-1.0 renderer "
+                      "(deprecated). Only pre1 selects the old one; any other value is the new renderer");
 REXCVAR_DEFINE_STRING(render_scale, "auto", "bots",
                       "Render resolution as a multiple of 720p (auto, 3, 2, 1.5, 1.25, 1, 0.75, "
                       "0.667, 0.5); auto is 2/3 on Intel GPUs, else 1");

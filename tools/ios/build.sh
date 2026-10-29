@@ -79,6 +79,9 @@ do_build() {
     export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-10G}" CCACHE_COMPILERCHECK="%compiler% --version"
     set -- "$@" -DBOTS_CCACHE=ON
   fi
+  # n1 (Rust): cargo and the target for this platform (tools/rust_env.sh; tvOS builds its standard library).
+  . tools/rust_env.sh
+  rust_env "aarch64-apple-$PLATFORM"
   cmake "$@" >"$OUT/configure.log" 2>&1 || { tail -30 "$OUT/configure.log"; exit 1; }
   step build
   cmake --build "$B" --target bots rexgpu-native MoltenVK --parallel "$JOBS"

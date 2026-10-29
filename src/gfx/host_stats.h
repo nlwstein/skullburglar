@@ -25,6 +25,10 @@ CpuClock CpuClockMhz();
 // on one machine (a throttled CPU takes longer).
 double CpuProbeMicros();
 
+// The process's memory in MB as the OS counts it against the app: the physical footprint on Apple platforms (what iOS
+// and tvOS terminate an app for), resident memory (VmRSS) on Linux and Android, the working set on Windows. 0 if unknown.
+double ProcessMemoryMB();
+
 // "AC", "battery 54%", plus battery saver, the power plan and (Windows) the power mode where the OS reports them.
 // Empty if unknown.
 std::string PowerState();

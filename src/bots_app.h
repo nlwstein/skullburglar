@@ -53,6 +53,7 @@
 #include "mnk_input.h"
 #include "coop.h"
 #include "widescreen.h"
+#include "hybrid_state.h"
 #include "renderer_choice.h"
 #include "script_input.h"
 #include "setup/app_paths.h"
@@ -124,6 +125,16 @@ class BotsApp : public rex::ReXApp {
   // bots.toml sits next to the executable (dev). Without --game_data_root the game files are the
   // ones the setup window installed: bots.toml's game_data_root, else a portable install's game folder next to the
   // executable, else the per-user default folder.
+  // No launcher on iOS, tvOS and Android: if the new renderer can't start, its failure box offers the pre-1.0 renderer
+  // (HybridState::pick_pre1), saved as renderer = "pre1" in bots.toml for the next start. An explicit pick, never an
+  // automatic fallback.
+  static void OfferPre1Pick(const std::filesystem::path& config_path) {
+    static std::filesystem::path path;
+    path = config_path;
+    if (bots::HybridState* hs = bots::FindHybridState())
+      hs->pick_pre1.store(+[] { bots::setup::SetConfigString(path, "renderer", "pre1"); });
+  }
+
   void OnConfigurePaths(rex::PathConfig& paths) override {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -145,6 +156,7 @@ class BotsApp : public rex::ReXApp {
       paths.config_path = paths.user_data_root / "bots.toml";
       config_path_ = paths.config_path;
       game_root_given_ = true;
+      OfferPre1Pick(config_path_);
       fs::create_directories(paths.user_data_root, ec);
       fs::create_directories(paths.cache_root, ec);
       if (rex::cvar::Query<std::string>("log_file").empty()) {
@@ -172,6 +184,7 @@ class BotsApp : public rex::ReXApp {
       paths.config_path = paths.user_data_root / "bots.toml";
       config_path_ = paths.config_path;
       game_root_given_ = true;
+      OfferPre1Pick(config_path_);
       fs::create_directories(paths.user_data_root, ec);
       fs::create_directories(paths.cache_root, ec);
       if (rex::cvar::Query<std::string>("log_file").empty()) {

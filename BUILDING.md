@@ -82,11 +82,18 @@ Running the Linux build needs a Vulkan GPU passed into the container (`--gpus al
 ## The n1 renderer
 
 `n1/` is a Rust workspace (the optional "n1" renderer, linked into the native renderer through the C ABI in
-`n1/n1ffi/include/n1ffi.h`). The desktop builds that include the native renderer (`-DBOTS_NATIVE_GFX=ON`) build it
-with cargo as part of the CMake build; install Rust with [rustup](https://rustup.rs) and `n1/rust-toolchain.toml`
-selects the version (the Windows cross build also needs `rustup target add x86_64-pc-windows-msvc`). Options:
+`n1/n1ffi/include/n1ffi.h`). Every build that includes the native renderer (`-DBOTS_NATIVE_GFX=ON`, the default on
+every platform) builds it with cargo as part of the CMake build; install Rust with [rustup](https://rustup.rs) and
+`n1/rust-toolchain.toml` selects the version. `. tools/rust_env.sh && rust_env <target...>` (from the repo root) installs
+that version and the targets a build needs; the iOS, Android and CI build scripts call it themselves.
 
-- `-DBOTS_N1=OFF` builds without n1 (no Rust needed). It is never built for Android, iOS and tvOS.
+- **Targets:** the Windows cross build needs `x86_64-pc-windows-msvc`, iOS `aarch64-apple-ios` (or `-ios-sim`),
+  Android `aarch64-linux-android` (and `x86_64-linux-android` for `ABIS=x86_64`). tvOS (`aarch64-apple-tvos`) has no
+  prebuilt standard library: the build compiles it from the `rust-src` component with `-Zbuild-std`, on the same
+  pinned stable toolchain (`RUSTC_BOOTSTRAP=1`, set only for that cargo call).
+- **GPUs:** n1 needs Vulkan 1.3 (dynamic rendering). On GPUs without the BC texture formats (most Android phones and
+  headsets, the Apple TV) it decodes those textures on the CPU when it loads them.
+- `-DBOTS_N1=OFF` builds without n1 (no Rust needed); the game then has only the pre-1.0 renderer.
 - `-DBOTS_N1FFI_LIBRARY=<libn1ffi.a or n1ffi.lib>` links a prebuilt library instead and skips cargo.
 - `cd n1 && cargo test --release` runs its unit tests; they need no game data.
 
@@ -123,6 +130,12 @@ PLATFORM=ios SDK=out/sdk tools/ios/build.sh build bundle ipa     # or PLATFORM=t
 - **Icons:** `tools/ios/make_icons.py` (a uv script; needs the cairo library) draws the iPhone icon and the layered
   Apple TV icon and Top Shelf banners from `packaging/linux/skullburglar.svg` into `tools/ios/Assets.*.xcassets`; the
   `bundle` step compiles them with `actool`. Rerun it after changing the SVG.
+- **Renderer:** on iOS n1 is the default, as on desktop. Its first start prepares its shaders for a few minutes (about
+  8 on an iPhone 15 Pro Max) and keeps them, with converted textures and meshes, under `Library/Caches/bots/n1` (a few
+  hundred MB). `renderer = "pre1"` in the user folder's `bots.toml` (or `--renderer=pre1`) picks the pre-1.0 renderer
+  (deprecated); if n1 can't start, the error box offers that switch. The Apple TV build includes n1 but stays on the
+  pre-1.0 renderer by default until n1 is shown to fit its memory limit; `renderer = "new"` (or `--renderer=new`)
+  tries it.
 - **Shader warm-up:** the bundle carries the macOS shader refs (`REFS`); iOS and tvOS share macOS's device class.
 - **Limits:** the game quits when it goes to the background (the renderer can't pause yet). Split-screen co-op isn't
   available (it starts a second process). The guest memory needs one 4.5 GB stretch of address space: iOS asks for the
@@ -134,7 +147,7 @@ PLATFORM=ios SDK=out/sdk tools/ios/build.sh build bundle ipa     # or PLATFORM=t
 
 ## Android (experimental)
 
-An arm64 APK for Android 10 (API 29) or later with Vulkan 1.1, cross-compiled with the Android NDK and packaged
+An arm64 APK for Android 10 (API 29) or later with Vulkan 1.1 (1.3 for the default n1 renderer), cross-compiled with the Android NDK and packaged
 without Gradle (javac, d8, aapt2, zipalign, apksigner). It needs codegen output already in `generated/` (the NDK can't
 run the recompiler). Like iOS there's no launcher: the app's own first screen installs the game files, then the game
 boots straight away.
@@ -155,6 +168,10 @@ adb install -r out/android/Skullburglar.apk
   and extracts it with the desktop launcher's `ExtractIso` into the app's data folder
   (`Android/data/<package>/files/game`, about 6.8 GB). `adb push game /sdcard/Android/data/sh.stz.skullburglar/files/`
   works too. Settings, saves and logs go to `user/` and `logs/` in the same folder. Uninstalling the app deletes them.
+- **Renderer:** n1 is the default; it needs Vulkan 1.3, which the emulator has. Its first start prepares its shaders
+  for a few minutes and keeps its cache (about 260 MB after one mission) in the app's internal `files/cache/n1`.
+  `renderer = "pre1"` in `user/bots.toml` (or `--renderer=pre1`) picks the pre-1.0 renderer (deprecated); if n1 can't
+  start, the error box offers that switch.
 - **Controls:** a game controller, or the on-screen controller (`TouchPadView`, a port of the iOS one) while none is
   connected.
 - **Backgrounding:** as on iOS, leaving the game quits it; the renderer can't give up its surface and resume yet.
