@@ -294,7 +294,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       const std::filesystem::path chosen = OpenPicker(PickFolder);
       if (!chosen.empty()) UseGameDir(ChosenGameDir(chosen, folder_error_));
     }
-    if (game_dir_ != default_game_dir_) {
+    if (!SamePath(game_dir_, default_game_dir_)) {
       ImGui::SameLine();
       if (ImGui::SmallButton("Use the default folder")) UseGameDir(default_game_dir_);
     }
@@ -309,7 +309,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
 
   // An installed copy that the chosen folder replaced: say it can go, never delete it.
   void DrawUnusedCopy() {
-    if (old_game_dir_.empty() || old_game_dir_ == game_dir_ || !IsGameDir(old_game_dir_)) return;
+    if (old_game_dir_.empty() || SamePath(old_game_dir_, game_dir_) || !IsGameDir(old_game_dir_)) return;
     ImGui::TextWrapped("The game files in %s aren't used any more: delete that folder to free about 7 GB.",
                        bots::PathUtf8(old_game_dir_).c_str());
   }
@@ -324,14 +324,14 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     game_dir_ = dir;
     installed_ = IsGameDir(game_dir_);
     REXLOG_INFO("setup: game folder {} ({})", bots::PathUtf8(game_dir_), installed_ ? "installed" : "missing");
-    if (installed_ || game_dir_ == default_game_dir_) RememberGameDir();
+    if (installed_ || SamePath(game_dir_, default_game_dir_)) RememberGameDir();
   }
 
   // bots.toml names the folder only when it isn't the default, so a player who never chooses one keeps no entry.
   void RememberGameDir() {
-    const std::string value = game_dir_ == default_game_dir_ ? std::string() : bots::PathUtf8(game_dir_);
-    if (value.empty() && !ConfigHasKey(config_path_, "game_data_root")) return;  // nothing to change
-    std::string err = SetConfigString(config_path_, "game_data_root", value);
+    const std::filesystem::path value = SamePath(game_dir_, default_game_dir_) ? std::filesystem::path() : game_dir_;
+    if (value.empty() && !ConfigHasPath(config_path_, "game_data_root")) return;  // nothing to change
+    std::string err = SetConfigPath(config_path_, "game_data_root", value);
     if (!err.empty()) REXLOG_WARN("setup: {}", err);
   }
 
@@ -576,7 +576,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     // Never spread the game's files into a folder that holds something else (only a chosen or configured folder
     // could; the per-user default is ours). A reinstall over the game replaces only the game's own entries.
     std::error_code ec;
-    if (game_dir_ != DefaultGameDir() && !IsGameDir(game_dir_) && std::filesystem::exists(game_dir_, ec) &&
+    if (!SamePath(game_dir_, DefaultGameDir()) && !IsGameDir(game_dir_) && std::filesystem::exists(game_dir_, ec) &&
         !(std::filesystem::is_directory(game_dir_, ec) && std::filesystem::is_empty(game_dir_, ec))) {
       error_ = bots::PathUtf8(game_dir_) + " already exists and doesn't hold the game's files. Choose another folder.";
       return;

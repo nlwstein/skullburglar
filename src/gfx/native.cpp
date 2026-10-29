@@ -80,13 +80,11 @@ namespace bots::gfx {
     while (SDL_ShowMessageBox(&box, &choice) && choice == 1 && !log.empty()) {
       // The log file itself, else its folder (some systems have no program for .log files).
       auto url = [](const std::filesystem::path& p) {
-        std::string out = "file://", path = bots::PathUtf8(p);
+        std::string path = bots::PathUtf8(p);
 #if defined(_WIN32)
         std::replace(path.begin(), path.end(), '\\', '/');
 #endif
-        if (path.empty() || path.front() != '/') out += '/';
-        for (const char c : path) out += c == ' ' ? std::string("%20") : std::string(1, c);
-        return out;
+        return bots::FileUrl(path);
       };
       const std::filesystem::path path = bots::PathFromUtf8(log);
       if (!SDL_OpenURL(url(path).c_str())) SDL_OpenURL(url(path.parent_path()).c_str());

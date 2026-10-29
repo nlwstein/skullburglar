@@ -203,10 +203,9 @@ class BotsApp : public rex::ReXApp {
     UseBundleLogDir();
     game_root_given_ = !paths.game_data_root.empty();
     if (paths.game_data_root.empty()) {
-      std::string configured = bots::setup::ConfigString(config_path_, "game_data_root");
-      paths.game_data_root = configured.empty()
-                                 ? bots::setup::AutoGameDir(rex::filesystem::GetExecutableFolder())
-                                 : bots::PathFromUtf8(configured);
+      const std::filesystem::path configured = bots::setup::ConfigPath(config_path_, "game_data_root");
+      paths.game_data_root =
+          configured.empty() ? bots::setup::AutoGameDir(rex::filesystem::GetExecutableFolder()) : configured;
     }
   }
 

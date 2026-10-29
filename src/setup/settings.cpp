@@ -280,4 +280,29 @@ std::string SetConfigString(const fs::path& config_path, const std::string& key,
   return WriteConfig(table, config_path);
 }
 
+bool ConfigHasPath(const fs::path& config_path, const std::string& key) {
+  return ConfigHasKey(config_path, key) || ConfigHasKey(config_path, key + "_hex");
+}
+
+fs::path ConfigPath(const fs::path& config_path, const std::string& key) {
+  const std::string text = ConfigString(config_path, key);
+  if (!text.empty()) return bots::PathFromUtf8(text);
+  bool ok = false;
+  const std::string bytes = bots::HexDecode(ConfigString(config_path, key + "_hex"), &ok);
+  return ok && !bytes.empty() ? bots::PathFromUtf8(bytes) : fs::path();
+}
+
+std::string SetConfigPath(const fs::path& config_path, const std::string& key, const fs::path& path) {
+  const std::string text = bots::PathUtf8(path);
+  toml::table table = ReadConfig(config_path);
+  table.erase(key);
+  table.erase(key + "_hex");
+  if (bots::IsValidUtf8(text)) {
+    if (!text.empty()) table.insert_or_assign(key, text);
+  } else {
+    table.insert_or_assign(key + "_hex", bots::HexEncode(text));
+  }
+  return WriteConfig(table, config_path);
+}
+
 }  // namespace bots::setup
