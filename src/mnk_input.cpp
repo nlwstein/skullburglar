@@ -249,6 +249,8 @@ void MouseKeyboardDriver::OnMouseMove(rex::ui::MouseEvent& e) {
   {
     std::lock_guard lock(mutex_);
     float dx = 0, dy = 0;
+    diag_events_ += 1;
+    if (!relative_ && !captured_) diag_dropped_ += 1;
     if (relative_) {
       dx = e.dx(), dy = e.dy();
     } else if (captured_) {
@@ -326,7 +328,23 @@ void MouseKeyboardDriver::TakeMouseDelta(float& dx, float& dy) {
   dx = mouse_dx_ * s;
   // Window y grows downward; the engine's MouseY is positive for "look up".
   dy = (REXCVAR_GET(kbm_invert_y) ? mouse_dy_ : -mouse_dy_) * s;
+  diag_taken_ += std::abs(mouse_dx_) + std::abs(mouse_dy_);
   mouse_dx_ = mouse_dy_ = 0;
+  // BOTS_MOUSE_LOG=1: once a second while the mouse moved, what reached the game (B-268 diagnostics).
+  static const bool log = [] { const char* v = std::getenv("BOTS_MOUSE_LOG"); return v && *v == '1'; }();
+  const int64_t now = Now();
+  if (log && now - diag_logged_ms_ >= 1000) {
+    if (diag_events_) {
+      const double pad_ago = (std::chrono::steady_clock::now().time_since_epoch().count() -
+                              pad_active_ns_.load(std::memory_order_relaxed)) / 1e9;
+      REXLOG_INFO("mouse: {} events, {} with no pointer lock, {:.0f} px taken; captured {} relative {} menu {} focus {}; "
+                  "controller used {:.1f} s ago", diag_events_, diag_dropped_, diag_taken_, bool(captured_), bool(relative_),
+                  MenuMode(), bool(has_focus_), pad_ago);
+    }
+    diag_events_ = diag_dropped_ = 0;
+    diag_taken_ = 0;
+    diag_logged_ms_ = now;
+  }
 }
 
 void MouseKeyboardDriver::TapButtons(uint16_t mask) {
