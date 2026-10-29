@@ -38,6 +38,8 @@ struct PMat {
     set: vk::DescriptorSet,
     blend: u8,
     two_sided: bool,
+    /// Reads the scene colour copy (DestColor).
+    dest: bool,
 }
 
 struct PMesh {
@@ -72,6 +74,8 @@ impl PGpu {
             let g = [
                 b(0, vk::DescriptorType::UNIFORM_BUFFER, vf),
                 b(1, vk::DescriptorType::SAMPLED_IMAGE, fr),
+                // B-273: the scene colour copy (DestColor materials).
+                b(2, vk::DescriptorType::SAMPLED_IMAGE, fr),
             ];
             let g_layout = device.create_descriptor_set_layout(
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&g),
@@ -190,6 +194,7 @@ impl Renderer {
                 set,
                 blend: blend_of(m.blend),
                 two_sided: m.two_sided,
+                dest: m.dest,
             });
             Ok(self.pg.mats.len() as u32 - 1)
         }
@@ -342,6 +347,11 @@ impl Renderer {
             image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
         }];
         let set = self.slots[si].pset;
+        let dc = [vk::DescriptorImageInfo {
+            sampler: vk::Sampler::null(),
+            image_view: self.destc.as_ref().unwrap().view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        }];
         let writes = [
             vk::WriteDescriptorSet::default()
                 .dst_set(set)
@@ -353,9 +363,19 @@ impl Renderer {
                 .dst_binding(1)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                 .image_info(&di),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&dc),
         ];
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
         Ok(())
+    }
+
+    /// Some sprite draw this frame reads the scene colour copy (DestColor): the frame must take it before the sprite pass.
+    pub(super) fn pg_needs_dest(&self, pf: &PFrame) -> bool {
+        pf.draws.iter().any(|d| d.variant != 2 && self.pg.mats.get(d.mat as usize).is_some_and(|m| m.dest))
     }
 
     /// Records the particle draws of one kind (`meshes`: inside the scene pass; otherwise the sprite pass).

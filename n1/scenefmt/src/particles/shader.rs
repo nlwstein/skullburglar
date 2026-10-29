@@ -246,9 +246,12 @@ pub fn module_source(c: &Compiled, mesh: bool) -> String {
             ""
         },
     );
+    // DestColor materials read the renderer's copy of the scene target (group 0 binding 2, before the sprite pass).
+    let dest = if c.dest { "@group(0) @binding(2) var dest_color: texture_2d<f32>;\n" } else { "" };
     format!(
-        "{}{}{}{}",
+        "{}{}{}{}{}",
         common,
+        dest,
         if mesh { LIT_MESH } else { LIT_SPRITE },
         if mesh { MESH_VS } else { SPRITE_VS },
         fragment_src(c, mesh)
