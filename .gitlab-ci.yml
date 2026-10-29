@@ -151,8 +151,8 @@ build:macos:
 # iOS and tvOS (experimental, tools/ios/build.sh): unsigned IPAs, signed when they're installed. On main they build with
 # the others when there's a release (or BUILD=1) and go in it as skullburglar-<VERSION>-<ios|tvos>.ipa; they may fail
 # without holding up the release, which then leaves them out. On branches named for them (apple, ios, tvos), and on
-# release/* branches with the desktop builds, they build on every push into skullburglar-apple/apple-<sha>. They need a Mac runner with Xcode and its iOS and tvOS platforms
-# (the command line tools have no iOS SDKs), tagged `xcode` as well as `macos`. DEVELOPER_DIR picks the full Xcode for
+# release/* branches with the desktop builds, they build on every push into skullburglar-apple/apple-<sha>.
+# They need a Mac runner with Xcode and its iOS and tvOS platforms (the command line tools have no iOS SDKs), tagged `xcode` as well as `macos`. DEVELOPER_DIR picks the full Xcode for
 # these jobs only, so the runner's selected developer directory can stay on the command line tools the macOS build uses.
 .apple:
   stage: build
@@ -192,8 +192,8 @@ build:tvos:
 # Android (experimental, tools/android/build.sh): an arm64 APK. On main it builds with the others when there's a release
 # (or BUILD=1) and goes in it as skullburglar-<VERSION>-android.apk, signed with the ANDROID_KEYSTORE file variable; like
 # iOS it may fail without holding up the release, which then leaves it out. On branches named for it (android), and on
-# release/* branches, it builds on every push into skullburglar-android/android-<sha>, debug-signed. Runs on the Docker runner like the Linux and
-# Windows builds (image docker/android).
+# release/* branches, it builds on every push into skullburglar-android/android-<sha>, debug-signed. Runs on the Docker
+# runner like the Linux and Windows builds (image docker/android).
 build:android:
   stage: build
   needs:
@@ -212,12 +212,12 @@ build:android:
   script:
     - |
       if [ "$CI_COMMIT_BRANCH" != "$CI_DEFAULT_BRANCH" ]; then
-        VERSION=android-$CI_COMMIT_SHORT_SHA PACKAGE=skullburglar-android
+        export VERSION=android-$CI_COMMIT_SHORT_SHA PACKAGE=skullburglar-android
       elif [ "$RELEASE" != true ] && [ "${BUILD:-}" != 1 ]; then
         echo "Nothing to release: not building."
         exit 0
       fi
-      PACKAGE=${PACKAGE:-skullburglar}
+      export PACKAGE=${PACKAGE:-skullburglar}
     - docker build -q -t skullburglar-ci-android docker/android
     - JOB=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.job.id=$CI_JOB_ID" --filter "label=com.gitlab.gitlab-runner.type=build")
     - test -n "$JOB"
