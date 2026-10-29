@@ -36,20 +36,31 @@ struct Json {
   std::string str;
   double num = 0;
   bool b = false;
-  std::vector<Json> items;                       // array
-  std::vector<std::pair<std::string, Json>> kv;  // object
+  std::vector<Json> items;  // array
+  // Object members. Not std::pair<std::string, Json>: libstdc++ needs the pair (and so Json) complete here.
+  struct Member;
+  std::vector<Member> kv;  // object
 
-  const Json* Get(const std::string& key) const {
-    if (type != kObject) return nullptr;
-    for (const auto& [k, v] : kv)
-      if (k == key) return &v;
-    return nullptr;
-  }
-  std::string Str(const std::string& key) const {
-    const Json* v = Get(key);
-    return v && v->type == kString ? v->str : std::string();
-  }
+  const Json* Get(const std::string& key) const;
+  std::string Str(const std::string& key) const;
 };
+
+struct Json::Member {
+  std::string first;
+  Json second;
+};
+
+const Json* Json::Get(const std::string& key) const {
+  if (type != kObject) return nullptr;
+  for (const auto& [k, v] : kv)
+    if (k == key) return &v;
+  return nullptr;
+}
+
+std::string Json::Str(const std::string& key) const {
+  const Json* v = Get(key);
+  return v && v->type == kString ? v->str : std::string();
+}
 
 class Reader {
  public:
@@ -131,7 +142,7 @@ class Reader {
         if (pos_ >= s_.size() || s_[pos_++] != ':') return false;
         Json v;
         if (!Value(v, depth + 1)) return false;
-        out.kv.emplace_back(std::move(key), std::move(v));
+        out.kv.push_back({std::move(key), std::move(v)});
         Space();
         if (pos_ >= s_.size()) return false;
         if (s_[pos_] == ',') {
