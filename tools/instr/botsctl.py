@@ -426,6 +426,9 @@ class Run:
             if text.startswith("wait"):
                 self.log(f"  waited {r.get('waited_s', 0):.1f}s, phase {get(r, 'status.phase')} "
                          f"map {get(r, 'status.game.map')}")
+            elif op in ("objs", "enemies", "inspect", "elems"):  # queries: keep the answer in driver.log
+                r = {k: v for k, v in r.items() if k != "status"}
+                self.log("  " + json.dumps(r, separators=(",", ":"))[:20000])
         self.steps.append({"step": line, "secs": round(time.time() - t, 2)})
 
     def run(self, lines):
