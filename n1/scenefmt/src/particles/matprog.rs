@@ -75,6 +75,12 @@ struct Cg<'a> {
     n: usize,
 }
 
+/// B-273 nodes (Abs, Divide, CameraVector) are compiled unless `BOTS_N1_PARTICLE_NODES=0`.
+fn nodes_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BOTS_N1_PARTICLE_NODES").map_or(true, |v| v != "0"))
+}
+
 fn flt(x: f64) -> String {
     let s = format!("{:?}", x as f32);
     if s.contains("inf") || s.contains("NaN") { "0.0".into() } else { s }
@@ -222,6 +228,27 @@ impl<'a> Cg<'a> {
                 let (a, w) = self.input(e, "Input").unwrap_or_else(|| (self.let_("vec4<f32>(0.0)".into()), 1));
                 let (lo, hi) = (self.prop_f(e, "Min", 0.0), self.prop_f(e, "Max", 1.0));
                 (self.let_(format!("clamp({a}, vec4<f32>({}), vec4<f32>({}))", flt(lo), flt(hi))), w)
+            }
+            // Abs, Divide and CameraVector (B-273): these hit the unknown-expression arm (constant 1.0) too. Abs: the lens
+            // flare and sun masks; Divide: PixelDepth / constant fades (lens flares, dust swirl, the Driving02 credits);
+            // CameraVector: SplashDrops. BOTS_N1_PARTICLE_NODES=0 restores the old fallback for A/B.
+            "Abs" if nodes_on() => {
+                let (a, w) = self.input(e, "Input").unwrap_or_else(|| (self.let_("vec4<f32>(0.0)".into()), 1));
+                (self.let_(format!("abs({a})")), w)
+            }
+            "Divide" if nodes_on() => {
+                let (a, wa) = self.in_or(e, "A", "ConstA", 0.0);
+                let (b, wb) = self.in_or(e, "B", "ConstB", 1.0);
+                // A zero divisor gives a tiny one (UE3's HLSL gives inf; a sprite pixel must not turn NaN).
+                (self.let_(format!("{a} / select({b}, vec4<f32>(1.0e-6), abs({b}) < vec4<f32>(1.0e-6))")), wa.max(wb))
+            }
+            // The unit vector from the pixel to the camera, UE3 world axes (the renderer's Y-up space swaps y and z).
+            // Sprites face the camera, so the view axis stands in for the per-pixel direction (as `ndv` does for Fresnel).
+            "CameraVector" if nodes_on() => (self.let_("vec4<f32>(-u.fwd.x, -u.fwd.z, -u.fwd.y, 0.0)".into()), 3),
+            // DestDepth: the view depth of the opaque scene behind the pixel (the lens-flare reflections fade by it).
+            "DestDepth" if nodes_on() => {
+                self.soft = true;
+                (self.let_("vec4<f32>(i.scene_w)".into()), 1)
             }
             "Floor" | "Frac" => {
                 let (a, w) = self.input(e, "Input").unwrap_or_else(|| (self.let_("vec4<f32>(0.0)".into()), 1));
@@ -488,6 +515,50 @@ mod tests {
         });
         let c = compile(&mat);
         assert!(c.wgsl.contains("vec4<f32>(0.1)") && c.wgsl.contains("vec4<f32>(0.3)"), "{}", c.wgsl);
+    }
+
+    fn one(class: &str, props: serde_json::Value) -> Compiled {
+        let mat = serde_json::json!({
+            "props": {"BlendMode": "BLEND_Additive", "EmissiveColor": {"Expression": {"obj": 1}}},
+            "expressions": {
+                "1": {"class": class, "props": props},
+                "2": {"class": "MaterialExpressionVertexColor", "props": {}},
+                "3": {"class": "MaterialExpressionPixelDepth", "props": {}},
+                "4": {"class": "MaterialExpressionConstant", "props": {"R": 400.0}}
+            }
+        });
+        compile(&mat)
+    }
+
+    #[test]
+    fn abs_is_supported() {
+        let c = one("MaterialExpressionAbs", serde_json::json!({"Input": {"Expression": {"obj": 2}}}));
+        assert!(c.unknown.is_empty(), "{:?}", c.unknown);
+        assert!(c.wgsl.contains("= abs(v0)") && c.wgsl.contains("= i.vcol"), "{}", c.wgsl);
+    }
+
+    #[test]
+    fn divide_is_supported() {
+        // The lens flare fade: PixelDepth / 400, with a guard against a zero divisor.
+        let c = one("MaterialExpressionDivide", serde_json::json!({"A": {"Expression": {"obj": 3}, "Mask": 1, "MaskR": 1}, "B": {"Expression": {"obj": 4}}}));
+        assert!(c.unknown.is_empty(), "{:?}", c.unknown);
+        assert!(c.wgsl.contains(" / select(") && c.wgsl.contains("vec4<f32>(400.0)") && c.wgsl.contains("i.pixel_w"), "{}", c.wgsl);
+        // An unconnected B divides by ConstB (default 1.0).
+        let d = one("MaterialExpressionDivide", serde_json::json!({"A": {"Expression": {"obj": 2}}, "ConstB": 2.0}));
+        assert!(d.unknown.is_empty() && d.wgsl.contains("vec4<f32>(2.0)"), "{}", d.wgsl);
+    }
+
+    #[test]
+    fn dest_depth_reads_scene_depth() {
+        let c = one("MaterialExpressionDestDepth", serde_json::json!({}));
+        assert!(c.unknown.is_empty() && c.soft && c.wgsl.contains("i.scene_w"), "{}", c.wgsl);
+    }
+
+    #[test]
+    fn camera_vector_is_supported() {
+        let c = one("MaterialExpressionCameraVector", serde_json::json!({}));
+        assert!(c.unknown.is_empty(), "{:?}", c.unknown);
+        assert!(c.wgsl.contains("-u.fwd.x"), "{}", c.wgsl);
     }
 
     #[test]
