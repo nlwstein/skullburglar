@@ -71,6 +71,22 @@ pub struct Effect {
     pub params: [f32; 4],
 }
 
+/// `BOTS_N1_POST_LOG=1`: print the post-material list every time it changes (the host logs it once per chain object,
+/// which misses a material added to a live chain, e.g. `ScenarioEdgeDetect_MAT`).
+fn log_chain(mats: &[String]) {
+    use std::sync::{Mutex, OnceLock};
+    static ON: OnceLock<bool> = OnceLock::new();
+    static LAST: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    if !*ON.get_or_init(|| std::env::var("BOTS_N1_POST_LOG").is_ok_and(|v| v != "0")) {
+        return;
+    }
+    let Ok(mut last) = LAST.lock() else { return };
+    if last.as_slice() != mats {
+        eprintln!("n1ffi: post materials now {mats:?}");
+        *last = mats.to_vec();
+    }
+}
+
 /// The active ported effects of a post feed, in chain order. A material whose strength is zero (or not positive) is
 /// left out, so the pass isn't recorded at all.
 pub fn effects(p: &PostFeed) -> Vec<Effect> {
@@ -78,6 +94,7 @@ pub fn effects(p: &PostFeed) -> Vec<Effect> {
     if !p.present {
         return out;
     }
+    log_chain(&p.material_effects);
     for m in &p.material_effects {
         let Some(kind) = Kind::of(m) else { continue };
         if out.iter().any(|e: &Effect| e.kind == kind) {

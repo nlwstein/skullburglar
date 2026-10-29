@@ -22,11 +22,14 @@ pub struct ShaderFlags {
     pub dynl: bool,
     /// B-235: the lightmaps are uploaded raw (UNORM) and take Xenos's piecewise-linear gamma curve in the shader.
     pub lm_pwl: bool,
+    /// What distance fog fades the surface toward: 0 the fog colour (opaque and alpha-blended draws), 1 black
+    /// (additive: fog only dims what is added), 2 white (modulate: fog fades the darkening out). B-273.
+    pub fog_mode: u8,
 }
 
 impl ShaderFlags {
     pub fn new(masked: bool, unlit: bool, translucent: bool, clip: u32) -> Self {
-        ShaderFlags { masked, unlit, translucent, clip, lm: true, nmap: true, spec: true, fog: true, dynl: true, lm_pwl: false }
+        ShaderFlags { masked, unlit, translucent, clip, lm: true, nmap: true, spec: true, fog: true, dynl: true, lm_pwl: false, fog_mode: 0 }
     }
 }
 
@@ -55,6 +58,7 @@ pub fn assemble(c: &Compiled, f: ShaderFlags) -> String {
         .replace("SPEC_ON", if f.spec { "true" } else { "false" })
         .replace("DYN_ON", if f.dynl { "true" } else { "false" })
         .replace("USES_LIGHTVEC", if body.contains("fi.light_ts") { "true" } else { "false" })
+        .replace("FOG_TARGET", match f.fog_mode { 1 => "vec3<f32>(0.0)", 2 => "vec3<f32>(1.0)", _ => "g.fog_col.rgb" })
         .replace("FOG_ON", if f.fog { "true" } else { "false" })
         .replace("MASKED", if f.masked { "true" } else { "false" })
         .replace("UNLIT", if f.unlit { "true" } else { "false" })

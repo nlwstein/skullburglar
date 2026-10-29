@@ -356,7 +356,7 @@ fn fs(i: VOut, @builtin(front_facing) ff: bool) -> @location(0) vec4<f32> {
             let dist = (vz - g.fog_par.z) * fr;
             var t = exp(-g.fog_par.x * dist);
             if (g.fog_par.w > 0.0 && dist >= g.fog_par.w) { t = 0.0; }
-            col = mix(g.fog_col.rgb, col, t);
+            col = mix(FOG_TARGET, col, t);
         }
     }
     return vec4<f32>(col, OPACITY_EXPR);
