@@ -4,8 +4,9 @@
 //   Windows  runs the setup program silently over the install folder (it keeps saves and game files, waits for this
 //            process to exit, starts the new version)
 //   macOS    mounts the disk image, copies Skullburglar.app beside the running one, swaps the two, reopens it
-//   Linux    AppImage: the new file replaces the running one (an atomic rename). An unpacked tarball doesn't update
-//            itself (it has no record of which files are the program's): it keeps the "Download it" button.
+//   Linux    AppImage: the new file replaces the running one (an atomic rename). An unpacked tarball (it carries an
+//            install-kind marker) gets the new folder built beside it and swapped in with one renameat2 exchange, so
+//            the install folder is always entirely old or entirely new; what the player keeps in it moves across.
 // Nothing is installed unless the release listing carried a valid Ed25519 signature (update_logic.h) and the release is
 // newer than the running version. The download is made by this program (WinHTTP, or curl on macOS and Linux), not by a browser, so the files carry
 // no "downloaded from the internet" mark (macOS quarantine, Windows Mark of the Web) and the system raises no security
@@ -36,7 +37,7 @@ InstallKind CurrentInstallKind();
 std::filesystem::path SelfExeFolder();
 
 // What InstallUpdateAt replaces: the app bundle (macOS), the AppImage file (Linux), else the folder holding the
-// executable (Windows). Empty for kNone.
+// executable (Windows, the Linux tarball). Empty for kNone.
 std::filesystem::path InstallTarget(InstallKind kind);
 
 // Why this install can't update itself ("" when it can): not a release-type install, or its folder isn't writable.
