@@ -41,6 +41,10 @@
 #include <CoreFoundation/CoreFoundation.h>
 #endif
 #endif
+// tvOS has no posix_spawn (and nothing to update in place): Run and RelaunchAfterExit do nothing there.
+#if defined(__APPLE__) && TARGET_OS_TV
+#define BOTS_UPDATE_NO_SPAWN 1
+#endif
 extern char** environ;
 #endif
 
@@ -200,6 +204,10 @@ fs::path SelfExe() {
 // too. Returns its exit status, or -1 when it didn't start, was stopped or failed.
 int Run(const std::vector<std::string>& args, const fs::path& out = {}, const std::atomic<bool>* cancel = nullptr,
         const std::function<bool()>& tick = {}) {
+#ifdef BOTS_UPDATE_NO_SPAWN
+  (void)args, (void)out, (void)cancel, (void)tick;
+  return -1;
+#else
   std::vector<char*> argv;
   for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
   argv.push_back(nullptr);
@@ -229,10 +237,14 @@ int Run(const std::vector<std::string>& args, const fs::path& out = {}, const st
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
+#endif
 }
 
 // Starts a program that outlives this process, a second from now (so this one has quit).
 void RelaunchAfterExit(const std::vector<std::string>& cmd) {
+#ifdef BOTS_UPDATE_NO_SPAWN
+  (void)cmd;
+#else
   std::vector<std::string> args = {Tool("sh"), "-c", Tool("sleep") + " 1; exec \"$@\"", "sh"};
   args.insert(args.end(), cmd.begin(), cmd.end());
   std::vector<char*> argv;
@@ -252,6 +264,7 @@ void RelaunchAfterExit(const std::vector<std::string>& cmd) {
   posix_spawn(&pid, argv[0], &fa, &attr, argv.data(), environ);
   posix_spawn_file_actions_destroy(&fa);
   posix_spawnattr_destroy(&attr);
+#endif
 }
 
 // curl ships with macOS and practically every Linux, SteamOS included. Not a browser: it sets no quarantine mark.
