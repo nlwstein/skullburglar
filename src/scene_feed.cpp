@@ -1373,7 +1373,7 @@ struct LiveComponent {
 // What an emitter's LOD level says about how to draw it, cached per LOD level (the property reads walk class records).
 struct LiveEmitter {
   uint32_t name = 0, outer = 0, material = 0, type_data = 0;
-  int kind = -1;  // 0 sprite, 1 mesh, -1 not drawn (beam, trail, other)
+  int kind = -1;  // 0 sprite, 1 mesh, 2 beam (B-263: drawn as a velocity-aligned sprite), -1 not drawn (trail, other)
   uint32_t align = 0, sub_h = 1, sub_v = 1, sub_method = 0, local_space = 0;
   uint32_t lock_axis = 0;  // EParticleAxisLock (LockAxisFlags of the LOD level's OrientationAxisLock module)
   uint32_t max_draw = UINT32_MAX;  // B-242: RequiredModule MaxDrawCount when bUseMaxDrawCount, else no cap
@@ -1423,6 +1423,12 @@ struct LiveState {
     return !(v && !std::strncmp(v, "off", 3));
   }();
   std::unordered_map<uint32_t, LiveEmitter> emitters;
+  // B-263: Beam2 emitters (minigun/assault rifle muzzle flames) as camera-facing strips from their source to their
+  // target (BOTS_N1_BEAMS=0: not drawn, as before).
+  bool beams_on = [] {
+    const char* v = std::getenv("BOTS_N1_BEAMS");
+    return !(v && v[0] == '0');
+  }();
   bool particles = [] {
     const char* v = std::getenv("BOTS_N1_PARTICLES");
     return !(v && (v[0] == '0'));
@@ -2540,7 +2546,8 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam, bool max_
         le.name = U32(lod + 0x2C), le.outer = U32(lod + 0x28), le.material = material, le.type_data = type_data0;
         const uint32_t required = PropU32(lod, "RequiredModule");
         const std::string type_class = IsObject(type_data0) ? ClassName(type_data0) : "";
-        le.kind = type_class.empty() ? 0 : type_class.find("Mesh") != std::string::npos ? 1 : -1;
+        le.kind = type_class.empty() ? 0 : type_class.find("Mesh") != std::string::npos ? 1
+                  : (st.beams_on && type_class.find("Beam2") != std::string::npos) ? 2 : -1;
         if (IsObject(required)) {
           le.align = PropByte(required, "ScreenAlignment");
           le.local_space = PropBool(required, "bUseLocalSpace");
@@ -2567,6 +2574,52 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam, bool max_
       const uint32_t pdata = U32(inst + kEmitData), pindex = U32(inst + kEmitIndices);
       if (!Readable(pdata) || !Readable(pindex & ~3u)) continue;
       if (out.particle_rows.size() / 15 + drawn > kMaxRows) return;
+      if (le.kind == 2) {
+        // B-263: a Beam2 particle's payload (from +0x80) is Source, SourceTangent, SourceStrength, Target, TargetTangent,
+        // TargetStrength, ..., the length at float 19; the particle's own Location is the target. The straight beam is
+        // a strip Size.X wide from Source to Target, which is what a velocity-aligned sprite is: centred on the
+        // midpoint, its length the sprite's Size.Y, its direction midpoint - OldLocation (here the source).
+        if (stride < 0x80 + 20 * 4) continue;
+        const size_t row_start = out.particle_rows.size();
+        uint32_t made = 0;
+        for (uint32_t k = 0; k < drawn; ++k) {
+          const uint16_t slot = uint16_t(__builtin_bswap16(*reinterpret_cast<const uint16_t*>(Raw(pindex + 2 * k))));
+          const uint32_t pp = pdata + slot * stride;
+          float sx[3], tx[3];
+          for (int a = 0; a < 3; ++a) sx[a] = F32(pp + 0x80 + 4 * a), tx[a] = F32(pp + 0x80 + 28 + 4 * a);
+          const float len = F32(pp + 0x80 + 76);
+          const float dx = tx[0] - sx[0], dy = tx[1] - sx[1], dz = tx[2] - sx[2];
+          const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+          // Reject a payload that isn't this layout: finite, the stored length matches the distance.
+          if (!std::isfinite(dist) || !std::isfinite(len) || dist < 1.0f || dist > 20000.0f ||
+              std::fabs(dist - len) > 0.02f * dist + 1.0f)
+            continue;
+          for (int a = 0; a < 3; ++a) out.particle_rows.push_back(0.5f * (sx[a] + tx[a]));
+          for (int a = 0; a < 3; ++a) out.particle_rows.push_back(sx[a]);
+          out.particle_rows.push_back(F32(pp + 0x50)), out.particle_rows.push_back(dist), out.particle_rows.push_back(0.0f);
+          out.particle_rows.push_back(0.0f);
+          for (uint32_t off : {0x60u, 0x64u, 0x68u, 0x6Cu}) out.particle_rows.push_back(F32(pp + off));
+          out.particle_rows.push_back(F32(pp + 0x0C));
+          ++made;
+        }
+        if (!made) continue;
+        HybridScene::Emitter& e = out.emitters.emplace_back();
+        e.kind = 0, e.align = 2, e.sub_h = 1, e.sub_v = 1, e.sub_method = 0, e.local_space = 0, e.lock_axis = 0;
+        e.material = le.material_path, e.mesh = nullptr;
+        e.count = made, e.row_offset = uint32_t(row_start), e.row_floats = 15;
+        for (int k = 0; k < 3; ++k) e.origin[k] = F32(inst + kEmitLocation + 4 * k);
+        if (g_off.bounds.ok()) {
+          const uint32_t b = c + g_off.bounds.offset;
+          e.sort_origin[0] = F32(b), e.sort_origin[1] = F32(b + 4), e.sort_origin[2] = F32(b + 8), e.sort_origin[3] = 1;
+        } else {
+          std::memset(e.sort_origin, 0, sizeof(e.sort_origin));
+        }
+        if (g_off.local_to_world.ok())
+          for (int k = 0; k < 16; ++k) e.transform[k] = F32(c + g_off.local_to_world.offset + 4 * k);
+        else
+          std::memset(e.transform, 0, sizeof(e.transform));
+        continue;
+      }
       // Payload floats: the sub-UV frame data [ImageH, ImageV, Interp, Image2H, Image2V] for sub-UV animation (all
       // of the payload if the instance's offset looks wrong; the renderer then searches it), the rotation for mesh
       // particles, none otherwise. The renderer's search alone picked a later window (the next frame, unblended) in
