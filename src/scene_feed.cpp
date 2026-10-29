@@ -2116,21 +2116,29 @@ void NoteSkip(uint32_t c, uint8_t reason, const Camera& cam) {
     return v && *v ? float(std::atof(v)) : -1.0f;
   }();
   if (min_radius < 0 || !g_off.bounds.ok()) return;
-  static std::unordered_map<uint32_t, uint8_t> last;
+  // Keyed by address, with the object's name and outer to tell a new object at a reused address (level loads free
+  // and reuse components) from the one seen before: such a hit starts over instead of logging a false transition.
+  struct Seen {
+    uint8_t reason;
+    uint32_t name, outer;
+  };
+  static std::unordered_map<uint32_t, Seen> last;
   static uint64_t events = 0;
+  const uint32_t name = U32(c + 0x2C), outer = U32(c + 0x28);
   auto it = last.find(c);
+  if (it != last.end() && (it->second.name != name || it->second.outer != outer)) last.erase(it), it = last.end();
   if (it == last.end()) {
     if (reason == kFed) {  // first sighting while fed: nothing to report
-      last.emplace(c, reason);
+      last.emplace(c, Seen{reason, name, outer});
       return;
     }
-    it = last.emplace(c, uint8_t(kFed)).first;
+    it = last.emplace(c, Seen{uint8_t(kFed), name, outer}).first;
   }
-  if (it->second == reason) return;
+  if (it->second.reason == reason) return;
   const uint32_t b = c + g_off.bounds.offset;
   const float radius = F32(b + 24);
-  const uint8_t was = it->second;
-  it->second = reason;
+  const uint8_t was = it->second.reason;
+  it->second.reason = reason;
   if (radius < min_radius) return;
   const float dx = F32(b) - cam.location[0], dy = F32(b + 4) - cam.location[1], dz = F32(b + 8) - cam.location[2];
   float cull = 0, cached = 0;
