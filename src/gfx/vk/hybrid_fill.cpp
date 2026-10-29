@@ -252,12 +252,20 @@ void* Renderer::EnsureN1(VkFormat format) {
   if (!host->r) {
     host->failed = true;
     REXLOG_ERROR("hybrid n1: n1_create failed: {}", failure);
+    const HybridState* hs = FindHybridState();
     ShowStartFailure(DeviceDescription(), "the new renderer couldn't start: " + failure,
-                     "You can still play: open the launcher, choose \"Pre-1.0 renderer (deprecated)\" as the "
-                     "Renderer, and press Play. If you start the game without the launcher, add --renderer=pre1.");
+                     hs && hs->pick_pre1.load()
+                         ? "You can still play with the pre-1.0 renderer (deprecated): choose \"Use the pre-1.0 "
+                           "renderer\" and start the game again."
+                         : "You can still play: open the launcher, choose \"Pre-1.0 renderer (deprecated)\" as the "
+                           "Renderer, and press Play. If you start the game without the launcher, add "
+                           "--renderer=pre1.");
   } else {
     REXLOG_INFO("hybrid n1: renderer up in {:.1f} ms (target format {})",
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), int(format));
+    // Most Android GPUs have no BC formats: n1 then decodes the game's DXT textures on the CPU (n1ffi bcdec.rs).
+    if (!bc_textures_)
+      REXLOG_INFO("hybrid n1: no BC texture formats on this GPU: textures are decoded on the CPU");
   }
   return host;
 }

@@ -257,6 +257,9 @@ struct HybridState {
   std::mutex package_mutex;
   std::vector<std::string> packages;
   std::atomic<uint32_t> opened{0};
+  // Builds with no launcher (iOS, tvOS, Android): the game sets this to a function that saves the explicit pick of the
+  // pre-1.0 renderer (renderer = "pre1" in bots.toml), and the renderer's start-failure box offers it as a button.
+  std::atomic<void (*)()> pick_pre1{nullptr};
 };
 
 // The register the marker writes: unknown to the Xenos register table (no side effects in the SDK's command

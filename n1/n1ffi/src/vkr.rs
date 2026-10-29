@@ -423,6 +423,8 @@ pub struct Renderer {
     last_serial: u64,
     bc_ok: [bool; 4],
     pub unsupported_textures: u32,
+    /// BC textures decoded on the CPU because the GPU has no BC formats (bcdec.rs).
+    pub decoded_textures: u32,
     pub shader_errors: u32,
     pub stats: FrameStats,
     pub lighting: Lighting,
@@ -721,6 +723,7 @@ impl Renderer {
                 last_serial: 0,
                 bc_ok,
                 unsupported_textures: 0,
+                decoded_textures: 0,
                 shader_errors: 0,
                 stats: FrameStats::default(),
                 lighting: Lighting::new(),
@@ -959,6 +962,7 @@ impl Renderer {
             | vk::Format::BC3_UNORM_BLOCK
             | vk::Format::BC3_SRGB_BLOCK
             | vk::Format::BC5_UNORM_BLOCK => (4, 16),
+            vk::Format::R8G8_UNORM => (1, 2),
             _ => (1, 4),
         };
         let complete = mips
@@ -2806,9 +2810,30 @@ impl Renderer {
             _ => true,
         };
         if !supported {
-            // TODO: decode BCn on the CPU for devices without it (Android/Quest).
-            self.unsupported_textures += 1;
-            return Ok(if t.normal { TEX_NORMAL } else { TEX_GREY });
+            // No BC on this GPU (most Android GPUs): decode on the CPU to RGBA8 (BC5: RG8), keeping the encoding.
+            let srgb = t.srgb && t.format != TexFormat::Bc5;
+            let fmt = match (t.format, srgb) {
+                (TexFormat::Bc5, _) => vk::Format::R8G8_UNORM,
+                (_, true) => vk::Format::R8G8B8A8_SRGB,
+                (_, false) => vk::Format::R8G8B8A8_UNORM,
+            };
+            let decoded: Vec<Vec<u8>> = t
+                .mips
+                .iter()
+                .enumerate()
+                .map_while(|(i, m)| {
+                    crate::bcdec::decode_mip(t.format, (t.width >> i).max(1), (t.height >> i).max(1), m)
+                })
+                .collect();
+            if decoded.is_empty() {
+                self.unsupported_textures += 1;
+                return Ok(if t.normal { TEX_NORMAL } else { TEX_GREY });
+            }
+            self.decoded_textures += 1;
+            let mips: Vec<&[u8]> = decoded.iter().map(|v| v.as_slice()).collect();
+            let id = self.upload_texture(fmt, t.width, t.height, &mips)?;
+            self.textures[id as usize].gamma = t.gamma;
+            return Ok(id);
         }
         let fmt = vk_format(t.format, t.srgb && t.format != TexFormat::Bc5);
         if t.format == TexFormat::R8 {

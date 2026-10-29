@@ -270,21 +270,45 @@ if(REXSDK_DIR AND (NOT WIN32 OR REXGLUE_USE_VULKAN))
         add_dependencies(bots rexgpu-native)
 
         # The n1 renderer (n1/, a Rust workspace; src/gfx/vk/hybrid_fill.cpp), linked into the plugin as a static
-        # library behind the C ABI in n1/n1ffi/include/n1ffi.h. On by default on the desktop platforms; the mobile
-        # builds never reach this block. The library is built here with cargo (release profile, `--locked`), or
-        # BOTS_N1FFI_LIBRARY names a prebuilt one (libn1ffi.a / n1ffi.lib), which skips cargo.
-        # BOTS_N1=OFF builds without n1.
+        # library behind the C ABI in n1/n1ffi/include/n1ffi.h. On by default on every platform. The library is built
+        # here with cargo (release profile, `--locked`), or BOTS_N1FFI_LIBRARY names a prebuilt one (libn1ffi.a /
+        # n1ffi.lib), which skips cargo. The cross builds need the Rust target installed for the pinned toolchain
+        # (`rustup target add <target>`; tools/ios/build.sh and tools/android/build.sh do it). tvOS is a tier-3 Rust
+        # target with no prebuilt standard library: cargo builds it from the toolchain's own sources (the rust-src
+        # component) with -Zbuild-std, which a stable toolchain allows with RUSTC_BOOTSTRAP=1, so every platform stays
+        # on the one pinned version. BOTS_N1=OFF builds without n1.
         option(BOTS_N1 "Build the n1 renderer (Rust, n1/) into the native renderer" ON)
         set(BOTS_N1FFI_LIBRARY "" CACHE FILEPATH "Prebuilt n1 static library; skips the cargo build")
         set(BOTS_N1FFI_INCLUDE_DIR "" CACHE PATH "Directory holding n1ffi.h (default: n1/n1ffi/include)")
-        if(BOTS_N1 AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME MATCHES "^(iOS|tvOS)$")
+        if(BOTS_N1)
             if(NOT BOTS_N1FFI_INCLUDE_DIR)
                 set(BOTS_N1FFI_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/n1/n1ffi/include)
             endif()
             if(NOT BOTS_N1FFI_LIBRARY)
                 # The Rust target for what this build produces. Left out when it is the host's own.
                 set(_n1_target "")
-                if(WIN32)
+                set(_n1_build_std OFF)
+                if(ANDROID)
+                    if(ANDROID_ABI STREQUAL "x86_64")
+                        set(_n1_target x86_64-linux-android)
+                    else()
+                        set(_n1_target aarch64-linux-android)
+                    endif()
+                    set(_n1_libname libn1ffi.a)
+                elseif(CMAKE_SYSTEM_NAME MATCHES "^(iOS|tvOS)$")
+                    # Device or Simulator, from the SDK the build compiles against.
+                    set(_n1_sim "")
+                    if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
+                        set(_n1_sim -sim)
+                    endif()
+                    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+                        set(_n1_target aarch64-apple-ios${_n1_sim})
+                    else()
+                        set(_n1_target aarch64-apple-tvos${_n1_sim})
+                        set(_n1_build_std ON)
+                    endif()
+                    set(_n1_libname libn1ffi.a)
+                elseif(WIN32)
                     if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
                         set(_n1_target aarch64-pc-windows-msvc)
                     else()
@@ -321,13 +345,25 @@ if(REXSDK_DIR AND (NOT WIN32 OR REXGLUE_USE_VULKAN))
                     set(BOTS_N1FFI_LIBRARY ${_n1_dir}/release/${_n1_libname})
                 endif()
                 set(_n1_env "")
-                if(APPLE AND CMAKE_OSX_DEPLOYMENT_TARGET)  # the object files carry the same minimum macOS as the game
-                    set(_n1_env MACOSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET})
+                if(APPLE AND CMAKE_OSX_DEPLOYMENT_TARGET)  # the object files carry the same minimum OS as the game
+                    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+                        set(_n1_env IPHONEOS_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET})
+                    elseif(CMAKE_SYSTEM_NAME STREQUAL "tvOS")
+                        set(_n1_env TVOS_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET})
+                    else()
+                        set(_n1_env MACOSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET})
+                    endif()
+                endif()
+                if(_n1_build_std)
+                    list(APPEND _n1_env RUSTC_BOOTSTRAP=1)
+                    list(INSERT _n1_args 1 -Zbuild-std=std,panic_abort)
                 endif()
                 # Always run: cargo is incremental and leaves the library alone when nothing changed, so the link
-                # only repeats when n1 does.
+                # only repeats when n1 does. It runs in n1/: rustup picks the toolchain from the working directory's
+                # rust-toolchain.toml, not the manifest's.
                 add_custom_target(n1ffi
                     COMMAND ${CMAKE_COMMAND} -E env ${_n1_env} ${BOTS_CARGO} ${_n1_args}
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/n1
                     BYPRODUCTS ${BOTS_N1FFI_LIBRARY}
                     COMMENT "Building n1 (cargo, release)"
                     USES_TERMINAL VERBATIM)
@@ -337,7 +373,9 @@ if(REXSDK_DIR AND (NOT WIN32 OR REXGLUE_USE_VULKAN))
             target_compile_definitions(bots PRIVATE BOTS_HAS_N1=1)  # src/renderer_choice.h: the launcher offers n1
             target_include_directories(rexgpu-native PRIVATE ${BOTS_N1FFI_INCLUDE_DIR})
             target_link_libraries(rexgpu-native PRIVATE ${BOTS_N1FFI_LIBRARY})
-            if(APPLE)
+            if(ANDROID)
+                target_link_libraries(rexgpu-native PRIVATE log dl m)  # rustc --print native-static-libs
+            elseif(APPLE)
                 target_link_libraries(rexgpu-native PRIVATE "-framework CoreFoundation" "-framework Security" iconv)
             elseif(WIN32)
                 # What rustc reports for the staticlib (--print native-static-libs). Its /defaultlib:msvcrt is the

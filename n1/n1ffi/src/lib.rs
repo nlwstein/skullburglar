@@ -12,6 +12,7 @@
 //! All entry points may be called from any thread; they serialise on one mutex (handle lookups are cheap; the host
 //! should cache handles per component).
 
+pub mod bcdec;
 pub mod decals;
 pub mod light;
 pub mod particles;

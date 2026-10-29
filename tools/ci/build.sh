@@ -42,19 +42,10 @@ fi
 step() { echo "== $* ($(date -u +%H:%M:%S))"; }
 
 # n1 (n1/, Rust) is built by the CMake build with cargo. The Linux and Windows images carry the toolchain; on the Mac it
-# is the user's rustup, found by its usual places or, when there is none, installed here without touching shell
-# profiles (rustup-init into ~/.cargo, user-local). n1/rust-toolchain.toml selects the version, which rustup fetches
-# on first use.
-if [ "$PLATFORM" = macos ] && ! command -v cargo >/dev/null; then
-  for d in "$HOME/.cargo/bin" /opt/homebrew/opt/rustup/bin /usr/local/opt/rustup/bin; do
-    [ ! -x "$d/cargo" ] || { PATH="$d:$PATH"; break; }
-  done
-  if ! command -v cargo >/dev/null; then
-    step "rustup (user-local install)"
-    curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain none
-    PATH="$HOME/.cargo/bin:$PATH"
-  fi
-  export PATH
+# is the user's rustup, or a user-local one installed on first use (tools/rust_env.sh).
+if [ "$PLATFORM" = macos ]; then
+  . tools/rust_env.sh
+  rust_env
 fi
 
 # Codegen output already in generated/ (restored by the caller for an unchanged codegen key) is used as it is: the

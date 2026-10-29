@@ -59,11 +59,23 @@ namespace bots::gfx {
                                          "the processor). Updating the driver from the maker's website often fixes it."
                                        : "\n\n" + advice);
     if (!log.empty()) text += "\n\nThe log, with more detail, is at:\n" + log;
+    // No launcher (iOS, tvOS, Android): the box itself offers the pre-1.0 renderer (HybridState::pick_pre1), and there
+    // is no program to open the log with.
+    const HybridState* hs = FindHybridState();
+    void (*pick_pre1)() = hs ? hs->pick_pre1.load() : nullptr;
     const SDL_MessageBoxButtonData buttons[] = {{SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Open log"},
                                                 {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Quit"}};
+    const SDL_MessageBoxButtonData pick_buttons[] = {
+        {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 2, "Use the pre-1.0 renderer"},
+        {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Quit"}};
     SDL_MessageBoxData box{SDL_MESSAGEBOX_ERROR, nullptr, "Skullburglar", text.c_str(), SDL_arraysize(buttons), buttons,
                            nullptr};
+    if (pick_pre1) box.numbuttons = SDL_arraysize(pick_buttons), box.buttons = pick_buttons;
     int choice = 0;
+    if (pick_pre1) {
+      if (SDL_ShowMessageBox(&box, &choice) && choice == 2) pick_pre1();
+      std::_Exit(1);
+    }
     while (SDL_ShowMessageBox(&box, &choice) && choice == 1 && !log.empty()) {
       // The log file itself, else its folder (some systems have no program for .log files).
       auto url = [](const std::filesystem::path& p) {
@@ -506,10 +518,10 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     if (last_cpu_time_.time_since_epoch().count()) {
       const double wall_us = std::chrono::duration<double, std::micro>(now - last_cpu_time_).count();
       REXLOG_INFO("gfx native: host: process CPU {:.0f}% user + {:.0f}% kernel (of one core, {} cores), CPU clock "
-                  "{} MHz of {} (limit {}), probe {:.0f} us",
+                  "{} MHz of {} (limit {}), probe {:.0f} us, memory {:.0f} MB",
                   double(cpu.user_us - last_cpu_.user_us) / wall_us * 100,
                   double(cpu.kernel_us - last_cpu_.kernel_us) / wall_us * 100, std::thread::hardware_concurrency(),
-                  clock.current_mhz, clock.max_mhz, clock.limit_mhz, probe);
+                  clock.current_mhz, clock.max_mhz, clock.limit_mhz, probe, host::ProcessMemoryMB());
     }
     last_cpu_ = cpu, last_cpu_time_ = now;
     // Overlays once a minute: listing the process's modules is the slow part (/proc/self/maps on Linux).

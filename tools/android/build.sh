@@ -36,6 +36,10 @@ do_build() {
   need ANDROID_NDK
   : "${SDK:?set SDK to an SDK checkout with the patches applied (tools/ci/sdk.sh)}"
   [ -f generated/default/sources.cmake ] || { echo "no codegen output in generated/" >&2; exit 1; }
+  # n1 (Rust): cargo and each ABI's target (tools/rust_env.sh).
+  . tools/rust_env.sh
+  # shellcheck disable=SC2046
+  rust_env $(for abi in $ABIS; do triple "$abi"; done)
   for abi in $ABIS; do
     B=out/build/android-$abi
     step "configure $abi"

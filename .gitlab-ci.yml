@@ -16,8 +16,10 @@
 # Linux and Windows run on a runner whose executor is Docker with the host's Docker socket: build jobs build their image
 # there (cached) and run it next to the job container, sharing its build directory. macOS needs an Apple silicon Mac:
 # a shell-executor runner tagged `macos` with the Xcode command line tools, cmake, ninja and ccache on its PATH, and
-# CCACHE_DIR set in its job environment. n1 (n1/, Rust) builds in every desktop job: the images carry a Rust toolchain
-# (docker/*/Dockerfile), and on the Mac tools/ci/build.sh uses the user's rustup, installing it (user-local) if absent.
+# CCACHE_DIR set in its job environment. n1 (n1/, Rust) builds in every job: the images carry a Rust toolchain
+# (docker/*/Dockerfile; docker/android with the Android targets), and on the Mac the build scripts use the user's
+# rustup, installing it (user-local) if absent and adding the iOS target or, for tvOS, the rust-src component
+# (tools/rust_env.sh).
 #
 # Run a pipeline on main with BUILD=1 to build (and upload as skullburglar/<last>-dev.<sha>) without releasing.
 
@@ -42,7 +44,9 @@ checks:
   script:
     - python3 tools/leak_scan.py tree
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/input_math_test.cpp -o $d/t && $d/t
-    - for f in tools/ci/*.sh tools/ios/build.sh tools/android/build.sh packaging/linux/AppRun; do sh -n "$f"; done
+    - >-
+      for f in tools/ci/*.sh tools/rust_env.sh tools/ios/build.sh tools/android/build.sh packaging/linux/AppRun;
+      do sh -n "$f"; done
     - python3 -m py_compile tools/ci/gitlab_release.py tools/ci/publish_downloads.py
     - SUBMODULES=0 tools/ci/sdk.sh "$(mktemp -d)/sdk"
 
@@ -51,7 +55,7 @@ checks:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 # The desktop builds also run on release/* branches (a release MR's full build before merging): they build into
-# skullburglar-branch/0.0.0-branch.<sha>.
+# skullburglar-branch/0.0.0-branch.<sha>. So do the experimental mobile builds (below).
 .desktop:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
@@ -149,10 +153,11 @@ build:macos:
 
 # iOS and tvOS (experimental, tools/ios/build.sh): unsigned IPAs, signed when they're installed. On main they build with
 # the others when there's a release (or BUILD=1) and go in it as skullburglar-<VERSION>-<ios|tvos>.ipa; they may fail
-# without holding up the release, which then leaves them out. On branches named for them (apple, ios, tvos) they build
-# on every push into skullburglar-apple/apple-<sha>. They need a Mac runner with Xcode and its iOS and tvOS platforms
-# (the command line tools have no iOS SDKs), tagged `xcode` as well as `macos`. DEVELOPER_DIR picks the full Xcode for
-# these jobs only, so the runner's selected developer directory can stay on the command line tools the macOS build uses.
+# without holding up the release, which then leaves them out. On branches named for them (apple, ios, tvos), and on
+# release/* branches with the desktop builds, they build on every push into skullburglar-apple/apple-<sha>.
+# They need a Mac runner with Xcode and its iOS and tvOS platforms (the command line tools have no iOS SDKs), tagged
+# `xcode` as well as `macos`. DEVELOPER_DIR picks the full Xcode for these jobs only, so the runner's selected developer
+# directory can stay on the command line tools the macOS build uses.
 .apple:
   stage: build
   tags: [macos, xcode]
@@ -167,6 +172,7 @@ build:macos:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_COMMIT_BRANCH =~ /(^|\/)(apple|ios|tvos)/
+    - if: $CI_COMMIT_BRANCH =~ /^release\//
   script:
     - |
       if [ "$CI_COMMIT_BRANCH" != "$CI_DEFAULT_BRANCH" ]; then
@@ -189,9 +195,9 @@ build:tvos:
 
 # Android (experimental, tools/android/build.sh): an arm64 APK. On main it builds with the others when there's a release
 # (or BUILD=1) and goes in it as skullburglar-<VERSION>-android.apk, signed with the ANDROID_KEYSTORE file variable; like
-# iOS it may fail without holding up the release, which then leaves it out. On branches named for it (android) it builds
-# on every push into skullburglar-android/android-<sha>, debug-signed. Runs on the Docker runner like the Linux and
-# Windows builds (image docker/android).
+# iOS it may fail without holding up the release, which then leaves it out. On branches named for it (android), and on
+# release/* branches, it builds on every push into skullburglar-android/android-<sha>, debug-signed. Runs on the Docker
+# runner like the Linux and Windows builds (image docker/android).
 build:android:
   stage: build
   needs:
@@ -206,15 +212,16 @@ build:android:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_COMMIT_BRANCH =~ /(^|\/)android/
+    - if: $CI_COMMIT_BRANCH =~ /^release\//
   script:
     - |
       if [ "$CI_COMMIT_BRANCH" != "$CI_DEFAULT_BRANCH" ]; then
-        VERSION=android-$CI_COMMIT_SHORT_SHA PACKAGE=skullburglar-android
+        export VERSION=android-$CI_COMMIT_SHORT_SHA PACKAGE=skullburglar-android
       elif [ "$RELEASE" != true ] && [ "${BUILD:-}" != 1 ]; then
         echo "Nothing to release: not building."
         exit 0
       fi
-      PACKAGE=${PACKAGE:-skullburglar}
+      export PACKAGE=${PACKAGE:-skullburglar}
     - docker build -q -t skullburglar-ci-android docker/android
     - JOB=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.job.id=$CI_JOB_ID" --filter "label=com.gitlab.gitlab-runner.type=build")
     - test -n "$JOB"
