@@ -62,13 +62,31 @@ set(BOTS_SOURCES
     src/setup/iso_extract.cpp
     src/setup/settings.cpp
     src/setup/update_check.cpp
+    src/setup/ed25519.cpp
+    src/setup/update_logic.cpp
+    src/setup/update_install.cpp
 )
 # Release builds carry their version and where to check for a newer one (src/setup/update_check.h); the release CI
 # sets both. Only that file sees them, so a new version recompiles one file.
 set(BOTS_VERSION "dev" CACHE STRING "Version shown in the launcher")
-set(BOTS_UPDATE_URL "" CACHE STRING "Address of the releases JSON the launcher checks (empty: no check)")
+set(BOTS_UPDATE_URL "" CACHE STRING "Address of the releases JSON the launcher checks (empty: no check; https only)")
+# The public key (64 hex digits) that the releases file's signature must verify against before "Update now" is offered.
+# Default: packaging/update-pubkey.txt, empty until the project's update signing key exists (then "Update now" stays
+# off and only "Download it" shows). Tests pass their own throwaway key.
+set(_bots_pubkey_default "")
+file(STRINGS packaging/update-pubkey.txt _bots_pubkey_lines REGEX "^[0-9a-fA-F]+$")
+if(_bots_pubkey_lines)
+    list(GET _bots_pubkey_lines 0 _bots_pubkey_default)
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS packaging/update-pubkey.txt)
+set(BOTS_UPDATE_PUBKEY "${_bots_pubkey_default}" CACHE STRING "Ed25519 public key (hex) that signs the releases file")
+option(BOTS_ALLOW_HTTP_UPDATE_URL "Accept a plain http BOTS_UPDATE_URL (a local test server); never in a release" OFF)
+set(_bots_update_defs "BOTS_VERSION=\"${BOTS_VERSION}\";BOTS_UPDATE_URL=\"${BOTS_UPDATE_URL}\";BOTS_UPDATE_PUBKEY=\"${BOTS_UPDATE_PUBKEY}\"")
+if(BOTS_ALLOW_HTTP_UPDATE_URL)
+    list(APPEND _bots_update_defs "BOTS_ALLOW_HTTP_UPDATE_URL=1")
+endif()
 set_source_files_properties(src/setup/update_check.cpp PROPERTIES
-    COMPILE_DEFINITIONS "BOTS_VERSION=\"${BOTS_VERSION}\";BOTS_UPDATE_URL=\"${BOTS_UPDATE_URL}\""
+    COMPILE_DEFINITIONS "${_bots_update_defs}"
     SKIP_PRECOMPILE_HEADERS ON)
 # First-run setup window's native file picker (B-061).
 if(WIN32)

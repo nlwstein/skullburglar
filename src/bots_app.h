@@ -59,6 +59,7 @@
 #include "setup/app_paths.h"
 #include "setup/settings.h"
 #include "setup/setup_dialog.h"
+#include "fps_counter.h"
 #include "shader_progress.h"
 
 #if defined(_WIN32)
@@ -310,6 +311,7 @@ class BotsApp : public rex::ReXApp {
           return runtime() ? static_cast<rex::input::InputSystem*>(runtime()->input_system())
                            : nullptr;
         });
+    if (rex::cvar::Query<bool>("fps_counter")) new FpsCounterDialog(drawer);  // B-279; lives for the whole run
   }
 
   // The SDK's achievement toast keeps an ImGui dialog registered while it shows, which puts the presenter in
@@ -419,6 +421,10 @@ class BotsApp : public rex::ReXApp {
   //  - depth_float24_convert_in_pixel_shader: the game's D24FS8 shadow/light-environment
   //    depth compares need exact 24-bit float depth; without it the player renders black
   //    in level 1 (B-035, sweep 2026-10-01).
+  // Closing the window (or Cmd-Q) while the launcher is replacing the program's files could leave an install half done:
+  // refuse until the swap has finished.
+  bool OnWindowCloseRequested() override { return !bots::setup::UpdateSwapInProgress(); }
+
   void OnPreSetup(rex::RuntimeConfig& config) override {
     bots::ApplyCoopDefaults();  // --coop: before the window, input and profile read their cvars
     // The menus' Quit option (game_hooks.cpp) runs on a guest thread. Quit the way closing the window does

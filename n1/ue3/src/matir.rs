@@ -87,8 +87,43 @@ fn array_elems<'a>(pkg: &Package, data: &'a [u8]) -> Vec<crate::props::Props<'a>
     out
 }
 
+/// Static switch values a `MaterialInstanceConstant` overrides, read from the native bytes after its property list
+/// (B-273: a lamp's `LightOn` switch, so the shade glows). The cooked instance carries them inside its compiled
+/// resource as `FStaticSwitchParameter` entries: an array count, then per entry the parameter `FName`, `Value` and
+/// `bOverride` (both 32-bit booleans) and an expression GUID. `name_at` maps a name-table index to its text. Only
+/// entries with `bOverride` set are returned; the others follow the parent's `DefaultValue`. The scan matches that
+/// layout anywhere in `tail`; the caller only looks up names the parent graph declares as switches, so a chance match
+/// on another name is never read.
+pub fn scan_static_switches(tail: &[u8], name_at: &dyn Fn(u32) -> Option<String>) -> Vec<(String, bool)> {
+    let word = |i: usize| -> Option<u32> { tail.get(i * 4..i * 4 + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])) };
+    let mut out: Vec<(String, bool)> = Vec::new();
+    for i in 1..tail.len() / 4 {
+        let (Some(count), Some(ni), Some(num), Some(value), Some(over)) = (word(i - 1), word(i), word(i + 1), word(i + 2), word(i + 3)) else {
+            break;
+        };
+        // The entry's GUID (16 bytes) follows the two booleans.
+        if !(1..=8).contains(&count) || num != 0 || value > 1 || over > 1 || (i + 4) * 4 + 16 > tail.len() {
+            continue;
+        }
+        let Some(n) = name_at(ni) else { continue };
+        if n == "None" || n.starts_with("FMaterial") || out.iter().any(|(k, _)| *k == n.to_lowercase()) {
+            continue;
+        }
+        if over == 1 {
+            out.push((n.to_lowercase(), value == 1));
+        }
+    }
+    out
+}
+
 fn collect_params(pkg: &Package, idx: i32, into: &mut Params) {
-    let Ok((props, _)) = object_props(pkg, idx) else { return };
+    let Ok((props, rest)) = object_props(pkg, idx) else { return };
+    if std::env::var("BOTS_N1_STATIC_SWITCH").map_or(true, |v| v != "0") {
+        let tail = pkg.export_data(idx).get(rest.o..).unwrap_or_default();
+        for (n, v) in scan_static_switches(tail, &|i| pkg.names.get(i as usize).cloned()) {
+            into.switch.entry(n).or_insert(v);
+        }
+    }
     let name_of = |e: &crate::props::Props| -> String {
         e.get("ParameterName").and_then(|p| read_fname(pkg, &mut p.r()).ok()).unwrap_or_default().to_lowercase()
     };
@@ -492,4 +527,49 @@ fn compile(pkg: &Package, g: &MatGraph, params: &Params) -> MatDef {
     // texture's own CompressionSettings.
     def.textures.iter_mut().for_each(|t| t.normal = false);
     def
+}
+
+#[cfg(test)]
+mod static_switch_tests {
+    use super::scan_static_switches;
+
+    fn hex(s: &str) -> Vec<u8> {
+        let s: String = s.split_whitespace().collect();
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    fn names(i: u32) -> Option<String> {
+        match i {
+            0x147 => Some("FMaterialUniformExpressionVectorParameter".into()),
+            0x1c7 => Some("LightOn".into()),
+            0x1c8 => Some("Reflections".into()),
+            _ => Some("Acceleration".into()),
+        }
+    }
+
+    // DownLightServ_ON_MAT01's native tail around its static parameter set: BaseMaterialId, count 1, `LightOn`,
+    // Value 1, bOverride 1, the expression GUID.
+    const ON: &str = "3f 80 00 00 00 00 00 00 35 28 64 44 4f 8a ee 3f dd a3 98 ad 71 52 77 04 \
+                      00 00 00 01 00 00 01 c7 00 00 00 00 00 00 00 01 00 00 00 01 \
+                      10 86 c5 46 45 d1 1d d8 91 20 29 b9 35 ea 3d 29 00 00 00 00 00 00 00 00";
+
+    #[test]
+    fn reads_an_overridden_switch() {
+        assert_eq!(scan_static_switches(&hex(ON), &names), vec![("lighton".to_string(), true)]);
+    }
+
+    #[test]
+    fn override_to_false_and_not_overridden() {
+        // Value 0, bOverride 1 -> off; Value 0, bOverride 0 -> follows the parent's default (not returned).
+        let off = ON.replace("00 00 00 00 00 00 00 01 00 00 00 01", "00 00 00 00 00 00 00 00 00 00 00 01");
+        assert_eq!(scan_static_switches(&hex(&off), &names), vec![("lighton".to_string(), false)]);
+        let none = ON.replace("00 00 00 00 00 00 00 01 00 00 00 01", "00 00 00 00 00 00 00 00 00 00 00 00");
+        assert!(scan_static_switches(&hex(&none), &names).is_empty());
+    }
+
+    #[test]
+    fn ignores_uniform_expression_records() {
+        let b = hex("00 00 00 01 00 00 01 47 00 00 00 00 00 00 00 01 00 00 00 01 10 86 c5 46 45 d1 1d d8 91 20 29 b9 35 ea 3d 29");
+        assert!(scan_static_switches(&b, &names).is_empty());
+    }
 }

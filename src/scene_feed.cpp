@@ -1373,7 +1373,7 @@ struct LiveComponent {
 // What an emitter's LOD level says about how to draw it, cached per LOD level (the property reads walk class records).
 struct LiveEmitter {
   uint32_t name = 0, outer = 0, material = 0, type_data = 0;
-  int kind = -1;  // 0 sprite, 1 mesh, -1 not drawn (beam, trail, other)
+  int kind = -1;  // 0 sprite, 1 mesh, 2 beam (B-263: drawn as a velocity-aligned sprite), -1 not drawn (trail, other)
   uint32_t align = 0, sub_h = 1, sub_v = 1, sub_method = 0, local_space = 0;
   uint32_t lock_axis = 0;  // EParticleAxisLock (LockAxisFlags of the LOD level's OrientationAxisLock module)
   uint32_t max_draw = UINT32_MAX;  // B-242: RequiredModule MaxDrawCount when bUseMaxDrawCount, else no cap
@@ -1423,6 +1423,12 @@ struct LiveState {
     return !(v && !std::strncmp(v, "off", 3));
   }();
   std::unordered_map<uint32_t, LiveEmitter> emitters;
+  // B-263: Beam2 emitters (minigun/assault rifle muzzle flames) as camera-facing strips from their source to their
+  // target (BOTS_N1_BEAMS=0: not drawn, as before).
+  bool beams_on = [] {
+    const char* v = std::getenv("BOTS_N1_BEAMS");
+    return !(v && v[0] == '0');
+  }();
   bool particles = [] {
     const char* v = std::getenv("BOTS_N1_PARTICLES");
     return !(v && (v[0] == '0'));
@@ -2085,7 +2091,9 @@ namespace {
 // UE3 skips a primitive whose bounds centre is farther from the view than its cull distance (CullDistance, or the
 // CachedCullDistance a cull-distance volume gave it; the smaller when both are set; later engines call these
 // MaxDrawDistance), though the game still ticks it: distant fires, props and decals the level designers cut.
+float g_last_cull_limit = 0, g_last_cull_dist = 0;  // BOTS_N1_SKIPLOG: what the last test used
 bool BeyondDrawDistance(uint32_t c, const Camera& cam) {
+  g_last_cull_limit = g_last_cull_dist = 0;
   if (!cam.ok || !g_off.bounds.ok()) return false;
   float limit = 0;
   for (const Field* f : {&g_off.cull_dist, &g_off.cached_cull}) {
@@ -2096,7 +2104,56 @@ bool BeyondDrawDistance(uint32_t c, const Camera& cam) {
   if (limit == 0) return false;
   const uint32_t b = c + g_off.bounds.offset;
   const float dx = F32(b) - cam.location[0], dy = F32(b + 4) - cam.location[1], dz = F32(b + 8) - cam.location[2];
+  g_last_cull_limit = limit, g_last_cull_dist = std::sqrt(dx * dx + dy * dy + dz * dz);
   return dx * dx + dy * dy + dz * dz > limit * limit;
+}
+
+// BOTS_N1_SKIPLOG=<min radius>: log, for every static or skeletal primitive whose bounds sphere is at least that big
+// (uu; 0 = all), each change of why the feed leaves it out (or feeds it): hidden component, hidden owner, beyond the
+// cull distance, unreadable mesh. B-274: a vanishing floor needs "was it fed, and if not, why" per frame.
+enum SkipReason : uint8_t { kFed, kHiddenComponent, kHiddenOwner, kBeyondDistance, kNoMesh };
+const char* SkipName(uint8_t r) {
+  static const char* n[] = {"fed", "hidden component", "hidden owner", "beyond cull distance", "mesh unreadable"};
+  return n[r];
+}
+void NoteSkip(uint32_t c, uint8_t reason, const Camera& cam) {
+  static const float min_radius = [] {
+    const char* v = std::getenv("BOTS_N1_SKIPLOG");
+    return v && *v ? float(std::atof(v)) : -1.0f;
+  }();
+  if (min_radius < 0 || !g_off.bounds.ok()) return;
+  // Keyed by address, with the object's name and outer to tell a new object at a reused address (level loads free
+  // and reuse components) from the one seen before: such a hit starts over instead of logging a false transition.
+  struct Seen {
+    uint8_t reason;
+    uint32_t name, outer;
+  };
+  static std::unordered_map<uint32_t, Seen> last;
+  static uint64_t events = 0;
+  const uint32_t name = U32(c + 0x2C), outer = U32(c + 0x28);
+  auto it = last.find(c);
+  if (it != last.end() && (it->second.name != name || it->second.outer != outer)) last.erase(it), it = last.end();
+  if (it == last.end()) {
+    if (reason == kFed) {  // first sighting while fed: nothing to report
+      last.emplace(c, Seen{reason, name, outer});
+      return;
+    }
+    it = last.emplace(c, Seen{uint8_t(kFed), name, outer}).first;
+  }
+  if (it->second.reason == reason) return;
+  const uint32_t b = c + g_off.bounds.offset;
+  const float radius = F32(b + 24);
+  const uint8_t was = it->second.reason;
+  it->second.reason = reason;
+  if (radius < min_radius) return;
+  const float dx = F32(b) - cam.location[0], dy = F32(b + 4) - cam.location[1], dz = F32(b + 8) - cam.location[2];
+  float cull = 0, cached = 0;
+  if (g_off.cull_dist.ok()) cull = F32(c + g_off.cull_dist.offset);
+  if (g_off.cached_cull.ok()) cached = F32(c + g_off.cached_cull.offset);
+  REXLOG_INFO("scenefeed skip #{}: {} -> {}: {} radius {:.0f} centre ({:.0f} {:.0f} {:.0f}) cam ({:.0f} {:.0f} {:.0f}) "
+              "dist {:.0f} cull {:g} cached {:g} tested: limit {:g} dist {:.0f}",
+              ++events, SkipName(was), SkipName(reason), Path(c), radius, F32(b), F32(b + 4), F32(b + 8),
+              cam.location[0], cam.location[1], cam.location[2], std::sqrt(dx * dx + dy * dy + dz * dz), cull, cached, g_last_cull_limit, g_last_cull_dist);
 }
 
 // Tracking: keep the primitive, light and fog lists without walking the whole object table (about 110k objects,
@@ -2489,7 +2546,8 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam, bool max_
         le.name = U32(lod + 0x2C), le.outer = U32(lod + 0x28), le.material = material, le.type_data = type_data0;
         const uint32_t required = PropU32(lod, "RequiredModule");
         const std::string type_class = IsObject(type_data0) ? ClassName(type_data0) : "";
-        le.kind = type_class.empty() ? 0 : type_class.find("Mesh") != std::string::npos ? 1 : -1;
+        le.kind = type_class.empty() ? 0 : type_class.find("Mesh") != std::string::npos ? 1
+                  : (st.beams_on && type_class.find("Beam2") != std::string::npos) ? 2 : -1;
         if (IsObject(required)) {
           le.align = PropByte(required, "ScreenAlignment");
           le.local_space = PropBool(required, "bUseLocalSpace");
@@ -2516,6 +2574,52 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam, bool max_
       const uint32_t pdata = U32(inst + kEmitData), pindex = U32(inst + kEmitIndices);
       if (!Readable(pdata) || !Readable(pindex & ~3u)) continue;
       if (out.particle_rows.size() / 15 + drawn > kMaxRows) return;
+      if (le.kind == 2) {
+        // B-263: a Beam2 particle's payload (from +0x80) is Source, SourceTangent, SourceStrength, Target, TargetTangent,
+        // TargetStrength, ..., the length at float 19; the particle's own Location is the target. The straight beam is
+        // a strip Size.X wide from Source to Target, which is what a velocity-aligned sprite is: centred on the
+        // midpoint, its length the sprite's Size.Y, its direction midpoint - OldLocation (here the source).
+        if (stride < 0x80 + 20 * 4) continue;
+        const size_t row_start = out.particle_rows.size();
+        uint32_t made = 0;
+        for (uint32_t k = 0; k < drawn; ++k) {
+          const uint16_t slot = uint16_t(__builtin_bswap16(*reinterpret_cast<const uint16_t*>(Raw(pindex + 2 * k))));
+          const uint32_t pp = pdata + slot * stride;
+          float sx[3], tx[3];
+          for (int a = 0; a < 3; ++a) sx[a] = F32(pp + 0x80 + 4 * a), tx[a] = F32(pp + 0x80 + 28 + 4 * a);
+          const float len = F32(pp + 0x80 + 76);
+          const float dx = tx[0] - sx[0], dy = tx[1] - sx[1], dz = tx[2] - sx[2];
+          const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+          // Reject a payload that isn't this layout: finite, the stored length matches the distance.
+          if (!std::isfinite(dist) || !std::isfinite(len) || dist < 1.0f || dist > 20000.0f ||
+              std::fabs(dist - len) > 0.02f * dist + 1.0f)
+            continue;
+          for (int a = 0; a < 3; ++a) out.particle_rows.push_back(0.5f * (sx[a] + tx[a]));
+          for (int a = 0; a < 3; ++a) out.particle_rows.push_back(sx[a]);
+          out.particle_rows.push_back(F32(pp + 0x50)), out.particle_rows.push_back(dist), out.particle_rows.push_back(0.0f);
+          out.particle_rows.push_back(0.0f);
+          for (uint32_t off : {0x60u, 0x64u, 0x68u, 0x6Cu}) out.particle_rows.push_back(F32(pp + off));
+          out.particle_rows.push_back(F32(pp + 0x0C));
+          ++made;
+        }
+        if (!made) continue;
+        HybridScene::Emitter& e = out.emitters.emplace_back();
+        e.kind = 0, e.align = 2, e.sub_h = 1, e.sub_v = 1, e.sub_method = 0, e.local_space = 0, e.lock_axis = 0;
+        e.material = le.material_path, e.mesh = nullptr;
+        e.count = made, e.row_offset = uint32_t(row_start), e.row_floats = 15;
+        for (int k = 0; k < 3; ++k) e.origin[k] = F32(inst + kEmitLocation + 4 * k);
+        if (g_off.bounds.ok()) {
+          const uint32_t b = c + g_off.bounds.offset;
+          e.sort_origin[0] = F32(b), e.sort_origin[1] = F32(b + 4), e.sort_origin[2] = F32(b + 8), e.sort_origin[3] = 1;
+        } else {
+          std::memset(e.sort_origin, 0, sizeof(e.sort_origin));
+        }
+        if (g_off.local_to_world.ok())
+          for (int k = 0; k < 16; ++k) e.transform[k] = F32(c + g_off.local_to_world.offset + 4 * k);
+        else
+          std::memset(e.transform, 0, sizeof(e.transform));
+        continue;
+      }
       // Payload floats: the sub-UV frame data [ImageH, ImageV, Interp, Image2H, Image2V] for sub-UV animation (all
       // of the payload if the instance's offset looks wrong; the renderer then searches it), the rotation for mesh
       // particles, none otherwise. The renderer's search alone picked a later window (the next frame, unblended) in
@@ -2634,8 +2738,12 @@ void Live(uint8_t* base) {
     const Field& ref = skel ? g_off.skeletal_mesh_ref : g_off.static_mesh_ref;
     if (!ref.ok()) continue;
     const uint32_t mesh = U32(c + ref.offset);
-    if (!Readable(mesh)) continue;
-    bool hidden = g_off.hidden_game.ok() && (U32(c + g_off.hidden_game.offset) & g_off.hidden_game.mask);
+    if (!Readable(mesh)) {
+      NoteSkip(c, kNoMesh, cam);
+      continue;
+    }
+    const bool hidden_comp = g_off.hidden_game.ok() && (U32(c + g_off.hidden_game.offset) & g_off.hidden_game.mask);
+    bool hidden = hidden_comp;
     const uint32_t owner = g_off.owner.ok() ? U32(c + g_off.owner.offset) : 0;
     if (Readable(owner)) {
       if (!g_off.actor) {
@@ -2644,7 +2752,15 @@ void Live(uint8_t* base) {
       }
       if (g_off.actor_hidden.ok()) hidden |= (U32(owner + g_off.actor_hidden.offset) & g_off.actor_hidden.mask) != 0;
     }
-    if (hidden || BeyondDrawDistance(c, cam)) continue;
+    if (hidden) {
+      NoteSkip(c, hidden_comp ? kHiddenComponent : kHiddenOwner, cam);
+      continue;
+    }
+    if (BeyondDrawDistance(c, cam)) {
+      NoteSkip(c, kBeyondDistance, cam);
+      continue;
+    }
+    NoteSkip(c, kFed, cam);
     uint32_t mats = 0, mat_count = 0;
     if (g_off.materials.ok()) {
       mats = U32(c + g_off.materials.offset);

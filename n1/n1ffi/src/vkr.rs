@@ -415,6 +415,8 @@ pub struct Renderer {
     bloom: Option<[Rt; 3]>,
     /// W4: the graded scene (full res), when the level's MaterialEffect grade isn't the identity.
     graded: Option<Rt>,
+    /// B-273: a copy of the HDR target taken before the sprite pass, for DestColor particle materials (the QTE ring).
+    destc: Option<Rt>,
     depth: Option<Rt>,
     /// Near plane of the frame's reverse-Z projection (the post chain linearises depth with it).
     pub near: f32,
@@ -716,6 +718,7 @@ impl Renderer {
                 hdr: None,
                 bloom: None,
                 graded: None,
+                destc: None,
                 near: 5.0,
                 depth: None,
                 pending: Vec::new(),
@@ -1130,6 +1133,7 @@ impl Renderer {
             fog: f & 8 != 0,
             dynl: f & 16 != 0,
             lm_pwl: scenekit::lm_pwl(),
+            fog_mode: crate::plan::fog_mode(blend),
             ..ShaderFlags::new(
                 blend == Blend::Masked,
                 def.lighting == "MLM_Unlit",
@@ -1388,7 +1392,10 @@ impl Renderer {
             )
         } else {
             (
-                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    | vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::TRANSFER_SRC
+                    | vk::ImageUsageFlags::TRANSFER_DST,
                 vk::ImageAspectFlags::COLOR,
             )
         };
@@ -1406,7 +1413,7 @@ impl Renderer {
         if self.hdr.as_ref().is_some_and(|r| r.width == w && r.height == h) {
             return Ok(());
         }
-        for r in [self.hdr.take(), self.depth.take(), self.graded.take()].into_iter().flatten() {
+        for r in [self.hdr.take(), self.depth.take(), self.graded.take(), self.destc.take()].into_iter().flatten() {
             self.defer(Garbage::Image(r.image, r.view, r.alloc));
         }
         if let Some(b) = self.bloom.take() {
@@ -1422,6 +1429,7 @@ impl Renderer {
         let c = self.rt(HDR_FORMAT, bw, bh, false, "n1 post q2")?;
         self.bloom = Some([a, b, c]);
         self.graded = Some(self.rt(HDR_FORMAT, w, h, false, "n1 graded")?);
+        self.destc = Some(self.rt(HDR_FORMAT, w, h, false, "n1 dest color")?);
         Ok(())
     }
 
@@ -2552,6 +2560,85 @@ impl Renderer {
             if let Some(g) = &self.gprof {
                 g.mark(d, cmd, 3);
             }
+            if pg_sprites && self.pg_needs_dest(&pf) {
+                // B-273: the scene as drawn so far, for DestColor materials (read in the sprite pass).
+                let dc = self.destc.as_ref().unwrap();
+                let xfer = vk::PipelineStageFlags::TRANSFER;
+                unsafe {
+                    d.cmd_pipeline_barrier(
+                        cmd,
+                        cao,
+                        xfer,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[
+                            layout_barrier(
+                                hdr.image,
+                                color,
+                                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                                vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                                vk::AccessFlags::TRANSFER_READ,
+                            ),
+                            layout_barrier(
+                                dc.image,
+                                color,
+                                vk::ImageLayout::UNDEFINED,
+                                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                vk::AccessFlags::SHADER_READ,
+                                vk::AccessFlags::TRANSFER_WRITE,
+                            ),
+                        ],
+                    );
+                    let layers = vk::ImageSubresourceLayers {
+                        aspect_mask: color,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    };
+                    d.cmd_copy_image(
+                        cmd,
+                        hdr.image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        dc.image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[vk::ImageCopy {
+                            src_subresource: layers,
+                            src_offset: vk::Offset3D::default(),
+                            dst_subresource: layers,
+                            dst_offset: vk::Offset3D::default(),
+                            extent: vk::Extent3D { width: hdr.width, height: hdr.height, depth: 1 },
+                        }],
+                    );
+                    d.cmd_pipeline_barrier(
+                        cmd,
+                        xfer,
+                        cao | frag,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[
+                            layout_barrier(
+                                hdr.image,
+                                color,
+                                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                                vk::AccessFlags::TRANSFER_READ,
+                                vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                            ),
+                            layout_barrier(
+                                dc.image,
+                                color,
+                                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                                vk::AccessFlags::TRANSFER_WRITE,
+                                vk::AccessFlags::SHADER_READ,
+                            ),
+                        ],
+                    );
+                }
+            }
             if pg_sprites {
                 // Sprite pass: same HDR target, depth bound read-only (tested, sampled for soft particles).
                 let dep = layout_barrier(
@@ -3185,7 +3272,7 @@ impl Drop for Renderer {
                     self.free(Garbage::Image(t.image, t.view, a));
                 }
             }
-            let mut rts: Vec<Rt> = [self.hdr.take(), self.depth.take(), self.graded.take()].into_iter().flatten().collect();
+            let mut rts: Vec<Rt> = [self.hdr.take(), self.depth.take(), self.graded.take(), self.destc.take()].into_iter().flatten().collect();
             if let Some(b) = self.bloom.take() {
                 rts.extend(b);
             }

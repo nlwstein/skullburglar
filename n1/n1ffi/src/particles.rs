@@ -60,6 +60,8 @@ pub struct LoadedMat {
     pub sprite_spv: Vec<u32>,
     pub mesh_spv: Vec<u32>,
     pub unknown: Vec<String>,
+    /// Reads the scene colour copy (DestColor).
+    pub dest: bool,
 }
 
 enum Job {
@@ -268,6 +270,7 @@ fn load_material(db: &AssetDb, path: &str) -> Result<LoadedMat> {
         textures,
         sprite_spv: sh.sprite_spv,
         mesh_spv: sh.mesh_spv,
+        dest: c.dest,
         unknown: c.unknown,
     })
 }
@@ -414,8 +417,8 @@ impl ParticleSystem {
             n += 1;
             match d {
                 Done::Mat(h, Ok(m)) => {
-                    if self.log && !m.unknown.is_empty() {
-                        eprintln!("n1ffi: particle material {} has unknown expressions {:?}", m.name, m.unknown);
+                    if !m.unknown.is_empty() && (self.log || std::env::var("BOTS_N1_MATLOG").map_or(true, |v| v != "0")) {
+                        eprintln!("n1ffi: particle material {} has unknown expressions {:?} (drawn as constant 1)", m.name, m.unknown);
                     }
                     match r.pmat_add(&m) {
                         Ok(id) => self.mat_state[h as usize] = St::Ready(id),

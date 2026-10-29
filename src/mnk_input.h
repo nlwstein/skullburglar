@@ -168,6 +168,9 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   std::chrono::steady_clock::time_point tap_until_[16] = {};  // TapButtons, per button bit
   float mouse_dx_ = 0, mouse_dy_ = 0;
   rex::input::X_INPUT_STATE last_out_{};  // what GetDeviceState last returned
+  uint32_t diag_events_ = 0, diag_dropped_ = 0;  // BOTS_MOUSE_LOG counters (mutex_)
+  double diag_taken_ = 0;
+  int64_t diag_logged_ms_ = 0;
   float moved_ = 0;                        // mouse travel toward switching the prompts, pixels
   std::atomic<int64_t> pad_active_ns_{0};  // steady-clock time of the last controller input seen by the game
   std::atomic<float> pointer_x_{-1}, pointer_y_{-1};         // window-relative 0..1, -1 = unknown

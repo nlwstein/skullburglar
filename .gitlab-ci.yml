@@ -44,10 +44,15 @@ checks:
   script:
     - python3 tools/leak_scan.py tree
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/input_math_test.cpp -o $d/t && $d/t
+    - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/fps_math_test.cpp -o $d/t && $d/t
+    - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/update_test.cpp src/setup/update_logic.cpp src/setup/ed25519.cpp -o $d/t && $d/t
+    - python3 tests/ed25519_vectors.py
+    - python3 tests/update_signing_test.py
+    - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src -c src/setup/update_install.cpp -o $d/i.o
     - >-
       for f in tools/ci/*.sh tools/rust_env.sh tools/ios/build.sh tools/android/build.sh packaging/linux/AppRun;
       do sh -n "$f"; done
-    - python3 -m py_compile tools/ci/gitlab_release.py tools/ci/publish_downloads.py
+    - python3 -m py_compile tools/ci/gitlab_release.py tools/ci/publish_downloads.py tools/ci/check_signing_key.py tools/ci/update_signing.py
     - SUBMODULES=0 tools/ci/sdk.sh "$(mktemp -d)/sdk"
 
 .main:
@@ -250,6 +255,11 @@ release:
       if [ "$next" != "$VERSION" ]; then
         echo "Built as $VERSION, but the next release is now $next (a release was made meanwhile)."
         exit 1
+      fi
+    # Before anything is tagged: a missing or mismatched signing key must not leave a release without its downloads.
+    - |
+      if [ -n "${DOWNLOADS_BUCKET:-}" ]; then
+        python3 tools/ci/check_signing_key.py
       fi
     - python3 tools/ci/gitlab_release.py
     - |

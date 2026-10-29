@@ -173,6 +173,9 @@ pub struct AssetDb {
     index: Index,
     open: Mutex<Vec<(String, Arc<Package>)>>, // most recently used last
     max_open: usize,
+    /// How many packages `package` has opened (decompressed) and the wall ms that took, summed over threads.
+    pub opens: std::sync::atomic::AtomicU64,
+    pub open_ms: std::sync::atomic::AtomicU64,
     tfc: ue3::texture::TfcCache,
     meshes: Mutex<HashMap<String, Option<Arc<MeshAsset>>>>,
     skeletals: Mutex<HashMap<String, Option<Arc<SkelAsset>>>>,
@@ -262,7 +265,12 @@ impl AssetDb {
             cache: cache.to_path_buf(),
             index,
             open: Mutex::new(Vec::new()),
-            max_open: 16,
+            max_open: std::env::var("BOTS_N1_MAX_OPEN")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(16),
+            opens: Default::default(),
+            open_ms: Default::default(),
             tfc: ue3::texture::TfcCache::new(cooked),
             meshes: Mutex::new(HashMap::new()),
             skeletals: Mutex::new(HashMap::new()),
@@ -304,6 +312,61 @@ impl AssetDb {
         // Grouped by the package holding the object, so a caller walking the list opens each package once.
         v.sort_by_key(|p| (self.index.objects.get(p).and_then(|x| x.first().copied()).unwrap_or(u32::MAX), p.clone()));
         v
+    }
+
+    /// Texture2D paths containing `sub` (case-insensitive) with the packages holding each, for finding same-named
+    /// textures in several packages (a tool, `texfind`).
+    pub fn texture_holders(&self, sub: &str) -> Vec<(String, Vec<String>)> {
+        let sub = sub.to_lowercase();
+        let mut v: Vec<(String, Vec<String>)> = self
+            .index
+            .textures
+            .iter()
+            .filter(|(p, _)| p.to_lowercase().contains(&sub))
+            .map(|(p, pk)| (p.clone(), pk.iter().map(|&i| self.index.packages[i as usize].0.clone()).collect()))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Names of every indexed package (a tool, `placefind`).
+    pub fn package_names(&self) -> Vec<String> {
+        self.index.packages.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    /// The static-mesh placements a package holds (those that parse), for tools.
+    pub fn level_placements(&self, pkg_name: &str) -> Vec<ue3::level::Placement> {
+        let Ok(pkg) = self.package(pkg_name) else { return Vec::new() };
+        ue3::level::placements(&pkg).into_iter().filter(|(_, e)| e.is_none()).map(|(p, _)| p).collect()
+    }
+
+    /// The class of an object and the bytes that follow its property list in its export (native serialization), for
+    /// tools that decode what the property reader skips (`mictail`).
+    pub fn object_tail(&self, path: &str) -> Option<(String, Vec<u8>)> {
+        let (pkg, idx) = self.locate(path, false).ok().flatten()?;
+        let (_, r) = ue3::props::object_props(&pkg, idx).ok()?;
+        let data = pkg.export_data(idx);
+        Some((pkg.class_name(idx).to_string(), data[r.o..].to_vec()))
+    }
+
+    /// The Parent of a MaterialInstanceConstant (object path), for tools.
+    pub fn material_parent(&self, path: &str) -> Option<String> {
+        let (pkg, idx) = self.locate(path, false).ok().flatten()?;
+        let (props, _) = ue3::props::object_props(&pkg, idx).ok()?;
+        let o = props.get("Parent").map(|x| x.as_obj()).filter(|&o| o != 0)?;
+        Some(pkg.obj_path(o))
+    }
+
+    /// An object's property list as JSON (`ue3::pmaterial::export_json`), for tools.
+    pub fn object_json(&self, path: &str) -> Option<serde_json::Value> {
+        let (pkg, idx) = self.locate(path, false).ok().flatten()?;
+        ue3::pmaterial::export_json(&pkg, idx).ok()
+    }
+
+    /// A name of the package that holds `path` (by name-table index), for tools decoding native bytes.
+    pub fn name_in_package_of(&self, path: &str, i: usize) -> Option<String> {
+        let (pkg, _) = self.locate(path, false).ok().flatten()?;
+        pkg.names.get(i).cloned()
     }
 
     /// Whether a cooked package of this name (file stem) is indexed.
@@ -383,7 +446,14 @@ impl AssetDb {
             }
         }
         let path = self.cooked.join(format!("{name}.xxx"));
+        let t = std::time::Instant::now();
         let p = Arc::new(Package::open(&path)?);
+        self.opens
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.open_ms.fetch_add(
+            t.elapsed().as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let mut open = self.open.lock().unwrap();
         open.push((name.to_string(), p.clone()));
         while open.len() > self.max_open {
@@ -540,6 +610,14 @@ impl AssetDb {
         }
         let mut mo = self.resolve_material(ue3::matir::base_path(path), 0);
         mo.def = ue3::matir::build_by(path, |q| self.locate(q, false).ok().flatten()).map(Arc::new);
+        // A class the mesh/decal compiler can't express draws as a constant 0.0 (invisible or black surfaces): say so
+        // once per material, so a gap shows up in the log instead of as a missing floor or a flat colour.
+        // `BOTS_N1_MATLOG=0` silences it.
+        if let Some(d) = mo.def.as_ref().filter(|d| !d.unsupported.is_empty()) {
+            if std::env::var("BOTS_N1_MATLOG").map_or(true, |v| v != "0") {
+                eprintln!("n1: material {path} [{}] uses unsupported expressions {:?} (drawn as constant 0)", d.blend, d.unsupported);
+            }
+        }
         let m = Arc::new(mo);
         self.materials
             .lock()

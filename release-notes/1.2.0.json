@@ -1,0 +1,11 @@
+[
+ "The launcher's update notice has an \"Update now\" button that installs the new version and restarts, with no security warning on macOS or Windows. \"Download it\" is still there.",
+ "New option \"Show FPS counter\" in the launcher settings: a small readout in the corner of the screen with the frame rate, the time per frame and which renderer is drawing. Handy when reporting performance. It is off by default.",
+ "The first-launch shader preparation is much shorter.",
+ "Lens flares, dust clouds and water splashes no longer draw as flat bright squares in the new renderer.",
+ "The ring of light around the melee button prompt is back to its original size in the new renderer.",
+ "Light fixtures and lamp shades that should be lit no longer draw dark in the new renderer.",
+ "The light shaft under hanging lamps no longer shows as a blocky square in the new renderer.",
+ "The new renderer now draws the beam part of gun muzzle flashes.",
+ "Machines with fewer than six CPU threads no longer fill the log file with a repeated scheduling warning."
+]

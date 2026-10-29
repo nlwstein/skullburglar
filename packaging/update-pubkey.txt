@@ -1,0 +1,6 @@
+# The public half of the key that signs the releases file (tools/ci/publish_downloads.py), as 64 hex digits on the
+# line below; it is built into the launcher, which only offers "Update now" for a release listing signed with the
+# matching private key. The private key is never in the repository: the release job reads it from the
+# UPDATE_SIGNING_KEY CI variable. With no key on the line below, "Update now" stays off. See BUILDING.md, "Update
+# signing".
+896260b25a1204c2321ec78fa00b557f296c54bc6a8a5ec697f57642252a9137

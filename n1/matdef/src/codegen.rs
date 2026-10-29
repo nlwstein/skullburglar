@@ -262,7 +262,29 @@ pub fn compile_gamma(
     let _ = writeln!(body, "    o.spec_power = {};", sc(def.spec_power, &spc));
     let _ = writeln!(body, "    o.has_normal = {};", def.normal.is_some());
     let _ = writeln!(body, "    o.normal = {};", rgb(def.normal, "vec3<f32>(0.0, 0.0, 1.0)"));
-    let _ = writeln!(body, "    o.emissive = {};", rgb(def.emissive, "vec3<f32>(0.0)"));
+    let dbg: Vec<String> = std::env::var("BOTS_N1_MATDBG").ok().map(|v| v.split(',').map(|x| x.trim().to_string()).collect()).unwrap_or_default();
+    let dbg_ok = dbg.len() == 3
+        && dbg.iter().all(|e| {
+            e == "uvx" || e == "uvy" || e == "zero" || e.split('.').next().and_then(|k| k.parse::<usize>().ok()).is_some_and(|k| k < n && live[k])
+        });
+    if dbg_ok {
+        let comp: Vec<String> = dbg
+            .iter()
+            .map(|e| match e.as_str() {
+                "uvx" => "fi.uv0.x".to_string(),
+                "uvy" => "fi.uv0.y".to_string(),
+                "zero" => "0.0".to_string(),
+                _ => {
+                    let mut it = e.split('.');
+                    let k = it.next().unwrap();
+                    format!("n{k}.{}", it.next().unwrap_or("x"))
+                }
+            })
+            .collect();
+        let _ = writeln!(body, "    o.emissive = vec3<f32>({}, {}, {});", comp[0], comp[1], comp[2]);
+    } else {
+        let _ = writeln!(body, "    o.emissive = {};", rgb(def.emissive, "vec3<f32>(0.0)"));
+    }
     let opc = if def.opacity.is_some() { String::new() } else { format!("mp.c[{}].x", p([def.opacity_const.unwrap_or(1.0), 0.0, 0.0, 0.0])) };
     let _ = writeln!(body, "    o.opacity = {};", sc(def.opacity, &opc));
     let _ = writeln!(body, "    o.mask = {};", sc(def.opacity_mask, "1.0"));
