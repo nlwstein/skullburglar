@@ -45,6 +45,21 @@ pub fn fnv(bytes: &[u8]) -> u64 {
     h
 }
 
+/// What distance fog fades a draw toward (`ShaderFlags::fog_mode`): additive surfaces only add light, so fog dims them
+/// toward black (toward the fog colour they drew a fog-coloured rectangle over the scene, B-273: the lamp's light
+/// shafts); modulate surfaces fade toward white (no darkening). `BOTS_N1_FOG_BLEND=0` keeps the fog colour for all.
+pub fn fog_mode(blend: Blend) -> u8 {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("BOTS_N1_FOG_BLEND").map_or(true, |v| v != "0")) {
+        return 0;
+    }
+    match blend {
+        Blend::Additive => 1,
+        Blend::Modulate => 2,
+        _ => 0,
+    }
+}
+
 pub fn shader_flags(features: u32, def: &MatDef, blend: Blend) -> ShaderFlags {
     ShaderFlags {
         lm: features & 1 != 0,
@@ -53,6 +68,7 @@ pub fn shader_flags(features: u32, def: &MatDef, blend: Blend) -> ShaderFlags {
         fog: features & 8 != 0,
         dynl: features & 16 != 0,
         lm_pwl: scenekit::lm_pwl(),
+        fog_mode: crate::plan::fog_mode(blend),
         ..ShaderFlags::new(
             blend == Blend::Masked,
             def.lighting == "MLM_Unlit",

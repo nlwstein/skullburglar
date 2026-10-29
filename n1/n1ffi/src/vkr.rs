@@ -1130,6 +1130,7 @@ impl Renderer {
             fog: f & 8 != 0,
             dynl: f & 16 != 0,
             lm_pwl: scenekit::lm_pwl(),
+            fog_mode: crate::plan::fog_mode(blend),
             ..ShaderFlags::new(
                 blend == Blend::Masked,
                 def.lighting == "MLM_Unlit",

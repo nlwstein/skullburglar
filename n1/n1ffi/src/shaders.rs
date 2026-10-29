@@ -255,4 +255,19 @@ mod tests {
         assert!(src.contains("if (true) { return xe_pwl3(c); }"));
         spirv(&src).unwrap();
     }
+
+    /// B-273: additive draws fade toward black in fog and modulate draws toward white; the rest toward the fog colour.
+    #[test]
+    fn fog_target_follows_the_blend() {
+        let grey = MatDef { diffuse_const: Some([0.6, 0.6, 0.6, 1.0]), ..Default::default() };
+        let c = matdef::codegen::compile(&grey, &[]);
+        for (mode, want) in [(0u8, "mix(g.fog_col.rgb, col, t)"), (1, "mix(vec3<f32>(0.0), col, t)"), (2, "mix(vec3<f32>(1.0), col, t)")] {
+            let f = ShaderFlags { fog_mode: mode, ..ShaderFlags::new(false, false, true, 330) };
+            let src = scene_source(&c, f);
+            assert!(src.contains(want), "mode {mode}");
+            spirv(&src).unwrap();
+        }
+        assert_eq!(crate::plan::fog_mode(scenekit::Blend::Opaque), 0);
+        assert_eq!(crate::plan::fog_mode(scenekit::Blend::Translucent), 0);
+    }
 }
