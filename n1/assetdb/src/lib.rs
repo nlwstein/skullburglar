@@ -306,6 +306,61 @@ impl AssetDb {
         v
     }
 
+    /// Texture2D paths containing `sub` (case-insensitive) with the packages holding each, for finding same-named
+    /// textures in several packages (a tool, `texfind`).
+    pub fn texture_holders(&self, sub: &str) -> Vec<(String, Vec<String>)> {
+        let sub = sub.to_lowercase();
+        let mut v: Vec<(String, Vec<String>)> = self
+            .index
+            .textures
+            .iter()
+            .filter(|(p, _)| p.to_lowercase().contains(&sub))
+            .map(|(p, pk)| (p.clone(), pk.iter().map(|&i| self.index.packages[i as usize].0.clone()).collect()))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Names of every indexed package (a tool, `placefind`).
+    pub fn package_names(&self) -> Vec<String> {
+        self.index.packages.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    /// The static-mesh placements a package holds (those that parse), for tools.
+    pub fn level_placements(&self, pkg_name: &str) -> Vec<ue3::level::Placement> {
+        let Ok(pkg) = self.package(pkg_name) else { return Vec::new() };
+        ue3::level::placements(&pkg).into_iter().filter(|(_, e)| e.is_none()).map(|(p, _)| p).collect()
+    }
+
+    /// The class of an object and the bytes that follow its property list in its export (native serialization), for
+    /// tools that decode what the property reader skips (`mictail`).
+    pub fn object_tail(&self, path: &str) -> Option<(String, Vec<u8>)> {
+        let (pkg, idx) = self.locate(path, false).ok().flatten()?;
+        let (_, r) = ue3::props::object_props(&pkg, idx).ok()?;
+        let data = pkg.export_data(idx);
+        Some((pkg.class_name(idx).to_string(), data[r.o..].to_vec()))
+    }
+
+    /// The Parent of a MaterialInstanceConstant (object path), for tools.
+    pub fn material_parent(&self, path: &str) -> Option<String> {
+        let (pkg, idx) = self.locate(path, false).ok().flatten()?;
+        let (props, _) = ue3::props::object_props(&pkg, idx).ok()?;
+        let o = props.get("Parent").map(|x| x.as_obj()).filter(|&o| o != 0)?;
+        Some(pkg.obj_path(o))
+    }
+
+    /// An object's property list as JSON (`ue3::pmaterial::export_json`), for tools.
+    pub fn object_json(&self, path: &str) -> Option<serde_json::Value> {
+        let (pkg, idx) = self.locate(path, false).ok().flatten()?;
+        ue3::pmaterial::export_json(&pkg, idx).ok()
+    }
+
+    /// A name of the package that holds `path` (by name-table index), for tools decoding native bytes.
+    pub fn name_in_package_of(&self, path: &str, i: usize) -> Option<String> {
+        let (pkg, _) = self.locate(path, false).ok().flatten()?;
+        pkg.names.get(i).cloned()
+    }
+
     /// Whether a cooked package of this name (file stem) is indexed.
     pub fn has_package(&self, name: &str) -> bool {
         self.index.packages.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
