@@ -70,8 +70,7 @@ std::vector<Setting> Catalog() {
   s.push_back({"present_vsync", "", "VSync", "Off has the lowest latency but can tear.", {}});
   s.push_back({"fps_counter", "", "Show FPS counter",
                "A small readout in the top-left corner: frames per second, milliseconds per frame, and which renderer "
-               "is drawing. Handy for bug reports. Can lower the frame rate a little while it is on. Takes effect the next "
-               "time the game starts.",
+               "is drawing. Handy for bug reports. Takes effect the next time the game starts.",
                {}});
   s.push_back({"check_updates", "", "Check for new versions",
                "When the launcher opens, look online for a newer Skullburglar and offer its download page.", {}});

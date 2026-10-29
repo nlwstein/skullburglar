@@ -32,6 +32,9 @@ class FpsCounterDialog : public rex::ui::ImGuiDialog {
 
   // Takes no input: the game keeps the pad, keyboard and pointer.
   bool captures_input() const override { return false; }
+  // The readout changes only with the game's frames, so the presenter need not repaint the overlay over an unchanged
+  // frame (SDK patch 0030): that repaint cost about a fifth of the frame rate.
+  bool needs_continuous_repaint() const override { return false; }
 
  protected:
   void OnDraw(ImGuiIO& io) override {
