@@ -2085,7 +2085,9 @@ namespace {
 // UE3 skips a primitive whose bounds centre is farther from the view than its cull distance (CullDistance, or the
 // CachedCullDistance a cull-distance volume gave it; the smaller when both are set; later engines call these
 // MaxDrawDistance), though the game still ticks it: distant fires, props and decals the level designers cut.
+float g_last_cull_limit = 0, g_last_cull_dist = 0;  // BOTS_N1_SKIPLOG: what the last test used
 bool BeyondDrawDistance(uint32_t c, const Camera& cam) {
+  g_last_cull_limit = g_last_cull_dist = 0;
   if (!cam.ok || !g_off.bounds.ok()) return false;
   float limit = 0;
   for (const Field* f : {&g_off.cull_dist, &g_off.cached_cull}) {
@@ -2096,7 +2098,56 @@ bool BeyondDrawDistance(uint32_t c, const Camera& cam) {
   if (limit == 0) return false;
   const uint32_t b = c + g_off.bounds.offset;
   const float dx = F32(b) - cam.location[0], dy = F32(b + 4) - cam.location[1], dz = F32(b + 8) - cam.location[2];
+  g_last_cull_limit = limit, g_last_cull_dist = std::sqrt(dx * dx + dy * dy + dz * dz);
   return dx * dx + dy * dy + dz * dz > limit * limit;
+}
+
+// BOTS_N1_SKIPLOG=<min radius>: log, for every static or skeletal primitive whose bounds sphere is at least that big
+// (uu; 0 = all), each change of why the feed leaves it out (or feeds it): hidden component, hidden owner, beyond the
+// cull distance, unreadable mesh. B-274: a vanishing floor needs "was it fed, and if not, why" per frame.
+enum SkipReason : uint8_t { kFed, kHiddenComponent, kHiddenOwner, kBeyondDistance, kNoMesh };
+const char* SkipName(uint8_t r) {
+  static const char* n[] = {"fed", "hidden component", "hidden owner", "beyond cull distance", "mesh unreadable"};
+  return n[r];
+}
+void NoteSkip(uint32_t c, uint8_t reason, const Camera& cam) {
+  static const float min_radius = [] {
+    const char* v = std::getenv("BOTS_N1_SKIPLOG");
+    return v && *v ? float(std::atof(v)) : -1.0f;
+  }();
+  if (min_radius < 0 || !g_off.bounds.ok()) return;
+  // Keyed by address, with the object's name and outer to tell a new object at a reused address (level loads free
+  // and reuse components) from the one seen before: such a hit starts over instead of logging a false transition.
+  struct Seen {
+    uint8_t reason;
+    uint32_t name, outer;
+  };
+  static std::unordered_map<uint32_t, Seen> last;
+  static uint64_t events = 0;
+  const uint32_t name = U32(c + 0x2C), outer = U32(c + 0x28);
+  auto it = last.find(c);
+  if (it != last.end() && (it->second.name != name || it->second.outer != outer)) last.erase(it), it = last.end();
+  if (it == last.end()) {
+    if (reason == kFed) {  // first sighting while fed: nothing to report
+      last.emplace(c, Seen{reason, name, outer});
+      return;
+    }
+    it = last.emplace(c, Seen{uint8_t(kFed), name, outer}).first;
+  }
+  if (it->second.reason == reason) return;
+  const uint32_t b = c + g_off.bounds.offset;
+  const float radius = F32(b + 24);
+  const uint8_t was = it->second.reason;
+  it->second.reason = reason;
+  if (radius < min_radius) return;
+  const float dx = F32(b) - cam.location[0], dy = F32(b + 4) - cam.location[1], dz = F32(b + 8) - cam.location[2];
+  float cull = 0, cached = 0;
+  if (g_off.cull_dist.ok()) cull = F32(c + g_off.cull_dist.offset);
+  if (g_off.cached_cull.ok()) cached = F32(c + g_off.cached_cull.offset);
+  REXLOG_INFO("scenefeed skip #{}: {} -> {}: {} radius {:.0f} centre ({:.0f} {:.0f} {:.0f}) cam ({:.0f} {:.0f} {:.0f}) "
+              "dist {:.0f} cull {:g} cached {:g} tested: limit {:g} dist {:.0f}",
+              ++events, SkipName(was), SkipName(reason), Path(c), radius, F32(b), F32(b + 4), F32(b + 8),
+              cam.location[0], cam.location[1], cam.location[2], std::sqrt(dx * dx + dy * dy + dz * dz), cull, cached, g_last_cull_limit, g_last_cull_dist);
 }
 
 // Tracking: keep the primitive, light and fog lists without walking the whole object table (about 110k objects,
@@ -2634,8 +2685,12 @@ void Live(uint8_t* base) {
     const Field& ref = skel ? g_off.skeletal_mesh_ref : g_off.static_mesh_ref;
     if (!ref.ok()) continue;
     const uint32_t mesh = U32(c + ref.offset);
-    if (!Readable(mesh)) continue;
-    bool hidden = g_off.hidden_game.ok() && (U32(c + g_off.hidden_game.offset) & g_off.hidden_game.mask);
+    if (!Readable(mesh)) {
+      NoteSkip(c, kNoMesh, cam);
+      continue;
+    }
+    const bool hidden_comp = g_off.hidden_game.ok() && (U32(c + g_off.hidden_game.offset) & g_off.hidden_game.mask);
+    bool hidden = hidden_comp;
     const uint32_t owner = g_off.owner.ok() ? U32(c + g_off.owner.offset) : 0;
     if (Readable(owner)) {
       if (!g_off.actor) {
@@ -2644,7 +2699,15 @@ void Live(uint8_t* base) {
       }
       if (g_off.actor_hidden.ok()) hidden |= (U32(owner + g_off.actor_hidden.offset) & g_off.actor_hidden.mask) != 0;
     }
-    if (hidden || BeyondDrawDistance(c, cam)) continue;
+    if (hidden) {
+      NoteSkip(c, hidden_comp ? kHiddenComponent : kHiddenOwner, cam);
+      continue;
+    }
+    if (BeyondDrawDistance(c, cam)) {
+      NoteSkip(c, kBeyondDistance, cam);
+      continue;
+    }
+    NoteSkip(c, kFed, cam);
     uint32_t mats = 0, mat_count = 0;
     if (g_off.materials.ok()) {
       mats = U32(c + g_off.materials.offset);
