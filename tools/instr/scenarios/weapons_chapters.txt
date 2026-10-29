@@ -1,0 +1,83 @@
+# Checkpoint weapons (B-277 / issue 24): load later-mission checkpoints with their real inventory (no cheats), shoot the
+# held weapon idle and aimed (plain + dual), then play a while and shoot again. State-driven.
+#   botsctl.py run scenarios/weapons_chapters.txt --out DIR --set SECS=120
+default SECS=120
+mark start
+wait -t 1800 phase==front_end || phase==movie || phase==dialog || phase==menu
+press_until "game.scenes~=MainMenu" START every=1000 timeout=120
+dismiss
+wait -t 1800 precompile.done==1
+mark precompile_done
+
+exec LoadChapter 51355
+until "game.chapter==51355 && phase==in_play && phase_s>=5" timeout=600
+mark ch51355
+sleep 8
+shot c51355-idle
+dualshot c51355-idle
+trigger L 1.0 5000
+sleep 2
+shot c51355-aim
+dualshot c51355-aim
+sleep 4
+sample ${SECS} shot_every=20 name=c51355
+shot c51355-late
+dualshot c51355-late
+trigger L 1.0 5000
+sleep 2
+dualshot c51355-late-aim
+
+exec LoadChapter 52400
+until "game.chapter==52400 && phase==in_play && phase_s>=5" timeout=600
+mark ch52400
+sleep 8
+shot c52400-idle
+dualshot c52400-idle
+trigger L 1.0 5000
+sleep 2
+shot c52400-aim
+dualshot c52400-aim
+sleep 4
+sample ${SECS} shot_every=20 name=c52400
+shot c52400-late
+dualshot c52400-late
+trigger L 1.0 5000
+sleep 2
+dualshot c52400-late-aim
+
+exec LoadChapter 53440
+until "game.chapter==53440 && phase==in_play && phase_s>=5" timeout=600
+mark ch53440
+sleep 8
+shot c53440-idle
+dualshot c53440-idle
+trigger L 1.0 5000
+sleep 2
+shot c53440-aim
+dualshot c53440-aim
+sleep 4
+sample ${SECS} shot_every=20 name=c53440
+shot c53440-late
+dualshot c53440-late
+trigger L 1.0 5000
+sleep 2
+dualshot c53440-late-aim
+
+exec LoadChapter 54460
+until "game.chapter==54460 && phase==in_play && phase_s>=5" timeout=600
+mark ch54460
+sleep 8
+shot c54460-idle
+dualshot c54460-idle
+trigger L 1.0 5000
+sleep 2
+shot c54460-aim
+dualshot c54460-aim
+sleep 4
+sample ${SECS} shot_every=20 name=c54460
+shot c54460-late
+dualshot c54460-late
+trigger L 1.0 5000
+sleep 2
+dualshot c54460-late-aim
+mark end

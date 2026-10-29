@@ -1,0 +1,98 @@
+# Weapons in 50's hand (B-277 / issue 24): load a chapter, enable cheats, give each weapon class in turn, and take a
+# plain shot plus a dual (port | n1) shot of each, idle and aimed. State-driven; dialogs are dismissed on the way.
+#   botsctl.py run scenarios/weapons.txt --out DIR --set CH=12065   (the game needs BOTS_HYBRID_DUAL=1 for dualshot)
+default CH=12065
+mark start
+wait -t 1800 phase==front_end || phase==movie || phase==dialog || phase==menu
+press_until "game.scenes~=MainMenu" START every=1000 timeout=120
+dismiss
+wait -t 1800 precompile.done==1
+mark precompile_done
+exec LoadChapter ${CH}
+until "game.chapter==${CH} && phase==in_play && phase_s>=5" timeout=600
+mark in_play
+sleep 8
+exec EnableCheats
+sleep 1
+exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 4
+shot BasicSMG-idle
+dualshot BasicSMG-idle
+trigger L 1.0 5000
+sleep 2
+shot BasicSMG-aim
+dualshot BasicSMG-aim
+sleep 4
+exec GiveWeapon C1GameNonNative.FcWeapon_HeavySMG
+sleep 4
+shot HeavySMG-idle
+dualshot HeavySMG-idle
+trigger L 1.0 5000
+sleep 2
+shot HeavySMG-aim
+dualshot HeavySMG-aim
+sleep 4
+exec GiveWeapon C1GameNonNative.FcWeapon_HeavyPistol
+sleep 4
+shot HeavyPistol-idle
+dualshot HeavyPistol-idle
+trigger L 1.0 5000
+sleep 2
+shot HeavyPistol-aim
+dualshot HeavyPistol-aim
+sleep 4
+exec GiveWeapon C1GameNonNative.FcWeapon_AdvancedRifle
+sleep 4
+shot AdvancedRifle-idle
+dualshot AdvancedRifle-idle
+trigger L 1.0 5000
+sleep 2
+shot AdvancedRifle-aim
+dualshot AdvancedRifle-aim
+sleep 4
+exec GiveWeapon C1GameNonNative.FcWeapon_PumpActionShotgun
+sleep 4
+shot PumpActionShotgun-idle
+dualshot PumpActionShotgun-idle
+trigger L 1.0 5000
+sleep 2
+shot PumpActionShotgun-aim
+dualshot PumpActionShotgun-aim
+sleep 4
+exec GiveWeapon C1GameNonNative.FcWeapon_SemiAutoShotgun
+sleep 4
+shot SemiAutoShotgun-idle
+dualshot SemiAutoShotgun-idle
+trigger L 1.0 5000
+sleep 2
+shot SemiAutoShotgun-aim
+dualshot SemiAutoShotgun-aim
+sleep 4
+exec GiveWeapon C1GameNonNative.FcWeapon_BasicMachineGun
+sleep 4
+shot BasicMachineGun-idle
+dualshot BasicMachineGun-idle
+trigger L 1.0 5000
+sleep 2
+shot BasicMachineGun-aim
+dualshot BasicMachineGun-aim
+sleep 4
+exec GiveWeapon C1GameNonNative.FcWeapon_BasicPistol
+sleep 4
+shot BasicPistol-idle
+dualshot BasicPistol-idle
+trigger L 1.0 5000
+sleep 2
+shot BasicPistol-aim
+dualshot BasicPistol-aim
+sleep 4
+exec GiveWeapon C1GameNonNative.FcWeapon_SuppressedSMG
+sleep 4
+shot SuppressedSMG-idle
+dualshot SuppressedSMG-idle
+trigger L 1.0 5000
+sleep 2
+shot SuppressedSMG-aim
+dualshot SuppressedSMG-aim
+sleep 4
+mark end
