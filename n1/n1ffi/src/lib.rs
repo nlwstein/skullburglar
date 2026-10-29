@@ -534,22 +534,41 @@ fn cstr<'a>(p: *const c_char) -> Option<&'a str> {
     unsafe { CStr::from_ptr(p) }.to_str().ok()
 }
 
+/// A folder name from C++: UTF-8 text on every platform, but on Linux a folder name may hold bytes that are not UTF-8
+/// (a Latin-1 name on an old SD card), and the C++ side passes those through unchanged, so read the raw bytes there
+/// rather than refusing the path.
+fn cpath<'a>(p: *const c_char) -> Option<&'a Path> {
+    if p.is_null() {
+        return None;
+    }
+    let bytes = unsafe { CStr::from_ptr(p) }.to_bytes();
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Some(Path::new(std::ffi::OsStr::from_bytes(bytes)))
+    }
+    #[cfg(not(unix))]
+    {
+        std::str::from_utf8(bytes).ok().map(Path::new)
+    }
+}
+
 /// # Safety
 /// `init` must point to a valid `N1Init` whose handles outlive the renderer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn n1_create(init: *const N1Init) -> *mut N1Renderer {
     let r = std::panic::catch_unwind(|| -> anyhow::Result<Box<N1Renderer>> {
         let init = unsafe { init.as_ref() }.ok_or_else(|| anyhow::anyhow!("null init"))?;
-        let cooked = cstr(init.cooked_dir).ok_or_else(|| anyhow::anyhow!("cooked_dir"))?;
-        let cache = cstr(init.cache_dir).ok_or_else(|| anyhow::anyhow!("cache_dir"))?;
-        let db = Arc::new(AssetDb::open(Path::new(cooked), Path::new(cache))?);
+        let cooked = cpath(init.cooked_dir).ok_or_else(|| anyhow::anyhow!("cooked_dir"))?;
+        let cache = cpath(init.cache_dir).ok_or_else(|| anyhow::anyhow!("cache_dir"))?;
+        let db = Arc::new(AssetDb::open(cooked, cache)?);
         let ctx = VkContext {
             get_instance_proc_addr: init.get_instance_proc_addr,
             instance: init.instance,
             physical_device: init.physical_device,
             device: init.device,
         };
-        let renderer = unsafe { Renderer::new(&ctx, init.color_format, Some(Path::new(cache).to_path_buf()))? };
+        let renderer = unsafe { Renderer::new(&ctx, init.color_format, Some(cache.to_path_buf()))? };
         let db_ps = db.clone();
         let db_tr = db.clone();
         let particles_on = renderer.knobs.particles;
