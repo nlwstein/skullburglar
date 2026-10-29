@@ -532,20 +532,7 @@ impl Store {
     fn wait_module(&self, key: u64, origin: Origin) -> Option<u32> {
         // B-248: the startup step's jobs must not give up on a module another worker is still building (a cold naga
         // build can take seconds under load): the pipelines after it would be skipped and built late, in play.
-        let limit = if origin == Origin::Startup {
-            120_000
-        } else {
-            2000
-        };
-        for _ in 0..limit {
-            match self.inner.lock().unwrap().by_key.get(&key) {
-                Some(MState::Ready(id)) => return Some(*id),
-                Some(MState::Building) => {}
-                _ => return None,
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        None
+        wait_ready(&self.inner, key, if origin == Origin::Startup { 120_000 } else { 2000 })
     }
 
     /// Claims `key` for building: true when the caller must build it (nobody has).
@@ -1107,4 +1094,63 @@ impl Store {
 pub enum AnyKeyRef {
     Scene(SceneKey),
     Part(PartKey),
+}
+
+/// Polls (1 ms apart, at most `limit` times) until `key` is ready; `None` if it failed, isn't known, or is still
+/// building at the end.
+fn wait_ready(inner: &Mutex<Inner>, key: u64, limit: u32) -> Option<u32> {
+    for _ in 0..limit {
+        match inner.lock().unwrap().by_key.get(&key) {
+            Some(MState::Ready(id)) => return Some(*id),
+            Some(MState::Building) => {}
+            _ => return None,
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    None
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+
+    fn building(key: u64) -> Arc<Mutex<Inner>> {
+        let inner = Arc::new(Mutex::new(Inner::default()));
+        inner.lock().unwrap().by_key.insert(key, MState::Building);
+        inner
+    }
+
+    fn ready_after(inner: &Arc<Mutex<Inner>>, key: u64, ms: u64) -> std::thread::JoinHandle<()> {
+        let i = inner.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            i.lock().unwrap().by_key.insert(key, MState::Ready(5));
+        })
+    }
+
+    #[test]
+    fn waits_for_a_module_another_worker_is_building() {
+        let inner = building(1);
+        let h = ready_after(&inner, 1, 300);
+        assert_eq!(wait_ready(&inner, 1, 5000), Some(5));
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn a_short_limit_gives_up_while_it_is_still_building() {
+        // What the 2 s limit did to a startup job whose module took longer: the caller saw `None` and skipped the
+        // pipelines.
+        let inner = building(1);
+        let h = ready_after(&inner, 1, 300);
+        assert_eq!(wait_ready(&inner, 1, 50), None);
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn a_failed_or_unknown_module_returns_at_once() {
+        let inner = Arc::new(Mutex::new(Inner::default()));
+        inner.lock().unwrap().by_key.insert(1, MState::Failed);
+        assert_eq!(wait_ready(&inner, 1, 120_000), None);
+        assert_eq!(wait_ready(&inner, 2, 120_000), None);
+    }
 }

@@ -303,28 +303,64 @@ impl Stream {
         let (prog, missing) = (self.prog.clone(), self.missing.clone());
         self.queue(Box::new(move |s| {
             let id = s.module_from_spv(key, &e.words, Origin::Startup);
-            if !e.counted.swap(true, Relaxed) {
-                prog.done.fetch_add(1, Relaxed);
-                if id.is_none() {
-                    missing.fetch_add(1, Relaxed);
-                }
-            }
-            if let (Some((blend, two_sided, variant)), true) = (pipe, new_pipe) {
-                if let Some(module) = id {
-                    s.build_part_pipe(
-                        PartKey {
-                            module,
-                            blend,
-                            two_sided,
-                            variant,
-                        },
-                        Origin::Startup,
-                    );
-                }
-                // Counted even when the module failed, or the step would wait for it forever.
-                prog.done.fetch_add(1, Relaxed);
-            }
+            part_job_done(&e.counted, &prog.done, &missing, id, pipe.filter(|_| new_pipe), |module, (blend, two_sided, variant)| {
+                s.build_part_pipe(PartKey { module, blend, two_sided, variant }, Origin::Startup);
+            });
         }));
+    }
+}
+
+/// The accounting of one queued particle job: the module's unit (once, by whichever job gets there first) and the
+/// pipeline's unit. The pipeline's unit is counted even when the module failed (`id` is `None`), or the step would wait
+/// for it forever (B-248).
+fn part_job_done(
+    counted: &AtomicBool,
+    done: &AtomicU32,
+    missing: &AtomicU32,
+    id: Option<u32>,
+    pipe: Option<(u8, bool, u8)>,
+    build: impl FnOnce(u32, (u8, bool, u8)),
+) {
+    if !counted.swap(true, Relaxed) {
+        done.fetch_add(1, Relaxed);
+        if id.is_none() {
+            missing.fetch_add(1, Relaxed);
+        }
+    }
+    if let Some(p) = pipe {
+        if let Some(module) = id {
+            build(module, p);
+        }
+        done.fetch_add(1, Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_particle_module_still_counts_its_pipe_unit() {
+        let (counted, done, missing) = (AtomicBool::new(false), AtomicU32::new(0), AtomicU32::new(0));
+        let mut built = false;
+        // A fresh module with one new pipeline is two units; the module failed.
+        part_job_done(&counted, &done, &missing, None, Some((0, true, 0)), |_, _| built = true);
+        assert_eq!(done.load(Relaxed), 2, "both units counted, so wait_done returns");
+        assert_eq!(missing.load(Relaxed), 1);
+        assert!(!built);
+    }
+
+    #[test]
+    fn module_unit_is_counted_once_across_jobs() {
+        let (counted, done, missing) = (AtomicBool::new(false), AtomicU32::new(0), AtomicU32::new(0));
+        let mut n = 0;
+        part_job_done(&counted, &done, &missing, Some(7), Some((0, true, 0)), |m, _| {
+            assert_eq!(m, 7);
+            n += 1;
+        });
+        part_job_done(&counted, &done, &missing, Some(7), Some((0, true, 1)), |_, _| n += 1);
+        part_job_done(&counted, &done, &missing, Some(7), None, |_, _| n += 1);
+        assert_eq!((done.load(Relaxed), missing.load(Relaxed), n), (3, 0, 2));
     }
 }
 
