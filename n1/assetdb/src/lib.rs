@@ -363,7 +363,7 @@ impl AssetDb {
     /// The emitter at an object path of class `ParticleSpriteEmitter` / `ParticleMeshEmitter`: its material, screen
     /// alignment and type data.
     pub fn emitter_info(&self, path: &str) -> Option<ue3::particle::EmitterInfo> {
-        let (p, ei) = self.locate(path, false).ok().flatten()?;
+        let (p, ei) = self.locate(path, false, None).ok().flatten()?;
         ue3::particle::read_emitter(&p, ei).ok()
     }
 
@@ -411,7 +411,17 @@ impl AssetDb {
     }
 
     /// The package holding `path` (preferred packages first) and the export index there.
-    fn locate(&self, path: &str, textures: bool) -> Result<Option<(Arc<Package>, i32)>> {
+    ///
+    /// `want` is the export class the caller can use. A path can exist in several packages with different classes
+    /// (a level's StaticMesh copy of a vehicle that another package ships as a SkeletalMesh); the preferred set only
+    /// grows over a session, so without this an earlier level's wrong-class copy shadowed the right one.
+    /// With no class match the first hit is returned, as before (`ASSETDB_CLASSAWARE=0` forces that).
+    fn locate(
+        &self,
+        path: &str,
+        textures: bool,
+        want: Option<&str>,
+    ) -> Result<Option<(Arc<Package>, i32)>> {
         let map = if textures {
             &self.index.textures
         } else {
@@ -426,15 +436,20 @@ impl AssetDb {
             .map(|&i| &self.index.packages[i as usize].0)
             .collect();
         order.sort_by_key(|n| !pref.contains(*n));
+        let want = want.filter(|_| std::env::var_os("ASSETDB_CLASSAWARE").is_none_or(|v| v != "0"));
+        let mut first = None;
         for name in order {
             let pkg = self.package(name)?;
             let map = self.path_map(name, &pkg);
             let found = map.get(&(textures, path.to_string())).copied();
             if let Some(i) = found {
-                return Ok(Some((pkg, i)));
+                if want.is_none_or(|w| pkg.class_name(i) == w) {
+                    return Ok(Some((pkg, i)));
+                }
+                first.get_or_insert((pkg, i));
             }
         }
-        Ok(None)
+        Ok(first)
     }
 
     /// LOD0 of a StaticMesh by object path; `None` when no package has it (or it fails to parse).
@@ -462,7 +477,7 @@ impl AssetDb {
                 return Ok(Some(Arc::new(m)));
             }
         }
-        let Some((pkg, idx)) = self.locate(path, false)? else {
+        let Some((pkg, idx)) = self.locate(path, false, Some("StaticMesh"))? else {
             return Ok(None);
         };
         if pkg.class_name(idx) != "StaticMesh" {
@@ -539,7 +554,7 @@ impl AssetDb {
             return m.clone();
         }
         let mut mo = self.resolve_material(ue3::matir::base_path(path), 0);
-        mo.def = ue3::matir::build_by(path, |q| self.locate(q, false).ok().flatten()).map(Arc::new);
+        mo.def = ue3::matir::build_by(path, |q| self.locate(q, false, None).ok().flatten()).map(Arc::new);
         let m = Arc::new(mo);
         self.materials
             .lock()
@@ -555,7 +570,7 @@ impl AssetDb {
 
     /// A material's named parameters (MIC overrides over the base material's defaults): see `ue3::matir::params_by`.
     pub fn material_params(&self, path: &str) -> Option<ue3::matir::NamedParams> {
-        ue3::matir::params_by(path, |q| self.locate(q, false).ok().flatten())
+        ue3::matir::params_by(path, |q| self.locate(q, false, None).ok().flatten())
     }
 
     /// N9's view of a material for particles: the expression graph (EmissiveColor, Opacity, OpacityMask,
@@ -567,7 +582,7 @@ impl AssetDb {
         let (base, mut params) = ue3::matir::path_overrides(path);
         let mut path = base.to_string();
         for _ in 0..6 {
-            let (p, ei) = self.locate(&path, false).ok().flatten()?;
+            let (p, ei) = self.locate(&path, false, None).ok().flatten()?;
             let class = p.class_name(ei).to_string();
             if class == "MaterialInstanceConstant" {
                 ue3::matir::instance_params(&p, ei, &mut params);
@@ -594,7 +609,7 @@ impl AssetDb {
 
     fn resolve_material(&self, path: &str, depth: u32) -> MaterialAsset {
         let mut mo = MaterialAsset::default();
-        let Ok(Some((p, ei))) = self.locate(path, false) else {
+        let Ok(Some((p, ei))) = self.locate(path, false, None) else {
             mo.class = "missing".into();
             return mo;
         };
@@ -648,7 +663,7 @@ impl AssetDb {
     /// What a texture's shader needs to know about it, from the export's properties alone (no mips are read):
     /// `None` when the path is unknown, the format is unsupported or the header doesn't parse.
     pub fn texture_meta(&self, path: &str) -> Option<TexMeta> {
-        let (pkg, idx) = self.locate(path, true).ok().flatten()?;
+        let (pkg, idx) = self.locate(path, true, None).ok().flatten()?;
         let (props, _) = ue3::props::object_props(&pkg, idx).ok()?;
         let name = |n: &str| -> String {
             props
@@ -722,7 +737,7 @@ impl AssetDb {
                 return Ok(Some(Arc::new(self.trim(t))));
             }
         }
-        let Some((pkg, idx)) = self.locate(path, true)? else {
+        let Some((pkg, idx)) = self.locate(path, true, None)? else {
             return Ok(None);
         };
         let ta = convert_texture(path, ue3::texture::read_texture(&pkg, idx, &self.tfc)?)?;
@@ -950,7 +965,7 @@ impl AssetDb {
         if let Some(m) = self.tree_mats.lock().unwrap().get(asset) {
             return m.clone();
         }
-        let found = match self.locate(asset, false) {
+        let found = match self.locate(asset, false, None) {
             Ok(Some((pkg, _))) => ue3::speedtree::tree_assets(&pkg)
                 .into_iter()
                 .find(|a| a.path == asset)
