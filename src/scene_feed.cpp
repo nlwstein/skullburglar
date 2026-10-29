@@ -2085,7 +2085,9 @@ namespace {
 // UE3 skips a primitive whose bounds centre is farther from the view than its cull distance (CullDistance, or the
 // CachedCullDistance a cull-distance volume gave it; the smaller when both are set; later engines call these
 // MaxDrawDistance), though the game still ticks it: distant fires, props and decals the level designers cut.
+float g_last_cull_limit = 0, g_last_cull_dist = 0;  // BOTS_N1_SKIPLOG: what the last test used
 bool BeyondDrawDistance(uint32_t c, const Camera& cam) {
+  g_last_cull_limit = g_last_cull_dist = 0;
   if (!cam.ok || !g_off.bounds.ok()) return false;
   float limit = 0;
   for (const Field* f : {&g_off.cull_dist, &g_off.cached_cull}) {
@@ -2096,6 +2098,7 @@ bool BeyondDrawDistance(uint32_t c, const Camera& cam) {
   if (limit == 0) return false;
   const uint32_t b = c + g_off.bounds.offset;
   const float dx = F32(b) - cam.location[0], dy = F32(b + 4) - cam.location[1], dz = F32(b + 8) - cam.location[2];
+  g_last_cull_limit = limit, g_last_cull_dist = std::sqrt(dx * dx + dy * dy + dz * dz);
   return dx * dx + dy * dy + dz * dz > limit * limit;
 }
 
@@ -2134,9 +2137,9 @@ void NoteSkip(uint32_t c, uint8_t reason, const Camera& cam) {
   if (g_off.cull_dist.ok()) cull = F32(c + g_off.cull_dist.offset);
   if (g_off.cached_cull.ok()) cached = F32(c + g_off.cached_cull.offset);
   REXLOG_INFO("scenefeed skip #{}: {} -> {}: {} radius {:.0f} centre ({:.0f} {:.0f} {:.0f}) cam ({:.0f} {:.0f} {:.0f}) "
-              "dist {:.0f} cull {:.0f} cached {:.0f}",
+              "dist {:.0f} cull {:g} cached {:g} tested: limit {:g} dist {:.0f}",
               ++events, SkipName(was), SkipName(reason), Path(c), radius, F32(b), F32(b + 4), F32(b + 8),
-              cam.location[0], cam.location[1], cam.location[2], std::sqrt(dx * dx + dy * dy + dz * dz), cull, cached);
+              cam.location[0], cam.location[1], cam.location[2], std::sqrt(dx * dx + dy * dy + dz * dz), cull, cached, g_last_cull_limit, g_last_cull_dist);
 }
 
 // Tracking: keep the primitive, light and fog lists without walking the whole object table (about 110k objects,
