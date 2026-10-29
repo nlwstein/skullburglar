@@ -97,10 +97,7 @@ fn parse_manifest(text: &str, h: &str) -> Option<Snapshot> {
             ["S", k, spv, ntex] => sn.scene_mods.push((hx(k)?, hx(spv)?, ntex.parse().ok()?)),
             ["s", k, b, skin] => sn.scene_pipes.push((hx(k)?, b.parse().ok()?, *skin == "1")),
             ["M", k] => sn.part_mods.push(hx(k)?),
-            ["q", k, b, two, v] => {
-                sn.part_pipes
-                    .push((hx(k)?, b.parse().ok()?, *two == "1", v.parse().ok()?))
-            }
+            ["q", k, b, two, v] => sn.part_pipes.push((hx(k)?, b.parse().ok()?, *two == "1", v.parse().ok()?)),
             _ => return None,
         }
     }
@@ -142,8 +139,7 @@ struct PartJob {
 impl Jobs {
     fn units(&self) -> u32 {
         let n = |p: usize| p as u32 + 1;
-        self.scene.values().map(|j| n(j.pipes.len())).sum::<u32>()
-            + self.part.values().map(|j| n(j.pipes.len())).sum::<u32>()
+        self.scene.values().map(|j| n(j.pipes.len())).sum::<u32>() + self.part.values().map(|j| n(j.pipes.len())).sum::<u32>()
     }
 
     fn from_snapshot(sn: &Snapshot) -> Jobs {
@@ -507,13 +503,7 @@ fn enumerate_and_build(store: &Arc<Store>, db: &AssetDb, o: &Opts, prog: &Arc<Pr
 }
 
 fn plan_clone(p: &plan::Plan) -> plan::Plan {
-    plan::Plan {
-        c: p.c.clone(),
-        flags: p.flags,
-        blend: p.blend,
-        two_sided: p.two_sided,
-        key: p.key,
-    }
+    plan::Plan { c: p.c.clone(), flags: p.flags, blend: p.blend, two_sided: p.two_sided, key: p.key }
 }
 
 /// Queues `jobs` on the store's workers and waits for them. Returns how many cached entries couldn't be built.
@@ -534,15 +524,7 @@ fn run(store: &Arc<Store>, jobs: Jobs, prog: &Arc<Progress>) -> u32 {
                         // Without dynamic cull state every combination is its own pipeline.
                         let culls: &[u8] = if dyn_cull { &[0] } else { &[0, 1, 2, 3] };
                         for &cull in culls {
-                            s.build_scene_pipe(
-                                SceneKey {
-                                    shader,
-                                    blend,
-                                    skin,
-                                    cull,
-                                },
-                                Origin::Startup,
-                            );
+                            s.build_scene_pipe(SceneKey { shader, blend, skin, cull }, Origin::Startup);
                         }
                     }
                     prog.done.fetch_add(1, Relaxed);
@@ -562,15 +544,7 @@ fn run(store: &Arc<Store>, jobs: Jobs, prog: &Arc<Progress>) -> u32 {
                 prog.done.fetch_add(1, Relaxed);
                 for (blend, two_sided, variant) in job.pipes {
                     if let Some(module) = id {
-                        s.build_part_pipe(
-                            PartKey {
-                                module,
-                                blend,
-                                two_sided,
-                                variant,
-                            },
-                            Origin::Startup,
-                        );
+                        s.build_part_pipe(PartKey { module, blend, two_sided, variant }, Origin::Startup);
                     }
                     prog.done.fetch_add(1, Relaxed);
                 }
@@ -729,9 +703,7 @@ pub fn maybe_save(store: &Arc<Store>) {
     }
     let c = &store.ctr;
     let built = c.pipes_live.load(Relaxed) + c.shaders_live.load(Relaxed);
-    if built == store.manifest_saved.load(Relaxed)
-        || store.last_save.lock().unwrap().elapsed().as_secs() < 10
-    {
+    if built == store.manifest_saved.load(Relaxed) || store.last_save.lock().unwrap().elapsed().as_secs() < 10 {
         return;
     }
     store.manifest_saved.store(built, Relaxed);
@@ -741,13 +713,11 @@ pub fn maybe_save(store: &Arc<Store>) {
         return;
     }
     let st = store.clone();
-    let spawned = std::thread::Builder::new()
-        .name("n1 manifest save".into())
-        .spawn(move || {
-            save_manifest(&st, &h);
-            st.save_cache();
-            SAVING.store(false, Relaxed);
-        });
+    let spawned = std::thread::Builder::new().name("n1 manifest save".into()).spawn(move || {
+        save_manifest(&st, &h);
+        st.save_cache();
+        SAVING.store(false, Relaxed);
+    });
     if spawned.is_err() {
         SAVING.store(false, Relaxed);
     }

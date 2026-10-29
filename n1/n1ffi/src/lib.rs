@@ -22,8 +22,8 @@ pub mod precompile;
 pub mod shaders;
 pub mod skin;
 pub mod store;
-pub mod trees;
 pub mod vkr;
+pub mod trees;
 pub mod xenos_vs;
 
 use ash::vk;
@@ -222,18 +222,12 @@ struct PreloadList {
 
 fn scan_package(db: &AssetDb, pkg: &str, particles: bool, trees: bool) -> PreloadList {
     let t0 = std::time::Instant::now();
-    let mut l = PreloadList {
-        package: pkg.to_string(),
-        ..Default::default()
-    };
+    let mut l = PreloadList { package: pkg.to_string(), ..Default::default() };
     for (path, class) in db.package_objects(pkg) {
         match class.as_str() {
             "StaticMesh" => l.meshes.push(path),
             "SkeletalMesh" => l.skel.push(path),
-            "Material"
-            | "MaterialInstanceConstant"
-            | "MaterialInstanceTimeVarying"
-            | "DecalMaterial" => l.materials.push(path),
+            "Material" | "MaterialInstanceConstant" | "MaterialInstanceTimeVarying" | "DecalMaterial" => l.materials.push(path),
             "SpeedTree" if trees => l.tree_assets.push(path),
             "ParticleSpriteEmitter" | "ParticleMeshEmitter" if particles => {
                 if let Some(e) = db.emitter_info(&path) {
@@ -331,9 +325,7 @@ impl Inner {
         let t0 = std::time::Instant::now();
         let mut n = self.resolver.pump_until(&mut self.renderer, max, deadline);
         if n < max && !deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            n += self
-                .skins
-                .pump_until(&mut self.renderer, &mut self.resolver, max - n, deadline);
+            n += self.skins.pump_until(&mut self.renderer, &mut self.resolver, max - n, deadline);
         }
         if n < max && !deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             n += self.ps.pump_until(&mut self.renderer, max - n, deadline);
@@ -344,10 +336,7 @@ impl Inner {
     }
 
     fn preload_pending(&self) -> u32 {
-        self.resolver.stats().preload_in_flight as u32
-            + self.skins.preload_pending()
-            + self.ps.pending()
-            + self.trees.pending_jobs() as u32
+        self.resolver.stats().preload_in_flight as u32 + self.skins.preload_pending() + self.ps.pending() + self.trees.pending_jobs() as u32
     }
 
     fn fill_load_stats(&self, out: &mut N1Stats) {
@@ -362,8 +351,7 @@ impl Inner {
         out.lazy_particles = self.ps.lazy;
         out.lazy_trees = self.trees.lazy;
         out.late_skips = c.late_skips + self.skins.late;
-        out.preload_requests =
-            c.preload_requests + self.skins.preloads + self.ps.preloads + self.trees.preloads;
+        out.preload_requests = c.preload_requests + self.skins.preloads + self.ps.preloads + self.trees.preloads;
         out.applied = c.uploads;
         out.apply_ms = c.upload_us as f32 / 1e3;
         out.apply_max_ms = c.upload_max_us as f32 / 1e3;
@@ -383,35 +371,14 @@ type Grades = Arc<Mutex<std::collections::HashMap<String, Option<lightfeed::post
 const GRADE_FILE_VERSION: &str = "g1";
 
 fn grade_file(db: &AssetDb, m: &str) -> std::path::PathBuf {
-    let name: String = m
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
+    let name: String = m.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '.' { c } else { '_' }).collect();
     db.cache_dir().join("grade").join(format!("{name}.txt"))
 }
 
 fn grade_floats(g: &lightfeed::post::Grade) -> [f32; 14] {
     [
-        g.fg_desaturate,
-        g.fg_contrast,
-        g.fg_tint[0],
-        g.fg_tint[1],
-        g.fg_tint[2],
-        g.bk_brightness,
-        g.bk_desaturate,
-        g.bk_contrast,
-        g.bk_tint[0],
-        g.bk_tint[1],
-        g.bk_tint[2],
-        g.blend,
-        g.blend_offset,
-        g.sky_clamp,
+        g.fg_desaturate, g.fg_contrast, g.fg_tint[0], g.fg_tint[1], g.fg_tint[2], g.bk_brightness, g.bk_desaturate,
+        g.bk_contrast, g.bk_tint[0], g.bk_tint[1], g.bk_tint[2], g.blend, g.blend_offset, g.sky_clamp,
     ]
 }
 
@@ -451,11 +418,7 @@ fn read_grade_file(path: &Path, m: &str) -> Option<Option<lightfeed::post::Grade
 fn write_grade_file(path: &Path, m: &str, g: &Option<lightfeed::post::Grade>) {
     let body = match g {
         None => "none".to_string(),
-        Some(g) => grade_floats(g)
-            .iter()
-            .map(|f| format!("{:08x}", f.to_bits()))
-            .collect::<Vec<_>>()
-            .join(" "),
+        Some(g) => grade_floats(g).iter().map(|f| format!("{:08x}", f.to_bits())).collect::<Vec<_>>().join(" "),
     };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -478,37 +441,25 @@ fn grade_of(db: &AssetDb, grades: &Grades, m: &str) -> Option<lightfeed::post::G
     }
     // BOTS_N1_GRADE_PREWARM=0 (also the host's switch for the background decode) turns the grade files off too.
     static FILES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let files = *FILES.get_or_init(|| {
-        std::env::var("BOTS_N1_GRADE_PREWARM")
-            .map(|v| v != "0")
-            .unwrap_or(true)
-    });
+    let files = *FILES.get_or_init(|| std::env::var("BOTS_N1_GRADE_PREWARM").map(|v| v != "0").unwrap_or(true));
     // A plain Material is its own base: only GenericOutdoor_MAT01 itself can give a grade, so every other one is
     // "none" without opening its package.
     if never_a_grade(db.class_of(m), m) {
-        grades
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(m.to_string(), None);
+        grades.lock().unwrap_or_else(|p| p.into_inner()).insert(m.to_string(), None);
         return None;
     }
     let file = grade_file(db, m);
     let g = match files.then(|| read_grade_file(&file, m)).flatten() {
         Some(g) => g,
         None => {
-            let g = db
-                .material_params(m)
-                .and_then(|(base, sc, ve)| lightfeed::post::Grade::from_params(&base, &sc, &ve));
+            let g = db.material_params(m).and_then(|(base, sc, ve)| lightfeed::post::Grade::from_params(&base, &sc, &ve));
             if files {
                 write_grade_file(&file, m, &g);
             }
             g
         }
     };
-    grades
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(m.to_string(), g.clone());
+    grades.lock().unwrap_or_else(|p| p.into_inner()).insert(m.to_string(), g.clone());
     g
 }
 
@@ -526,17 +477,9 @@ fn spawn_grade_pass(db: Arc<AssetDb>, grades: Grades) -> Option<std::thread::Joi
         .spawn(move || {
             let t0 = std::time::Instant::now();
             let all = db.paths_of_classes(&["MaterialInstanceConstant"]);
-            let known = |m: &String| {
-                grades
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .contains_key(m)
-            };
+            let known = |m: &String| grades.lock().unwrap_or_else(|p| p.into_inner()).contains_key(m);
             let todo: Vec<&String> = all.iter().filter(|m| !known(m)).collect();
-            let found = todo
-                .iter()
-                .filter(|m| grade_of(&db, &grades, m).is_some())
-                .count();
+            let found = todo.iter().filter(|m| grade_of(&db, &grades, m).is_some()).count();
             eprintln!(
                 "n1ffi: grades: {} materials resolved ({} grades) in {:.0} ms",
                 todo.len(),
@@ -606,13 +549,7 @@ pub unsafe extern "C" fn n1_create(init: *const N1Init) -> *mut N1Renderer {
             physical_device: init.physical_device,
             device: init.device,
         };
-        let renderer = unsafe {
-            Renderer::new(
-                &ctx,
-                init.color_format,
-                Some(Path::new(cache).to_path_buf()),
-            )?
-        };
+        let renderer = unsafe { Renderer::new(&ctx, init.color_format, Some(Path::new(cache).to_path_buf()))? };
         let db_ps = db.clone();
         let db_tr = db.clone();
         let particles_on = renderer.knobs.particles;
@@ -646,21 +583,14 @@ pub unsafe extern "C" fn n1_create(init: *const N1Init) -> *mut N1Renderer {
                 post_tex_rx: None,
                 preload: {
                     let (tx, rx) = std::sync::mpsc::channel();
-                    let ms: f32 = std::env::var("BOTS_N1_UPLOAD_MS")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(2.0);
+                    let ms: f32 = std::env::var("BOTS_N1_UPLOAD_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0);
                     Preload {
                         seen: Default::default(),
                         tx,
                         rx,
                         scanning: Default::default(),
-                        log: std::env::var("BOTS_N1_PRELOAD_LOG")
-                            .map(|v| v != "0")
-                            .unwrap_or(true),
-                        play_budget: std::time::Duration::from_micros(
-                            (ms.max(0.0) * 1000.0) as u64,
-                        ),
+                        log: std::env::var("BOTS_N1_PRELOAD_LOG").map(|v| v != "0").unwrap_or(true),
+                        play_budget: std::time::Duration::from_micros((ms.max(0.0) * 1000.0) as u64),
                     }
                 },
             }),
@@ -687,9 +617,7 @@ pub unsafe extern "C" fn n1_create(init: *const N1Init) -> *mut N1Renderer {
 /// `r` must be a live renderer from `n1_create`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn n1_precompile_start(r: *const N1Renderer) -> i32 {
-    let Some(rr) = (unsafe { r.as_ref() }) else {
-        return -1;
-    };
+    let Some(rr) = (unsafe { r.as_ref() }) else { return -1 };
     let mut pre = match rr.pre.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
@@ -698,57 +626,29 @@ pub unsafe extern "C" fn n1_precompile_start(r: *const N1Renderer) -> i32 {
         return 0;
     }
     let Some((store, db, features, bc5_ok, grades)) = with(r, None, |i| {
-        Some((
-            i.renderer.store.clone(),
-            i.db.clone(),
-            i.renderer.knobs.features,
-            i.renderer.bc5_ok(),
-            i.grades.clone(),
-        ))
+        Some((i.renderer.store.clone(), i.db.clone(), i.renderer.knobs.features, i.renderer.bc5_ok(), i.grades.clone()))
     }) else {
         return -1;
     };
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let play_threads = std::env::var("BOTS_N1_COMPILE_THREADS")
         .ok()
         .and_then(|v| v.parse().ok())
         // Up to 8 logical CPUs (a 4-core laptop) the startup step gets 2 workers, not 4: on a laptop 4 workers left the
         // game's audio short of CPU (670-1468 underruns over the 85 s cold-cache step, against 288-567 with 2, for a
         // 92-98 s step). That was with the game running behind the step (BOTS_PRECOMPILE_HOLD=0).
-        .unwrap_or(if cores <= 8 {
-            2
-        } else {
-            (cores / 2).clamp(2, 8)
-        });
+        .unwrap_or(if cores <= 8 { 2 } else { (cores / 2).clamp(2, 8) });
     // B-248: while the player waits at "Preparing the renderer" the game is held, so nothing needs the CPU or plays
     // audio: the step may use half the logical CPUs (4 on a 4-core laptop). The workers above `play_threads` park when
     // it ends. BOTS_N1_HOLD_THREADS=<n> picks the count, 0 turns it off.
-    let held = std::env::var("BOTS_PRECOMPILE_HOLD")
-        .map(|v| v != "0")
-        .unwrap_or(true);
+    let held = std::env::var("BOTS_PRECOMPILE_HOLD").map(|v| v != "0").unwrap_or(true);
     let hold_threads: usize = std::env::var("BOTS_N1_HOLD_THREADS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or((cores / 2).clamp(2, 8));
-    let threads = if held && hold_threads > play_threads {
-        hold_threads
-    } else {
-        play_threads
-    };
+    let threads = if held && hold_threads > play_threads { hold_threads } else { play_threads };
     let pregrade = spawn_grade_pass(db.clone(), grades);
-    *pre = Some(precompile::start(
-        store,
-        db,
-        precompile::Opts {
-            features,
-            bc5_ok,
-            threads,
-            play_threads,
-            pregrade,
-        },
-    ));
+    *pre = Some(precompile::start(store, db, precompile::Opts { features, bc5_ok, threads, play_threads, pregrade }));
     0
 }
 
@@ -758,14 +658,8 @@ pub unsafe extern "C" fn n1_precompile_start(r: *const N1Renderer) -> i32 {
 /// # Safety
 /// `r` must be a live renderer; `done` and `total` NULL or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn n1_precompile_progress(
-    r: *const N1Renderer,
-    done: *mut u32,
-    total: *mut u32,
-) -> u32 {
-    let Some(rr) = (unsafe { r.as_ref() }) else {
-        return 0;
-    };
+pub unsafe extern "C" fn n1_precompile_progress(r: *const N1Renderer, done: *mut u32, total: *mut u32) -> u32 {
+    let Some(rr) = (unsafe { r.as_ref() }) else { return 0 };
     let pre = match rr.pre.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
@@ -807,26 +701,21 @@ impl Inner {
         if post.present && self.post_tex_rx.is_none() && self.renderer.knobs.post_mats {
             let (tx, rx) = std::sync::mpsc::channel();
             let db = self.db.clone();
-            let _ = std::thread::Builder::new()
-                .name("n1-postmat".into())
-                .spawn(move || {
-                    for t in postmat::all_textures() {
-                        match db.texture(t) {
-                            Some(a) => {
-                                let _ = tx.send((t.to_string(), a));
-                            }
-                            None => eprintln!("n1ffi: post material texture {t} not found"),
+            let _ = std::thread::Builder::new().name("n1-postmat".into()).spawn(move || {
+                for t in postmat::all_textures() {
+                    match db.texture(t) {
+                        Some(a) => {
+                            let _ = tx.send((t.to_string(), a));
                         }
+                        None => eprintln!("n1ffi: post material texture {t} not found"),
                     }
-                });
+                }
+            });
             self.post_tex_rx = Some(rx);
         }
         let db = &self.db;
         let grades = &self.grades;
-        post.grade = post
-            .material_effects
-            .iter()
-            .find_map(|m| grade_of(db, grades, m));
+        post.grade = post.material_effects.iter().find_map(|m| grade_of(db, grades, m));
     }
 }
 
@@ -837,11 +726,7 @@ impl Inner {
 /// # Safety
 /// `paths` points to `count` valid NUL-terminated strings (or `count` is 0).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn n1_prewarm_grade(
-    r: *const N1Renderer,
-    paths: *const *const c_char,
-    count: u32,
-) -> i32 {
+pub unsafe extern "C" fn n1_prewarm_grade(r: *const N1Renderer, paths: *const *const c_char, count: u32) -> i32 {
     if paths.is_null() || count == 0 {
         return 0;
     }
@@ -859,13 +744,11 @@ pub unsafe extern "C" fn n1_prewarm_grade(
     if todo.is_empty() {
         return 0;
     }
-    let spawned = std::thread::Builder::new()
-        .name("n1-grade".into())
-        .spawn(move || {
-            for m in &todo {
-                let _ = grade_of(&db, &grades, m);
-            }
-        });
+    let spawned = std::thread::Builder::new().name("n1-grade".into()).spawn(move || {
+        for m in &todo {
+            let _ = grade_of(&db, &grades, m);
+        }
+    });
     i32::from(spawned.is_ok())
 }
 
@@ -1091,12 +974,7 @@ pub unsafe extern "C" fn n1_set_trees(r: *const N1Renderer, trees: *const N1Tree
 /// # Safety
 /// `consts` valid for 1024 floats.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn n1_tree_probe(
-    r: *const N1Renderer,
-    vs_hash: u64,
-    consts: *const f32,
-    index_count: u32,
-) -> u32 {
+pub unsafe extern "C" fn n1_tree_probe(r: *const N1Renderer, vs_hash: u64, consts: *const f32, index_count: u32) -> u32 {
     if consts.is_null() {
         return 0;
     }
@@ -1188,17 +1066,9 @@ pub unsafe extern "C" fn n1_set_fade(r: *const N1Renderer, scale: *const f32, ov
     let fade = if scale.is_null() || overlay.is_null() {
         [[1.0; 3], [0.0; 3]]
     } else {
-        let (s, o) = unsafe {
-            (
-                std::slice::from_raw_parts(scale, 3),
-                std::slice::from_raw_parts(overlay, 3),
-            )
-        };
+        let (s, o) = unsafe { (std::slice::from_raw_parts(scale, 3), std::slice::from_raw_parts(overlay, 3)) };
         let f = |x: f32, d: f32| if x.is_finite() { x } else { d };
-        [
-            [f(s[0], 1.0), f(s[1], 1.0), f(s[2], 1.0)],
-            [f(o[0], 0.0), f(o[1], 0.0), f(o[2], 0.0)],
-        ]
+        [[f(s[0], 1.0), f(s[1], 1.0), f(s[2], 1.0)], [f(o[0], 0.0), f(o[1], 0.0), f(o[2], 0.0)]]
     };
     with(r, (), |i| i.renderer.fade = fade);
 }
@@ -1304,11 +1174,7 @@ pub unsafe extern "C" fn n1_set_feed_bin(r: *const N1Renderer, feed: *const N1Fe
 /// # Safety
 /// `json` valid for `len` bytes; `feed` and its pointers valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn n1_check_feed(
-    json: *const c_char,
-    len: u32,
-    feed: *const N1FeedBin,
-) -> i32 {
+pub unsafe extern "C" fn n1_check_feed(json: *const c_char, len: u32, feed: *const N1FeedBin) -> i32 {
     let (Some(b), false) = (unsafe { feed.as_ref() }, json.is_null()) else {
         set_error("null feed");
         return -1;
@@ -1326,10 +1192,7 @@ pub unsafe extern "C" fn n1_check_feed(
             let diffs = lightfeed::bin::diff_frames(&jf, &d.frame, 1e-5);
             if !diffs.is_empty() {
                 if std::env::var_os("BOTS_N1_FEED_VERIFY_DUMP").is_some() {
-                    eprintln!(
-                        "feed verify json: {:?}\nfeed verify bin:  {:?}",
-                        jf.post, d.frame.post
-                    );
+                    eprintln!("feed verify json: {:?}\nfeed verify bin:  {:?}", jf.post, d.frame.post);
                 }
                 set_error(diffs.join("; "));
             }
@@ -1355,11 +1218,7 @@ pub extern "C" fn n1_preload_package(r: *const N1Renderer, name: *const c_char) 
         return 0;
     };
     let pkg = name.rsplit(['/', '\\']).next().unwrap_or(name);
-    let pkg = pkg
-        .strip_suffix(".xxx")
-        .or_else(|| pkg.strip_suffix(".XXX"))
-        .unwrap_or(pkg)
-        .to_string();
+    let pkg = pkg.strip_suffix(".xxx").or_else(|| pkg.strip_suffix(".XXX")).unwrap_or(pkg).to_string();
     with(r, 0, |i| {
         if !i.db.has_package(&pkg) || !i.preload.seen.insert(pkg.to_ascii_lowercase()) {
             return 0;
@@ -1369,17 +1228,13 @@ pub extern "C" fn n1_preload_package(r: *const N1Renderer, name: *const c_char) 
         let scanning = i.preload.scanning.clone();
         let (particles, trees) = (i.ps.enabled, i.trees.enabled);
         scanning.fetch_add(1, Relaxed);
-        let spawned = std::thread::Builder::new()
-            .name("n1-preload-scan".into())
-            .spawn(move || {
-                let l = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    scan_package(&db, &pkg, particles, trees)
-                }));
-                if let Ok(l) = l {
-                    let _ = tx.send(l);
-                }
-                scanning.fetch_sub(1, Relaxed);
-            });
+        let spawned = std::thread::Builder::new().name("n1-preload-scan".into()).spawn(move || {
+            let l = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scan_package(&db, &pkg, particles, trees)));
+            if let Ok(l) = l {
+                let _ = tx.send(l);
+            }
+            scanning.fetch_sub(1, Relaxed);
+        });
         if spawned.is_err() {
             i.preload.scanning.fetch_sub(1, Relaxed);
             return 0;
@@ -1406,8 +1261,7 @@ pub unsafe extern "C" fn n1_upload(
 ) -> i32 {
     with(r, -1, |i| {
         i.take_preloads();
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_micros(budget_us as u64);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_micros(budget_us as u64);
         let n = i.apply_loads(usize::MAX, Some(deadline));
         let res = i.renderer.upload(cmd, serial, completed);
         if let Some(out) = unsafe { stats.as_mut() } {
@@ -1487,11 +1341,8 @@ pub unsafe extern "C" fn n1_record(
         }
         lp.lap("take_preloads");
         // B-199: a count cap (`upload_budget`) and a time cap (`BOTS_N1_UPLOAD_MS`) on loads applied per frame.
-        let deadline = (!i.preload.play_budget.is_zero())
-            .then(|| std::time::Instant::now() + i.preload.play_budget);
-        let uploads = i
-            .resolver
-            .pump_until(&mut i.renderer, upload_budget as usize, deadline);
+        let deadline = (!i.preload.play_budget.is_zero()).then(|| std::time::Instant::now() + i.preload.play_budget);
+        let uploads = i.resolver.pump_until(&mut i.renderer, upload_budget as usize, deadline);
         lp.lap("pump_until");
         let skel_uploads = i.skins.pump_until(
             &mut i.renderer,
@@ -1508,14 +1359,7 @@ pub unsafe extern "C" fn n1_record(
         let translated = i.instances.len() as u32;
         // B-228: decals, as extra instances (clipped receiver geometry with the decal's material).
         lp.lap("translate");
-        i.decals.append(
-            &mut i.renderer,
-            &mut i.resolver,
-            &i.db,
-            inst,
-            &mut i.instances,
-            &mut i.overrides,
-        );
+        i.decals.append(&mut i.renderer, &mut i.resolver, &i.db, inst, &mut i.instances, &mut i.overrides);
         lp.lap("decals");
         // Run-time material variants (one per bullet tracer) nothing has named for ~5 s give their GPU material back.
         i.record_calls += 1;
@@ -1570,11 +1414,7 @@ pub unsafe extern "C" fn n1_record(
         );
         lp.lap("skins_build");
         // B-186: particles. Material and mesh loads finish on the loader thread; a few are taken per frame.
-        let near = if c.near_plane > 0.0 {
-            c.near_plane
-        } else {
-            5.0
-        };
+        let near = if c.near_plane > 0.0 { c.near_plane } else { 5.0 };
         let mut pf = i.ps.prepare(&mut i.renderer, &vp, c.location, 2);
         pf.near = near;
         lp.lap("ps_prepare");
@@ -1643,9 +1483,7 @@ pub unsafe extern "C" fn n1_record(
                         particle_emitters: i.ps.last.emitters,
                         particle_sprites: i.ps.last.sprites,
                         particle_meshes: i.ps.last.mesh_instances,
-                        particle_dropped: i.ps.last.dropped_sprites
-                            + i.ps.last.dropped_meshes
-                            + i.ps.last.bad_rows,
+                        particle_dropped: i.ps.last.dropped_sprites + i.ps.last.dropped_meshes + i.ps.last.bad_rows,
                         particle_mats_ready: i.ps.last.mats_ready,
                         particle_mats_failed: i.ps.last.mats_failed,
                         particle_skipped: i.ps.last.skipped_emitters,
@@ -1716,14 +1554,8 @@ mod grade_file_tests {
     fn plain_materials_are_never_grades() {
         assert!(never_a_grade(Some("Material"), "FX.PostFX_v03"));
         assert!(!never_a_grade(Some("Material"), "Pkg.GenericOutdoor_MAT01"));
-        assert!(
-            !never_a_grade(Some("MaterialInstanceConstant"), "Pkg.Crib_MIC"),
-            "an instance has to be decoded"
-        );
-        assert!(
-            !never_a_grade(None, "Pkg.Unknown"),
-            "an unindexed path takes the old route"
-        );
+        assert!(!never_a_grade(Some("MaterialInstanceConstant"), "Pkg.Crib_MIC"), "an instance has to be decoded");
+        assert!(!never_a_grade(None, "Pkg.Unknown"), "an unindexed path takes the old route");
     }
 
     /// B-248: a grade read back from its cache file is bit-for-bit the one written, and "none" survives too.
@@ -1733,19 +1565,11 @@ mod grade_file_tests {
         let file = dir.join("grade").join("a.txt");
         write_grade_file(&file, "Pkg.Mat", &Some(sample()));
         assert_eq!(read_grade_file(&file, "Pkg.Mat"), Some(Some(sample())));
-        assert_eq!(
-            read_grade_file(&file, "Other.Mat"),
-            None,
-            "a file for another path is not used"
-        );
+        assert_eq!(read_grade_file(&file, "Other.Mat"), None, "a file for another path is not used");
         write_grade_file(&file, "Pkg.Mat", &None);
         assert_eq!(read_grade_file(&file, "Pkg.Mat"), Some(None));
         std::fs::write(&file, "g0\nPkg.Mat\nnone\n").unwrap();
-        assert_eq!(
-            read_grade_file(&file, "Pkg.Mat"),
-            None,
-            "another version is not used"
-        );
+        assert_eq!(read_grade_file(&file, "Pkg.Mat"), None, "another version is not used");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

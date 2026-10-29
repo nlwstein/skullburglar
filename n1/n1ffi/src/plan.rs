@@ -66,17 +66,8 @@ pub fn shader_flags(features: u32, def: &MatDef, blend: Blend) -> ShaderFlags {
 pub fn fallback_def(textured: bool) -> MatDef {
     if textured {
         MatDef {
-            textures: vec![TexRef {
-                path: String::new(),
-                normal: false,
-            }],
-            nodes: vec![
-                Node::Tex { tex: 0, uv: None },
-                Node::Mask {
-                    x: 0,
-                    m: [false, false, false, true],
-                },
-            ],
+            textures: vec![TexRef { path: String::new(), normal: false }],
+            nodes: vec![Node::Tex { tex: 0, uv: None }, Node::Mask { x: 0, m: [false, false, false, true] }],
             diffuse: Some(0),
             opacity: Some(1),
             opacity_mask: Some(1),
@@ -84,21 +75,13 @@ pub fn fallback_def(textured: bool) -> MatDef {
             ..Default::default()
         }
     } else {
-        MatDef {
-            diffuse_const: Some([0.6, 0.6, 0.6, 1.0]),
-            ..Default::default()
-        }
+        MatDef { diffuse_const: Some([0.6, 0.6, 0.6, 1.0]), ..Default::default() }
     }
 }
 
 /// `m`: the resolved material; `diffuse_tex`: its diffuse texture exists (used only when it has no graph);
 /// `tex(k)`: what texture slot `k` of the graph (or the single fallback slot) holds.
-pub fn plan(
-    features: u32,
-    m: &MaterialAsset,
-    diffuse_tex: bool,
-    tex: &dyn Fn(usize) -> TexInfo,
-) -> Plan {
+pub fn plan(features: u32, m: &MaterialAsset, diffuse_tex: bool, tex: &dyn Fn(usize) -> TexInfo) -> Plan {
     let fallback;
     let def: &MatDef = match m.def.as_deref() {
         Some(d) => d,
@@ -110,31 +93,19 @@ pub fn plan(
     let n = def.textures.len();
     let info: Vec<TexInfo> = (0..n).map(&tex).collect();
     // A BC5 normal map without UnpackMin/Max still needs X and Y in [-1, 1].
-    let unpack: Vec<Option<([f32; 3], [f32; 3])>> = info
-        .iter()
-        .map(|t| t.unpack.or_else(|| t.bc5.then_some(([-1.0; 3], [1.0; 3]))))
-        .collect();
+    let unpack: Vec<Option<([f32; 3], [f32; 3])>> =
+        info.iter().map(|t| t.unpack.or_else(|| t.bc5.then_some(([-1.0; 3], [1.0; 3])))).collect();
     // BC5 normal maps (characters, weapons) hold X and Y only: rebuild Z as UE3 does.
     let recon_z: Vec<bool> = info.iter().map(|t| t.bc5).collect();
     let gamma: Vec<bool> = info.iter().map(|t| t.gamma).collect();
     let c = matdef::codegen::compile_gamma(def, &unpack, &recon_z, &gamma);
     let blend = Blend::from_ue3(
-        m.def
-            .as_deref()
-            .map(|d| d.blend.as_str())
-            .filter(|b| !b.is_empty())
-            .unwrap_or(&m.blend),
+        m.def.as_deref().map(|d| d.blend.as_str()).filter(|b| !b.is_empty()).unwrap_or(&m.blend),
     );
     let two_sided = m.two_sided || m.def.as_deref().is_some_and(|d| d.two_sided);
     let flags = shader_flags(features, def, blend);
     let key = fnv(format!("{flags:?}|{}", c.key).as_bytes());
-    Plan {
-        c,
-        flags,
-        blend,
-        two_sided,
-        key,
-    }
+    Plan { c, flags, blend, two_sided, key }
 }
 
 /// Every Material-like object on the disc, planned: the superset of what any level can ask for. Runs on `threads`
@@ -164,28 +135,13 @@ pub fn enumerate(
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some(p) = paths.get(i) else { break };
                     let m = db.material(p);
-                    let diffuse = m
-                        .diffuse
-                        .as_ref()
-                        .is_some_and(|d| db.texture_meta(d).is_some());
+                    let diffuse = m.diffuse.as_ref().is_some_and(|d| db.texture_meta(d).is_some());
                     let metas: Vec<Option<TexMeta>> = match m.def.as_deref() {
-                        Some(d) => d
-                            .textures
-                            .iter()
-                            .map(|t| db.texture_meta(&t.path))
-                            .collect(),
-                        None => m
-                            .diffuse
-                            .as_ref()
-                            .map(|d| vec![db.texture_meta(d)])
-                            .unwrap_or_default(),
+                        Some(d) => d.textures.iter().map(|t| db.texture_meta(&t.path)).collect(),
+                        None => m.diffuse.as_ref().map(|d| vec![db.texture_meta(d)]).unwrap_or_default(),
                     };
                     let pl = plan(features, &m, diffuse, &|k| {
-                        metas
-                            .get(k)
-                            .and_then(|x| x.as_ref())
-                            .map(|x| TexInfo::from_meta(x, bc5_ok))
-                            .unwrap_or_default()
+                        metas.get(k).and_then(|x| x.as_ref()).map(|x| TexInfo::from_meta(x, bc5_ok)).unwrap_or_default()
                     });
                     // B-248: the startup step queues each plan's shader now, not after the whole pass.
                     on_plan(p, &pl);
