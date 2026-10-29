@@ -109,6 +109,8 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     HoldForWarmup();
     if (InstrState* is = FindInstrState()) PublishInstr(*is, frontbuffer_width, frontbuffer_height);
     ++frames_;
+    if (bots::HybridState* hs = bots::FindHybridState(); hs && hs->fps_counter.load(std::memory_order_relaxed))
+      hs->swaps.fetch_add(1, std::memory_order_relaxed);  // the in-game FPS counter (fps_counter.h)
     // BOTS_GFX_NO_PRESENT=1 (benchmarking): render everything but never hand the frame to the presenter. Under a
     // GPU-less X server (Xvfb) the Vulkan surface falls back to xcb_put_image and presenting costs more than the
     // whole frame's rendering, which hides the renderer's own throughput.

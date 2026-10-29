@@ -213,6 +213,10 @@ struct HybridState {
   // B-243: n1 has finished its startup step (every shader and pipeline it can need is built). Until then the game
   // draws its own scene although the port suppresses it (fill 4, not dual), so a cold n1 cache never shows a partial
   // frame. The renderer sets it (hybrid_fill.cpp PumpN1Warmup); BOTS_N1_PORT_UNTIL_READY=0 lets n1 draw from the start.
+  // B-279 in-game FPS counter (fps_counter.h): the app sets `fps_counter` when the setting is on, and the renderer
+  // then counts every frame it hands to the presenter in `swaps`. Off, the renderer's cost is one relaxed load.
+  std::atomic<uint32_t> fps_counter{0};
+  std::atomic<uint64_t> swaps{0};
   std::atomic<uint32_t> n1_ready{0};
   std::atomic<uint64_t> markers_seen{0}, fills_drawn{0};  // renderer side, for the log
   HybridCamera cameras[kCameras] = {};

@@ -1,0 +1,37 @@
+diff --git a/include/rex/ui/imgui_dialog.h b/include/rex/ui/imgui_dialog.h
+index 7692ab0..4e4545b 100644
+--- a/include/rex/ui/imgui_dialog.h
++++ b/include/rex/ui/imgui_dialog.h
+@@ -43,6 +43,12 @@ class ImGuiDialog {
+   // game input and pointer capture while only those are up (ImGuiDrawer::HasInputDialogs).
+   virtual bool captures_input() const { return true; }
+ 
++  // False for passive overlays that change only when the guest outputs a new frame (a stats readout): while only
++  // such dialogs are up, the drawer does not ask the presenter to repaint the UI continuously over an unchanged
++  // guest frame, which costs a full composite + present per repaint (a fps counter measured ~20% of the frame
++  // rate). The presenter still repaints for every new guest frame. Animated or interactive dialogs keep true.
++  virtual bool needs_continuous_repaint() const { return true; }
++
+  protected:
+   ImGuiDialog(ImGuiDrawer* imgui_drawer);
+ 
+diff --git a/src/ui/imgui_drawer.cpp b/src/ui/imgui_drawer.cpp
+index 6b50110..ca6f9fd 100644
+--- a/src/ui/imgui_drawer.cpp
++++ b/src/ui/imgui_drawer.cpp
+@@ -447,9 +447,12 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+   DetachIfLastDialogRemoved();
+ 
+   if (!dialogs_.empty()) {
+-    // Repaint (and handle input) continuously if still active. In detached mode
+-    // there is no presenter; the app drives repaint via its own present loop.
+-    if (presenter_) {
++    // Repaint (and handle input) continuously if still active, unless every dialog is a passive overlay that only
++    // changes with the guest's frames (the presenter repaints for those anyway). In detached mode there is no
++    // presenter; the app drives repaint via its own present loop.
++    const bool continuous = std::any_of(dialogs_.cbegin(), dialogs_.cend(),
++                                        [](const ImGuiDialog* d) { return d->needs_continuous_repaint(); });
++    if (presenter_ && continuous) {
+       presenter_->RequestUIPaintFromUIThread();
+     }
+   }
