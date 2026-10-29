@@ -540,6 +540,14 @@ impl AssetDb {
         }
         let mut mo = self.resolve_material(ue3::matir::base_path(path), 0);
         mo.def = ue3::matir::build_by(path, |q| self.locate(q, false).ok().flatten()).map(Arc::new);
+        // A class the mesh/decal compiler can't express draws as a constant 0.0 (invisible or black surfaces): say so
+        // once per material, so a gap shows up in the log instead of as a missing floor or a flat colour.
+        // `BOTS_N1_MATLOG=0` silences it.
+        if let Some(d) = mo.def.as_ref().filter(|d| !d.unsupported.is_empty()) {
+            if std::env::var("BOTS_N1_MATLOG").map_or(true, |v| v != "0") {
+                eprintln!("n1: material {path} [{}] uses unsupported expressions {:?} (drawn as constant 0)", d.blend, d.unsupported);
+            }
+        }
         let m = Arc::new(mo);
         self.materials
             .lock()
