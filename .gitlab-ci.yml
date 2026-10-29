@@ -17,8 +17,9 @@
 # there (cached) and run it next to the job container, sharing its build directory. macOS needs an Apple silicon Mac:
 # a shell-executor runner tagged `macos` with the Xcode command line tools, cmake, ninja and ccache on its PATH, and
 # CCACHE_DIR set in its job environment. n1 (n1/, Rust) builds in every job: the images carry a Rust toolchain
-# (docker/*/Dockerfile; docker/android with the Android targets), and on the Mac the build scripts use the user's rustup,
-# installing it (user-local) if absent and adding the iOS target or, for tvOS, the rust-src component (tools/rust_env.sh).
+# (docker/*/Dockerfile; docker/android with the Android targets), and on the Mac the build scripts use the user's
+# rustup, installing it (user-local) if absent and adding the iOS target or, for tvOS, the rust-src component
+# (tools/rust_env.sh).
 #
 # Run a pipeline on main with BUILD=1 to build (and upload as skullburglar/<last>-dev.<sha>) without releasing.
 
@@ -43,7 +44,9 @@ checks:
   script:
     - python3 tools/leak_scan.py tree
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/input_math_test.cpp -o $d/t && $d/t
-    - for f in tools/ci/*.sh tools/rust_env.sh tools/ios/build.sh tools/android/build.sh packaging/linux/AppRun; do sh -n "$f"; done
+    - >-
+      for f in tools/ci/*.sh tools/rust_env.sh tools/ios/build.sh tools/android/build.sh packaging/linux/AppRun;
+      do sh -n "$f"; done
     - python3 -m py_compile tools/ci/gitlab_release.py tools/ci/publish_downloads.py
     - SUBMODULES=0 tools/ci/sdk.sh "$(mktemp -d)/sdk"
 
@@ -152,8 +155,9 @@ build:macos:
 # the others when there's a release (or BUILD=1) and go in it as skullburglar-<VERSION>-<ios|tvos>.ipa; they may fail
 # without holding up the release, which then leaves them out. On branches named for them (apple, ios, tvos), and on
 # release/* branches with the desktop builds, they build on every push into skullburglar-apple/apple-<sha>.
-# They need a Mac runner with Xcode and its iOS and tvOS platforms (the command line tools have no iOS SDKs), tagged `xcode` as well as `macos`. DEVELOPER_DIR picks the full Xcode for
-# these jobs only, so the runner's selected developer directory can stay on the command line tools the macOS build uses.
+# They need a Mac runner with Xcode and its iOS and tvOS platforms (the command line tools have no iOS SDKs), tagged
+# `xcode` as well as `macos`. DEVELOPER_DIR picks the full Xcode for these jobs only, so the runner's selected developer
+# directory can stay on the command line tools the macOS build uses.
 .apple:
   stage: build
   tags: [macos, xcode]
