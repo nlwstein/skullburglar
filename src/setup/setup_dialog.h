@@ -20,6 +20,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -36,6 +37,7 @@
 #include "settings.h"
 #include "firewall.h"
 #include "update_check.h"
+#include "update_install.h"
 
 namespace bots::setup {
 
@@ -125,13 +127,71 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   struct UpdateState {
     std::atomic<bool> done{false};
     UpdateInfo info;
+    // "Update now" (update_install.h): what this install is, its package, and the install thread's state.
+    InstallKind kind = InstallKind::kNone;
+    Asset asset;
+    bool has_asset = false;
+    bool needs_move = false;  // macOS: run from a disk image or App Translocation, so it can't replace itself
+    std::string blocker;  // why there's no Update now button, when there's a package for it
+    std::string failed_note;  // Windows: the last update's setup program never finished
+    InstallProgress progress;
+    std::atomic<bool> running{false}, finished{false};  // finished: installed, the program should quit now
+    std::mutex mutex;
+    std::string install_error;  // guarded by mutex
   };
 
   void StartUpdateCheck() {
     update_ = std::make_shared<UpdateState>();
     std::thread([state = update_] {
+      CleanUpOldUpdates();
+      state->failed_note = TakeFailedUpdateNote();
       state->info = FetchUpdateInfo();
+      if (IsNewerVersion(state->info.latest, AppVersion())) {
+        state->kind = CurrentInstallKind();
+        state->needs_move = state->kind == InstallKind::kNone && MacAppNeedsMove(SelfExeFolder().string());
+        // Only a signed listing gets the button (an unsigned one, or a build without the key, keeps "Download it").
+        const Asset* a = PickAsset(state->info, state->kind);
+        if (a && !a->signed_ok) {
+          REXLOG_INFO("setup: the release listing isn't signed for this build; Update now stays off");
+          a = nullptr;
+        }
+        if (a) {
+          state->asset = *a;
+          state->has_asset = true;
+          state->blocker = SelfUpdateBlocker(state->kind);
+        }
+      }
       state->done.store(true);
+    }).detach();
+  }
+
+  bool UpdateBusy() const { return update_ && update_->running.load(); }
+  // Past the download the swap can't be interrupted: Quit waits.
+  bool UpdateCommitted() const {
+    return UpdateBusy() && update_->progress.stage.load() > int(UpdateStage::kDownloading);
+  }
+
+  void StartInstall() {
+    auto state = update_;
+    if (!state || state->running.exchange(true)) return;
+    {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      state->install_error.clear();
+    }
+    state->progress.cancel = false;
+    SaveSettings(settings_, config_path_);  // what was changed in this window survives the restart
+    std::thread([state] {
+      std::string error;
+      bool ok = InstallUpdate(state->kind, state->asset, state->progress, error);
+      if (!ok) {
+        REXLOG_WARN("setup: update failed: {}", error);
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->install_error = error == "cancelled" ? std::string() : error;
+      } else {
+        REXLOG_INFO("setup: updated to {}; restarting", state->info.latest);
+      }
+      state->finished.store(ok);
+      state->running.store(false);
     }).detach();
   }
 
@@ -217,13 +277,63 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       if (!info.error.empty()) REXLOG_INFO("setup: update check failed: {}", info.error);
       else REXLOG_INFO("setup: newest release {}, this is {}", info.latest, AppVersion());
     }
+    if (!update_->failed_note.empty()) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.4f, 1.0f));
+      ImGui::TextWrapped("%s", update_->failed_note.c_str());
+      ImGui::PopStyleColor();
+    }
     if (info.latest.empty() || !IsNewerVersion(info.latest, AppVersion())) return;
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
     ImGui::TextWrapped("Skullburglar %s is out (you have %s).", info.latest.c_str(), AppVersion());
     ImGui::PopStyleColor();
+    UpdateState& u = *update_;
+    const bool can_update = u.has_asset && u.blocker.empty();
+    ImGui::BeginDisabled(UpdateBusy());
+    if (can_update) {
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Update now")) StartInstall();
+    }
     if (!info.page.empty()) {
       ImGui::SameLine();
       if (ImGui::SmallButton("Download it")) OpenInBrowser(info.page);
+    }
+    ImGui::EndDisabled();
+    if (UpdateBusy()) {
+      const auto stage = UpdateStage(u.progress.stage.load());
+      const double done = double(u.progress.done.load()) / 1e6, total = double(u.progress.total.load()) / 1e6;
+      if (stage == UpdateStage::kDownloading) {
+        ImGui::TextDisabled("Downloading %.1f of %.1f MB...", done, total);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Cancel")) u.progress.cancel = true;
+      } else if (stage == UpdateStage::kVerifying) {
+        ImGui::TextDisabled("Checking the download...");
+      } else {
+        ImGui::TextDisabled("Installing...");
+      }
+    } else if (u.finished.load()) {
+      ImGui::TextDisabled("Updated. Restarting...");
+      if (!quit_requested_) {
+        quit_requested_ = true;
+        pad_.reset();
+        quit_();
+        return;
+      }
+    } else {
+      std::string error;
+      {
+        std::lock_guard<std::mutex> lock(u.mutex);
+        error = u.install_error;
+      }
+      if (!error.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.4f, 1.0f));
+        ImGui::TextWrapped("The update didn't install (%s). Your install is unchanged; \"Download it\" gets the new version by hand.",
+                           error.c_str());
+        ImGui::PopStyleColor();
+      } else if (u.needs_move) {
+        ImGui::TextDisabled("To update from here, move Skullburglar to your Applications folder first.");
+      } else if (u.has_asset && !u.blocker.empty()) {
+        ImGui::TextDisabled("Can't update in place: %s.", u.blocker.c_str());
+      }
     }
     ImGui::Spacing();
     ImGui::Separator();
@@ -538,7 +648,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     const bool ps = pad && pad_->PlayStation();
     char play[48];
     std::snprintf(play, sizeof(play), "Play  (%s)##play", pad ? (ps ? "Options" : "Start") : "Enter");
-    const bool can_play = installed_ && !Extracting();
+    const bool can_play = installed_ && !Extracting() && !UpdateBusy();
     // The way in, so it stands out from the other buttons.
     const ImVec4* colors = ImGui::GetStyle().Colors;
     ImGui::PushStyleColor(ImGuiCol_Button, colors[ImGuiCol_ButtonHovered]);
@@ -553,8 +663,12 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       return;
     }
     ImGui::SameLine();
-    if (ImGui::Button("Quit", ImVec2(120, ImGui::GetFrameHeight() * 1.5f))) {
+    ImGui::BeginDisabled(UpdateCommitted());
+    const bool quit_pressed = ImGui::Button("Quit", ImVec2(120, ImGui::GetFrameHeight() * 1.5f));
+    ImGui::EndDisabled();
+    if (quit_pressed) {
       if (Extracting()) progress_->cancel = true;
+      if (UpdateBusy()) update_->progress.cancel = true;
       pad_.reset();
       quit_();
       return;
@@ -644,6 +758,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   std::vector<Setting> settings_;
   std::unique_ptr<PadNav> pad_;  // null once Play or Quit is pressed
   bool installed_ = false;
+  bool quit_requested_ = false;  // an installed update asked the program to quit
   bool show_reinstall_ = false;
   bool auto_ = false;
   bool auto_reinstall_ = false;

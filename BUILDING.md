@@ -226,6 +226,30 @@ that Cloudflare R2 bucket behind the public download page and add the release to
 `feat`/`fix`/`perf` commits: give a player-visible commit a `Release-note:` trailer written for players
 (`Release-note: none` leaves it out).
 
+### Update signing
+
+The launcher's **Update now** button installs a package the program downloads itself, with none of the operating
+system's "downloaded from the internet" prompts, so a listing that can be forged must never be enough. Every release
+entry in `version.json` therefore carries an Ed25519 `signature` over its version and its packages' names, sizes and
+SHA-256 checksums (`signing_message` in `tools/ci/update_signing.py`; the launcher rebuilds the same text in
+`src/setup/update_logic.cpp`). The launcher verifies it against the public key built in from
+`packaging/update-pubkey.txt`; with no key there, or an unsigned or wrongly signed entry, it shows only **Download
+it**. It also never installs a version that isn't newer than the running one.
+
+- **Private key:** a 32-byte Ed25519 seed (RFC 8032), base64, kept only in the release job's `UPDATE_SIGNING_KEY` CI
+  variable (masked and protected, so only pipelines on protected branches see it) and in the project's secret store;
+  never in the repository. The release job on the default branch runs `tools/ci/check_signing_key.py` before it tags
+  anything, and stops there when the key is missing or its public half isn't the one in `packaging/update-pubkey.txt`.
+  `publish_downloads.py` also refuses a release whose version, package keys, file names, sizes or checksums the launcher
+  would reject (`update_signing.validate_release`), since that would silently turn **Update now** off for everyone. `python3 tools/ci/ed25519_sign.py keygen` makes
+  a throwaway pair for tests. Losing the key means shipping a new public key in a build that players then install by
+  hand; a leaked one means doing the same at once.
+- **What it protects against:** a tampered site or bucket, or a stolen storage token, can no longer make **Update now**
+  install anything, because the packages' checksums are signed. It does not cover the page link behind **Download
+  it**, and a stolen signing key (or CI job) defeats it.
+- **Tests:** `tests/update_test.cpp` (RFC 8032 vectors and tamper cases), `tests/ed25519_vectors.py`, `tests/update_signing_test.py`, and the end to end
+  `tools/update_probe_test.sh`, which signs with a throwaway key.
+
 Codegen takes over half an hour on an x86 CI runner, and its output is the same on every platform and only changes
 with its inputs (`tools/ci/codegen_key.sh`: the manifest, `config/`, the recompiler's SDK sources). After changing one
 of those, store the new output for the release builds with `GITLAB_TOKEN=... tools/ci/codegen_publish.sh` (on a Mac

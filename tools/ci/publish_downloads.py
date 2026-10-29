@@ -21,10 +21,19 @@ Release notes are the feat/fix/perf commits since LAST, newest first. A commit's
 the subject without its type. --notes-file (a JSON list of strings) replaces them, and so does
 release-notes/<VERSION>.json in the tree when it exists (hand-written notes for a release with many internal commits).
 
-Env: VERSION, LAST (optional), DOWNLOADS_BUCKET, DOWNLOADS_PAGE (the site's address), CF_API_TOKEN (with R2 edit),
+Signing: when UPDATE_SIGNING_KEY (the Ed25519 private key's 32-byte seed, base64; a masked, protected CI variable) is
+set, the new entry gets "signature": a plain Ed25519 (RFC 8032) signature over signing_message() below, which the
+launcher checks against the public key in packaging/update-pubkey.txt before it offers "Update now". On the default
+branch (the release job) a missing key stops the run before anything is uploaded: a release is never published
+unsigned there. Anywhere else (a hand run, another branch) a missing key just leaves the entry unsigned, and players
+get only the "Download it" link. The key is never written anywhere or printed, and a key whose public half isn't the
+one in packaging/update-pubkey.txt is refused (it would silently turn "Update now" off for everyone).
+
+Env: VERSION, LAST (optional), UPDATE_SIGNING_KEY (optional, see above), DOWNLOADS_BUCKET, DOWNLOADS_PAGE (the site's address), CF_API_TOKEN (with R2 edit),
 CF_ACCOUNT_ID; the registry is read with CI_JOB_TOKEN in CI, else GITLAB_TOKEN; CI_API_V4_URL and CI_PROJECT_ID.
 """
 import argparse
+import base64
 import datetime
 import hashlib
 import json
@@ -40,7 +49,14 @@ import urllib.request
 import boto3
 from botocore.config import Config
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ed25519_sign  # noqa: E402
+import update_signing  # noqa: E402
+from update_signing import signing_message, signing_seed  # noqa: E402,F401
+
 VERSION = os.environ["VERSION"]
+if not update_signing.plain_version(VERSION):
+    sys.exit(f"VERSION {VERSION!r} is not one the launcher accepts ([0-9A-Za-z.+-], at most 64 characters)")
 LAST = os.environ.get("LAST", "")
 BUCKET = os.environ["DOWNLOADS_BUCKET"]
 PAGE = os.environ["DOWNLOADS_PAGE"]
@@ -143,6 +159,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--notes-file")
     args = ap.parse_args()
+    seed = signing_seed()  # before anything is uploaded
     s3 = r2()
     ref = release_ref()
     notes_file = args.notes_file
@@ -160,6 +177,11 @@ def main():
                     print(f"not built, left out: {name}")
                     continue
                 raise
+            # The launcher treats a release with any entry it rejects as unsigned, for every platform: fail before uploading.
+            try:
+                update_signing.validate_release(VERSION, {platform: {"file": name, "size": size, "sha256": sha}})
+            except ValueError as e:
+                sys.exit(f"refusing to publish: {e}")
             key = f"releases/{VERSION}/{name}"
             s3.upload_file(path, BUCKET, key, ExtraArgs={"ContentType": "application/octet-stream"})
             downloads[platform] = {"file": name, "size": size, "sha256": sha, "url": f"/dl/{VERSION}/{name}"}
@@ -176,6 +198,11 @@ def main():
         "available": True,
         "downloads": downloads,
     }
+    if seed:
+        entry["signature"] = ed25519_sign.sign(seed, signing_message(VERSION, downloads)).hex()
+        print("release entry signed")
+    else:
+        print("no signing key: release entry is unsigned (launchers offer Download it only)")
     versions = [v for v in doc["versions"] if v["version"] != VERSION] + [entry]
     key = lambda v: [int(n) for n in re.findall(r"\d+", v["version"].split("-")[0])]
     versions.sort(key=key, reverse=True)
@@ -184,6 +211,7 @@ def main():
             for d in v["downloads"].values():
                 s3.delete_object(Bucket=BUCKET, Key=f"releases/{v['version']}/{d['file']}")
             v["available"] = False
+            v.pop("signature", None)  # a pruned entry can't be replayed as a signed release
             print(f"no longer downloadable: {v['version']}")
     doc.update({
         "latest": versions[0]["version"],

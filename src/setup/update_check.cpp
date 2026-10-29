@@ -1,6 +1,8 @@
 // See update_check.h.
 #include "update_check.h"
 
+#include "ed25519.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -29,16 +31,28 @@ extern char** environ;
 #ifndef BOTS_UPDATE_URL
 #define BOTS_UPDATE_URL ""
 #endif
+#ifndef BOTS_UPDATE_PUBKEY
+#define BOTS_UPDATE_PUBKEY ""
+#endif
 
 namespace bots::setup {
 
 namespace {
 
 constexpr const char* kUpdateUrl = BOTS_UPDATE_URL;
+constexpr const char* kPublicKey = BOTS_UPDATE_PUBKEY;
+#ifdef BOTS_ALLOW_HTTP_UPDATE_URL
+constexpr bool kAllowHttp = true;  // a local test server only; CMake's BOTS_ALLOW_HTTP_UPDATE_URL, off in releases
+#else
+constexpr bool kAllowHttp = false;
+#endif
 constexpr int kTimeoutMs = 5000;
 constexpr size_t kMaxBody = 1 << 20;
 
 bool IsHttpUrl(const std::string& url) { return url.starts_with("https://") || url.starts_with("http://"); }
+
+// The address the releases file is read from: https, or http when the build allows it (tests).
+bool IsUpdateUrl(const std::string& url) { return url.starts_with("https://") || (kAllowHttp && url.starts_with("http://")); }
 
 #if defined(_WIN32)
 std::wstring Widen(const std::string& s) {
@@ -94,7 +108,15 @@ std::string Fetch(const std::string& url, std::string& error) {
     error = "bad address";
     return {};
   }
-  std::string cmd = "curl -fsSL --max-time " + std::to_string(kTimeoutMs / 1000) + " '" + url + "' 2>/dev/null";
+#if defined(__APPLE__)
+  const char* curl = "/usr/bin/curl";
+#else
+  const char* curl = "curl";
+#endif
+  const char* proto = url.starts_with("https://") ? "=https" : "=http";
+  std::string cmd = std::string(curl) + " -fsSL --proto " + proto + " --proto-redir " + proto + " --max-filesize " +
+                    std::to_string(kMaxBody) + " --max-time " + std::to_string(kTimeoutMs / 1000) + " '" + url +
+                    "' 2>/dev/null";
   FILE* pipe = popen(cmd.c_str(), "r");
   if (!pipe) {
     error = "can't run curl";
@@ -112,79 +134,26 @@ std::string Fetch(const std::string& url, std::string& error) {
 }
 #endif
 
-std::vector<long> VersionNumbers(const std::string& v) {
-  std::vector<long> out;
-  const char* p = v.c_str();
-  if (*p == 'v') ++p;
-  while (*p >= '0' && *p <= '9') {
-    char* end;
-    out.push_back(std::strtol(p, &end, 10));
-    p = end;
-    if (*p != '.') break;
-    ++p;
-  }
-  return out;
-}
-
 }  // namespace
 
 const char* AppVersion() { return BOTS_VERSION; }
 
-bool UpdateCheckAvailable() { return IsHttpUrl(kUpdateUrl) && !VersionNumbers(BOTS_VERSION).empty(); }
+bool UpdateCheckAvailable() { return IsUpdateUrl(kUpdateUrl) && HasVersionNumber(BOTS_VERSION); }
+
+bool SelfUpdateKeyConfigured() {
+  uint8_t key[32];
+  return HexToBytes(kPublicKey, key, 32);
+}
 
 UpdateInfo FetchUpdateInfo() {
-  UpdateInfo info;
-  std::string body = Fetch(kUpdateUrl, info.error);
-  if (!info.error.empty()) return info;
-  info.latest = JsonStringField(body, "latest");
-  info.page = JsonStringField(body, "page");
-  if (VersionNumbers(info.latest).empty()) {
-    info.latest.clear();
-    info.error = "no version in the reply";
-  } else if (!IsHttpUrl(info.page)) {
-    info.page.clear();
+  std::string error;
+  std::string body = Fetch(kUpdateUrl, error);
+  if (!error.empty()) {
+    UpdateInfo info;
+    info.error = error;
+    return info;
   }
-  return info;
-}
-
-bool IsNewerVersion(const std::string& a, const std::string& b) {
-  auto x = VersionNumbers(a), y = VersionNumbers(b);
-  x.resize(std::max(x.size(), y.size()));
-  y.resize(x.size());
-  return x > y;
-}
-
-std::string JsonStringField(const std::string& json, const std::string& key) {
-  int depth = 0;
-  std::string last;  // the most recent string at depth 1
-  bool after_key = false;
-  for (size_t i = 0; i < json.size(); ++i) {
-    char c = json[i];
-    if (c == '"') {
-      std::string s;
-      for (++i; i < json.size() && json[i] != '"'; ++i) {
-        if (json[i] == '\\' && i + 1 < json.size()) ++i;  // \" \\ \/ as the character; others are not expected
-        s += json[i];
-      }
-      if (depth != 1) continue;
-      if (after_key) {
-        if (last == key) return s;
-        after_key = false;
-      } else {
-        last = s;
-      }
-    } else if (c == ':') {
-      after_key = depth == 1;
-    } else if (c == ',') {
-      after_key = false;
-    } else if (c == '{' || c == '[') {
-      ++depth;
-      after_key = false;
-    } else if (c == '}' || c == ']') {
-      --depth;
-    }
-  }
-  return {};
+  return ParseReleases(body, kUpdateUrl, SelfUpdateKeyConfigured() ? kPublicKey : "");
 }
 
 void OpenInBrowser(const std::string& url) {

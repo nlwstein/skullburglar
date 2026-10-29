@@ -34,6 +34,8 @@ VIAddVersionKey "LegalCopyright" ""
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 !include "FileFunc.nsh"
+!insertmacro GetParameters
+!insertmacro GetOptions
 
 !define MUI_ICON "skullburglar.ico"
 !define MUI_UNICON "skullburglar.ico"
@@ -56,12 +58,24 @@ VIAddVersionKey "LegalCopyright" ""
 !insertmacro MUI_LANGUAGE "English"
 
 ; The game must not be running while its files are replaced: a running exe can't be opened for writing.
+; Silent (/S, as the launcher's "Update now" runs it): no message box; the launcher is quitting as this starts, so wait
+; for it up to half a minute, then give up with an error code (2).
 !macro WaitForGameClosed
   ${If} ${FileExists} "$INSTDIR\bots.exe"
+    StrCpy $2 0
     retry:
     ClearErrors
     FileOpen $0 "$INSTDIR\bots.exe" a
     ${If} ${Errors}
+      ${If} ${Silent}
+        IntOp $2 $2 + 1
+        ${If} $2 > 60
+          SetErrorLevel 2
+          Abort
+        ${EndIf}
+        Sleep 500
+        Goto retry
+      ${EndIf}
       MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "${APP} is running. Close it, then choose Retry." IDRETRY retry
       Abort
     ${EndIf}
@@ -79,8 +93,24 @@ VIAddVersionKey "LegalCopyright" ""
   RMDir /r "$INSTDIR\pipelines"
 !macroend
 
+; The launcher's "Update now" runs this setup with /UPDATE over the folder it runs from. Only a folder this setup made
+; (it has uninstall.exe) is accepted: an unzipped copy, or any other folder, must never have its program files
+; deleted by an update. Error level 3.
+!macro RequireOwnInstallForUpdate
+  ${GetParameters} $R0
+  ${GetOptions} $R0 "/UPDATE" $R1
+  ${IfNot} ${Errors}
+    ${IfNot} ${FileExists} "$INSTDIR\uninstall.exe"
+      SetErrorLevel 3
+      Abort
+    ${EndIf}
+  ${EndIf}
+!macroend
+
 Section "Install"
   SetShellVarContext current
+  ; Before SetOutPath, which creates the folder: a bad /D= must leave no empty folder behind.
+  !insertmacro RequireOwnInstallForUpdate
   SetOutPath "$INSTDIR"
   !insertmacro WaitForGameClosed
   !insertmacro RemoveProgramFiles
@@ -103,7 +133,36 @@ Section "Install"
   WriteRegDWORD HKCU "${UNINSTKEY}" "NoRepair" 1
   ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
   WriteRegDWORD HKCU "${UNINSTKEY}" "EstimatedSize" $0
+
+  ; "Update now" in the launcher runs this setup silently with /UPDATE: the finish page (which would start the game)
+  ; doesn't show then, so start it here.
+  ${GetParameters} $R0
+  ${GetOptions} $R0 "/UPDATE" $R1
+  ${IfNot} ${Errors}
+    ; The launcher leaves this note before it starts the setup, and a note still there at its next start means the update
+    ; didn't finish: remove it now that it did.
+    Delete "$LOCALAPPDATA\bots-recomp\update-pending.txt"
+    Exec '"$INSTDIR\bots.exe"'
+  ${EndIf}
 SectionEnd
+
+; A silent update that stops (the game wouldn't close in half a minute, no room, an error): the launcher already quit, so
+; start the old version again if its files are still there. The note stays, and the launcher says at its next start that
+; the update didn't finish. Not when bots.exe is still running (it can't be opened for writing): that is the failure
+; where the game never closed, and starting it again would run a second copy.
+Function .onInstFailed
+  ${GetParameters} $R0
+  ${GetOptions} $R0 "/UPDATE" $R1
+  ${IfNot} ${Errors}
+  ${AndIf} ${FileExists} "$INSTDIR\bots.exe"
+    ClearErrors
+    FileOpen $0 "$INSTDIR\bots.exe" a
+    ${IfNot} ${Errors}
+      FileClose $0
+      Exec '"$INSTDIR\bots.exe"'
+    ${EndIf}
+  ${EndIf}
+FunctionEnd
 
 Section "Uninstall"
   SetShellVarContext current

@@ -3,34 +3,30 @@
 // neither and never check. The launcher fetches the file in the background when it opens (unless the check_updates
 // setting is off) and, when a newer version is out, offers to open its download page in the browser.
 //
-// The file is JSON; the check reads two top-level strings from it:
-//   {"latest": "0.4.0", "page": "https://.../", ...}
+// The file is JSON (update_logic.h reads it): "latest" and "page" at the top, and per version the packages with their
+// size and SHA-256, which "Update now" (update_install.h) downloads, and an Ed25519 signature over them that must
+// verify against the key compiled into this build:
+//   {"latest": "0.4.0", "page": "https://.../", "versions": [{"version": "0.4.0", "signature": "<128 hex>", "downloads": {...}}]}
 #pragma once
 
 #include <string>
+
+#include "update_logic.h"
 
 namespace bots::setup {
 
 // This build's version ("0.4.0"), or "dev".
 const char* AppVersion();
 
-// True when this build knows where to look (a release build).
+// True when this build knows where to look (a release build; the address must be https).
 bool UpdateCheckAvailable();
 
-struct UpdateInfo {
-  std::string latest;  // newest released version, empty when the check failed
-  std::string page;    // its download page
-  std::string error;   // why the check failed, for the log
-};
+// True when this build carries the update signing key (BOTS_UPDATE_PUBKEY, packaging/update-pubkey.txt). Without it no
+// release counts as signed, so "Update now" never shows and only "Download it" does.
+bool SelfUpdateKeyConfigured();
 
 // Fetches and reads the releases file. Blocks for up to a few seconds; run it off the UI thread.
 UpdateInfo FetchUpdateInfo();
-
-// True when version `a` is newer than `b` (dotted numbers; a suffix such as "-dev.abc" is ignored).
-bool IsNewerVersion(const std::string& a, const std::string& b);
-
-// Reads a top-level "key": "value" string from a JSON document; empty when missing.
-std::string JsonStringField(const std::string& json, const std::string& key);
 
 // Opens an http(s) address in the default browser.
 void OpenInBrowser(const std::string& url);
