@@ -29,6 +29,8 @@ pub struct Compiled {
     pub wgsl: String,
     /// Reads scene depth (DepthBiasedAlpha): needs the depth texture.
     pub soft: bool,
+    /// Reads the scene colour behind the pixel (DestColor): the renderer must bind a copy of the scene target.
+    pub dest: bool,
     pub unknown: Vec<String>,
 }
 
@@ -71,6 +73,7 @@ struct Cg<'a> {
     memo: HashMap<i64, (String, u8)>,
     textures: Vec<String>,
     soft: bool,
+    dest: bool,
     unknown: Vec<String>,
     n: usize,
 }
@@ -79,6 +82,12 @@ struct Cg<'a> {
 fn nodes_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("BOTS_N1_PARTICLE_NODES").map_or(true, |v| v != "0"))
+}
+
+/// DestColor needs the scene copy; `BOTS_N1_DEST_COLOR=0` leaves it on the unknown-expression fallback.
+pub fn dest_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BOTS_N1_DEST_COLOR").map_or(true, |v| v != "0"))
 }
 
 fn flt(x: f64) -> String {
@@ -250,6 +259,14 @@ impl<'a> Cg<'a> {
                 self.soft = true;
                 (self.let_("vec4<f32>(i.scene_w)".into()), 1)
             }
+            // DestColor (B-273): the scene colour already drawn at this pixel, read from the copy the renderer takes
+            // before the sprite pass (`dest_color`, group 0 binding 2). FakePostProcess_Border_WIPv2_MAT, the QTE
+            // button ring, adds `DestColor * (60, 40, 40) * mask`: with the old constant 1.0 the ring was a huge solid
+            // glow. BOTS_N1_DEST_COLOR=0 restores the fallback.
+            "DestColor" if dest_on() => {
+                self.dest = true;
+                (self.let_("textureLoad(dest_color, vec2<i32>(i.screen * vec2<f32>(u.vw, u.vh)), 0)".into()), 4)
+            }
             "Floor" | "Frac" => {
                 let (a, w) = self.input(e, "Input").unwrap_or_else(|| (self.let_("vec4<f32>(0.0)".into()), 1));
                 (self.let_(format!("{}({a})", if class == "Floor" { "floor" } else { "fract" })), w)
@@ -402,7 +419,7 @@ pub fn compile_with(mat: &Value, tex_info: &dyn Fn(&str) -> TexInfo) -> Compiled
     let empty = Value::Object(Default::default());
     let ex = mat.get("expressions").unwrap_or(&empty);
     let ov = mat.get("overrides").unwrap_or(&empty);
-    let mut cg = Cg { ex, tex_info, ov, out: String::new(), memo: HashMap::new(), textures: Vec::new(), soft: false, unknown: Vec::new(), n: 0 };
+    let mut cg = Cg { ex, tex_info, ov, out: String::new(), memo: HashMap::new(), textures: Vec::new(), soft: false, dest: false, unknown: Vec::new(), n: 0 };
     let root = |cg: &mut Cg, k: &str| -> Option<(String, u8)> {
         let inp = &props[k];
         let obj = inp["Expression"]["obj"].as_i64()?;
@@ -443,7 +460,7 @@ pub fn compile_with(mat: &Value, tex_info: &dyn Fn(&str) -> TexInfo) -> Compiled
     let mut wgsl = String::from("fn material(i: MatIn) -> vec4<f32> {\n");
     wgsl.push_str(&cg.out);
     wgsl.push_str(&format!("    return vec4<f32>({rgb}, {a});\n}}\n"));
-    Compiled { blend, two_sided, clip, textures: cg.textures, wgsl, soft: cg.soft, unknown: cg.unknown }
+    Compiled { blend, two_sided, clip, textures: cg.textures, wgsl, soft: cg.soft, dest: cg.dest, unknown: cg.unknown }
 }
 
 /// Compile every material in the assets (parents are followed for instances).
@@ -559,6 +576,19 @@ mod tests {
         let c = one("MaterialExpressionCameraVector", serde_json::json!({}));
         assert!(c.unknown.is_empty(), "{:?}", c.unknown);
         assert!(c.wgsl.contains("-u.fwd.x"), "{}", c.wgsl);
+    }
+
+    #[test]
+    fn dest_color_reads_the_scene_copy() {
+        let mat = serde_json::json!({
+            "props": {"BlendMode": "BLEND_Additive", "EmissiveColor": {"Expression": {"obj": 1}}},
+            "expressions": {"1": {"class": "MaterialExpressionDestColor", "props": {}}}
+        });
+        let c = compile(&mat);
+        assert!(c.unknown.is_empty() && c.dest, "{:?}", c.unknown);
+        assert!(c.wgsl.contains("textureLoad(dest_color"), "{}", c.wgsl);
+        let m = crate::particles::shader::module_source(&c, false);
+        assert!(m.contains("@binding(2) var dest_color"), "module declares the copy");
     }
 
     #[test]

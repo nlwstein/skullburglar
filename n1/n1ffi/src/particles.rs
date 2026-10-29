@@ -60,6 +60,8 @@ pub struct LoadedMat {
     pub sprite_spv: Vec<u32>,
     pub mesh_spv: Vec<u32>,
     pub unknown: Vec<String>,
+    /// Reads the scene colour copy (DestColor).
+    pub dest: bool,
 }
 
 enum Job {
@@ -268,6 +270,7 @@ fn load_material(db: &AssetDb, path: &str) -> Result<LoadedMat> {
         textures,
         sprite_spv: sh.sprite_spv,
         mesh_spv: sh.mesh_spv,
+        dest: c.dest,
         unknown: c.unknown,
     })
 }
