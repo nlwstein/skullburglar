@@ -53,7 +53,8 @@ case $PLATFORM in android)
     exit 1
   fi
   step build
-  SDK=out/sdk VERSION=$VERSION tools/android/build.sh build apk
+  # PACKAGE here is the registry package; tools/android/build.sh reads PACKAGE as the application id.
+  (unset PACKAGE; SDK=out/sdk VERSION=$VERSION tools/android/build.sh build apk)
   rm -f out/android/release.keystore
   step upload
   name=skullburglar-$VERSION-android.apk
