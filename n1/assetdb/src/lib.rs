@@ -437,19 +437,19 @@ impl AssetDb {
             .collect();
         order.sort_by_key(|n| !pref.contains(*n));
         let want = want.filter(|_| std::env::var_os("ASSETDB_CLASSAWARE").is_none_or(|v| v != "0"));
-        let mut first = None;
-        for name in order {
-            let pkg = self.package(name)?;
-            let map = self.path_map(name, &pkg);
-            let found = map.get(&(textures, path.to_string())).copied();
-            if let Some(i) = found {
-                if want.is_none_or(|w| pkg.class_name(i) == w) {
-                    return Ok(Some((pkg, i)));
-                }
-                first.get_or_insert((pkg, i));
-            }
-        }
-        Ok(first)
+        pick_class(
+            want,
+            order.into_iter().filter_map(|name| {
+                let found = (|| -> Result<Option<(Arc<Package>, i32)>> {
+                    let pkg = self.package(name)?;
+                    let map = self.path_map(name, &pkg);
+                    let i = map.get(&(textures, path.to_string())).copied();
+                    Ok(i.map(|i| (pkg, i)))
+                })();
+                found.transpose()
+            }),
+            |(pkg, i), class| pkg.class_name(*i) == class,
+        )
     }
 
     /// LOD0 of a StaticMesh by object path; `None` when no package has it (or it fails to parse).
@@ -1488,4 +1488,67 @@ fn decode_light(b: &[u8]) -> Result<HashMap<String, Arc<Vec<[f32; 3]>>>> {
         out.insert(k, Arc::new(v));
     }
     Ok(out)
+}
+
+/// The first hit whose class is `want`, else the first hit (none wanted: the first). Hits are taken lazily, so packages
+/// after a match are never opened.
+fn pick_class<T>(
+    want: Option<&str>,
+    hits: impl Iterator<Item = Result<T>>,
+    class_is: impl Fn(&T, &str) -> bool,
+) -> Result<Option<T>> {
+    let mut first = None;
+    for hit in hits {
+        let hit = hit?;
+        if want.is_none_or(|w| class_is(&hit, w)) {
+            return Ok(Some(hit));
+        }
+        first.get_or_insert(hit);
+    }
+    Ok(first)
+}
+
+#[cfg(test)]
+mod pick_tests {
+    use super::pick_class;
+
+    // (package, class of the path's export there): the shapes of the 61509 helicopter, where a level package holds a
+    // StaticMesh copy of the path and the vehicle package holds the SkeletalMesh.
+    fn hits(v: &[(&'static str, &'static str)]) -> impl Iterator<Item = anyhow::Result<(&'static str, &'static str)>> {
+        v.to_vec().into_iter().map(Ok)
+    }
+    fn is(h: &(&str, &str), c: &str) -> bool {
+        h.1 == c
+    }
+
+    #[test]
+    fn picks_the_wanted_class_over_an_earlier_package() {
+        let v = [("level_a", "StaticMesh"), ("vehicles", "SkeletalMesh")];
+        let got = pick_class(Some("SkeletalMesh"), hits(&v), is).unwrap();
+        assert_eq!(got, Some(("vehicles", "SkeletalMesh")));
+    }
+
+    #[test]
+    fn no_class_match_falls_back_to_the_first_hit() {
+        let v = [("level_a", "StaticMesh"), ("level_b", "StaticMesh")];
+        assert_eq!(pick_class(Some("SkeletalMesh"), hits(&v), is).unwrap(), Some(("level_a", "StaticMesh")));
+    }
+
+    #[test]
+    fn no_wanted_class_is_the_first_hit_and_nothing_is_none() {
+        let v = [("level_a", "Texture2D"), ("level_b", "StaticMesh")];
+        assert_eq!(pick_class(None, hits(&v), is).unwrap(), Some(("level_a", "Texture2D")));
+        assert_eq!(pick_class(Some("StaticMesh"), hits(&[]), is).unwrap(), None);
+    }
+
+    #[test]
+    fn stops_at_the_first_match() {
+        let seen = std::cell::Cell::new(0);
+        let it = ["StaticMesh", "SkeletalMesh", "SkeletalMesh"].into_iter().map(|c| {
+            seen.set(seen.get() + 1);
+            anyhow::Ok(("p", c))
+        });
+        assert!(pick_class(Some("SkeletalMesh"), it, is).unwrap().is_some());
+        assert_eq!(seen.get(), 2);
+    }
 }
