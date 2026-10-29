@@ -59,6 +59,7 @@
 #include "setup/app_paths.h"
 #include "setup/settings.h"
 #include "setup/setup_dialog.h"
+#include "fps_counter.h"
 #include "shader_progress.h"
 
 #if defined(_WIN32)
@@ -310,6 +311,7 @@ class BotsApp : public rex::ReXApp {
           return runtime() ? static_cast<rex::input::InputSystem*>(runtime()->input_system())
                            : nullptr;
         });
+    if (rex::cvar::Query<bool>("fps_counter")) new FpsCounterDialog(drawer);  // B-279; lives for the whole run
   }
 
   // The SDK's achievement toast keeps an ImGui dialog registered while it shows, which puts the presenter in

@@ -34,6 +34,9 @@ REXCVAR_DEFINE_BOOL(present_vsync, true, "bots",
                     "Wait for the display's refresh to show each frame (Vulkan presentation): no tearing. Off presents "
                     "immediately, with the lowest latency, and can tear. (Not `vsync`, the emulated console's vblank.)");
 
+REXCVAR_DEFINE_BOOL(fps_counter, false, "bots",
+                    "Show the frame rate, frame time and renderer in a corner of the screen (fps_counter.h)");
+
 namespace bots::setup {
 namespace fs = std::filesystem;
 
@@ -65,6 +68,10 @@ std::vector<Setting> Catalog() {
   s.push_back({"framerate_limit", "", "Frame rate limit", "",
                {{"30", "30 fps"}, {"60", "60 fps (recommended)"}, {"0", "Unlimited"}}});
   s.push_back({"present_vsync", "", "VSync", "Off has the lowest latency but can tear.", {}});
+  s.push_back({"fps_counter", "", "Show FPS counter",
+               "A small readout in the top-left corner: frames per second, milliseconds per frame, and which renderer "
+               "is drawing. Handy for bug reports. Takes effect the next time the game starts.",
+               {}});
   s.push_back({"check_updates", "", "Check for new versions",
                "When the launcher opens, look online for a newer Skullburglar and offer its download page.", {}});
   s.push_back({"pad_prompts", "", "Controller button prompts",
