@@ -170,10 +170,7 @@ pub struct ParticleSystem {
 }
 
 fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 fn tex_format(f: TexFmt) -> scenekit::TexFormat {
@@ -189,11 +186,7 @@ fn tex_format(f: TexFmt) -> scenekit::TexFormat {
 
 /// Texture description for the renderer's uploader. `raw`: upload an sRGB colour texture without the sRGB view, for a
 /// particle shader that applies Xenos's curve to the stored values (`pwl_raw`).
-pub fn tex_desc<'a>(
-    t: &'a TextureAsset,
-    mips: &'a [&'a [u8]],
-    raw: bool,
-) -> scenekit::TextureDesc<'a> {
+pub fn tex_desc<'a>(t: &'a TextureAsset, mips: &'a [&'a [u8]], raw: bool) -> scenekit::TextureDesc<'a> {
     scenekit::TextureDesc {
         format: tex_format(t.fmt),
         srgb: t.srgb && !t.normal && !raw,
@@ -217,23 +210,14 @@ pub struct PShaders {
 
 fn particle_pwl() -> bool {
     static PWL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *PWL.get_or_init(|| {
-        std::env::var("BOTS_N1_PARTICLE_PWL")
-            .map(|v| v != "0")
-            .unwrap_or(true)
-    })
+    *PWL.get_or_init(|| std::env::var("BOTS_N1_PARTICLE_PWL").map(|v| v != "0").unwrap_or(true))
 }
 
 /// G6: particle colour textures that take Xenos's curve are uploaded raw and decoded from the stored value, as the port
 /// does, instead of through the sRGB view plus a `pow` re-encode (`BOTS_N1_PARTICLE_PWL_RAW=0`: the B-229 way).
 pub fn pwl_raw() -> bool {
     static RAW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *RAW.get_or_init(|| {
-        particle_pwl()
-            && std::env::var("BOTS_N1_PARTICLE_PWL_RAW")
-                .map(|v| v != "0")
-                .unwrap_or(true)
-    })
+    *RAW.get_or_init(|| particle_pwl() && std::env::var("BOTS_N1_PARTICLE_PWL_RAW").map(|v| v != "0").unwrap_or(true))
 }
 
 /// Whether a particle texture is uploaded raw (`tex_desc`'s `raw`): exactly the textures `tex_info` gives the curve.
@@ -246,19 +230,13 @@ pub fn tex_raw(t: &TextureAsset) -> bool {
 pub fn tex_info(db: &AssetDb, t: &str) -> matprog::TexInfo {
     let pwl = particle_pwl();
     match db.texture_meta(t) {
-        Some(m) => matprog::TexInfo {
-            unpack: m.unpack,
-            pwl: pwl && m.srgb && !m.normal,
-            raw: pwl_raw(),
-        },
+        Some(m) => matprog::TexInfo { unpack: m.unpack, pwl: pwl && m.srgb && !m.normal, raw: pwl_raw() },
         None => matprog::TexInfo::default(),
     }
 }
 
 fn compile_material(db: &AssetDb, path: &str) -> Result<(matprog::Compiled, PShaders)> {
-    let j = db
-        .particle_material_json(path)
-        .ok_or_else(|| anyhow!("no material graph"))?;
+    let j = db.particle_material_json(path).ok_or_else(|| anyhow!("no material graph"))?;
     let mut c = matprog::compile_with(&j, &|t| tex_info(db, t));
     let sprite_spv = shaders::spirv(&shader::module_source(&c, false))?;
     // Mesh particles are drawn inside the opaque pass, where the depth buffer can't be sampled.
@@ -272,15 +250,7 @@ fn compile_material(db: &AssetDb, path: &str) -> Result<(matprog::Compiled, PSha
         matprog::Blend::Modulate => Blend::Modulate,
     };
     let two_sided = c.two_sided;
-    Ok((
-        c,
-        PShaders {
-            sprite_spv,
-            mesh_spv,
-            blend,
-            two_sided,
-        },
-    ))
+    Ok((c, PShaders { sprite_spv, mesh_spv, blend, two_sided }))
 }
 
 /// Shaders only (no textures): what the startup step needs to build a particle material's pipelines.
@@ -312,9 +282,7 @@ impl ParticleSystem {
             .spawn(move || {
                 while let Ok(job) = jobs.recv() {
                     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match job {
-                        Job::Mat(h, p) => {
-                            Done::Mat(h, load_material(&d, &p).map_err(|e| format!("{p}: {e:#}")))
-                        }
+                        Job::Mat(h, p) => Done::Mat(h, load_material(&d, &p).map_err(|e| format!("{p}: {e:#}"))),
                         Job::Mesh(h, p) => Done::Mesh(h, d.mesh(&p)),
                     }));
                     match r {
@@ -415,13 +383,8 @@ impl ParticleSystem {
 
     /// Materials and meshes still loading (preloaded or not) and finished loads not taken in yet.
     pub fn pending(&self) -> u32 {
-        (self
-            .mat_state
-            .iter()
-            .chain(&self.mesh_state)
-            .filter(|s| matches!(s, St::Loading))
-            .count()
-            + self.queue.len()) as u32
+        (self.mat_state.iter().chain(&self.mesh_state).filter(|s| matches!(s, St::Loading)).count() + self.queue.len())
+            as u32
     }
 
     /// The next `prepare`'s emitters (copied; used once).
@@ -438,12 +401,7 @@ impl ParticleSystem {
 
     /// Takes finished loads into the renderer (at most `budget` per call), then builds this frame's instances.
     /// Applies up to `budget` finished loads (stops early at `deadline`); returns how many.
-    pub fn pump_until(
-        &mut self,
-        r: &mut Renderer,
-        budget: usize,
-        deadline: Option<std::time::Instant>,
-    ) -> usize {
+    pub fn pump_until(&mut self, r: &mut Renderer, budget: usize, deadline: Option<std::time::Instant>) -> usize {
         while let Ok(d) = self.rx.try_recv() {
             self.queue.push_back(d);
         }
@@ -452,17 +410,12 @@ impl ParticleSystem {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 break;
             }
-            let Some(d) = self.queue.pop_front() else {
-                break;
-            };
+            let Some(d) = self.queue.pop_front() else { break };
             n += 1;
             match d {
                 Done::Mat(h, Ok(m)) => {
                     if self.log && !m.unknown.is_empty() {
-                        eprintln!(
-                            "n1ffi: particle material {} has unknown expressions {:?}",
-                            m.name, m.unknown
-                        );
+                        eprintln!("n1ffi: particle material {} has unknown expressions {:?}", m.name, m.unknown);
                     }
                     match r.pmat_add(&m) {
                         Ok(id) => self.mat_state[h as usize] = St::Ready(id),
@@ -491,13 +444,7 @@ impl ParticleSystem {
         n
     }
 
-    pub fn prepare(
-        &mut self,
-        r: &mut Renderer,
-        view_proj: &[f32; 16],
-        eye: [f32; 3],
-        budget: usize,
-    ) -> PFrame {
+    pub fn prepare(&mut self, r: &mut Renderer, view_proj: &[f32; 16], eye: [f32; 3], budget: usize) -> PFrame {
         self.pump_until(r, budget, None);
         let mut pf = PFrame::default();
         let col = |c: usize| {
@@ -518,11 +465,7 @@ impl ParticleSystem {
                 St::Idle => {}
             }
         }
-        st.meshes_ready = self
-            .mesh_state
-            .iter()
-            .filter(|s| matches!(s, St::Ready(_)))
-            .count() as u32;
+        st.meshes_ready = self.mesh_state.iter().filter(|s| matches!(s, St::Ready(_))).count() as u32;
         if !self.enabled || self.raw.is_empty() {
             self.raw.clear();
             self.rows.clear();
@@ -531,9 +474,7 @@ impl ParticleSystem {
         }
         // Debug: BOTS_N1_PARTICLE_SKIP=a,b skips emitters whose material path contains one of the words;
         // BOTS_N1_PARTICLE_ONLY=a keeps only those.
-        let skip: Vec<String> = std::env::var("BOTS_N1_PARTICLE_SKIP")
-            .map(|v| v.split(',').map(str::to_string).collect())
-            .unwrap_or_default();
+        let skip: Vec<String> = std::env::var("BOTS_N1_PARTICLE_SKIP").map(|v| v.split(',').map(str::to_string).collect()).unwrap_or_default();
         let only = std::env::var("BOTS_N1_PARTICLE_ONLY").ok();
         // Which emitters can be drawn now; the rest start their loads.
         let mut order: Vec<(f32, usize, u32, u32)> = Vec::new();
@@ -541,16 +482,8 @@ impl ParticleSystem {
             if e.count == 0 || e.row_floats < 15 {
                 continue;
             }
-            let mp = self
-                .mat_paths
-                .get(e.material as usize)
-                .map(|x| x.as_str())
-                .unwrap_or("");
-            if skip
-                .iter()
-                .any(|w| !w.is_empty() && mp.contains(w.as_str()))
-                || only.as_ref().is_some_and(|w| !mp.contains(w.as_str()))
-            {
+            let mp = self.mat_paths.get(e.material as usize).map(|x| x.as_str()).unwrap_or("");
+            if skip.iter().any(|w| !w.is_empty() && mp.contains(w.as_str())) || only.as_ref().is_some_and(|w| !mp.contains(w.as_str())) {
                 continue;
             }
             let mat = match self.mat_state.get(e.material as usize) {
@@ -577,9 +510,7 @@ impl ParticleSystem {
                         self.lazy += 1;
                         let h = e.mesh as usize;
                         scenekit::lazy_log("particle mesh", &self.mesh_paths[h]);
-                        let _ = self
-                            .tx
-                            .send(Job::Mesh(h as u32, self.mesh_paths[h].clone()));
+                        let _ = self.tx.send(Job::Mesh(h as u32, self.mesh_paths[h].clone()));
                         self.mesh_state[h] = St::Loading;
                         st.skipped_emitters += 1;
                         continue;
@@ -591,9 +522,7 @@ impl ParticleSystem {
                 }
             }
             let o = [e.origin[0], e.origin[2], e.origin[1]];
-            let d2 = (o[0] - pf.pos[0]).powi(2)
-                + (o[1] - pf.pos[1]).powi(2)
-                + (o[2] - pf.pos[2]).powi(2);
+            let d2 = (o[0] - pf.pos[0]).powi(2) + (o[1] - pf.pos[1]).powi(2) + (o[2] - pf.pos[2]).powi(2);
             order.push((d2, i, mat, mesh));
         }
         // Keep the nearest emitters within the sprite cap; draw far to near.
@@ -641,23 +570,15 @@ impl ParticleSystem {
         // fireball last and hid the blood. The rocket's trail, whose bounds reach back along its path, sorts in front.
         // BOTS_N1_PARTICLE_SORT=0 or debug bit 1024 ("hybrid n1debug 1024") keeps the old key.
         static UE3_SORT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let ue3_sort = *UE3_SORT.get_or_init(|| {
-            std::env::var("BOTS_N1_PARTICLE_SORT")
-                .map(|v| v != "0")
-                .unwrap_or(true)
-        }) && r.debug_bits & 1024 == 0;
+        let ue3_sort = *UE3_SORT.get_or_init(|| std::env::var("BOTS_N1_PARTICLE_SORT").map(|v| v != "0").unwrap_or(true))
+            && r.debug_bits & 1024 == 0;
         let mut kept: Vec<(f32, usize, u32, u32)> = kept
             .into_iter()
             .map(|(d2, i, mat, mesh)| {
                 let s = self.raw[i].sort_origin;
                 if ue3_sort && s[3] != 0.0 {
                     let o = [s[0] - pf.pos[0], s[2] - pf.pos[1], s[1] - pf.pos[2]];
-                    (
-                        o[0] * pf.fwd[0] + o[1] * pf.fwd[1] + o[2] * pf.fwd[2],
-                        i,
-                        mat,
-                        mesh,
-                    )
+                    (o[0] * pf.fwd[0] + o[1] * pf.fwd[1] + o[2] * pf.fwd[2], i, mat, mesh)
                 } else {
                     (d2, i, mat, mesh)
                 }
@@ -668,32 +589,16 @@ impl ParticleSystem {
         // per that many frames.
         static CENSUS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
         static FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let every = *CENSUS.get_or_init(|| {
-            std::env::var("BOTS_N1_PARTICLE_CENSUS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0)
-        });
-        let census =
-            every > 0 && FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % every == 0;
+        let every = *CENSUS.get_or_init(|| std::env::var("BOTS_N1_PARTICLE_CENSUS").ok().and_then(|v| v.parse().ok()).unwrap_or(0));
+        let census = every > 0 && FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % every == 0;
         if census {
-            let t = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
-            eprintln!(
-                "n1ffi: census frame, {} emitters drawn, unix {t:.1}",
-                kept.len()
-            );
+            let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+            eprintln!("n1ffi: census frame, {} emitters drawn, unix {t:.1}", kept.len());
         }
         for (_, i, mat, mesh) in kept {
             let e = self.raw[i];
             let d = &mut self.scratch;
-            d.kind = if e.kind == 1 {
-                Kind::Mesh
-            } else {
-                Kind::Sprite
-            };
+            d.kind = if e.kind == 1 { Kind::Mesh } else { Kind::Sprite };
             d.sub_images = [e.sub_h.max(1), e.sub_v.max(1)];
             d.align = scenefmt::particles::parse_align("", e.align as i64);
             d.sprites.clear();
@@ -707,19 +612,13 @@ impl ParticleSystem {
             let sscale = sprite_scale(&e.transform);
             for k in 0..e.count as usize {
                 let at = base + k * rf;
-                let Some(row) = self.rows.get(at..at + rf) else {
-                    break;
-                };
+                let Some(row) = self.rows.get(at..at + rf) else { break };
                 push_particle(d, row, e.local_space != 0, l2w, e.sub_method as i64);
                 if e.kind == 0 && sscale != [1.0, 1.0] {
                     if let Some(s) = d.sprites.last_mut() {
                         // PSA_Square takes Y from the scaled X, as UE3 does after scaling.
                         s[8] *= sscale[0];
-                        s[9] = if e.align != 1 && e.align != 2 {
-                            s[8]
-                        } else {
-                            s[9] * sscale[1]
-                        };
+                        s[9] = if e.align != 1 && e.align != 2 { s[8] } else { s[9] * sscale[1] };
                     }
                 }
                 // B-236 debug A/B (skullburglar "hybrid quad ... v<k>" or "hybrid n1variant <k>", passed in `pad1`):
@@ -743,42 +642,21 @@ impl ParticleSystem {
                     }
                 }
                 // Rows are the game's memory: never hand the GPU a non-finite or absurd instance.
-                let arr = if e.kind == 1 {
-                    &mut d.meshes
-                } else {
-                    &mut d.sprites
-                };
+                let arr = if e.kind == 1 { &mut d.meshes } else { &mut d.sprites };
                 if arr.last().is_some_and(|x| !sane_instance(x, e.kind == 1)) {
                     arr.pop();
                     st.bad_rows += 1;
                 }
             }
             if self.log && (e.kind == 1 || e.align == 2) {
-                let first = if e.kind == 1 {
-                    d.meshes.first().map(|m| m.to_vec())
-                } else {
-                    d.sprites.first().map(|m| m.to_vec())
-                };
+                let first = if e.kind == 1 { d.meshes.first().map(|m| m.to_vec()) } else { d.sprites.first().map(|m| m.to_vec()) };
                 eprintln!(
                     "n1ffi: emitter kind {} align {} n {} mat {} local {} origin {:?} first {:?}",
-                    e.kind,
-                    e.align,
-                    e.count,
-                    self.mat_paths
-                        .get(e.material as usize)
-                        .map(|s| s.as_str())
-                        .unwrap_or("?"),
-                    e.local_space,
-                    e.origin,
-                    first
+                    e.kind, e.align, e.count, self.mat_paths.get(e.material as usize).map(|s| s.as_str()).unwrap_or("?"), e.local_space, e.origin, first
                 );
             }
             if census {
-                let v: Vec<&[f32; 20]> = if e.kind == 1 {
-                    d.meshes.iter().collect()
-                } else {
-                    d.sprites.iter().collect()
-                };
+                let v: Vec<&[f32; 20]> = if e.kind == 1 { d.meshes.iter().collect() } else { d.sprites.iter().collect() };
                 if !v.is_empty() {
                     let n = v.len() as f32;
                     let mut mean = [0.0f32; 4];
@@ -798,18 +676,7 @@ impl ParticleSystem {
                     }
                     eprintln!(
                         "n1ffi: census kind {} lock {} n {} mat {} col mean {:.2?} max {:.2?} size {:.0} wmin {:.0} scale {:.2?}",
-                        e.kind,
-                        e.lock_axis,
-                        v.len(),
-                        self.mat_paths
-                            .get(e.material as usize)
-                            .map(|s| s.as_str())
-                            .unwrap_or("?"),
-                        mean,
-                        mx,
-                        sz,
-                        wmin,
-                        sscale
+                        e.kind, e.lock_axis, v.len(), self.mat_paths.get(e.material as usize).map(|s| s.as_str()).unwrap_or("?"), mean, mx, sz, wmin, sscale
                     );
                     // Sub-UV emitters: the grid, method, the first particle's payload and the cells n1 picked.
                     if e.kind == 0 && rf > 15 {
@@ -817,14 +684,7 @@ impl ParticleSystem {
                         let s0 = v[0];
                         eprintln!(
                             "n1ffi: census   subuv {}x{} method {} rt {:.3} payload {:?} uv1 {:.3?} uv2 {:.3?} interp {:.3}",
-                            e.sub_h,
-                            e.sub_v,
-                            e.sub_method,
-                            row.get(14).copied().unwrap_or(-1.0),
-                            row.get(15..).unwrap_or(&[]),
-                            &s0[10..12],
-                            &s0[12..14],
-                            s0[7]
+                            e.sub_h, e.sub_v, e.sub_method, row.get(14).copied().unwrap_or(-1.0), row.get(15..).unwrap_or(&[]), &s0[10..12], &s0[12..14], s0[7]
                         );
                     }
                 }
@@ -835,11 +695,7 @@ impl ParticleSystem {
                 (&mut pf.sprites, (e.align == 2) as u8)
             };
             let first = (arr.len() / 20) as u32;
-            let n = if e.kind == 1 {
-                d.meshes.len()
-            } else {
-                d.sprites.len()
-            };
+            let n = if e.kind == 1 { d.meshes.len() } else { d.sprites.len() };
             if n == 0 {
                 continue;
             }
@@ -855,13 +711,7 @@ impl ParticleSystem {
                 st.sprites += n as u32;
             }
             st.emitters += 1;
-            pf.draws.push(PDraw {
-                mat,
-                variant,
-                mesh,
-                first,
-                count: n as u32,
-            });
+            pf.draws.push(PDraw { mat, variant, mesh, first, count: n as u32 });
         }
         st.draws = pf.draws.len() as u32;
         self.raw.clear();
@@ -904,11 +754,7 @@ pub fn sane_instance(x: &[f32; 20], mesh: bool) -> bool {
 pub fn sprite_scale(t: &[f32; 16]) -> [f32; 2] {
     let len = |a: f32, b: f32, c: f32| (a * a + b * b + c * c).sqrt();
     let (x, y) = (len(t[0], t[1], t[2]), len(t[4], t[5], t[6]));
-    if x.is_finite() && y.is_finite() && x > 1.0e-3 && y > 1.0e-3 && x < 1.0e3 && y < 1.0e3 {
-        [x, y]
-    } else {
-        [1.0, 1.0]
-    }
+    if x.is_finite() && y.is_finite() && x > 1.0e-3 && y > 1.0e-3 && x < 1.0e3 && y < 1.0e3 { [x, y] } else { [1.0, 1.0] }
 }
 
 pub fn sprite_fill(e: &N1Emitter, rows: &[f32], view_proj: &[f32; 16]) -> f32 {
@@ -919,9 +765,7 @@ pub fn sprite_fill(e: &N1Emitter, rows: &[f32], view_proj: &[f32; 16]) -> f32 {
     let mut total = 0.0f32;
     for k in 0..e.count as usize {
         let at = e.row_offset as usize + k * rf;
-        let Some(r) = rows.get(at..at + 15) else {
-            break;
-        };
+        let Some(r) = rows.get(at..at + 15) else { break };
         let mut p = [r[0], r[1], r[2]];
         let mut s = r[6].abs().max(r[7].abs());
         if e.local_space != 0 {

@@ -87,11 +87,7 @@ pub struct Outputs<'a> {
 
 impl Outputs<'_> {
     pub fn get(&self, name: &str) -> Option<[f64; 4]> {
-        self.prog
-            .outputs
-            .iter()
-            .position(|n| n == name)
-            .map(|i| self.values[i])
+        self.prog.outputs.iter().position(|n| n == name).map(|i| self.values[i])
     }
 }
 
@@ -129,12 +125,7 @@ fn parse_src(s: &str) -> Result<Src> {
             *o = chars.get(i).map(|&c| comp(c)).transpose()?.unwrap_or(last);
         }
     }
-    Ok(Src {
-        kind,
-        neg,
-        swz: out,
-        given: chars.len(),
-    })
+    Ok(Src { kind, neg, swz: out, given: chars.len() })
 }
 
 fn parse_dest(s: &str, outputs: &mut Vec<String>) -> Result<Dest> {
@@ -146,12 +137,7 @@ fn parse_dest(s: &str, outputs: &mut Vec<String>) -> Result<Dest> {
     }
     let mask_len = mask.len().min(4);
     if let Some(n) = name.strip_prefix('r').and_then(|n| n.parse::<usize>().ok()) {
-        return Ok(Dest {
-            index: n,
-            reg: true,
-            mask: m,
-            mask_len,
-        });
+        return Ok(Dest { index: n, reg: true, mask: m, mask_len });
     }
     let index = match outputs.iter().position(|o| o == name) {
         Some(i) => i,
@@ -160,12 +146,7 @@ fn parse_dest(s: &str, outputs: &mut Vec<String>) -> Result<Dest> {
             outputs.len() - 1
         }
     };
-    Ok(Dest {
-        index,
-        reg: false,
-        mask: m,
-        mask_len,
-    })
+    Ok(Dest { index, reg: false, mask: m, mask_len })
 }
 
 fn parse_fmt(s: &str) -> Result<Fmt> {
@@ -196,14 +177,7 @@ impl Program {
             }
             let (body, paired) = if s.starts_with("/*") {
                 match s.find("*/") {
-                    Some(e)
-                        if s[2..e]
-                            .trim()
-                            .chars()
-                            .all(|c| c.is_ascii_digit() || c == '.') =>
-                    {
-                        (s[e + 2..].trim(), false)
-                    }
+                    Some(e) if s[2..e].trim().chars().all(|c| c.is_ascii_digit() || c == '.') => (s[e + 2..].trim(), false),
                     _ => continue,
                 }
             } else if let Some(r) = s.strip_prefix('+') {
@@ -215,9 +189,7 @@ impl Program {
                 continue;
             }
             let (op, rest) = body.split_once(char::is_whitespace).unwrap_or((body, ""));
-            if matches!(op, "exec" | "exece" | "alloc" | "cnop" | "serialize")
-                || op.starts_with("kill")
-            {
+            if matches!(op, "exec" | "exece" | "alloc" | "cnop" | "serialize") || op.starts_with("kill") {
                 continue;
             }
             let args = split_args(rest);
@@ -229,26 +201,14 @@ impl Program {
                     let (k, v) = a.split_once('=').unwrap_or((a, ""));
                     opts.insert(k, v);
                 }
-                let dest = parse_dest(
-                    args.first()
-                        .ok_or_else(|| anyhow!("fetch without destination"))?,
-                    &mut outputs,
-                )?;
+                let dest = parse_dest(args.first().ok_or_else(|| anyhow!("fetch without destination"))?, &mut outputs)?;
                 let (vtx, stream) = if full {
-                    let vf = args
-                        .get(2)
-                        .ok_or_else(|| anyhow!("vfetch_full without stream"))?;
-                    (
-                        Some(parse_src(&args[1])?),
-                        vf.trim_start_matches("vf").parse::<usize>()?,
-                    )
+                    let vf = args.get(2).ok_or_else(|| anyhow!("vfetch_full without stream"))?;
+                    (Some(parse_src(&args[1])?), vf.trim_start_matches("vf").parse::<usize>()?)
                 } else {
                     (None, 0)
                 };
-                let fmt = parse_fmt(
-                    opts.get("DataFormat")
-                        .ok_or_else(|| anyhow!("fetch without DataFormat"))?,
-                )?;
+                let fmt = parse_fmt(opts.get("DataFormat").ok_or_else(|| anyhow!("fetch without DataFormat"))?)?;
                 code.push(Instr::Fetch(Fetch {
                     full,
                     dest,
@@ -260,22 +220,9 @@ impl Program {
                     integer: opts.get("NumFormat") == Some(&"integer"),
                 }));
             } else {
-                let dest = parse_dest(
-                    args.first()
-                        .ok_or_else(|| anyhow!("{op} without destination"))?,
-                    &mut outputs,
-                )?;
-                let srcs = args
-                    .iter()
-                    .skip(1)
-                    .map(|a| parse_src(a))
-                    .collect::<Result<Vec<_>>>()?;
-                code.push(Instr::Alu(Alu {
-                    op: op.to_string(),
-                    dest,
-                    srcs,
-                    paired,
-                }));
+                let dest = parse_dest(args.first().ok_or_else(|| anyhow!("{op} without destination"))?, &mut outputs)?;
+                let srcs = args.iter().skip(1).map(|a| parse_src(a)).collect::<Result<Vec<_>>>()?;
+                code.push(Instr::Alu(Alu { op: op.to_string(), dest, srcs, paired }));
             }
         }
         if code.is_empty() {
@@ -308,19 +255,7 @@ pub struct Vm<'a> {
 fn is_scalar_op(op: &str) -> bool {
     op.ends_with('s')
         || op.ends_with("sc")
-        || matches!(
-            op,
-            "sin"
-                | "cos"
-                | "log"
-                | "exp"
-                | "rcp"
-                | "rsq"
-                | "maxas"
-                | "adds_prev"
-                | "muls_prev"
-                | "sqrt"
-        )
+        || matches!(op, "sin" | "cos" | "log" | "exp" | "rcp" | "rsq" | "maxas" | "adds_prev" | "muls_prev" | "sqrt")
 }
 
 impl<'a> Vm<'a> {
@@ -345,12 +280,7 @@ impl<'a> Vm<'a> {
         if c.len() < (i + 1) * 4 {
             return [0.0; 4];
         }
-        [
-            c[i * 4] as f64,
-            c[i * 4 + 1] as f64,
-            c[i * 4 + 2] as f64,
-            c[i * 4 + 3] as f64,
-        ]
+        [c[i * 4] as f64, c[i * 4 + 1] as f64, c[i * 4 + 2] as f64, c[i * 4 + 3] as f64]
     }
 
     fn src(&self, s: &Src) -> [f64; 4] {
@@ -368,11 +298,7 @@ impl<'a> Vm<'a> {
     }
 
     fn write(&mut self, d: &Dest, val: [f64; 4], fetch: bool) {
-        let reg = if d.reg {
-            &mut self.r[d.index]
-        } else {
-            &mut self.o[d.index]
-        };
+        let reg = if d.reg { &mut self.r[d.index] } else { &mut self.o[d.index] };
         for i in 0..d.mask_len {
             match d.mask[i] {
                 b'_' => {}
@@ -393,22 +319,16 @@ impl<'a> Vm<'a> {
     }
 
     fn fetch(&self, f: &Fetch, vertex: usize, stream: usize) -> Result<[f64; 4]> {
-        let s = self
-            .streams
-            .get(stream)
-            .ok_or_else(|| anyhow!("fetch from missing stream {stream}"))?;
+        let s = self.streams.get(stream).ok_or_else(|| anyhow!("fetch from missing stream {stream}"))?;
         let base = vertex * s.stride + f.offset_words * 4;
         let bytes = |n: usize| -> Result<&[u8]> {
-            s.data
-                .get(base..base + n)
-                .ok_or_else(|| anyhow!("fetch past the end of stream {stream} (vertex {vertex})"))
+            s.data.get(base..base + n).ok_or_else(|| anyhow!("fetch past the end of stream {stream} (vertex {vertex})"))
         };
         let float = |n: usize| -> Result<[f64; 4]> {
             let b = bytes(4 * n)?;
             let mut v = [0.0, 0.0, 0.0, 1.0];
             for (i, x) in v.iter_mut().enumerate().take(n) {
-                *x =
-                    f32::from_be_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]]) as f64;
+                *x = f32::from_be_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]]) as f64;
             }
             Ok(v)
         };
@@ -423,11 +343,7 @@ impl<'a> Vm<'a> {
                 let mut v = [0.0; 4];
                 for (i, x) in v.iter_mut().enumerate() {
                     let byte = (w >> (8 * i)) & 0xFF;
-                    let sb = if byte > 127 {
-                        byte as i32 - 256
-                    } else {
-                        byte as i32
-                    };
+                    let sb = if byte > 127 { byte as i32 - 256 } else { byte as i32 };
                     *x = if f.integer {
                         if f.signed { sb as f64 } else { byte as f64 }
                     } else if f.signed {
@@ -442,96 +358,34 @@ impl<'a> Vm<'a> {
     }
 
     fn vector(&self, op: &str, a: &[[f64; 4]]) -> Result<[f64; 4]> {
-        let m = |f: &dyn Fn(f64, f64) -> f64| {
-            [
-                f(a[0][0], a[1][0]),
-                f(a[0][1], a[1][1]),
-                f(a[0][2], a[1][2]),
-                f(a[0][3], a[1][3]),
-            ]
-        };
+        let m = |f: &dyn Fn(f64, f64) -> f64| [f(a[0][0], a[1][0]), f(a[0][1], a[1][1]), f(a[0][2], a[1][2]), f(a[0][3], a[1][3])];
         let dot = |n: usize| -> f64 { (0..n).map(|i| a[0][i] * a[1][i]).sum() };
         let need = |n: usize| -> Result<()> {
-            if a.len() < n {
-                bail!("{op}: {} operands, need {n}", a.len())
-            } else {
-                Ok(())
-            }
+            if a.len() < n { bail!("{op}: {} operands, need {n}", a.len()) } else { Ok(()) }
         };
         let flag = |b: bool| if b { 1.0 } else { 0.0 };
         Ok(match op {
-            "mul" => {
-                need(2)?;
-                m(&|x, y| x * y)
-            }
-            "add" => {
-                need(2)?;
-                m(&|x, y| x + y)
-            }
+            "mul" => { need(2)?; m(&|x, y| x * y) }
+            "add" => { need(2)?; m(&|x, y| x + y) }
             "mad" => {
                 need(3)?;
                 [0, 1, 2, 3].map(|i| a[0][i] * a[1][i] + a[2][i])
             }
-            "max" => {
-                need(2)?;
-                m(&f64::max)
-            }
-            "min" => {
-                need(2)?;
-                m(&f64::min)
-            }
-            "dp4" => {
-                need(2)?;
-                [dot(4); 4]
-            }
-            "dp3" => {
-                need(2)?;
-                [dot(3); 4]
-            }
-            "dp2add" => {
-                need(3)?;
-                [a[0][0] * a[1][0] + a[0][1] * a[1][1] + a[2][0]; 4]
-            }
-            "seq" => {
-                need(2)?;
-                m(&|x, y| flag(x == y))
-            }
-            "sne" => {
-                need(2)?;
-                m(&|x, y| flag(x != y))
-            }
-            "sge" => {
-                need(2)?;
-                m(&|x, y| flag(x >= y))
-            }
-            "sgt" => {
-                need(2)?;
-                m(&|x, y| flag(x > y))
-            }
-            "cndeq" => {
-                need(3)?;
-                [0, 1, 2, 3].map(|i| if a[0][i] == 0.0 { a[1][i] } else { a[2][i] })
-            }
-            "cndge" => {
-                need(3)?;
-                [0, 1, 2, 3].map(|i| if a[0][i] >= 0.0 { a[1][i] } else { a[2][i] })
-            }
-            "cndgt" => {
-                need(3)?;
-                [0, 1, 2, 3].map(|i| if a[0][i] > 0.0 { a[1][i] } else { a[2][i] })
-            }
-            "frc" => {
-                need(1)?;
-                a[0].map(|x| x - x.floor())
-            }
-            "trunc" => {
-                need(1)?;
-                a[0].map(f64::trunc)
-            }
-            "floor" => {
-                need(1)?;
-                a[0].map(f64::floor)
-            }
+            "max" => { need(2)?; m(&f64::max) }
+            "min" => { need(2)?; m(&f64::min) }
+            "dp4" => { need(2)?; [dot(4); 4] }
+            "dp3" => { need(2)?; [dot(3); 4] }
+            "dp2add" => { need(3)?; [a[0][0] * a[1][0] + a[0][1] * a[1][1] + a[2][0]; 4] }
+            "seq" => { need(2)?; m(&|x, y| flag(x == y)) }
+            "sne" => { need(2)?; m(&|x, y| flag(x != y)) }
+            "sge" => { need(2)?; m(&|x, y| flag(x >= y)) }
+            "sgt" => { need(2)?; m(&|x, y| flag(x > y)) }
+            "cndeq" => { need(3)?; [0, 1, 2, 3].map(|i| if a[0][i] == 0.0 { a[1][i] } else { a[2][i] }) }
+            "cndge" => { need(3)?; [0, 1, 2, 3].map(|i| if a[0][i] >= 0.0 { a[1][i] } else { a[2][i] }) }
+            "cndgt" => { need(3)?; [0, 1, 2, 3].map(|i| if a[0][i] > 0.0 { a[1][i] } else { a[2][i] }) }
+            "frc" => { need(1)?; a[0].map(|x| x - x.floor()) }
+            "trunc" => { need(1)?; a[0].map(f64::trunc) }
+            "floor" => { need(1)?; a[0].map(f64::floor) }
             _ => bail!("unsupported vector operation {op}"),
         })
     }
@@ -545,13 +399,7 @@ impl<'a> Vm<'a> {
             let v = self.src(s);
             (v[0], if s.given > 1 { v[1] } else { v[0] })
         };
-        let base = if let Some(b) = op.strip_suffix("sc") {
-            b
-        } else if op.ends_with('s') {
-            &op[..op.len() - 1]
-        } else {
-            op
-        };
+        let base = if let Some(b) = op.strip_suffix("sc") { b } else if op.ends_with('s') { &op[..op.len() - 1] } else { op };
         let ps = self.ps;
         let flag = |b: bool| if b { 1.0 } else { 0.0 };
         Ok(match op {
@@ -563,28 +411,10 @@ impl<'a> Vm<'a> {
             }
             "sin" => x.sin(),
             "cos" => x.cos(),
-            "log" => {
-                if x > 0.0 {
-                    x.log2()
-                } else {
-                    f64::NEG_INFINITY
-                }
-            }
+            "log" => if x > 0.0 { x.log2() } else { f64::NEG_INFINITY },
             "exp" => 2f64.powf(x),
-            "rcp" => {
-                if x != 0.0 {
-                    1.0 / x
-                } else {
-                    f64::INFINITY
-                }
-            }
-            "rsq" => {
-                if x > 0.0 {
-                    1.0 / x.sqrt()
-                } else {
-                    f64::INFINITY
-                }
-            }
+            "rcp" => if x != 0.0 { 1.0 / x } else { f64::INFINITY },
+            "rsq" => if x > 0.0 { 1.0 / x.sqrt() } else { f64::INFINITY },
             "seqs" => flag(x == 0.0),
             "sges" => flag(x >= 0.0),
             "sgts" => flag(x > 0.0),
@@ -625,11 +455,7 @@ impl Vm<'_> {
             match &prog.code[i] {
                 Instr::Fetch(f) => {
                     let (stream, vtx) = if f.full {
-                        let v = self.src(
-                            f.vtx
-                                .as_ref()
-                                .ok_or_else(|| anyhow!("vfetch_full without index"))?,
-                        )[0] as usize;
+                        let v = self.src(f.vtx.as_ref().ok_or_else(|| anyhow!("vfetch_full without index"))?)[0] as usize;
                         self.last_vtx = v;
                         self.last_stream = f.stream;
                         (f.stream, v)
@@ -644,10 +470,7 @@ impl Vm<'_> {
                     let base_op = a.op.trim_end_matches("_sat");
                     let sat = base_op.len() != a.op.len();
                     let scalar_only = {
-                        let probe = Alu {
-                            op: base_op.to_string(),
-                            ..a.clone()
-                        };
+                        let probe = Alu { op: base_op.to_string(), ..a.clone() };
                         is_scalar_op(&probe.op)
                     };
                     let (vec, sca): (Option<&Alu>, Option<&Alu>) = if scalar_only {
@@ -699,10 +522,7 @@ impl Vm<'_> {
                 }
             }
         }
-        Ok(Outputs {
-            prog,
-            values: self.o.clone(),
-        })
+        Ok(Outputs { prog, values: self.o.clone() })
     }
 }
 

@@ -109,11 +109,7 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 fn norm(a: [f32; 3]) -> [f32; 3] {
     let l = dot(a, a).sqrt().max(1e-12);
@@ -132,30 +128,14 @@ fn mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
 
 /// Right-handed look-at (column-major), looking from `eye` along `f`.
 fn look(eye: [f32; 3], f: [f32; 3]) -> [f32; 16] {
-    let up = if f[1].abs() > 0.99 {
-        [1.0, 0.0, 0.0]
-    } else {
-        [0.0, 1.0, 0.0]
-    };
+    let up = if f[1].abs() > 0.99 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
     let s = norm(cross(f, up));
     let u = cross(s, f);
     [
-        s[0],
-        u[0],
-        -f[0],
-        0.0, //
-        s[1],
-        u[1],
-        -f[1],
-        0.0, //
-        s[2],
-        u[2],
-        -f[2],
-        0.0, //
-        -dot(s, eye),
-        -dot(u, eye),
-        dot(f, eye),
-        1.0,
+        s[0], u[0], -f[0], 0.0, //
+        s[1], u[1], -f[1], 0.0, //
+        s[2], u[2], -f[2], 0.0, //
+        -dot(s, eye), -dot(u, eye), dot(f, eye), 1.0,
     ]
 }
 
@@ -233,14 +213,9 @@ pub(super) fn hull_polygon(
         let hw = z * t + off * (1.0 + t);
         let sx = if k & 1 == 0 { -hw } else { hw };
         let sy = if k & 2 == 0 { -hw } else { hw };
-        let p = [0, 1, 2].map(|i| {
-            light[i] as f64 + fit.f[i] as f64 * z + fit.s[i] as f64 * sx + fit.u[i] as f64 * sy
-        });
+        let p = [0, 1, 2].map(|i| light[i] as f64 + fit.f[i] as f64 * z + fit.s[i] as f64 * sx + fit.u[i] as f64 * sy);
         for (r, v) in c.iter_mut().enumerate() {
-            *v = vp[r] as f64 * p[0]
-                + vp[4 + r] as f64 * p[1]
-                + vp[8 + r] as f64 * p[2]
-                + vp[12 + r] as f64;
+            *v = vp[r] as f64 * p[0] + vp[4 + r] as f64 * p[1] + vp[8 + r] as f64 * p[2] + vp[12 + r] as f64;
         }
     }
     // The clipped pyramid's vertices: corners in front, and where box edges (corners one bit apart) cross w = min_w.
@@ -277,19 +252,8 @@ pub(super) fn hull_polygon(
     }
     let mut poly = convex_hull(grown);
     // Clip to the target plus 2 pixels (Sutherland-Hodgman against the four sides).
-    for (axis, lim, keep_below) in [
-        (0, hw + 2.0, true),
-        (0, -hw - 2.0, false),
-        (1, hh + 2.0, true),
-        (1, -hh - 2.0, false),
-    ] {
-        let inside = |p: &[f64; 2]| {
-            if keep_below {
-                p[axis] <= lim
-            } else {
-                p[axis] >= lim
-            }
-        };
+    for (axis, lim, keep_below) in [(0, hw + 2.0, true), (0, -hw - 2.0, false), (1, hh + 2.0, true), (1, -hh - 2.0, false)] {
+        let inside = |p: &[f64; 2]| if keep_below { p[axis] <= lim } else { p[axis] >= lim };
         let mut out = Vec::with_capacity(poly.len() + 2);
         for i in 0..poly.len() {
             let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
@@ -322,21 +286,13 @@ fn convex_hull(mut p: Vec<[f64; 2]>) -> Vec<[f64; 2]> {
     if p.len() < 3 {
         return p;
     }
-    let cross = |o: [f64; 2], a: [f64; 2], b: [f64; 2]| {
-        (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
-    };
+    let cross = |o: [f64; 2], a: [f64; 2], b: [f64; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
     let mut hull: Vec<[f64; 2]> = Vec::with_capacity(2 * p.len());
     for pass in 0..2 {
         let start = hull.len();
-        let iter: Box<dyn Iterator<Item = &[f64; 2]>> = if pass == 0 {
-            Box::new(p.iter())
-        } else {
-            Box::new(p.iter().rev())
-        };
+        let iter: Box<dyn Iterator<Item = &[f64; 2]>> = if pass == 0 { Box::new(p.iter()) } else { Box::new(p.iter().rev()) };
         for &q in iter {
-            while hull.len() >= start + 2
-                && cross(hull[hull.len() - 2], hull[hull.len() - 1], q) <= 0.0
-            {
+            while hull.len() >= start + 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], q) <= 0.0 {
                 hull.pop();
             }
             hull.push(q);
@@ -358,28 +314,17 @@ impl Shadows {
     ) -> Result<Shadows> {
         unsafe {
             // Off: a 1x1 map, still bound (the scene shader declares it), never drawn.
-            let (layers, res) = if knobs.shadows {
-                (knobs.shadow_max, knobs.shadow_res)
-            } else {
-                (1, 1)
-            };
+            let (layers, res) = if knobs.shadows { (knobs.shadow_max, knobs.shadow_res) } else { (1, 1) };
             let image = device.create_image(
                 &vk::ImageCreateInfo::default()
                     .image_type(vk::ImageType::TYPE_2D)
                     .format(DEPTH_FORMAT)
-                    .extent(vk::Extent3D {
-                        width: res,
-                        height: res,
-                        depth: 1,
-                    })
+                    .extent(vk::Extent3D { width: res, height: res, depth: 1 })
                     .mip_levels(1)
                     .array_layers(layers)
                     .samples(vk::SampleCountFlags::TYPE_1)
                     .tiling(vk::ImageTiling::OPTIMAL)
-                    .usage(
-                        vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
-                            | vk::ImageUsageFlags::SAMPLED,
-                    ),
+                    .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED),
                 None,
             )?;
             let requirements = device.get_image_memory_requirements(image);
@@ -402,11 +347,7 @@ impl Shadows {
             };
             let view = |ty, r| {
                 device.create_image_view(
-                    &vk::ImageViewCreateInfo::default()
-                        .image(image)
-                        .view_type(ty)
-                        .format(DEPTH_FORMAT)
-                        .subresource_range(r),
+                    &vk::ImageViewCreateInfo::default().image(image).view_type(ty).format(DEPTH_FORMAT).subresource_range(r),
                     None,
                 )
             };
@@ -429,38 +370,21 @@ impl Shadows {
                 None,
             )?;
             let sets = [set0];
-            let pcr = [vk::PushConstantRange {
-                stage_flags: vk::ShaderStageFlags::VERTEX,
-                offset: 0,
-                size: 4,
-            }];
+            let pcr = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::VERTEX, offset: 0, size: 4 }];
             let pipe_layout = device.create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::default()
-                    .set_layouts(&sets)
-                    .push_constant_ranges(&pcr),
+                &vk::PipelineLayoutCreateInfo::default().set_layouts(&sets).push_constant_ranges(&pcr),
                 None,
             )?;
-            let words = shaders::spirv_caps(
-                shaders::SHADOW_DEPTH_WGSL,
-                naga::valid::Capabilities::IMMEDIATES,
-            )?;
-            let module = device
-                .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)?;
+            let words = shaders::spirv_caps(shaders::SHADOW_DEPTH_WGSL, naga::valid::Capabilities::IMMEDIATES)?;
+            let module = device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)?;
             let mk = |skin: bool| -> Result<vk::Pipeline> {
                 let stages = [vk::PipelineShaderStageCreateInfo::default()
                     .stage(vk::ShaderStageFlags::VERTEX)
                     .module(module)
                     .name(if skin { c"vs_skin" } else { c"vs_static" })];
-                let stride = if skin {
-                    std::mem::size_of::<SkinVertex>()
-                } else {
-                    std::mem::size_of::<Vertex>()
-                } as u32;
-                let bindings = [vk::VertexInputBindingDescription {
-                    binding: 0,
-                    stride,
-                    input_rate: vk::VertexInputRate::VERTEX,
-                }];
+                let stride = if skin { std::mem::size_of::<SkinVertex>() } else { std::mem::size_of::<Vertex>() } as u32;
+                let bindings =
+                    [vk::VertexInputBindingDescription { binding: 0, stride, input_rate: vk::VertexInputRate::VERTEX }];
                 let attr = |location, format, offset| vk::VertexInputAttributeDescription {
                     location,
                     binding: 0,
@@ -479,11 +403,9 @@ impl Shadows {
                 let vi = vk::PipelineVertexInputStateCreateInfo::default()
                     .vertex_binding_descriptions(&bindings)
                     .vertex_attribute_descriptions(&attrs);
-                let ia = vk::PipelineInputAssemblyStateCreateInfo::default()
-                    .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-                let vp = vk::PipelineViewportStateCreateInfo::default()
-                    .viewport_count(1)
-                    .scissor_count(1);
+                let ia =
+                    vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+                let vp = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
                 // Both faces cast (no leaks through open meshes); slope bias against acne, plus the receiver's
                 // normal offset in the scene shader.
                 let rs = vk::PipelineRasterizationStateCreateInfo::default()
@@ -493,8 +415,8 @@ impl Shadows {
                     .depth_bias_constant_factor(0.0)
                     .depth_bias_slope_factor(1.5)
                     .line_width(1.0);
-                let ms = vk::PipelineMultisampleStateCreateInfo::default()
-                    .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+                let ms =
+                    vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
                 let ds = vk::PipelineDepthStencilStateCreateInfo::default()
                     .depth_test_enable(true)
                     .depth_write_enable(true)
@@ -502,8 +424,7 @@ impl Shadows {
                 let cb = vk::PipelineColorBlendStateCreateInfo::default();
                 let dyns = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
                 let dy = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyns);
-                let mut rendering = vk::PipelineRenderingCreateInfo::default()
-                    .depth_attachment_format(DEPTH_FORMAT);
+                let mut rendering = vk::PipelineRenderingCreateInfo::default().depth_attachment_format(DEPTH_FORMAT);
                 let info = vk::GraphicsPipelineCreateInfo::default()
                     .stages(&stages)
                     .vertex_input_state(&vi)
@@ -523,9 +444,7 @@ impl Shadows {
             let pipe_static = mk(false)?;
             let pipe_skin = mk(true)?;
             if knobs.shadows {
-                eprintln!(
-                    "[n1] shadows: up to {layers} a frame, {res}x{res} (BOTS_N1_SHADOW=0 turns them off)"
-                );
+                eprintln!("[n1] shadows: up to {layers} a frame, {res}x{res} (BOTS_N1_SHADOW=0 turns them off)");
             }
             Ok(Shadows {
                 image,
@@ -574,11 +493,7 @@ impl Shadows {
 /// Area of an NDC triangle list (the full screen is 4).
 fn tri_area(t: &[[f32; 2]]) -> f32 {
     t.chunks(3)
-        .map(|v| {
-            ((v[1][0] - v[0][0]) * (v[2][1] - v[0][1]) - (v[2][0] - v[0][0]) * (v[1][1] - v[0][1]))
-                .abs()
-                * 0.5
-        })
+        .map(|v| ((v[1][0] - v[0][0]) * (v[2][1] - v[0][1]) - (v[2][0] - v[0][0]) * (v[1][1] - v[0][1])).abs() * 0.5)
         .sum()
 }
 
@@ -641,11 +556,7 @@ impl Renderer {
             if want <= MIN_RES {
                 continue;
             }
-            let strength = if want >= FADE_RES {
-                1.0
-            } else {
-                ((want - MIN_RES) / (FADE_RES - MIN_RES)).powf(FADE_EXP)
-            };
+            let strength = if want >= FADE_RES { 1.0 } else { ((want - MIN_RES) / (FADE_RES - MIN_RES)).powf(FADE_EXP) };
             let Some(ft) = fit(s.pos, c, r) else { continue };
             let size = want.min(sh.res as f32).max(MIN_RES).round();
             let texel = 2.0 * ft.half.tan() / size;
@@ -663,34 +574,19 @@ impl Renderer {
             };
             // The shader offsets receivers by 1.5 texels (at their distance, which is under the radius).
             let (rect, cover) = if masks {
-                let Some(t) = hull_polygon(
-                    &ft,
-                    s.pos,
-                    s.radius,
-                    1.5 * texel * s.radius,
-                    vp,
-                    min_w,
-                    vw,
-                    h,
-                ) else {
+                let Some(t) = hull_polygon(&ft, s.pos, s.radius, 1.5 * texel * s.radius, vp, min_w, vw, h) else {
                     continue; // darkens no pixel on screen: don't spend a layer on it
                 };
                 // Bounding box in pixels (NDC y up, framebuffer y down), one pixel of margin.
                 let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
                 for p in &t {
-                    let q = [
-                        (p[0] * 0.5 + 0.5) * vw as f32,
-                        (0.5 - p[1] * 0.5) * h as f32,
-                    ];
+                    let q = [(p[0] * 0.5 + 0.5) * vw as f32, (0.5 - p[1] * 0.5) * h as f32];
                     for a in 0..2 {
                         lo[a] = lo[a].min(q[a]);
                         hi[a] = hi[a].max(q[a]);
                     }
                 }
-                (
-                    [lo[0] - 1.0, lo[1] - 1.0, hi[0] + 1.0, hi[1] + 1.0],
-                    tri_area(&t) / 4.0,
-                )
+                ([lo[0] - 1.0, lo[1] - 1.0, hi[0] + 1.0, hi[1] + 1.0], tri_area(&t) / 4.0)
             } else {
                 (FULL_RECT, 1.0)
             };
@@ -709,14 +605,9 @@ impl Renderer {
                 cull,
             ));
         }
-        cand.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.1.cmp(&b.1))
-        });
+        cand.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
         sh.cover.clear();
-        for (k, (_, e, mut g, cover, cull)) in cand.into_iter().take(sh.layers as usize).enumerate()
-        {
+        for (k, (_, e, mut g, cover, cull)) in cand.into_iter().take(sh.layers as usize).enumerate() {
             sh.cull.push(cull);
             g.misc[0] = k as f32;
             let size = (g.misc[2] * sh.res as f32).round() as u32;
@@ -740,21 +631,14 @@ impl Renderer {
                 all
             } else {
                 let (c, r) = self.spheres[i];
-                cull.iter().enumerate().fold(
-                    0u32,
-                    |m, (k, v)| if v.touches(c, r) { m | 1 << k } else { m },
-                )
+                cull.iter().enumerate().fold(0u32, |m, (k, v)| if v.touches(c, r) { m | 1 << k } else { m })
             };
         }
     }
 
     /// Records the shadow depth passes (set 0 must hold this frame's shadows at binding 7) and leaves every layer
     /// ready to sample. Returns the caster draws made.
-    pub(super) fn record_shadows(
-        &mut self,
-        cmd: vk::CommandBuffer,
-        set0: vk::DescriptorSet,
-    ) -> u32 {
+    pub(super) fn record_shadows(&mut self, cmd: vk::CommandBuffer, set0: vk::DescriptorSet) -> u32 {
         let d = &self.device;
         let sh = &mut self.shadows;
         let range = |base, count| vk::ImageSubresourceRange {
@@ -776,98 +660,35 @@ impl Renderer {
                 .subresource_range(r)
         };
         let frag = vk::PipelineStageFlags::FRAGMENT_SHADER;
-        let tests = vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-            | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS;
+        let tests = vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS;
         let ro = vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL;
         let att = vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL;
         let n = sh.casters.len() as u32;
         let mut draws = 0;
         unsafe {
             if !sh.ready {
-                let b = [bar(
-                    vk::ImageLayout::UNDEFINED,
-                    ro,
-                    vk::AccessFlags::empty(),
-                    vk::AccessFlags::SHADER_READ,
-                    range(0, sh.layers),
-                )];
-                d.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    frag,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &b,
-                );
+                let b = [bar(vk::ImageLayout::UNDEFINED, ro, vk::AccessFlags::empty(), vk::AccessFlags::SHADER_READ, range(0, sh.layers))];
+                d.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::TOP_OF_PIPE, frag, vk::DependencyFlags::empty(), &[], &[], &b);
                 sh.ready = true;
             }
             if n == 0 {
                 return 0;
             }
-            let b = [bar(
-                ro,
-                att,
-                vk::AccessFlags::SHADER_READ,
-                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
-                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ,
-                range(0, n),
-            )];
+            let b = [bar(ro, att, vk::AccessFlags::SHADER_READ, vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ, range(0, n))];
             d.cmd_pipeline_barrier(cmd, frag, tests, vk::DependencyFlags::empty(), &[], &[], &b);
-            d.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                sh.pipe_layout,
-                0,
-                &[set0],
-                &[],
-            );
+            d.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, sh.pipe_layout, 0, &[set0], &[]);
             for (k, &(env, size)) in sh.casters.iter().enumerate() {
-                let rect = vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: vk::Extent2D {
-                        width: size,
-                        height: size,
-                    },
-                };
+                let rect = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width: size, height: size } };
                 let datt = vk::RenderingAttachmentInfo::default()
                     .image_view(sh.layer_views[k])
                     .image_layout(att)
                     .load_op(vk::AttachmentLoadOp::CLEAR)
                     .store_op(vk::AttachmentStoreOp::STORE)
-                    .clear_value(vk::ClearValue {
-                        depth_stencil: vk::ClearDepthStencilValue {
-                            depth: 1.0,
-                            stencil: 0,
-                        },
-                    });
-                d.cmd_begin_rendering(
-                    cmd,
-                    &vk::RenderingInfo::default()
-                        .render_area(rect)
-                        .layer_count(1)
-                        .depth_attachment(&datt),
-                );
-                d.cmd_set_viewport(
-                    cmd,
-                    0,
-                    &[vk::Viewport {
-                        x: 0.0,
-                        y: 0.0,
-                        width: size as f32,
-                        height: size as f32,
-                        min_depth: 0.0,
-                        max_depth: 1.0,
-                    }],
-                );
+                    .clear_value(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } });
+                d.cmd_begin_rendering(cmd, &vk::RenderingInfo::default().render_area(rect).layer_count(1).depth_attachment(&datt));
+                d.cmd_set_viewport(cmd, 0, &[vk::Viewport { x: 0.0, y: 0.0, width: size as f32, height: size as f32, min_depth: 0.0, max_depth: 1.0 }]);
                 d.cmd_set_scissor(cmd, 0, &[rect]);
-                d.cmd_push_constants(
-                    cmd,
-                    sh.pipe_layout,
-                    vk::ShaderStageFlags::VERTEX,
-                    0,
-                    &(k as u32).to_ne_bytes(),
-                );
+                d.cmd_push_constants(cmd, sh.pipe_layout, vk::ShaderStageFlags::VERTEX, 0, &(k as u32).to_ne_bytes());
                 let mut cur: Option<(bool, u32)> = None;
                 let mut cur_skin = None;
                 for dr in &self.draws {
@@ -875,23 +696,11 @@ impl Renderer {
                         continue;
                     }
                     if cur_skin != Some(dr.key.skin) {
-                        d.cmd_bind_pipeline(
-                            cmd,
-                            vk::PipelineBindPoint::GRAPHICS,
-                            if dr.key.skin {
-                                sh.pipe_skin
-                            } else {
-                                sh.pipe_static
-                            },
-                        );
+                        d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, if dr.key.skin { sh.pipe_skin } else { sh.pipe_static });
                         cur_skin = Some(dr.key.skin);
                     }
                     if cur != Some((dr.key.skin, dr.mesh)) {
-                        let m = if dr.key.skin {
-                            &self.skin_meshes[dr.mesh as usize]
-                        } else {
-                            &self.meshes[dr.mesh as usize]
-                        };
+                        let m = if dr.key.skin { &self.skin_meshes[dr.mesh as usize] } else { &self.meshes[dr.mesh as usize] };
                         d.cmd_bind_vertex_buffers(cmd, 0, &[m.vbuf.buffer], &[0]);
                         d.cmd_bind_index_buffer(cmd, m.ibuf.buffer, 0, vk::IndexType::UINT32);
                         cur = Some((dr.key.skin, dr.mesh));
@@ -901,32 +710,17 @@ impl Renderer {
                 }
                 d.cmd_end_rendering(cmd);
             }
-            let b = [bar(
-                att,
-                ro,
-                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                vk::AccessFlags::SHADER_READ,
-                range(0, n),
-            )];
+            let b = [bar(att, ro, vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE, vk::AccessFlags::SHADER_READ, range(0, n))];
             d.cmd_pipeline_barrier(cmd, tests, frag, vk::DependencyFlags::empty(), &[], &[], &b);
         }
         sh.frames_with += 1;
         sh.caster_draws += draws as u64;
         if sh.frames_with % 300 == 1 && std::env::var_os("BOTS_N1_SHADOW_LOG").is_some() {
-            let envs = self
-                .lighting
-                .dyn_frame
-                .env_shadows
-                .iter()
-                .filter(|s| s.is_some())
-                .count();
+            let envs = self.lighting.dyn_frame.env_shadows.iter().filter(|s| s.is_some()).count();
             eprintln!(
                 "[n1] shadows: {n} drawn ({draws} caster draws, sizes {:?}, screen % covered {:?}); {envs} of {} envs shadowing; {} frames with",
                 sh.casters.iter().map(|c| c.1).collect::<Vec<_>>(),
-                sh.cover
-                    .iter()
-                    .map(|c| (c * 100.0).round() as u32)
-                    .collect::<Vec<_>>(),
+                sh.cover.iter().map(|c| (c * 100.0).round() as u32).collect::<Vec<_>>(),
                 self.lighting.dyn_frame.env_shadows.len(),
                 sh.frames_with
             );
@@ -934,6 +728,7 @@ impl Renderer {
         draws
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -951,24 +746,7 @@ mod tests {
     fn hull_polygon_is_small_for_a_distant_shadow() {
         // Camera at the origin looking down -Z (Y-up), 90 degree fov, square 100x100 target.
         let (n, f) = (1.0f32, 10000.0f32);
-        let proj = [
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            f / (n - f),
-            -1.0,
-            0.0,
-            0.0,
-            n * f / (n - f),
-            0.0,
-        ];
+        let proj = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, f / (n - f), -1.0, 0.0, 0.0, n * f / (n - f), 0.0];
         // A caster 3000 ahead, light 10 radii above it, radius 1.4x the distance.
         let center = [0.0, 0.0, -3000.0];
         let light = [0.0, 1000.0, -3000.0];
@@ -976,23 +754,12 @@ mod tests {
         let tris = hull_polygon(&ft, light, 1400.0, 1.0, &proj, 0.5, 100, 100).unwrap();
         let area: f32 = tris
             .chunks(3)
-            .map(|v| {
-                ((v[1][0] - v[0][0]) * (v[2][1] - v[0][1])
-                    - (v[2][0] - v[0][0]) * (v[1][1] - v[0][1]))
-                    .abs()
-                    * 0.5
-            })
+            .map(|v| ((v[1][0] - v[0][0]) * (v[2][1] - v[0][1]) - (v[2][0] - v[0][0]) * (v[1][1] - v[0][1])).abs() * 0.5)
             .sum();
-        assert!(
-            area / 4.0 < 0.05,
-            "covers {} of the screen: {tris:?}",
-            area / 4.0
-        );
+        assert!(area / 4.0 < 0.05, "covers {} of the screen: {tris:?}", area / 4.0);
         // The caster's centre is inside.
         let inside = tris.chunks(3).any(|v| {
-            let s = |a: [f32; 2], b: [f32; 2]| {
-                (b[0] - a[0]) * (0.0 - a[1]) - (b[1] - a[1]) * (0.0 - a[0])
-            };
+            let s = |a: [f32; 2], b: [f32; 2]| (b[0] - a[0]) * (0.0 - a[1]) - (b[1] - a[1]) * (0.0 - a[0]);
             let (x, y, z) = (s(v[0], v[1]), s(v[1], v[2]), s(v[2], v[0]));
             (x >= 0.0 && y >= 0.0 && z >= 0.0) || (x <= 0.0 && y <= 0.0 && z <= 0.0)
         });
@@ -1011,16 +778,10 @@ mod tests {
             (seed >> 11) as f32 / (1u64 << 53) as f32
         };
         for case in 0..40 {
-            let light = [
-                rnd() * 400.0 - 200.0,
-                300.0 + rnd() * 300.0,
-                rnd() * 400.0 - 200.0,
-            ];
+            let light = [rnd() * 400.0 - 200.0, 300.0 + rnd() * 300.0, rnd() * 400.0 - 200.0];
             let center = [rnd() * 100.0 - 50.0, 50.0, rnd() * 100.0 - 50.0];
             let rad = 30.0 + rnd() * 60.0;
-            let Some(ft) = fit(light, center, rad) else {
-                continue;
-            };
+            let Some(ft) = fit(light, center, rad) else { continue };
             let radius = 400.0 + rnd() * 1200.0;
             let off_max = 1.5 * (2.0 * ft.half.tan() / 64.0) * radius;
             let t = ft.half.tan() * 1.001;
@@ -1058,26 +819,14 @@ mod tests {
                     continue;
                 }
                 hits += 1;
-                assert!(
-                    cull.touches(w, 0.01),
-                    "case {case}: darkened point {w:?} culled"
-                );
+                assert!(cull.touches(w, 0.01), "case {case}: darkened point {w:?} culled");
             }
             assert!(hits > 0 || case > 0);
         }
         // A sphere far outside the cone is culled.
         let light = [0.0, 1000.0, 0.0];
         let ft = fit(light, [0.0, 0.0, 0.0], 50.0).unwrap();
-        let cull = Cull {
-            light,
-            radius: 2000.0,
-            f: ft.f,
-            s: ft.s,
-            u: ft.u,
-            z0: ft.near - 1.0,
-            t: ft.half.tan(),
-            off: 1.0,
-        };
+        let cull = Cull { light, radius: 2000.0, f: ft.f, s: ft.s, u: ft.u, z0: ft.near - 1.0, t: ft.half.tan(), off: 1.0 };
         assert!(cull.touches([0.0, 0.0, 0.0], 10.0));
         assert!(!cull.touches([900.0, 0.0, 0.0], 10.0));
         assert!(!cull.touches([0.0, 1500.0, 0.0], 10.0));

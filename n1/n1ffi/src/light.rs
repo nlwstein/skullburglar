@@ -52,11 +52,7 @@ impl Default for Env {
     fn default() -> Self {
         Env {
             sun_dir: [-0.1512, 0.5078, 0.8481],
-            sun_col: [
-                252.0 / 255.0 * 1.5,
-                192.0 / 255.0 * 1.5,
-                152.0 / 255.0 * 1.5,
-            ],
+            sun_col: [252.0 / 255.0 * 1.5, 192.0 / 255.0 * 1.5, 152.0 / 255.0 * 1.5],
             sun_enabled: true,
             amb_up: [0.35, 0.38, 0.45],
             amb_dn: [0.20, 0.18, 0.15],
@@ -97,11 +93,7 @@ impl Env {
             None => e.sun_enabled = false,
         }
         if fr.sky_up != [0.0; 3] {
-            let (up, dn) = if ue3_gamma {
-                (fr.sky_up_ue3, fr.sky_down_ue3)
-            } else {
-                (fr.sky_up, fr.sky_down)
-            };
+            let (up, dn) = if ue3_gamma { (fr.sky_up_ue3, fr.sky_down_ue3) } else { (fr.sky_up, fr.sky_down) };
             e.amb_up = up;
             e.amb_dn = dn;
             for f in &fr.fills {
@@ -112,15 +104,7 @@ impl Env {
             }
         }
         // W4: as the port's fog pass (draw 911 of capture f4420): colour LightColor^2.2, extinction distance in w.
-        e.fog = fr.fog.as_ref().map(|f| {
-            (
-                f.light_color.map(|c| c.powf(2.2)),
-                f.density,
-                f.height,
-                f.start,
-                f.extinction,
-            )
-        });
+        e.fog = fr.fog.as_ref().map(|f| (f.light_color.map(|c| c.powf(2.2)), f.density, f.height, f.start, f.extinction));
         e
     }
 
@@ -175,12 +159,7 @@ impl Env {
         Globals {
             view_proj,
             cam_pos: [eye[0], eye[1], eye[2], time],
-            sun_dir: [
-                self.sun_dir[0],
-                self.sun_dir[1],
-                self.sun_dir[2],
-                self.sun_enabled as u32 as f32,
-            ],
+            sun_dir: [self.sun_dir[0], self.sun_dir[1], self.sun_dir[2], self.sun_enabled as u32 as f32],
             sun_col: [self.sun_col[0], self.sun_col[1], self.sun_col[2], 0.0],
             amb_up: [self.amb_up[0], self.amb_up[1], self.amb_up[2], 0.0],
             amb_dn: [self.amb_dn[0], self.amb_dn[1], self.amb_dn[2], 0.0],
@@ -188,12 +167,7 @@ impl Env {
             fog_par: f.map(|f| [f.1, f.2, f.3, f.4]).unwrap_or([0.0; 4]),
             tune: [self.lm_gain, self.spec_gain, self.vl_gain, self.dbg],
             tune2: [self.vcol_map as f32, self.sun_luma, self.nmap_strength, 0.0],
-            tune3: [
-                self.env_gain,
-                self.env_ambient,
-                self.dyn_gain,
-                self.vl_gamma,
-            ],
+            tune3: [self.env_gain, self.env_ambient, self.dyn_gain, self.vl_gamma],
         }
     }
 }
@@ -331,36 +305,12 @@ impl PostParams {
         });
         let mut o = [[0.0f32; 4]; 16];
         o[0] = [u.bloom_scale, u.bloom_threshold, b.texel[0], b.texel[1]];
-        o[1] = [
-            u.focus_distance,
-            1.0 / u.focus_radius.max(1.0),
-            u.falloff,
-            b.offset[0],
-        ];
+        o[1] = [u.focus_distance, 1.0 / u.focus_radius.max(1.0), u.falloff, b.offset[0]];
         o[2] = [u.max_near, u.max_far, b.near, b.offset[1]];
-        o[3] = [
-            b.dir[0],
-            b.dir[1],
-            b.unorm as u32 as f32,
-            b.taps.len().min(6) as f32,
-        ];
-        let mix = if u.different_bloom_kernel {
-            self.bloom_mix
-        } else {
-            0.0
-        };
-        o[4] = [
-            mix,
-            1.0 / self.gamma.max(0.1),
-            self.blurs() as u32 as f32,
-            0.0,
-        ];
-        o[5] = [
-            g.fg_desaturate,
-            g.fg_contrast,
-            g.bk_brightness,
-            g.bk_desaturate,
-        ];
+        o[3] = [b.dir[0], b.dir[1], b.unorm as u32 as f32, b.taps.len().min(6) as f32];
+        let mix = if u.different_bloom_kernel { self.bloom_mix } else { 0.0 };
+        o[4] = [mix, 1.0 / self.gamma.max(0.1), self.blurs() as u32 as f32, 0.0];
+        o[5] = [g.fg_desaturate, g.fg_contrast, g.bk_brightness, g.bk_desaturate];
         o[6] = [g.bk_contrast, g.blend, g.blend_offset, g.sky_clamp];
         o[7] = [g.fg_tint[0], g.fg_tint[1], g.fg_tint[2], 0.0];
         o[8] = [g.bk_tint[0], g.bk_tint[1], g.bk_tint[2], 0.0];
@@ -464,10 +414,7 @@ fn env_flag(name: &str, default: bool) -> bool {
 }
 
 fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 impl Knobs {
@@ -568,32 +515,17 @@ impl Lighting {
         if let Ok(s) = std::env::var("BOTS_N1_POSTP") {
             self.post.apply(&s);
         }
-        let max_lights = if k.dyn_lights {
-            lightfeed::pack::MAX_LIGHTS
-        } else {
-            0
-        };
-        self.dyn_frame =
-            DynFrame::from_frame_env(fr, max_lights, k.envs, k.light_gamma, k.env_gamma);
-        self.dyn_lights_alt =
-            DynFrame::from_frame_with(fr, max_lights, false, !k.light_gamma).lights;
+        let max_lights = if k.dyn_lights { lightfeed::pack::MAX_LIGHTS } else { 0 };
+        self.dyn_frame = DynFrame::from_frame_env(fr, max_lights, k.envs, k.light_gamma, k.env_gamma);
+        self.dyn_lights_alt = DynFrame::from_frame_with(fr, max_lights, false, !k.light_gamma).lights;
         self.envs_alt = if k.envs {
-            fr.envs
-                .iter()
-                .take(lightfeed::pack::MAX_ENVS)
-                .map(|e| lightfeed::pack::pack_env_with(e, !k.env_gamma))
-                .collect()
+            fr.envs.iter().take(lightfeed::pack::MAX_ENVS).map(|e| lightfeed::pack::pack_env_with(e, !k.env_gamma)).collect()
         } else {
             vec![]
         };
         let [kd, kp, ks] = self.env.env_terms;
         if [kd, kp, ks] != [1.0; 3] || self.env.env_flip {
-            for e in self
-                .dyn_frame
-                .envs
-                .iter_mut()
-                .chain(self.envs_alt.iter_mut())
-            {
+            for e in self.dyn_frame.envs.iter_mut().chain(self.envs_alt.iter_mut()) {
                 if self.env.env_flip {
                     e[0..3].iter_mut().for_each(|c| *c = -*c);
                 }
@@ -637,13 +569,7 @@ mod bench {
             c += (t3 - t2).as_secs_f64();
         }
         let ms = |x: f64| x * 1000.0 / n as f64;
-        println!(
-            "{} bytes: parse {:.3} ms, from_value {:.3} ms, set_feed {:.3} ms",
-            bytes.len(),
-            ms(a),
-            ms(b),
-            ms(c)
-        );
+        println!("{} bytes: parse {:.3} ms, from_value {:.3} ms, set_feed {:.3} ms", bytes.len(), ms(a), ms(b), ms(c));
     }
 }
 
@@ -654,10 +580,7 @@ mod matprobe {
     #[ignore]
     fn matprobe() {
         let db = assetdb::AssetDb::open(
-            std::path::Path::new(
-                &std::env::var("N1_COOKED_DIR")
-                    .expect("N1_COOKED_DIR (the disc's C1Game/CookedXenon)"),
-            ),
+            std::path::Path::new(&std::env::var("N1_COOKED_DIR").expect("N1_COOKED_DIR (the disc's C1Game/CookedXenon)")),
             std::path::Path::new("cache/n12"),
         )
         .unwrap();
@@ -669,10 +592,7 @@ mod matprobe {
             println!("{mesh}: {:?}", s.materials);
             for m in &s.materials {
                 let a = db.material(m);
-                println!(
-                    "== {m}: class {} diffuse {:?} blend {}\n{:#?}",
-                    a.class, a.diffuse, a.blend, a.def
-                );
+                println!("== {m}: class {} diffuse {:?} blend {}\n{:#?}", a.class, a.diffuse, a.blend, a.def);
             }
         }
     }
@@ -686,10 +606,7 @@ mod texprobe {
     #[ignore]
     fn texprobe() {
         let db = assetdb::AssetDb::open(
-            std::path::Path::new(
-                &std::env::var("N1_COOKED_DIR")
-                    .expect("N1_COOKED_DIR (the disc's C1Game/CookedXenon)"),
-            ),
+            std::path::Path::new(&std::env::var("N1_COOKED_DIR").expect("N1_COOKED_DIR (the disc's C1Game/CookedXenon)")),
             std::path::Path::new("cache/n12"),
         )
         .unwrap();
@@ -700,8 +617,7 @@ mod texprobe {
             };
             let m = t.mips.len().saturating_sub(4).min(t.mips.len() - 1);
             let d = &t.mips[m];
-            let bs =
-                d.len() / (((t.width >> m).max(4) / 4) * ((t.height >> m).max(4) / 4)) as usize;
+            let bs = d.len() / (((t.width >> m).max(4) / 4) * ((t.height >> m).max(4) / 4)) as usize;
             let off = if bs == 16 { 8 } else { 0 };
             let (mut s, mut n) = ([0f64; 3], 0f64);
             for b in d.chunks_exact(bs.max(8)) {
@@ -732,16 +648,7 @@ mod texprobe {
             }
             println!(
                 "{p}: {:?} srgb {} {}x{} mips {} normal {} unpack {:?}; mip {m} block {bs} B, mean c0 {:.2} {:.2} {:.2}",
-                t.fmt,
-                t.srgb,
-                t.width,
-                t.height,
-                t.mips.len(),
-                t.normal,
-                t.unpack,
-                s[0] / n,
-                s[1] / n,
-                s[2] / n
+                t.fmt, t.srgb, t.width, t.height, t.mips.len(), t.normal, t.unpack, s[0] / n, s[1] / n, s[2] / n
             );
         }
     }
@@ -759,10 +666,7 @@ mod post_tests {
             assert!((a - b).abs() < 2e-3, "{w:?}");
         }
         let w: Vec<f32> = kernel_taps(1.0, 1.0).iter().map(|t| t.1).collect();
-        assert!(
-            (w[0] - 0.893).abs() < 2e-3 && (w[1] - 0.107).abs() < 2e-3,
-            "{w:?}"
-        );
+        assert!((w[0] - 0.893).abs() < 2e-3 && (w[1] - 0.107).abs() < 2e-3, "{w:?}");
     }
 }
 
@@ -773,10 +677,7 @@ mod gradeprobe {
     #[ignore]
     fn gradeprobe() {
         let db = assetdb::AssetDb::open(
-            std::path::Path::new(
-                &std::env::var("N1_COOKED_DIR")
-                    .expect("N1_COOKED_DIR (the disc's C1Game/CookedXenon)"),
-            ),
+            std::path::Path::new(&std::env::var("N1_COOKED_DIR").expect("N1_COOKED_DIR (the disc's C1Game/CookedXenon)")),
             &std::env::temp_dir().join("n1-gradeprobe"),
         )
         .unwrap();
@@ -784,22 +685,14 @@ mod gradeprobe {
             ("Ambush_P", "GEN_PostProcess.AmbushPP_MAT01"),
             ("Crib_P", "MIS_CribGeneric.Crib_MAT01"),
             ("Helicopter_P", "GEN_PostProcess.FlyingLevel_MAT01"),
-            (
-                "MountainCity_P",
-                "MIS_MountainCityGeneric.MountainCityPP_MAT01",
-            ),
+            ("MountainCity_P", "MIS_MountainCityGeneric.MountainCityPP_MAT01"),
             ("TheFlyover_P", "MIS_TheFlyoverMisc.FlyoverPP_Final_MAT01"),
             ("TheMall_P", "GEN_PostProcess.MallPP_MAT01"),
             ("TheTheatre_P", "MIS_TheTheatre_Environmental.TheatrePP_MIC"),
-            (
-                "DesertChase_P",
-                "MIS_Driving02_Environmental.PostFX_v03_MAT",
-            ),
+            ("DesertChase_P", "MIS_Driving02_Environmental.PostFX_v03_MAT"),
         ] {
             db.prefer_packages([lvl.to_string()]);
-            let g = db
-                .material_params(m)
-                .map(|(b, s, v)| (lightfeed::post::Grade::from_params(&b, &s, &v), b));
+            let g = db.material_params(m).map(|(b, s, v)| (lightfeed::post::Grade::from_params(&b, &s, &v), b));
             println!("{lvl}: {g:?}");
         }
     }

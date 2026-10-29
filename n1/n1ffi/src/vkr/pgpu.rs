@@ -209,23 +209,11 @@ impl Renderer {
         }
         let vb: &[u8] = bytemuck::cast_slice(&verts);
         let ib: &[u8] = bytemuck::cast_slice(&idx);
-        let mut vbuf = self.buffer(
-            vb.len() as u64,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            "n1 pmesh v",
-        )?;
+        let mut vbuf = self.buffer(vb.len() as u64, vk::BufferUsageFlags::VERTEX_BUFFER, "n1 pmesh v")?;
         vbuf.bytes()[..vb.len()].copy_from_slice(vb);
-        let mut ibuf = self.buffer(
-            ib.len() as u64,
-            vk::BufferUsageFlags::INDEX_BUFFER,
-            "n1 pmesh i",
-        )?;
+        let mut ibuf = self.buffer(ib.len() as u64, vk::BufferUsageFlags::INDEX_BUFFER, "n1 pmesh i")?;
         ibuf.bytes()[..ib.len()].copy_from_slice(ib);
-        self.pg.meshes.push(PMesh {
-            vbuf,
-            ibuf,
-            index_count: idx.len() as u32,
-        });
+        self.pg.meshes.push(PMesh { vbuf, ibuf, index_count: idx.len() as u32 });
         Ok(self.pg.meshes.len() as u32 - 1)
     }
 
@@ -277,11 +265,7 @@ impl Renderer {
         out[2] = v4(e.amb_up, 0.0);
         out[3] = v4(e.amb_dn, 0.0);
         // The instances' positions (column 3 of each model matrix).
-        let pos: Vec<[f32; 3]> = pf
-            .meshes
-            .chunks_exact(20)
-            .map(|m| [m[12], m[13], m[14]])
-            .collect();
+        let pos: Vec<[f32; 3]> = pf.meshes.chunks_exact(20).map(|m| [m[12], m[13], m[14]]).collect();
         let lights = &self.lighting.dyn_frame.lights;
         let mut cand: Vec<(f32, usize)> = Vec::new();
         for (li, l) in lights.iter().enumerate() {
@@ -289,8 +273,7 @@ impl Renderer {
             let luma = l[4] * 0.3 + l[5] * 0.59 + l[6] * 0.11;
             let mut best = 0.0f32;
             for p in &pos {
-                let d =
-                    ((l[0] - p[0]).powi(2) + (l[1] - p[1]).powi(2) + (l[2] - p[2]).powi(2)).sqrt();
+                let d = ((l[0] - p[0]).powi(2) + (l[1] - p[1]).powi(2) + (l[2] - p[2]).powi(2)).sqrt();
                 best += luma * lightfeed::point_attenuation(d, rad, l[7].max(1.0));
             }
             if best > 1e-3 {
@@ -377,13 +360,7 @@ impl Renderer {
 
     /// Records the particle draws of one kind (`meshes`: inside the scene pass; otherwise the sprite pass).
     /// Returns the draw count.
-    pub(super) fn pg_record(
-        &self,
-        cmd: vk::CommandBuffer,
-        si: usize,
-        pf: &PFrame,
-        meshes: bool,
-    ) -> u32 {
+    pub(super) fn pg_record(&self, cmd: vk::CommandBuffer, si: usize, pf: &PFrame, meshes: bool) -> u32 {
         let d = &self.device;
         let buf = self.slots[si].pbuf.buffer;
         let mesh_at = align(P_BASE + (pf.sprites.len() * 4) as u64);
@@ -392,16 +369,8 @@ impl Renderer {
         let mut cur: Option<(u32, u8)> = None;
         let mut cur_mat = u32::MAX;
         for dr in pf.draws.iter().filter(|x| (x.variant == 2) == meshes) {
-            let PDraw {
-                mat,
-                variant,
-                mesh,
-                first,
-                count,
-            } = *dr;
-            let Some(&pipe) = self.pg.ready.get(&(mat, variant)) else {
-                continue;
-            };
+            let PDraw { mat, variant, mesh, first, count } = *dr;
+            let Some(&pipe) = self.pg.ready.get(&(mat, variant)) else { continue };
             unsafe {
                 if !bound {
                     d.cmd_bind_descriptor_sets(
@@ -436,9 +405,7 @@ impl Renderer {
                     if mesh == PNONE {
                         continue;
                     }
-                    let Some(m) = self.pg.meshes.get(mesh as usize) else {
-                        continue;
-                    };
+                    let Some(m) = self.pg.meshes.get(mesh as usize) else { continue };
                     d.cmd_bind_vertex_buffers(cmd, 0, &[m.vbuf.buffer, buf], &[0, mesh_at]);
                     d.cmd_bind_index_buffer(cmd, m.ibuf.buffer, 0, vk::IndexType::UINT32);
                     d.cmd_draw_indexed(cmd, m.index_count, count, 0, 0, first);

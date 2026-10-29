@@ -163,8 +163,7 @@ pub fn spirv(src: &str) -> Result<Vec<u32>> {
 
 /// As `spirv`, with extra validator capabilities (the shadow depth pass uses an immediate, i.e. a push constant).
 pub fn spirv_caps(src: &str, caps: naga::valid::Capabilities) -> Result<Vec<u32>> {
-    let module = naga::front::wgsl::parse_str(src)
-        .map_err(|e| anyhow!("wgsl: {}", e.emit_to_string(src)))?;
+    let module = naga::front::wgsl::parse_str(src).map_err(|e| anyhow!("wgsl: {}", e.emit_to_string(src)))?;
     let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), caps)
         .validate(&module)
         .map_err(|e| anyhow!("validate: {e:?}"))?;
@@ -188,11 +187,7 @@ mod tests {
             "expressions": {"1": {"class": "MaterialExpressionParticleSubUV", "props": {"Texture": {"path": "Pkg.Fire"}}}}
         });
         for raw in [true, false] {
-            let c = matprog::compile_with(&mat, &|_| matprog::TexInfo {
-                unpack: None,
-                pwl: true,
-                raw,
-            });
+            let c = matprog::compile_with(&mat, &|_| matprog::TexInfo { unpack: None, pwl: true, raw });
             for mesh in [false, true] {
                 let src = shader::module_source(&c, mesh);
                 assert_eq!(src.contains("xe_pwl_raw(textureSample"), raw);
@@ -203,28 +198,12 @@ mod tests {
 
     #[test]
     fn fallback_and_textured_compile() {
-        let grey = MatDef {
-            diffuse_const: Some([0.6, 0.6, 0.6, 1.0]),
-            ..Default::default()
-        };
+        let grey = MatDef { diffuse_const: Some([0.6, 0.6, 0.6, 1.0]), ..Default::default() };
         let c = matdef::codegen::compile(&grey, &[]);
-        spirv(&scene_source(
-            &c,
-            ShaderFlags::new(false, false, false, 330),
-        ))
-        .unwrap();
+        spirv(&scene_source(&c, ShaderFlags::new(false, false, false, 330))).unwrap();
         let tex = MatDef {
-            textures: vec![TexRef {
-                path: "a".into(),
-                normal: false,
-            }],
-            nodes: vec![
-                Node::Tex { tex: 0, uv: None },
-                Node::Mask {
-                    x: 0,
-                    m: [false, false, false, true],
-                },
-            ],
+            textures: vec![TexRef { path: "a".into(), normal: false }],
+            nodes: vec![Node::Tex { tex: 0, uv: None }, Node::Mask { x: 0, m: [false, false, false, true] }],
             diffuse: Some(0),
             opacity_mask: Some(1),
             ..Default::default()
@@ -241,10 +220,7 @@ mod tests {
     #[test]
     fn lightvec_normal_compiles() {
         let m = MatDef {
-            textures: vec![TexRef {
-                path: "n".into(),
-                normal: true,
-            }],
+            textures: vec![TexRef { path: "n".into(), normal: true }],
             nodes: vec![Node::Tex { tex: 0, uv: None }, Node::LightVec],
             diffuse: Some(0),
             normal: Some(1),
@@ -252,19 +228,10 @@ mod tests {
         };
         let c = matdef::codegen::compile(&m, &[None]);
         let src = scene_source(&c, ShaderFlags::new(false, false, false, 330));
-        assert!(
-            src.contains("if (true && true)"),
-            "LightVector material should take the per-light path"
-        );
+        assert!(src.contains("if (true && true)"), "LightVector material should take the per-light path");
         spirv(&src).unwrap();
-        let grey = MatDef {
-            diffuse_const: Some([0.6, 0.6, 0.6, 1.0]),
-            ..Default::default()
-        };
-        let src = scene_source(
-            &matdef::codegen::compile(&grey, &[]),
-            ShaderFlags::new(false, false, false, 330),
-        );
+        let grey = MatDef { diffuse_const: Some([0.6, 0.6, 0.6, 1.0]), ..Default::default() };
+        let src = scene_source(&matdef::codegen::compile(&grey, &[]), ShaderFlags::new(false, false, false, 330));
         assert!(src.contains("if (false && true)"));
     }
 
@@ -272,34 +239,18 @@ mod tests {
     #[test]
     fn pwl_gamma_compiles() {
         let tex = MatDef {
-            textures: vec![
-                TexRef {
-                    path: "a".into(),
-                    normal: false,
-                },
-                TexRef {
-                    path: "n".into(),
-                    normal: true,
-                },
-            ],
-            nodes: vec![
-                Node::Tex { tex: 0, uv: None },
-                Node::Tex { tex: 1, uv: None },
-            ],
+            textures: vec![TexRef { path: "a".into(), normal: false }, TexRef { path: "n".into(), normal: true }],
+            nodes: vec![Node::Tex { tex: 0, uv: None }, Node::Tex { tex: 1, uv: None }],
             diffuse: Some(0),
             normal: Some(1),
             ..Default::default()
         };
-        let c =
-            matdef::codegen::compile_gamma(&tex, &[None, None], &[false, false], &[true, false]);
+        let c = matdef::codegen::compile_gamma(&tex, &[None, None], &[false, false], &[true, false]);
         assert!(c.body.contains("xe_pwl(textureSample(t0"), "{}", c.body);
         assert!(!c.body.contains("xe_pwl(textureSample(t1"), "{}", c.body);
         let plain = matdef::codegen::compile_ex(&tex, &[None, None], &[false, false]);
         assert_ne!(c.key, plain.key);
-        let f = ShaderFlags {
-            lm_pwl: true,
-            ..ShaderFlags::new(false, false, false, 330)
-        };
+        let f = ShaderFlags { lm_pwl: true, ..ShaderFlags::new(false, false, false, 330) };
         let src = scene_source(&c, f);
         assert!(src.contains("if (true) { return xe_pwl3(c); }"));
         spirv(&src).unwrap();

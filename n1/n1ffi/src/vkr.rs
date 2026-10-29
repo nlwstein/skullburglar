@@ -309,11 +309,7 @@ pub fn record_log_ms() -> Option<f32> {
 
 impl Laps {
     pub fn new() -> Self {
-        Laps {
-            on: record_log_ms().is_some(),
-            last: std::time::Instant::now(),
-            steps: Vec::new(),
-        }
+        Laps { on: record_log_ms().is_some(), last: std::time::Instant::now(), steps: Vec::new() }
     }
     /// Starts a new frame's breakdown.
     #[inline]
@@ -544,8 +540,7 @@ fn layout_barrier(
 impl Renderer {
     /// Material and particle time: the game's world time when given, else seconds since start.
     pub fn time(&self) -> f32 {
-        self.world_time
-            .unwrap_or_else(|| self.t_start.elapsed().as_secs_f32())
+        self.world_time.unwrap_or_else(|| self.t_start.elapsed().as_secs_f32())
     }
 
     /// # Safety
@@ -656,23 +651,10 @@ impl Renderer {
             let pg = pgpu::PGpu::new(&device)?;
             let tg = tgpu::TGpu::new(&device)?;
             // Cull mode and front face per draw need Vulkan 1.3's dynamic state; without it they join the pipeline key.
-            let dyn_cull = std::env::var("BOTS_N1_DYN_CULL")
-                .map(|v| v != "0")
-                .unwrap_or(true)
-                && instance
-                    .get_physical_device_properties(ctx.physical_device)
-                    .api_version
-                    >= vk::API_VERSION_1_3
-                && (instance.fp_v1_0().get_device_proc_addr)(
-                    ctx.device,
-                    c"vkCmdSetCullMode".as_ptr(),
-                )
-                .is_some()
-                && (instance.fp_v1_0().get_device_proc_addr)(
-                    ctx.device,
-                    c"vkCmdSetFrontFace".as_ptr(),
-                )
-                .is_some();
+            let dyn_cull = std::env::var("BOTS_N1_DYN_CULL").map(|v| v != "0").unwrap_or(true)
+                && instance.get_physical_device_properties(ctx.physical_device).api_version >= vk::API_VERSION_1_3
+                && (instance.fp_v1_0().get_device_proc_addr)(ctx.device, c"vkCmdSetCullMode".as_ptr()).is_some()
+                && (instance.fp_v1_0().get_device_proc_addr)(ctx.device, c"vkCmdSetFrontFace".as_ptr()).is_some();
             let store = Store::new(
                 device.clone(),
                 set0_layout,
@@ -682,8 +664,7 @@ impl Renderer {
                 dyn_cull,
             )?;
             let mut allocator = allocator;
-            let shadows =
-                shadow::Shadows::new(&device, &mut allocator, set0_layout, store.cache, &knobs)?;
+            let shadows = shadow::Shadows::new(&device, &mut allocator, set0_layout, store.cache, &knobs)?;
             let gprof = gprof::GpuProf::from_env(&instance, &device, ctx.physical_device);
             let mut r = Self {
                 laps: Laps::new(),
@@ -764,9 +745,7 @@ impl Renderer {
             };
             r.light = r.buffer(
                 4 << 20,
-                vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::TRANSFER_SRC
-                    | vk::BufferUsageFlags::TRANSFER_DST,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST,
                 "n1 light",
             )?;
             // Built-in textures: TEX_GREY (sRGB), TEX_NORMAL (flat), TEX_BLACK.
@@ -1191,11 +1170,7 @@ impl Renderer {
                         ..Default::default()
                     }
                 };
-                let t = if m.texture != NONE {
-                    vec![m.texture]
-                } else {
-                    vec![]
-                };
+                let t = if m.texture != NONE { vec![m.texture] } else { vec![] };
                 (&fallback, t)
             }
         };
@@ -1219,12 +1194,7 @@ impl Renderer {
         let recon_z: Vec<bool> = (0..def.textures.len()).map(is_bc5).collect();
         // B-235: textures uploaded raw for the gamma fetch take the PWL curve.
         let gamma: Vec<bool> = (0..def.textures.len())
-            .map(|k| {
-                textures
-                    .get(k)
-                    .and_then(|&t| self.textures.get(t as usize))
-                    .is_some_and(|t| t.gamma)
-            })
+            .map(|k| textures.get(k).and_then(|&t| self.textures.get(t as usize)).is_some_and(|t| t.gamma))
             .collect();
         let c = matdef::codegen::compile_gamma(def, &unpack, &recon_z, &gamma);
         let fl = self.shader_flags(def, m.blend);
@@ -1236,12 +1206,7 @@ impl Renderer {
                 // B-199: materials arrive with the level preload, before anything draws them; have the static-mesh
                 // pipeline built now too (a worker, not urgent), so the first draw does not wait on the stand-in.
                 let cull = if self.dyn_cull { 0 } else { m.two_sided as u8 };
-                self.store.prewarm_scene_pipe(crate::store::SceneKey {
-                    shader: id,
-                    blend: blend_of(m.blend),
-                    skin: false,
-                    cull,
-                });
+                self.store.prewarm_scene_pipe(crate::store::SceneKey { shader: id, blend: blend_of(m.blend), skin: false, cull });
                 id
             }
             None => {
@@ -1344,10 +1309,7 @@ impl Renderer {
         if shader == NO_SHADER && !self.unresolved.contains(&id) {
             self.unresolved.push(id);
             if self.store.log_misses {
-                eprintln!(
-                    "n1ffi: material #{id} needs shader {skey:016x} ({} params)",
-                    c.params.len()
-                );
+                eprintln!("n1ffi: material #{id} needs shader {skey:016x} ({} params)", c.params.len());
             }
         }
         let mi = &mut self.materials[id as usize];
@@ -1408,11 +1370,7 @@ impl Renderer {
                 .dynamic_state(&dy)
                 .layout(self.post_pipe_layout)
                 .push_next(&mut rendering);
-            let _use = self
-                .store
-                .cache_use
-                .read()
-                .unwrap_or_else(|p| p.into_inner());
+            let _use = self.store.cache_use.read().unwrap_or_else(|p| p.into_inner());
             let p = self
                 .device
                 .create_graphics_pipelines(self.store.cache, &[info], None)
@@ -1445,17 +1403,10 @@ impl Renderer {
     }
 
     fn ensure_targets(&mut self, w: u32, h: u32) -> Result<()> {
-        if self
-            .hdr
-            .as_ref()
-            .is_some_and(|r| r.width == w && r.height == h)
-        {
+        if self.hdr.as_ref().is_some_and(|r| r.width == w && r.height == h) {
             return Ok(());
         }
-        for r in [self.hdr.take(), self.depth.take(), self.graded.take()]
-            .into_iter()
-            .flatten()
-        {
+        for r in [self.hdr.take(), self.depth.take(), self.graded.take()].into_iter().flatten() {
             self.defer(Garbage::Image(r.image, r.view, r.alloc));
         }
         if let Some(b) = self.bloom.take() {
@@ -1523,12 +1474,7 @@ impl Renderer {
     /// per frame, instead of all in the first scene frame. `BOTS_N1_LIGHT_GROW=0`: the old path.
     fn sync_light(&mut self, cmd: vk::CommandBuffer) -> Result<()> {
         let fast = self.knobs.light_grow;
-        let plan = light_sync_plan(
-            self.light_cpu.len(),
-            self.light_dirty_from,
-            self.light.cap,
-            fast,
-        );
+        let plan = light_sync_plan(self.light_cpu.len(), self.light_dirty_from, self.light.cap, fast);
         if let Some(cap) = plan.grow_to {
             let usage = vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_SRC
@@ -1554,17 +1500,11 @@ impl Renderer {
                         cmd,
                         old.buffer,
                         self.light.buffer,
-                        &[vk::BufferCopy {
-                            src_offset: 0,
-                            dst_offset: 0,
-                            size: bytes,
-                        }],
+                        &[vk::BufferCopy { src_offset: 0, dst_offset: 0, size: bytes }],
                     );
                     let b = [vk::BufferMemoryBarrier::default()
                         .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                        .dst_access_mask(
-                            vk::AccessFlags::SHADER_READ | vk::AccessFlags::TRANSFER_READ,
-                        )
+                        .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::TRANSFER_READ)
                         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                         .buffer(self.light.buffer)
@@ -1733,11 +1673,7 @@ impl Renderer {
             shader: k.shader,
             blend: k.blend,
             skin: k.skin,
-            cull: if self.dyn_cull {
-                0
-            } else {
-                k.two_sided as u8 | (k.mirrored as u8) << 1
-            },
+            cull: if self.dyn_cull { 0 } else { k.two_sided as u8 | (k.mirrored as u8) << 1 },
         }
     }
 
@@ -1763,11 +1699,7 @@ impl Renderer {
     /// Never block on a compile: a draw whose shader or pipeline isn't ready is drawn with the grey stand-in (opaque
     /// ones) or left out (blended ones), and the missing pipeline is built by a worker.
     fn fix_draws(&mut self, grey: u32) {
-        let grey_shader = self
-            .materials
-            .get(grey as usize)
-            .map(|m| m.shader)
-            .unwrap_or(NO_SHADER);
+        let grey_shader = self.materials.get(grey as usize).map(|m| m.shader).unwrap_or(NO_SHADER);
         let mut draws = std::mem::take(&mut self.draws);
         let mut skipped = 0u32;
         let mut fallback = 0u64;
@@ -1776,11 +1708,7 @@ impl Renderer {
                 return true;
             }
             if !blended(d.key.blend) && grey_shader != NO_SHADER {
-                let k = Key {
-                    shader: grey_shader,
-                    blend: 0,
-                    ..d.key
-                };
+                let k = Key { shader: grey_shader, blend: 0, ..d.key };
                 if self.pipe_ready(&k) {
                     d.key = k;
                     d.mat = grey;
@@ -1942,9 +1870,8 @@ impl Renderer {
                 continue;
             };
             let b = skin.insts[d.instance as usize].bounds;
-            let dist =
-                ((b[0] - eye[0]).powi(2) + (b[1] - eye[1]).powi(2) + (b[2] - eye[2]).powi(2))
-                    .sqrt();
+            let dist = ((b[0] - eye[0]).powi(2) + (b[1] - eye[1]).powi(2) + (b[2] - eye[2]).powi(2))
+                .sqrt();
             self.draws.push(Draw {
                 key: Key {
                     shader: mt.shader,
@@ -1970,11 +1897,7 @@ impl Renderer {
         let sort = self.knobs.opaque_sort;
         self.draws.sort_by(|a, b| {
             let (ab, bb) = (blended(a.key.blend), blended(b.key.blend));
-            let near = |a: &Draw, b: &Draw| {
-                a.depth
-                    .partial_cmp(&b.depth)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            };
+            let near = |a: &Draw, b: &Draw| a.depth.partial_cmp(&b.depth).unwrap_or(std::cmp::Ordering::Equal);
             ab.cmp(&bb).then_with(|| {
                 if ab {
                     b.depth
@@ -1983,9 +1906,7 @@ impl Renderer {
                 } else if sort == 1 {
                     a.key.cmp(&b.key).then_with(|| near(a, b))
                 } else if sort == 2 {
-                    near(a, b).then_with(|| {
-                        (a.key, a.mat, a.lm, a.mesh).cmp(&(b.key, b.mat, b.lm, b.mesh))
-                    })
+                    near(a, b).then_with(|| (a.key, a.mat, a.lm, a.mesh).cmp(&(b.key, b.mat, b.lm, b.mesh)))
                 } else {
                     (a.key, a.mat, a.lm, a.mesh).cmp(&(b.key, b.mat, b.lm, b.mesh))
                 }
@@ -2042,11 +1963,7 @@ impl Renderer {
             self.lighting.dyn_frame.instance_words(
                 &self.spheres,
                 &|i| (env[i] != NONE).then_some(env[i] as usize),
-                if self.knobs.dyn_lights {
-                    self.knobs.listed
-                } else {
-                    0
-                },
+                if self.knobs.dyn_lights { self.knobs.listed } else { 0 },
             )
         } else {
             vec![[0xFFFF_FFFF, 0]; self.gpu_insts.len()]
@@ -2058,24 +1975,11 @@ impl Renderer {
             if !self.dyn_logged {
                 self.dyn_logged = true;
                 let ls = &self.lighting.dyn_frame.lights;
-                eprintln!(
-                    "n1ffi: dynlog {} lights, {} instances ({} skinned)",
-                    ls.len(),
-                    self.spheres.len(),
-                    skin.insts.len()
-                );
+                eprintln!("n1ffi: dynlog {} lights, {} instances ({} skinned)", ls.len(), self.spheres.len(), skin.insts.len());
                 for (i, l) in ls.iter().enumerate() {
                     eprintln!(
                         "n1ffi: dynlog light {i} pos ({:.1}, {:.1}, {:.1}) radius {:.1} rgb ({:.4}, {:.4}, {:.4}) falloff {:.2} spot {}",
-                        l[0],
-                        l[1],
-                        l[2],
-                        1.0 / l[3],
-                        l[4],
-                        l[5],
-                        l[6],
-                        l[7],
-                        l[12]
+                        l[0], l[1], l[2], 1.0 / l[3], l[4], l[5], l[6], l[7], l[12]
                     );
                 }
                 let skin_base = self.gpu_insts.len() - skin.insts.len();
@@ -2092,18 +1996,14 @@ impl Renderer {
             self.dyn_logged = false;
         }
         // B-230 debug A/B: bit 0 swaps in the other light colour mode (same lights, same order).
-        let lights = if self.debug_bits & 1 != 0
-            && self.lighting.dyn_lights_alt.len() == self.lighting.dyn_frame.lights.len()
-        {
+        let lights = if self.debug_bits & 1 != 0 && self.lighting.dyn_lights_alt.len() == self.lighting.dyn_frame.lights.len() {
             &self.lighting.dyn_lights_alt
         } else {
             &self.lighting.dyn_frame.lights
         };
         let lw: Vec<u8> = bytemuck::cast_slice(&lights.concat()).to_vec();
         // B-245 debug A/B: bit 8 (256) swaps in the light environments packed in the other colour mode.
-        let envs = if self.debug_bits & 256 != 0
-            && self.lighting.envs_alt.len() == self.lighting.dyn_frame.envs.len()
-        {
+        let envs = if self.debug_bits & 256 != 0 && self.lighting.envs_alt.len() == self.lighting.dyn_frame.envs.len() {
             &self.lighting.envs_alt
         } else {
             &self.lighting.dyn_frame.envs
@@ -2117,30 +2017,25 @@ impl Renderer {
         let envs_at = align(lights_at + (lw.len() as u64).max(64));
         let bones_at = align(envs_at + (ew.len() as u64).max(208));
         let end_bones = bones_at + skin.bones.len().max(1) as u64 * 64;
-        let (rw, rh) = (
-            target.rect.extent.width.max(1),
-            target.rect.extent.height.max(1),
-        );
+        let (rw, rh) = (target.rect.extent.width.max(1), target.rect.extent.height.max(1));
         // B-189: this frame's shadows, after the bones.
         self.select_shadows(&swz_vp(view_proj), rw, rh);
         self.shadow_receivers();
         self.laps.lap("shadows_select");
         let shadows_at = align(end_bones);
-        let end = shadows_at
-            + self.shadows.frame.len().max(1) as u64
-                * std::mem::size_of::<shadow::GpuShadow>() as u64;
+        let end = shadows_at + self.shadows.frame.len().max(1) as u64 * std::mem::size_of::<shadow::GpuShadow>() as u64;
         let si = self.slot(end, serial, completed)?;
         self.laps.lap("slot");
 
         self.ensure_targets(rw, rh)?;
         self.laps.lap("ensure_targets");
         let eye_y = lightfeed::swz(eye);
-        let env = if self.debug_bits & 2048 != 0 {
-            &self.lighting.env_alt
-        } else {
-            &self.lighting.env
-        };
-        let mut globals = env.globals(swz_vp(view_proj), eye_y, self.time());
+        let env = if self.debug_bits & 2048 != 0 { &self.lighting.env_alt } else { &self.lighting.env };
+        let mut globals = env.globals(
+            swz_vp(view_proj),
+            eye_y,
+            self.time(),
+        );
         let post_on = self.knobs.post;
         let pp = &self.lighting.post;
         let grade_on = post_on && pp.grade.is_some();
@@ -2165,11 +2060,7 @@ impl Renderer {
             })
         };
         // B-266: post materials after the composite (which then writes linear into a full-res target).
-        let mats = if post_on {
-            self.post_mat_passes()
-        } else {
-            vec![]
-        };
+        let mats = if post_on { self.post_mat_passes() } else { vec![] };
         let names: Vec<&'static str> = mats.iter().map(|m| m.0).collect();
         if names != self.post_mats_last {
             eprintln!(
@@ -2208,11 +2099,7 @@ impl Renderer {
             let put = |b: &mut [u8], at: u64, src: &[u8]| {
                 b[at as usize..at as usize + src.len()].copy_from_slice(src)
             };
-            globals.tune2[3] = if self.knobs.shadow_apply {
-                self.shadows.frame.len() as f32
-            } else {
-                0.0
-            };
+            globals.tune2[3] = if self.knobs.shadow_apply { self.shadows.frame.len() as f32 } else { 0.0 };
             // B-244 debug A/B: bit 2 shows the lighting alone (`BOTS_N1_ENVP=irr`), bit 3 drops the modulated shadows,
             // bit 4 the dynamic lights (gain 0).
             if self.debug_bits & 4 != 0 {
@@ -2232,11 +2119,8 @@ impl Renderer {
             let env_spec = self.knobs.env_spec && self.debug_bits & 512 == 0;
             // B-261 flag bit 4: tangent-space ReflectionVector (debug bit 12, 4096, off).
             let refl_ts = self.knobs.refl_ts && self.debug_bits & 4096 == 0;
-            globals.amb_up[3] = (post as u32
-                | (lv as u32) << 1
-                | (spec as u32) << 2
-                | (env_spec as u32) << 3
-                | (refl_ts as u32) << 4) as f32;
+            globals.amb_up[3] =
+                (post as u32 | (lv as u32) << 1 | (spec as u32) << 2 | (env_spec as u32) << 3 | (refl_ts as u32) << 4) as f32;
             put(b, GLOBALS_AT, bytemuck::bytes_of(&globals));
             for (k, blk) in blocks.iter().enumerate() {
                 put(b, POST_AT + 256 * k as u64, bytemuck::cast_slice(blk));
@@ -2319,17 +2203,9 @@ impl Renderer {
         // Post sets: (uniform block, source, bloom, bloom2) per pass; binding 5 is the depth buffer.
         {
             let hdr = self.hdr.as_ref().unwrap().view;
-            let scene = if grade_on {
-                self.graded.as_ref().unwrap().view
-            } else {
-                hdr
-            };
+            let scene = if grade_on { self.graded.as_ref().unwrap().view } else { hdr };
             let dv = self.depth.as_ref().unwrap().view;
-            let [q0, q1, q2] = self
-                .bloom
-                .as_ref()
-                .map(|x| [x[0].view, x[1].view, x[2].view])
-                .unwrap();
+            let [q0, q1, q2] = self.bloom.as_ref().map(|x| [x[0].view, x[1].view, x[2].view]).unwrap();
             let mut srcs = vec![
                 (hdr, q0, q0),   // grade
                 (scene, q0, q0), // down -> q0
@@ -2342,19 +2218,11 @@ impl Renderer {
             if !mats.is_empty() {
                 // B-266: the linear composite reads the scene and writes the other full-res target; the material
                 // passes ping-pong between the two, the last writing the output.
-                let other = if grade_on {
-                    hdr
-                } else {
-                    self.graded.as_ref().unwrap().view
-                };
+                let other = if grade_on { hdr } else { self.graded.as_ref().unwrap().view };
                 srcs.push((scene, q0, q2));
                 let mut cur = other;
                 for (_, _, ids, _) in &mats {
-                    srcs.push((
-                        cur,
-                        self.tex_view(ids[0], TEX_BLACK),
-                        self.tex_view(ids[1], TEX_BLACK),
-                    ));
+                    srcs.push((cur, self.tex_view(ids[0], TEX_BLACK), self.tex_view(ids[1], TEX_BLACK)));
                     cur = if cur == other { scene } else { other };
                 }
             }
@@ -2458,11 +2326,7 @@ impl Renderer {
         if !mats.is_empty() {
             p_mats.push(self.post_pipe("fs_comp_lin", HDR_FORMAT)?);
             for (j, (fs, ..)) in mats.iter().enumerate() {
-                let fmt = if j + 1 == mats.len() {
-                    self.color_format
-                } else {
-                    HDR_FORMAT
-                };
+                let fmt = if j + 1 == mats.len() { self.color_format } else { HDR_FORMAT };
                 p_mats.push(self.post_pipe(fs, fmt)?);
             }
         }
@@ -2486,20 +2350,12 @@ impl Renderer {
         let graded = self.graded.as_ref().unwrap();
         let color = vk::ImageAspectFlags::COLOR;
         let barrier = |stage_src, stage_dst, b: &[vk::ImageMemoryBarrier]| unsafe {
-            d.cmd_pipeline_barrier(
-                cmd,
-                stage_src,
-                stage_dst,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                b,
-            )
+            d.cmd_pipeline_barrier(cmd, stage_src, stage_dst, vk::DependencyFlags::empty(), &[], &[], b)
         };
         let frag = vk::PipelineStageFlags::FRAGMENT_SHADER;
         let cao = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT;
-        let tests = vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-            | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS;
+        let tests =
+            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS;
         let to_att = |img| {
             layout_barrier(
                 img,
@@ -2608,15 +2464,9 @@ impl Renderer {
                     shader: dr.key.shader,
                     blend: dr.key.blend,
                     skin: dr.key.skin,
-                    cull: if self.dyn_cull {
-                        0
-                    } else {
-                        dr.key.two_sided as u8 | (dr.key.mirrored as u8) << 1
-                    },
+                    cull: if self.dyn_cull { 0 } else { dr.key.two_sided as u8 | (dr.key.mirrored as u8) << 1 },
                 };
-                let Some(&pipe) = self.ready.get(&sk) else {
-                    continue;
-                };
+                let Some(&pipe) = self.ready.get(&sk) else { continue };
                 if cur_key != Some(dr.key) {
                     if pipe != cur_pipe {
                         d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipe);
@@ -2625,27 +2475,15 @@ impl Renderer {
                     if self.dyn_cull {
                         d.cmd_set_cull_mode(
                             cmd,
-                            if dr.key.two_sided {
-                                vk::CullModeFlags::NONE
-                            } else {
-                                vk::CullModeFlags::BACK
-                            },
+                            if dr.key.two_sided { vk::CullModeFlags::NONE } else { vk::CullModeFlags::BACK },
                         );
                         d.cmd_set_front_face(
                             cmd,
-                            if dr.key.mirrored {
-                                vk::FrontFace::CLOCKWISE
-                            } else {
-                                vk::FrontFace::COUNTER_CLOCKWISE
-                            },
+                            if dr.key.mirrored { vk::FrontFace::CLOCKWISE } else { vk::FrontFace::COUNTER_CLOCKWISE },
                         );
                     }
                     let ntex = self.store.ntex_of(dr.key.shader);
-                    let layout = self
-                        .store
-                        .mat_layout(ntex)
-                        .map(|l| l.1)
-                        .unwrap_or(cur_layout);
+                    let layout = self.store.mat_layout(ntex).map(|l| l.1).unwrap_or(cur_layout);
                     if layout != cur_layout {
                         // Set 0 and 1 have the same layout in every pipeline layout, so they stay bound; binding
                         // again after a layout switch is cheap and keeps validation layers quiet.
@@ -2727,8 +2565,7 @@ impl Renderer {
                 let mem = [vk::MemoryBarrier::default()
                     .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
                     .dst_access_mask(
-                        vk::AccessFlags::COLOR_ATTACHMENT_READ
-                            | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                        vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
                     )];
                 d.cmd_pipeline_barrier(
                     cmd,
@@ -2830,23 +2667,11 @@ impl Renderer {
                 if blur_on {
                     barrier(frag, cao, &[to_att(bloom[0].image)]);
                     pass(bloom[0].view, catt_layout, bq, p_down, ps[1]);
-                    barrier(
-                        cao,
-                        frag | cao,
-                        &[to_read(bloom[0].image), to_att(bloom[1].image)],
-                    );
+                    barrier(cao, frag | cao, &[to_read(bloom[0].image), to_att(bloom[1].image)]);
                     pass(bloom[1].view, catt_layout, bq, p_blur, ps[2]);
-                    barrier(
-                        cao | frag,
-                        frag | cao,
-                        &[to_read(bloom[1].image), to_att(bloom[0].image)],
-                    );
+                    barrier(cao | frag, frag | cao, &[to_read(bloom[1].image), to_att(bloom[0].image)]);
                     pass(bloom[0].view, catt_layout, bq, p_blur, ps[3]);
-                    barrier(
-                        cao | frag,
-                        frag | cao,
-                        &[to_read(bloom[0].image), to_att(bloom[2].image)],
-                    );
+                    barrier(cao | frag, frag | cao, &[to_read(bloom[0].image), to_att(bloom[2].image)]);
                     pass(bloom[2].view, catt_layout, bq, p_blur, ps[4]);
                     barrier(cao, frag, &[to_read(bloom[2].image)]);
                 } else {
@@ -2873,11 +2698,7 @@ impl Renderer {
                 } else {
                     // B-266: linear composite into the full-res target the composite doesn't read, then each post
                     // material, ping-ponging; the last writes the output with the gamma and screen fade.
-                    let (scene_rt, other_rt) = if grade_on {
-                        (graded, hdr)
-                    } else {
-                        (hdr, graded)
-                    };
+                    let (scene_rt, other_rt) = if grade_on { (graded, hdr) } else { (hdr, graded) };
                     barrier(frag, cao, &[to_att(other_rt.image)]);
                     pass(other_rt.view, catt_layout, full(rw, rh), p_mats[0], ps[7]);
                     barrier(cao, frag, &[to_read(other_rt.image)]);
@@ -2943,10 +2764,7 @@ impl Renderer {
 
     /// Texture copies waiting for a command buffer, and the staging bytes they hold.
     pub fn pending_uploads(&self) -> (u32, u64) {
-        (
-            self.pending.len() as u32,
-            self.pending.iter().map(|u| u.staging.cap).sum(),
-        )
+        (self.pending.len() as u32, self.pending.iter().map(|u| u.staging.cap).sum())
     }
 
     /// Uploads a skinned mesh (vertices with mesh bone indices); returns its id for `SkinDraw::mesh`.
@@ -3004,12 +2822,7 @@ impl Renderer {
                 .iter()
                 .enumerate()
                 .map_while(|(i, m)| {
-                    crate::bcdec::decode_mip(
-                        t.format,
-                        (t.width >> i).max(1),
-                        (t.height >> i).max(1),
-                        m,
-                    )
+                    crate::bcdec::decode_mip(t.format, (t.width >> i).max(1), (t.height >> i).max(1), m)
                 })
                 .collect();
             if decoded.is_empty() {
@@ -3120,13 +2933,7 @@ impl Renderer {
     pub fn free_decal(&mut self, mesh: u32, light: u32) {
         let serial = self.last_serial + 1;
         if let Some(gm) = self.meshes.get_mut(mesh as usize) {
-            let old = std::mem::replace(
-                gm,
-                GpuMesh {
-                    vbuf: Buf::null(),
-                    ibuf: Buf::null(),
-                },
-            );
+            let old = std::mem::replace(gm, GpuMesh { vbuf: Buf::null(), ibuf: Buf::null() });
             self.mesh_info[mesh as usize].sections.clear();
             self.defer_at(serial, Garbage::Buffer(old.vbuf));
             self.defer_at(serial, Garbage::Buffer(old.ibuf));
@@ -3134,11 +2941,7 @@ impl Renderer {
         }
         if let Some(LightInfo::Words { base, count, .. }) = self.lights.get(light as usize) {
             let (base, count) = (*base, *count);
-            self.lights[light as usize] = LightInfo::Words {
-                base: 0,
-                count: u32::MAX,
-                sc: [[0.0; 4]; 3],
-            };
+            self.lights[light as usize] = LightInfo::Words { base: 0, count: u32::MAX, sc: [[0.0; 4]; 3] };
             self.free_words.push((serial, base, count));
             self.free_lights.push((serial, light));
         }
@@ -3165,11 +2968,7 @@ impl Renderer {
     pub fn add_decal_light(&mut self, words: &[u32], sc: [[f32; 4]; 3]) -> u32 {
         let count = (words.len() / 3) as u32;
         let done = self.completed;
-        let base = match self
-            .free_words
-            .iter()
-            .position(|&(s, _, n)| s <= done && n >= count)
-        {
+        let base = match self.free_words.iter().position(|&(s, _, n)| s <= done && n >= count) {
             Some(k) => {
                 let (s, base, n) = self.free_words.swap_remove(k);
                 if n > count {
@@ -3226,11 +3025,7 @@ struct LightSyncPlan {
 fn light_sync_plan(len_words: usize, dirty_from: usize, cap: u64, fast: bool) -> LightSyncPlan {
     let need = len_words as u64 * 4;
     if need <= cap {
-        return LightSyncPlan {
-            grow_to: None,
-            gpu_copy_words: 0,
-            cpu_from: dirty_from,
-        };
+        return LightSyncPlan { grow_to: None, gpu_copy_words: 0, cpu_from: dirty_from };
     }
     let mut new_cap = cap.max(1 << 20);
     while new_cap < need {
@@ -3238,11 +3033,7 @@ fn light_sync_plan(len_words: usize, dirty_from: usize, cap: u64, fast: bool) ->
     }
     // The old buffer holds `dirty_from` current words (the rest were never written to it).
     let keep = if fast { dirty_from.min(len_words) } else { 0 };
-    LightSyncPlan {
-        grow_to: Some(new_cap),
-        gpu_copy_words: keep,
-        cpu_from: keep,
-    }
+    LightSyncPlan { grow_to: Some(new_cap), gpu_copy_words: keep, cpu_from: keep }
 }
 
 /// Legacy single-colour vertex light as three identical words (bytes A, R, G, B; the shader reads `.yzw`), scale 4.
@@ -3274,10 +3065,7 @@ impl Backend for Renderer {
     fn remove_material(&mut self, id: u32) {
         // Reused once the newest submission that could have drawn it has completed (the resolver only releases
         // materials no instance named for many frames, so that is long past by then).
-        if (id as usize) < self.materials.len()
-            && id != self.grey_mat
-            && !self.free_mats.iter().any(|x| x.1 == id)
-        {
+        if (id as usize) < self.materials.len() && id != self.grey_mat && !self.free_mats.iter().any(|x| x.1 == id) {
             self.free_mats.push((self.last_serial + 1, id));
         }
     }
@@ -3397,10 +3185,7 @@ impl Drop for Renderer {
                     self.free(Garbage::Image(t.image, t.view, a));
                 }
             }
-            let mut rts: Vec<Rt> = [self.hdr.take(), self.depth.take(), self.graded.take()]
-                .into_iter()
-                .flatten()
-                .collect();
+            let mut rts: Vec<Rt> = [self.hdr.take(), self.depth.take(), self.graded.take()].into_iter().flatten().collect();
             if let Some(b) = self.bloom.take() {
                 rts.extend(b);
             }
@@ -3423,14 +3208,12 @@ impl Drop for Renderer {
             for s in [self.sampler, self.lm_sampler, self.post_sampler] {
                 self.device.destroy_sampler(s, None);
             }
-            self.device
-                .destroy_pipeline_layout(self.post_pipe_layout, None);
+            self.device.destroy_pipeline_layout(self.post_pipe_layout, None);
             for l in [self.set0_layout, self.lm_layout, self.post_layout] {
                 self.device.destroy_descriptor_set_layout(l, None);
             }
             self.device.destroy_shader_module(self.post_module, None);
-            self.shadows
-                .destroy(&self.device, self.allocator.as_mut().unwrap());
+            self.shadows.destroy(&self.device, self.allocator.as_mut().unwrap());
             self.allocator.take();
         }
     }
@@ -3443,14 +3226,7 @@ mod light_sync_tests {
     #[test]
     fn fits_means_no_growth() {
         let p = light_sync_plan(1000, 400, 4000, true);
-        assert_eq!(
-            p,
-            LightSyncPlan {
-                grow_to: None,
-                gpu_copy_words: 0,
-                cpu_from: 400
-            }
-        );
+        assert_eq!(p, LightSyncPlan { grow_to: None, gpu_copy_words: 0, cpu_from: 400 });
     }
 
     #[test]
@@ -3458,14 +3234,7 @@ mod light_sync_tests {
         // 27 MB of words in a 16 MB buffer, 20 MB synced before: 32 MB buffer, 20 MB by GPU copy, the CPU writes the rest.
         let (len, synced) = (27 << 18, 20 << 18);
         let p = light_sync_plan(len, synced, 16 << 20, true);
-        assert_eq!(
-            p,
-            LightSyncPlan {
-                grow_to: Some(32 << 20),
-                gpu_copy_words: synced,
-                cpu_from: synced
-            }
-        );
+        assert_eq!(p, LightSyncPlan { grow_to: Some(32 << 20), gpu_copy_words: synced, cpu_from: synced });
     }
 
     #[test]
@@ -3478,26 +3247,12 @@ mod light_sync_tests {
     #[test]
     fn switch_off_rewrites_everything_from_the_cpu() {
         let p = light_sync_plan(27 << 18, 20 << 18, 16 << 20, false);
-        assert_eq!(
-            p,
-            LightSyncPlan {
-                grow_to: Some(32 << 20),
-                gpu_copy_words: 0,
-                cpu_from: 0
-            }
-        );
+        assert_eq!(p, LightSyncPlan { grow_to: Some(32 << 20), gpu_copy_words: 0, cpu_from: 0 });
     }
 
     #[test]
     fn nothing_synced_yet_copies_nothing() {
         let p = light_sync_plan(5 << 18, 0, 4 << 20, true);
-        assert_eq!(
-            p,
-            LightSyncPlan {
-                grow_to: Some(8 << 20),
-                gpu_copy_words: 0,
-                cpu_from: 0
-            }
-        );
+        assert_eq!(p, LightSyncPlan { grow_to: Some(8 << 20), gpu_copy_words: 0, cpu_from: 0 });
     }
 }

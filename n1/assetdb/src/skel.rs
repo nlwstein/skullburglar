@@ -156,16 +156,8 @@ mod normal_probe {
             return;
         }
         let cooked = std::env::var("COOKED").unwrap();
-        let db = crate::AssetDb::open(
-            std::path::Path::new(&cooked),
-            std::path::Path::new("../cache/n12"),
-        )
-        .unwrap();
-        for p in [
-            "Ch_Type1_50Cent.Meshes.Char_Body",
-            "AST_WeaponsEmplacement.MiniGun01_SKN",
-            "AST_VehiclesHelicopter.BlackHawk03_SKN",
-        ] {
+        let db = crate::AssetDb::open(std::path::Path::new(&cooked), std::path::Path::new("../cache/n12")).unwrap();
+        for p in ["Ch_Type1_50Cent.Meshes.Char_Body", "AST_WeaponsEmplacement.MiniGun01_SKN", "AST_VehiclesHelicopter.BlackHawk03_SKN"] {
             let Some(a) = db.skeletal(p) else {
                 println!("{p}: missing");
                 continue;
@@ -176,11 +168,7 @@ mod normal_probe {
                 let (p0, p1, p2) = (v(t[0]), v(t[1]), v(t[2]));
                 let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
                 let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
-                let f = [
-                    e1[1] * e2[2] - e1[2] * e2[1],
-                    e1[2] * e2[0] - e1[0] * e2[2],
-                    e1[0] * e2[1] - e1[1] * e2[0],
-                ];
+                let f = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
                 let nn = a.verts[t[0] as usize].normal;
                 let d = f[0] * nn[0] + f[1] * nn[1] + f[2] * nn[2];
                 n += 1;
@@ -188,11 +176,7 @@ mod normal_probe {
                     agree += 1;
                 }
             }
-            println!(
-                "{p}: {} tris, {:.1}% agree (cross(e1,e2) . n > 0)",
-                n,
-                100.0 * agree as f64 / n as f64
-            );
+            println!("{p}: {} tris, {:.1}% agree (cross(e1,e2) . n > 0)", n, 100.0 * agree as f64 / n as f64);
         }
     }
 }

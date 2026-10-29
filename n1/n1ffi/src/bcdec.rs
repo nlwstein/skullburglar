@@ -42,12 +42,7 @@ fn bc1(block: &[u8], out: &mut [u8; 64], four_colour: bool) {
     let c1 = block[2] as u32 | (block[3] as u32) << 8;
     let mut p = [[0u8; 4]; 4];
     for (i, c) in [c0, c1].into_iter().enumerate() {
-        p[i] = [
-            ((c >> 11) * 255 / 31) as u8,
-            (((c >> 5) & 63) * 255 / 63) as u8,
-            ((c & 31) * 255 / 31) as u8,
-            255,
-        ];
+        p[i] = [((c >> 11) * 255 / 31) as u8, (((c >> 5) & 63) * 255 / 63) as u8, ((c & 31) * 255 / 31) as u8, 255];
     }
     let opaque = four_colour || c0 > c1;
     for ch in 0..3 {
