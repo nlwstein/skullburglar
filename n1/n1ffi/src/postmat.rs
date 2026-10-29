@@ -28,8 +28,14 @@ impl Kind {
     /// The material paths (outermost instance, or the parent material) that select this effect.
     pub const fn paths(self) -> &'static [&'static str] {
         match self {
-            Kind::Gangsta => &["C1HUD.SlowmoEffect_MatInst", "FX_GangsterFire.GangsterFire_MAT02"],
-            Kind::Death => &["UI_DeathEffect.FaderDeath_MIC", "UI_DeathEffect.FaderDeath_MAT"],
+            Kind::Gangsta => &[
+                "C1HUD.SlowmoEffect_MatInst",
+                "FX_GangsterFire.GangsterFire_MAT02",
+            ],
+            Kind::Death => &[
+                "UI_DeathEffect.FaderDeath_MIC",
+                "UI_DeathEffect.FaderDeath_MAT",
+            ],
         }
     }
 
@@ -45,20 +51,29 @@ impl Kind {
     pub const fn textures(self) -> [&'static str; 2] {
         match self {
             Kind::Gangsta => ["FX_GangsterFire.streak", "FX_GangsterFire.EyeMask"],
-            Kind::Death => ["UI_DeathEffect.DeathScreenBackground_Alphas", "UI_DeathEffect.HeatVisionClouds_Alpha"],
+            Kind::Death => [
+                "UI_DeathEffect.DeathScreenBackground_Alphas",
+                "UI_DeathEffect.HeatVisionClouds_Alpha",
+            ],
         }
     }
 
     pub const ALL: [Kind; 2] = [Kind::Gangsta, Kind::Death];
 
     pub fn of(path: &str) -> Option<Kind> {
-        Kind::ALL.into_iter().find(|k| k.paths().iter().any(|p| p.eq_ignore_ascii_case(path)))
+        Kind::ALL
+            .into_iter()
+            .find(|k| k.paths().iter().any(|p| p.eq_ignore_ascii_case(path)))
     }
 }
 
 /// Every texture a ported effect can bind (loaded once in the background when post materials are on).
 pub fn all_textures() -> Vec<&'static str> {
-    let mut v: Vec<&'static str> = Kind::ALL.iter().flat_map(|k| k.textures()).filter(|t| !t.is_empty()).collect();
+    let mut v: Vec<&'static str> = Kind::ALL
+        .iter()
+        .flat_map(|k| k.textures())
+        .filter(|t| !t.is_empty())
+        .collect();
     v.sort_unstable();
     v.dedup();
     v
@@ -88,7 +103,10 @@ pub fn effects(p: &PostFeed) -> Vec<Effect> {
                 // A version 2 feed has no parameters: the material in the chain means the mode is on.
                 let a = p.param(m, "PARAMAmount").unwrap_or(1.0);
                 if a.is_finite() && a > 0.0 {
-                    Some(Effect { kind, params: [a.min(1.0), 0.0, 0.0, 0.0] })
+                    Some(Effect {
+                        kind,
+                        params: [a.min(1.0), 0.0, 0.0, 0.0],
+                    })
                 } else {
                     None
                 }
@@ -98,9 +116,10 @@ pub fn effects(p: &PostFeed) -> Vec<Effect> {
                 let start = p.param(m, "StartTime");
                 let len = p.param(m, "EffectLength").unwrap_or(2.0);
                 match start {
-                    Some(t0) if t0.is_finite() && len.is_finite() => {
-                        Some(Effect { kind, params: [t0, len.max(1e-3), 0.0, 0.0] })
-                    }
+                    Some(t0) if t0.is_finite() && len.is_finite() => Some(Effect {
+                        kind,
+                        params: [t0, len.max(1e-3), 0.0, 0.0],
+                    }),
                     _ => None,
                 }
             }
@@ -118,18 +137,33 @@ mod tests {
         let mut p = PostFeed::default();
         p.present = true;
         p.material_effects = mats.iter().map(|s| s.to_string()).collect();
-        p.material_params = params.iter().map(|(m, n, v)| (m.to_string(), n.to_string(), *v)).collect();
+        p.material_params = params
+            .iter()
+            .map(|(m, n, v)| (m.to_string(), n.to_string(), *v))
+            .collect();
         p
     }
 
     #[test]
     fn gangsta_amount() {
         let m = "C1HUD.SlowmoEffect_MatInst";
-        let e = effects(&feed(&["GEN_PostProcess.AmbushPP_MAT01", m], &[(m, "PARAMAmount", 0.4)]));
-        assert_eq!(e, [Effect { kind: Kind::Gangsta, params: [0.4, 0.0, 0.0, 0.0] }]);
+        let e = effects(&feed(
+            &["GEN_PostProcess.AmbushPP_MAT01", m],
+            &[(m, "PARAMAmount", 0.4)],
+        ));
+        assert_eq!(
+            e,
+            [Effect {
+                kind: Kind::Gangsta,
+                params: [0.4, 0.0, 0.0, 0.0]
+            }]
+        );
         // Off at zero, clamped at one, on without parameters (version 2 feed).
         assert!(effects(&feed(&[m], &[(m, "paramamount", 0.0)])).is_empty());
-        assert_eq!(effects(&feed(&[m], &[(m, "PARAMAmount", 3.0)]))[0].params[0], 1.0);
+        assert_eq!(
+            effects(&feed(&[m], &[(m, "PARAMAmount", 3.0)]))[0].params[0],
+            1.0
+        );
         assert_eq!(effects(&feed(&[m], &[]))[0].params[0], 1.0);
         assert!(effects(&feed(&[m], &[(m, "PARAMAmount", f32::NAN)])).is_empty());
     }
@@ -137,16 +171,34 @@ mod tests {
     #[test]
     fn death_times() {
         let m = "UI_DeathEffect.FaderDeath_MIC";
-        let e = effects(&feed(&["GEN_PostProcess.FlyingLevel_MAT01", m], &[(m, "StartTime", 12.5)]));
-        assert_eq!(e, [Effect { kind: Kind::Death, params: [12.5, 2.0, 0.0, 0.0] }]);
-        let e = effects(&feed(&[m], &[(m, "StartTime", 3.0), (m, "EffectLength", 4.0)]));
+        let e = effects(&feed(
+            &["GEN_PostProcess.FlyingLevel_MAT01", m],
+            &[(m, "StartTime", 12.5)],
+        ));
+        assert_eq!(
+            e,
+            [Effect {
+                kind: Kind::Death,
+                params: [12.5, 2.0, 0.0, 0.0]
+            }]
+        );
+        let e = effects(&feed(
+            &[m],
+            &[(m, "StartTime", 3.0), (m, "EffectLength", 4.0)],
+        ));
         assert_eq!(e[0].params[..2], [3.0, 4.0]);
         // No start time: nothing to ramp from, so no pass.
         assert!(effects(&feed(&[m], &[(m, "EffectLength", 4.0)])).is_empty());
         // Both in one chain, in chain order.
         let g = "C1HUD.SlowmoEffect_MatInst";
-        let e = effects(&feed(&[m, g], &[(m, "StartTime", 1.0), (g, "PARAMAmount", 1.0)]));
-        assert_eq!(e.iter().map(|x| x.kind).collect::<Vec<_>>(), [Kind::Death, Kind::Gangsta]);
+        let e = effects(&feed(
+            &[m, g],
+            &[(m, "StartTime", 1.0), (g, "PARAMAmount", 1.0)],
+        ));
+        assert_eq!(
+            e.iter().map(|x| x.kind).collect::<Vec<_>>(),
+            [Kind::Death, Kind::Gangsta]
+        );
     }
 
     #[test]
@@ -155,7 +207,10 @@ mod tests {
         let mut p = feed(&["C1HUD.SlowmoEffect_MatInst"], &[]);
         p.present = false;
         assert!(effects(&p).is_empty());
-        assert_eq!(Kind::of("fx_gangsterfire.gangsterfire_mat02"), Some(Kind::Gangsta));
+        assert_eq!(
+            Kind::of("fx_gangsterfire.gangsterfire_mat02"),
+            Some(Kind::Gangsta)
+        );
     }
 
     #[test]

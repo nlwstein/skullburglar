@@ -118,7 +118,10 @@ pub enum ComponentLight {
     /// Per-vertex linear colour.
     Legacy(Vec<[f32; 3]>),
     /// Per-vertex directional light: three FColor words per vertex (bytes A, R, G, B) and an RGB scale per word.
-    Dir { words: Vec<u32>, scale: [[f32; 3]; 3] },
+    Dir {
+        words: Vec<u32>,
+        scale: [[f32; 3]; 3],
+    },
     /// 2D lightmap: three LightMapTexture2D exports (level package, export index), a scale per coefficient and the
     /// UV1 transform (uv = uv1 * coord_scale + coord_bias).
     Map {
@@ -128,7 +131,6 @@ pub enum ComponentLight {
         coord_bias: [f32; 2],
     },
 }
-
 
 /// A SpeedTree component's baked vertex light (B-187): per geometry slot (branch+frond, leaf card, billboard, leaf mesh)
 /// three FColor words (bytes A, R, G, B) per vertex and an RGB scale per word, when the component stores one.
@@ -173,6 +175,9 @@ pub struct AssetDb {
     index: Index,
     open: Mutex<Vec<(String, Arc<Package>)>>, // most recently used last
     max_open: usize,
+    /// How many packages `package` has opened (decompressed) and the wall ms that took, summed over threads.
+    pub opens: std::sync::atomic::AtomicU64,
+    pub open_ms: std::sync::atomic::AtomicU64,
     tfc: ue3::texture::TfcCache,
     meshes: Mutex<HashMap<String, Option<Arc<MeshAsset>>>>,
     skeletals: Mutex<HashMap<String, Option<Arc<SkelAsset>>>>,
@@ -262,7 +267,12 @@ impl AssetDb {
             cache: cache.to_path_buf(),
             index,
             open: Mutex::new(Vec::new()),
-            max_open: 16,
+            max_open: std::env::var("BOTS_N1_MAX_OPEN")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(16),
+            opens: Default::default(),
+            open_ms: Default::default(),
             tfc: ue3::texture::TfcCache::new(cooked),
             meshes: Mutex::new(HashMap::new()),
             skeletals: Mutex::new(HashMap::new()),
@@ -275,7 +285,11 @@ impl AssetDb {
             preferred: Mutex::new(HashSet::new()),
             path_maps: Mutex::new(HashMap::new()),
             verbose: std::env::var("ASSETDB_VERBOSE").is_ok(),
-            max_tex: std::env::var("BOTS_N1_MAXTEX").ok().and_then(|v| v.parse().ok()).unwrap_or(2048).max(64),
+            max_tex: std::env::var("BOTS_N1_MAXTEX")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2048)
+                .max(64),
         })
     }
 
@@ -302,13 +316,25 @@ impl AssetDb {
             .map(|(p, _)| p.clone())
             .collect();
         // Grouped by the package holding the object, so a caller walking the list opens each package once.
-        v.sort_by_key(|p| (self.index.objects.get(p).and_then(|x| x.first().copied()).unwrap_or(u32::MAX), p.clone()));
+        v.sort_by_key(|p| {
+            (
+                self.index
+                    .objects
+                    .get(p)
+                    .and_then(|x| x.first().copied())
+                    .unwrap_or(u32::MAX),
+                p.clone(),
+            )
+        });
         v
     }
 
     /// Whether a cooked package of this name (file stem) is indexed.
     pub fn has_package(&self, name: &str) -> bool {
-        self.index.packages.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
+        self.index
+            .packages
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case(name))
     }
 
     /// B-199 preload: every indexed object a package holds a copy of, as (object path, class), Texture2D excluded
@@ -316,7 +342,12 @@ impl AssetDb {
     /// (with and without the package name in front, see `export_paths`); only the one the game uses at run time (the
     /// prefixed one) is returned.
     pub fn package_objects(&self, name: &str) -> Vec<(String, String)> {
-        let Some(pi) = self.index.packages.iter().position(|(n, _)| n.eq_ignore_ascii_case(name)) else {
+        let Some(pi) = self
+            .index
+            .packages
+            .iter()
+            .position(|(n, _)| n.eq_ignore_ascii_case(name))
+        else {
             return Vec::new();
         };
         let pi = pi as u32;
@@ -327,7 +358,9 @@ impl AssetDb {
             .objects
             .iter()
             .filter(|(p, pk)| {
-                pk.contains(&pi) && (p.starts_with(&prefix) || !self.index.objects.contains_key(&format!("{prefix}{p}")))
+                pk.contains(&pi)
+                    && (p.starts_with(&prefix)
+                        || !self.index.objects.contains_key(&format!("{prefix}{p}")))
             })
             .filter_map(|(p, _)| self.index.classes.get(p).map(|c| (p.clone(), c.clone())))
             .collect();
@@ -383,7 +416,14 @@ impl AssetDb {
             }
         }
         let path = self.cooked.join(format!("{name}.xxx"));
+        let t = std::time::Instant::now();
         let p = Arc::new(Package::open(&path)?);
+        self.opens
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.open_ms.fetch_add(
+            t.elapsed().as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let mut open = self.open.lock().unwrap();
         open.push((name.to_string(), p.clone()));
         while open.len() > self.max_open {
@@ -406,7 +446,10 @@ impl AssetDb {
             }
         }
         let m = Arc::new(m);
-        self.path_maps.lock().unwrap().insert(name.to_string(), m.clone());
+        self.path_maps
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), m.clone());
         m
     }
 
@@ -574,20 +617,37 @@ impl AssetDb {
             }
             if class.starts_with("MaterialInstance") {
                 let j = ue3::pmaterial::export_json(&p, ei).ok()?;
-                let parent = j["props"]["Parent"]["path"].as_str().unwrap_or_default().to_string();
+                let parent = j["props"]["Parent"]["path"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
                 if parent.is_empty() {
                     return None;
                 }
                 path = parent;
                 continue;
             }
-            let (mat, graph) = ue3::pmaterial::material_graph(&p, ei, &["EmissiveColor", "Opacity", "OpacityMask", "DiffuseColor", "SpecularColor", "SpecularPower"]).ok()?;
+            let (mat, graph) = ue3::pmaterial::material_graph(
+                &p,
+                ei,
+                &[
+                    "EmissiveColor",
+                    "Opacity",
+                    "OpacityMask",
+                    "DiffuseColor",
+                    "SpecularColor",
+                    "SpecularPower",
+                ],
+            )
+            .ok()?;
             let overrides = serde_json::json!({
                 "scalar": params.scalar,
                 "vector": params.vector,
                 "texture": params.texture,
             });
-            return Some(serde_json::json!({"class": class, "props": mat["props"], "expressions": graph, "overrides": overrides}));
+            return Some(
+                serde_json::json!({"class": class, "props": mat["props"], "expressions": graph, "overrides": overrides}),
+            );
         }
         None
     }
@@ -653,7 +713,13 @@ impl AssetDb {
         let name = |n: &str| -> String {
             props
                 .get(n)
-                .and_then(|p| if p.data.len() == 8 { ue3::props::read_fname(&pkg, &mut p.r()).ok() } else { None })
+                .and_then(|p| {
+                    if p.data.len() == 8 {
+                        ue3::props::read_fname(&pkg, &mut p.r()).ok()
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or_default()
         };
         let mut format = name("Format");
@@ -784,16 +850,25 @@ impl AssetDb {
                     }
                     HashMap::new()
                 }));
-                self.lights_full.lock().unwrap().insert(pkg.to_string(), m.clone());
+                self.lights_full
+                    .lock()
+                    .unwrap()
+                    .insert(pkg.to_string(), m.clone());
                 m
             }
         };
         map.get(component).cloned()
     }
 
-    fn load_level_light_full(&self, pkg_name: &str) -> Result<HashMap<String, Arc<ComponentLight>>> {
+    fn load_level_light_full(
+        &self,
+        pkg_name: &str,
+    ) -> Result<HashMap<String, Arc<ComponentLight>>> {
         let inherit = std::env::var_os("BOTS_N1_LIGHT_INHERIT").map_or(true, |v| v != "0");
-        let file = self.cache.join(if inherit { "light3" } else { "light2" }).join(cache_name(pkg_name) + ".bin");
+        let file = self
+            .cache
+            .join(if inherit { "light3" } else { "light2" })
+            .join(cache_name(pkg_name) + ".bin");
         if let Ok(b) = std::fs::read(&file) {
             if let Ok(m) = decode_light_full(&b) {
                 return Ok(m);
@@ -811,10 +886,23 @@ impl AssetDb {
             let key = format!("{pkg_name}.{}", pl.component);
             let three = |s: &[[f32; 3]]| [s[0], s[1], s[2]];
             let l = if let Some(lm) = pl.lightmap2d.as_ref().filter(|l| l.texture_idx[0] > 0) {
-                let t = |k: usize| (lm.texture_idx[k] > 0).then(|| (pkg_name.to_string(), lm.texture_idx[k]));
-                ComponentLight::Map { textures: [t(0), t(1), t(2)], scale: three(&lm.scale), coord_scale: lm.coord_scale, coord_bias: lm.coord_bias }
+                let t = |k: usize| {
+                    (lm.texture_idx[k] > 0).then(|| (pkg_name.to_string(), lm.texture_idx[k]))
+                };
+                ComponentLight::Map {
+                    textures: [t(0), t(1), t(2)],
+                    scale: three(&lm.scale),
+                    coord_scale: lm.coord_scale,
+                    coord_bias: lm.coord_bias,
+                }
             } else if let Some((v, sc)) = pl.vertex_light_dir {
-                let words = v.iter().flat_map(|b| b.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))).collect();
+                let words = v
+                    .iter()
+                    .flat_map(|b| {
+                        b.chunks_exact(4)
+                            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    })
+                    .collect();
                 ComponentLight::Dir { words, scale: sc }
             } else if let Some(v) = pl.vertex_light {
                 ComponentLight::Legacy(v)
@@ -831,10 +919,23 @@ impl AssetDb {
                     continue;
                 }
                 let l = if let Some(lm) = li.lm2d.as_ref().filter(|l| l.texture_idx[0] > 0) {
-                    let t = |k: usize| (lm.texture_idx[k] > 0).then(|| (pkg_name.to_string(), lm.texture_idx[k]));
-                    ComponentLight::Map { textures: [t(0), t(1), t(2)], scale: [lm.scale[0], lm.scale[1], lm.scale[2]], coord_scale: lm.coord_scale, coord_bias: lm.coord_bias }
+                    let t = |k: usize| {
+                        (lm.texture_idx[k] > 0).then(|| (pkg_name.to_string(), lm.texture_idx[k]))
+                    };
+                    ComponentLight::Map {
+                        textures: [t(0), t(1), t(2)],
+                        scale: [lm.scale[0], lm.scale[1], lm.scale[2]],
+                        coord_scale: lm.coord_scale,
+                        coord_bias: lm.coord_bias,
+                    }
                 } else if let Some((v, sc)) = li.dir {
-                    let words = v.iter().flat_map(|b| b.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))).collect();
+                    let words = v
+                        .iter()
+                        .flat_map(|b| {
+                            b.chunks_exact(4)
+                                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        })
+                        .collect();
                     ComponentLight::Dir { words, scale: sc }
                 } else if let Some(v) = li.flat {
                     ComponentLight::Legacy(v)
@@ -911,7 +1012,10 @@ impl AssetDb {
                     }
                     HashMap::new()
                 }));
-                self.tree_lights.lock().unwrap().insert(pkg.to_string(), m.clone());
+                self.tree_lights
+                    .lock()
+                    .unwrap()
+                    .insert(pkg.to_string(), m.clone());
                 m
             }
         };
@@ -919,7 +1023,10 @@ impl AssetDb {
     }
 
     fn load_tree_lights(&self, pkg_name: &str) -> Result<HashMap<String, Arc<TreeLight>>> {
-        let file = self.cache.join("treelight").join(cache_name(pkg_name) + ".bin");
+        let file = self
+            .cache
+            .join("treelight")
+            .join(cache_name(pkg_name) + ".bin");
         if let Ok(b) = std::fs::read(&file) {
             if let Ok(m) = decode_tree_lights(&b) {
                 return Ok(m);
@@ -934,7 +1041,14 @@ impl AssetDb {
             let mut t = TreeLight::default();
             for (k, l) in pl.lights.iter().take(4).enumerate() {
                 if let Some(l) = l {
-                    let words = l.samples.iter().flat_map(|b| b.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))).collect();
+                    let words = l
+                        .samples
+                        .iter()
+                        .flat_map(|b| {
+                            b.chunks_exact(4)
+                                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        })
+                        .collect();
                     t.slots[k] = Some((words, l.scale));
                 }
             }
@@ -954,7 +1068,13 @@ impl AssetDb {
             Ok(Some((pkg, _))) => ue3::speedtree::tree_assets(&pkg)
                 .into_iter()
                 .find(|a| a.path == asset)
-                .map(|a| Arc::new(TreeMaterials { branch: a.branch_material, frond: a.frond_material, leaf: a.leaf_material })),
+                .map(|a| {
+                    Arc::new(TreeMaterials {
+                        branch: a.branch_material,
+                        frond: a.frond_material,
+                        leaf: a.leaf_material,
+                    })
+                }),
             Ok(None) => None,
             Err(e) => {
                 if self.verbose {
@@ -963,7 +1083,10 @@ impl AssetDb {
                 None
             }
         };
-        self.tree_mats.lock().unwrap().insert(asset.to_string(), found.clone());
+        self.tree_mats
+            .lock()
+            .unwrap()
+            .insert(asset.to_string(), found.clone());
         found
     }
 
@@ -997,12 +1120,16 @@ fn convert_texture(name: &str, mut t: ue3::texture::Texture) -> Result<TextureAs
         bail!("{w0}x{h0} not block-aligned");
     }
     for (i, (w, h, d)) in t.mips.into_iter().enumerate() {
-        if (w as u32, h as u32) != ((w0 >> i).max(1), (h0 >> i).max(1)) || w as u32 % b != 0 || h as u32 % b != 0 {
+        if (w as u32, h as u32) != ((w0 >> i).max(1), (h0 >> i).max(1))
+            || w as u32 % b != 0
+            || h as u32 % b != 0
+        {
             break;
         }
         mips.push(d);
     }
-    let unpack = (t.unpack_min != [0.0; 3] || t.unpack_max != [1.0; 3]).then_some((t.unpack_min, t.unpack_max));
+    let unpack = (t.unpack_min != [0.0; 3] || t.unpack_max != [1.0; 3])
+        .then_some((t.unpack_min, t.unpack_max));
     Ok(TextureAsset {
         name: name.to_string(),
         fmt,
@@ -1242,7 +1369,12 @@ fn encode_light_full(m: &HashMap<String, Arc<ComponentLight>>) -> Vec<u8> {
                 words.iter().for_each(|&x| w.u32(x));
                 f3(&mut w, scale);
             }
-            ComponentLight::Map { textures, scale, coord_scale, coord_bias } => {
+            ComponentLight::Map {
+                textures,
+                scale,
+                coord_scale,
+                coord_bias,
+            } => {
                 w.u32(2);
                 for t in textures {
                     match t {
@@ -1282,7 +1414,10 @@ fn decode_light_full(b: &[u8]) -> Result<HashMap<String, Arc<ComponentLight>>> {
             1 => {
                 let nw = r.u32()? as usize;
                 let words = (0..nw).map(|_| r.u32()).collect::<Result<_>>()?;
-                ComponentLight::Dir { words, scale: [f3(&mut r)?, f3(&mut r)?, f3(&mut r)?] }
+                ComponentLight::Dir {
+                    words,
+                    scale: [f3(&mut r)?, f3(&mut r)?, f3(&mut r)?],
+                }
             }
             2 => {
                 let mut textures: [Option<(String, i32)>; 3] = Default::default();
@@ -1294,7 +1429,12 @@ fn decode_light_full(b: &[u8]) -> Result<HashMap<String, Arc<ComponentLight>>> {
                 let scale = [f3(&mut r)?, f3(&mut r)?, f3(&mut r)?];
                 let coord_scale = [r.f32()?, r.f32()?];
                 let coord_bias = [r.f32()?, r.f32()?];
-                ComponentLight::Map { textures, scale, coord_scale, coord_bias }
+                ComponentLight::Map {
+                    textures,
+                    scale,
+                    coord_scale,
+                    coord_bias,
+                }
             }
             x => bail!("light kind {x}"),
         };
@@ -1331,13 +1471,23 @@ fn encode_mesh(m: &MeshAsset) -> Vec<u8> {
     m.center.iter().for_each(|&v| w.f32(v));
     w.f32(m.radius);
     for i in 0..m.positions.len() {
-        m.tangents.get(i).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]).iter().for_each(|&v| w.f32(v));
+        m.tangents
+            .get(i)
+            .copied()
+            .unwrap_or([1.0, 0.0, 0.0, 1.0])
+            .iter()
+            .for_each(|&v| w.f32(v));
     }
     for i in 0..m.positions.len() {
         w.0.extend_from_slice(&m.colors.get(i).copied().unwrap_or([255; 4]));
     }
     for i in 0..m.positions.len() {
-        m.uv1.get(i).copied().unwrap_or([0.0; 2]).iter().for_each(|&v| w.f32(v));
+        m.uv1
+            .get(i)
+            .copied()
+            .unwrap_or([0.0; 2])
+            .iter()
+            .for_each(|&v| w.f32(v));
     }
     w.0
 }
@@ -1371,9 +1521,15 @@ fn decode_mesh(name: &str, b: &[u8]) -> Result<MeshAsset> {
         .collect::<Result<Vec<_>>>()?;
     let center = [r.f32()?, r.f32()?, r.f32()?];
     let radius = r.f32()?;
-    let tangents = (0..nv).map(|_| Ok([r.f32()?, r.f32()?, r.f32()?, r.f32()?])).collect::<Result<Vec<_>>>()?;
-    let colors = (0..nv).map(|_| Ok(<[u8; 4]>::try_from(r.take(4)?)?)).collect::<Result<Vec<_>>>()?;
-    let uv1 = (0..nv).map(|_| Ok([r.f32()?, r.f32()?])).collect::<Result<Vec<_>>>()?;
+    let tangents = (0..nv)
+        .map(|_| Ok([r.f32()?, r.f32()?, r.f32()?, r.f32()?]))
+        .collect::<Result<Vec<_>>>()?;
+    let colors = (0..nv)
+        .map(|_| Ok(<[u8; 4]>::try_from(r.take(4)?)?))
+        .collect::<Result<Vec<_>>>()?;
+    let uv1 = (0..nv)
+        .map(|_| Ok([r.f32()?, r.f32()?]))
+        .collect::<Result<Vec<_>>>()?;
     Ok(MeshAsset {
         name: name.to_string(),
         tangents,

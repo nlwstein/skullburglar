@@ -72,17 +72,34 @@ impl TGpu {
             let fr = vk::ShaderStageFlags::FRAGMENT;
             let g = [
                 b(0, vk::DescriptorType::UNIFORM_BUFFER, vf),
-                b(1, vk::DescriptorType::STORAGE_BUFFER, vk::ShaderStageFlags::VERTEX),
-                b(2, vk::DescriptorType::STORAGE_BUFFER, vk::ShaderStageFlags::VERTEX),
+                b(
+                    1,
+                    vk::DescriptorType::STORAGE_BUFFER,
+                    vk::ShaderStageFlags::VERTEX,
+                ),
+                b(
+                    2,
+                    vk::DescriptorType::STORAGE_BUFFER,
+                    vk::ShaderStageFlags::VERTEX,
+                ),
             ];
-            let g_layout =
-                device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&g), None)?;
-            let m = [b(0, vk::DescriptorType::SAMPLED_IMAGE, fr), b(1, vk::DescriptorType::SAMPLER, fr)];
-            let m_layout =
-                device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&m), None)?;
+            let g_layout = device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&g),
+                None,
+            )?;
+            let m = [
+                b(0, vk::DescriptorType::SAMPLED_IMAGE, fr),
+                b(1, vk::DescriptorType::SAMPLER, fr),
+            ];
+            let m_layout = device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&m),
+                None,
+            )?;
             let ls = [g_layout, m_layout];
-            let pipe_layout =
-                device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&ls), None)?;
+            let pipe_layout = device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default().set_layouts(&ls),
+                None,
+            )?;
             Ok(TGpu {
                 g_layout,
                 m_layout,
@@ -144,9 +161,17 @@ impl Renderer {
         let g = &t.geom;
         let vb: &[u8] = bytemuck::cast_slice(&g.vertices);
         let ib: &[u8] = bytemuck::cast_slice(&g.indices);
-        let mut vbuf = self.buffer(vb.len() as u64, vk::BufferUsageFlags::VERTEX_BUFFER, "n1 tree v")?;
+        let mut vbuf = self.buffer(
+            vb.len() as u64,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            "n1 tree v",
+        )?;
         vbuf.bytes()[..vb.len()].copy_from_slice(vb);
-        let mut ibuf = self.buffer(ib.len() as u64, vk::BufferUsageFlags::INDEX_BUFFER, "n1 tree i")?;
+        let mut ibuf = self.buffer(
+            ib.len() as u64,
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            "n1 tree i",
+        )?;
         ibuf.bytes()[..ib.len()].copy_from_slice(ib);
         // One set per material (branch, frond, leaf).
         let mut sets = [vk::DescriptorSet::null(); 3];
@@ -211,15 +236,22 @@ impl Renderer {
         unsafe {
             if self.tg.module == vk::ShaderModule::null() {
                 let spv = crate::shaders::spirv(include_str!("tree.wgsl"))?;
-                self.tg.module =
-                    self.device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&spv), None)?;
+                self.tg.module = self.device.create_shader_module(
+                    &vk::ShaderModuleCreateInfo::default().code(&spv),
+                    None,
+                )?;
             }
             let binds = [vk::VertexInputBindingDescription {
                 binding: 0,
                 stride: (STRIDE * 4) as u32,
                 input_rate: vk::VertexInputRate::VERTEX,
             }];
-            let attr = |location, format, offset| vk::VertexInputAttributeDescription { location, binding: 0, format, offset };
+            let attr = |location, format, offset| vk::VertexInputAttributeDescription {
+                location,
+                binding: 0,
+                format,
+                offset,
+            };
             let attrs = [
                 attr(0, vk::Format::R32G32B32_SFLOAT, 0),
                 attr(1, vk::Format::R32G32_SFLOAT, 12),
@@ -230,20 +262,31 @@ impl Renderer {
             let vi = vk::PipelineVertexInputStateCreateInfo::default()
                 .vertex_binding_descriptions(&binds)
                 .vertex_attribute_descriptions(&attrs);
-            let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-            let vp = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
+            let ia = vk::PipelineInputAssemblyStateCreateInfo::default()
+                .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+            let vp = vk::PipelineViewportStateCreateInfo::default()
+                .viewport_count(1)
+                .scissor_count(1);
             // Foliage is two-sided and the swap of Y and Z mirrors the winding, so nothing is culled.
             let rs = vk::PipelineRasterizationStateCreateInfo::default()
                 .polygon_mode(vk::PolygonMode::FILL)
                 .cull_mode(vk::CullModeFlags::NONE)
                 .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
                 .line_width(1.0);
-            let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            let ms = vk::PipelineMultisampleStateCreateInfo::default()
+                .rasterization_samples(vk::SampleCountFlags::TYPE_1);
             let ds = vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(true)
                 .depth_write_enable(true)
-                .depth_compare_op(if std::env::var("BOTS_N1_TREE_DEBUG").as_deref() == Ok("2") { vk::CompareOp::ALWAYS } else { vk::CompareOp::GREATER });
-            let att = [vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA)];
+                .depth_compare_op(
+                    if std::env::var("BOTS_N1_TREE_DEBUG").as_deref() == Ok("2") {
+                        vk::CompareOp::ALWAYS
+                    } else {
+                        vk::CompareOp::GREATER
+                    },
+                );
+            let att = [vk::PipelineColorBlendAttachmentState::default()
+                .color_write_mask(vk::ColorComponentFlags::RGBA)];
             let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&att);
             let dyns = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
             let dy = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyns);
@@ -295,7 +338,13 @@ impl Renderer {
     }
 
     /// Writes this frame's globals and instances into the slot's tree buffer and its descriptor set.
-    pub(super) fn tg_stage(&mut self, si: usize, tf: &TFrame, g: &crate::light::Globals, pf: &PFrame) -> Result<()> {
+    pub(super) fn tg_stage(
+        &mut self,
+        si: usize,
+        tf: &TFrame,
+        g: &crate::light::Globals,
+        pf: &PFrame,
+    ) -> Result<()> {
         if tf.calls.is_empty() {
             return Ok(());
         }
@@ -335,7 +384,16 @@ impl Renderer {
             fog_col: g.fog_col,
             fog_par: g.fog_par,
             // vertex-light gain, the game's tree light gamma, alpha-test threshold
-            tune: [g.tune[2], 2.2, 0.333, if std::env::var_os("BOTS_N1_TREE_DEBUG").is_some() { 1.0 } else { 0.0 }],
+            tune: [
+                g.tune[2],
+                2.2,
+                0.333,
+                if std::env::var_os("BOTS_N1_TREE_DEBUG").is_some() {
+                    1.0
+                } else {
+                    0.0
+                },
+            ],
         };
         let slot = self.tg.slots[si].as_mut().unwrap();
         let b = slot.buf.bytes();
@@ -343,9 +401,21 @@ impl Renderer {
         let ib: &[u8] = bytemuck::cast_slice(&tf.insts);
         b[T_BASE as usize..T_BASE as usize + ib.len()].copy_from_slice(ib);
         let (buffer, set) = (slot.buf.buffer, slot.set);
-        let ub = [vk::DescriptorBufferInfo { buffer, offset: 0, range: std::mem::size_of::<TGlobals>() as u64 }];
-        let sb = [vk::DescriptorBufferInfo { buffer, offset: T_BASE, range: ib.len().max(16) as u64 }];
-        let lb = [vk::DescriptorBufferInfo { buffer: self.light.buffer, offset: 0, range: vk::WHOLE_SIZE }];
+        let ub = [vk::DescriptorBufferInfo {
+            buffer,
+            offset: 0,
+            range: std::mem::size_of::<TGlobals>() as u64,
+        }];
+        let sb = [vk::DescriptorBufferInfo {
+            buffer,
+            offset: T_BASE,
+            range: ib.len().max(16) as u64,
+        }];
+        let lb = [vk::DescriptorBufferInfo {
+            buffer: self.light.buffer,
+            offset: 0,
+            range: vk::WHOLE_SIZE,
+        }];
         let writes = [
             vk::WriteDescriptorSet::default()
                 .dst_set(set)
@@ -373,20 +443,37 @@ impl Renderer {
             use std::sync::atomic::{AtomicU32, Ordering};
             static N: AtomicU32 = AtomicU32::new(0);
             if N.fetch_add(1, Ordering::Relaxed) % 300 == 0 {
-                eprintln!("n1ffi: tg_record calls {} insts {} pipe {} slot {}", tf.calls.len(), tf.insts.len(), self.tg.pipes[0] != vk::Pipeline::null(), matches!(self.tg.slots.get(si), Some(Some(_))));
+                eprintln!(
+                    "n1ffi: tg_record calls {} insts {} pipe {} slot {}",
+                    tf.calls.len(),
+                    tf.insts.len(),
+                    self.tg.pipes[0] != vk::Pipeline::null(),
+                    matches!(self.tg.slots.get(si), Some(Some(_)))
+                );
             }
         }
         if tf.calls.is_empty() || self.tg.pipes[0] == vk::Pipeline::null() {
             return 0;
         }
-        let Some(Some(slot)) = self.tg.slots.get(si) else { return 0 };
+        let Some(Some(slot)) = self.tg.slots.get(si) else {
+            return 0;
+        };
         let d = &self.device;
         let mut n = 0;
         unsafe {
-            d.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.tg.pipe_layout, 0, &[slot.set], &[]);
+            d.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.tg.pipe_layout,
+                0,
+                &[slot.set],
+                &[],
+            );
             let mut cur_pipe = usize::MAX;
             for call in &tf.calls {
-                let Some(a) = self.tg.assets.get(call.asset as usize) else { continue };
+                let Some(a) = self.tg.assets.get(call.asset as usize) else {
+                    continue;
+                };
                 d.cmd_bind_vertex_buffers(cmd, 0, &[a.vbuf.buffer], &[0]);
                 d.cmd_bind_index_buffer(cmd, a.ibuf.buffer, 0, vk::IndexType::UINT32);
                 for dr in &a.draws {
@@ -396,10 +483,21 @@ impl Renderer {
                     }
                     let pipe = dr.masked as usize;
                     if cur_pipe != pipe {
-                        d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.tg.pipes[pipe]);
+                        d.cmd_bind_pipeline(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            self.tg.pipes[pipe],
+                        );
                         cur_pipe = pipe;
                     }
-                    d.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.tg.pipe_layout, 1, &[dr.set], &[]);
+                    d.cmd_bind_descriptor_sets(
+                        cmd,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.tg.pipe_layout,
+                        1,
+                        &[dr.set],
+                        &[],
+                    );
                     d.cmd_draw_indexed(cmd, count, call.count, dr.first, 0, call.first);
                     n += 1;
                 }

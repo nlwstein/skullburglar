@@ -36,7 +36,9 @@ pub struct Opts {
     pub pregrade: Option<std::thread::JoinHandle<()>>,
     pub features: u32,
     pub bc5_ok: bool,
+    /// Workers during the step; `play_threads` of them stay active after it (B-248).
     pub threads: usize,
+    pub play_threads: usize,
 }
 
 /// The pieces a manifest depends on; any change makes it stale.
@@ -95,7 +97,10 @@ fn parse_manifest(text: &str, h: &str) -> Option<Snapshot> {
             ["S", k, spv, ntex] => sn.scene_mods.push((hx(k)?, hx(spv)?, ntex.parse().ok()?)),
             ["s", k, b, skin] => sn.scene_pipes.push((hx(k)?, b.parse().ok()?, *skin == "1")),
             ["M", k] => sn.part_mods.push(hx(k)?),
-            ["q", k, b, two, v] => sn.part_pipes.push((hx(k)?, b.parse().ok()?, *two == "1", v.parse().ok()?)),
+            ["q", k, b, two, v] => {
+                sn.part_pipes
+                    .push((hx(k)?, b.parse().ok()?, *two == "1", v.parse().ok()?))
+            }
             _ => return None,
         }
     }
@@ -123,31 +128,35 @@ struct Jobs {
     part: HashMap<u64, PartJob>,
 }
 
+/// A manifest entry: the shader's stored SPIR-V and the pipelines to build from it.
 struct SceneJob {
-    src: SceneSrc,
+    spv: u64,
+    ntex: usize,
     pipes: BTreeSet<(u8, bool)>,
 }
 
-enum SceneSrc {
-    Plan(Box<plan::Plan>),
-    Cached { spv: u64, ntex: usize },
-}
-
 struct PartJob {
-    words: Option<Vec<u32>>,
     pipes: BTreeSet<(u8, bool, u8)>,
 }
 
 impl Jobs {
     fn units(&self) -> u32 {
         let n = |p: usize| p as u32 + 1;
-        self.scene.values().map(|j| n(j.pipes.len())).sum::<u32>() + self.part.values().map(|j| n(j.pipes.len())).sum::<u32>()
+        self.scene.values().map(|j| n(j.pipes.len())).sum::<u32>()
+            + self.part.values().map(|j| n(j.pipes.len())).sum::<u32>()
     }
 
     fn from_snapshot(sn: &Snapshot) -> Jobs {
         let mut j = Jobs::default();
         for &(k, spv, ntex) in &sn.scene_mods {
-            j.scene.insert(k, SceneJob { src: SceneSrc::Cached { spv, ntex }, pipes: BTreeSet::new() });
+            j.scene.insert(
+                k,
+                SceneJob {
+                    spv,
+                    ntex,
+                    pipes: BTreeSet::new(),
+                },
+            );
         }
         for &(k, b, skin) in &sn.scene_pipes {
             if let Some(s) = j.scene.get_mut(&k) {
@@ -155,7 +164,12 @@ impl Jobs {
             }
         }
         for &k in &sn.part_mods {
-            j.part.insert(k, PartJob { words: None, pipes: BTreeSet::new() });
+            j.part.insert(
+                k,
+                PartJob {
+                    pipes: BTreeSet::new(),
+                },
+            );
         }
         for &(k, b, two, v) in &sn.part_pipes {
             if let Some(p) = j.part.get_mut(&k) {
@@ -166,46 +180,163 @@ impl Jobs {
     }
 }
 
-/// Every shader and pipeline the disc can ask for, from the asset index.
-fn enumerate(db: &AssetDb, o: &Opts, prog: &Progress) -> Jobs {
-    let set = |p: &str| *prog.phase.lock().unwrap() = p.to_string();
-    let mut jobs = Jobs::default();
-    set("materials");
-    let bar = |d: usize, t: usize| {
-        prog.total.store(t as u32, Relaxed);
-        prog.done.store(d as u32, Relaxed);
-    };
-    let plans = plan::enumerate(db, o.features, o.bc5_ok, o.threads, &bar);
-    // Materials that skeletal meshes name get the skinned pipelines too.
-    set("skeletal meshes");
-    let mut skin_mats: BTreeSet<String> = BTreeSet::new();
-    let sk_paths = db.paths_of_classes(&["SkeletalMesh"]);
-    for (i, sp) in sk_paths.iter().enumerate() {
-        if let Some(m) = db.skeletal(sp) {
-            skin_mats.extend(m.materials.iter().filter(|x| !x.is_empty()).cloned());
+struct SceneEntry {
+    plan: plan::Plan,
+    pipes: Mutex<BTreeSet<(u8, bool)>>,
+    /// The shader's progress unit and failure are counted once, by whichever of its jobs gets there first.
+    counted: AtomicBool,
+}
+
+struct PartEntry {
+    words: Vec<u32>,
+    pipes: Mutex<BTreeSet<(u8, bool, u8)>>,
+    counted: AtomicBool,
+}
+
+/// B-248: the cold path, streamed. The same jobs as `Jobs` (every shader and pipeline the disc can ask for), but each
+/// is queued the moment its material is planned, so the compile workers run while the enumeration is still reading
+/// packages (it used to finish first: 95 of 294 s on the T480 with a cold driver cache, workers idle).
+struct Stream {
+    store: Arc<Store>,
+    prog: Arc<Progress>,
+    missing: Arc<AtomicU32>,
+    /// Units queued so far; the bar's total is the larger of this and `est` until the enumeration is done.
+    queued: AtomicU32,
+    est: u32,
+    scene: Mutex<HashMap<u64, Arc<SceneEntry>>>,
+    part: Mutex<HashMap<u64, Arc<PartEntry>>>,
+    /// `BOTS_N1_STREAM=0`: hold the jobs back until the enumeration is done, as before B-248.
+    held_back: Option<Mutex<Vec<crate::store::Task>>>,
+}
+
+impl Stream {
+    fn queue(&self, t: crate::store::Task) {
+        match &self.held_back {
+            Some(h) => h.lock().unwrap().push(t),
+            None => self.store.spawn(false, t),
         }
-        bar(i + 1, sk_paths.len());
     }
-    for (path, p) in plans {
-        let b = blend_of(p.blend);
-        let job = jobs.scene.entry(p.key).or_insert_with(|| SceneJob { src: SceneSrc::Plan(Box::new(plan_clone(&p))), pipes: BTreeSet::new() });
-        job.pipes.insert((b, false));
-        if skin_mats.contains(&path) {
-            job.pipes.insert((b, true));
+
+    fn release(&self) {
+        if let Some(h) = &self.held_back {
+            for t in h.lock().unwrap().drain(..) {
+                self.store.spawn(false, t);
+            }
         }
     }
-    // The grey stand-in (a material with no graph and no texture), opaque, static and skinned.
-    {
-        let g = plan::plan(o.features, &assetdb::MaterialAsset::default(), false, &|_| Default::default());
-        let job = jobs.scene.entry(g.key).or_insert_with(|| SceneJob { src: SceneSrc::Plan(Box::new(plan_clone(&g))), pipes: BTreeSet::new() });
-        job.pipes.insert((0, false));
-        job.pipes.insert((0, true));
+
+    fn add_units(&self, n: u32) {
+        let q = self.queued.fetch_add(n, Relaxed) + n;
+        self.prog.total.store(q.max(self.est), Relaxed);
     }
-    // Particle materials, found through the emitters that name them.
-    set("particles");
+
+    /// Queues the pipeline `(blend, skin)` of the scene shader `key` (and the shader itself, the first time).
+    fn want_scene(&self, key: u64, p: &plan::Plan, blend: u8, skin: bool) {
+        let (e, fresh) = {
+            let mut m = self.scene.lock().unwrap();
+            match m.get(&key) {
+                Some(e) => (e.clone(), false),
+                None => {
+                    let e = Arc::new(SceneEntry {
+                        plan: plan_clone(p),
+                        pipes: Mutex::new(BTreeSet::new()),
+                        counted: AtomicBool::new(false),
+                    });
+                    m.insert(key, e.clone());
+                    (e, true)
+                }
+            }
+        };
+        if fresh {
+            self.add_units(1);
+        }
+        if !e.pipes.lock().unwrap().insert((blend, skin)) {
+            return;
+        }
+        self.add_units(1);
+        let (prog, missing) = (self.prog.clone(), self.missing.clone());
+        self.queue(Box::new(move |s| {
+            let id = s.build_scene_shader(key, &e.plan.c, e.plan.flags, Origin::Startup);
+            if !e.counted.swap(true, Relaxed) {
+                prog.done.fetch_add(1, Relaxed);
+                if id.is_none() {
+                    missing.fetch_add(1, Relaxed);
+                }
+            }
+            if let Some(shader) = id {
+                // Without dynamic cull state every combination is its own pipeline.
+                let culls: &[u8] = if s.dyn_cull { &[0] } else { &[0, 1, 2, 3] };
+                for &cull in culls {
+                    s.build_scene_pipe(
+                        SceneKey {
+                            shader,
+                            blend,
+                            skin,
+                            cull,
+                        },
+                        Origin::Startup,
+                    );
+                }
+            }
+            prog.done.fetch_add(1, Relaxed);
+        }));
+    }
+
+    /// Queues a particle module (the first time) and, when given, one of its pipelines.
+    fn want_part(&self, key: u64, words: &[u32], pipe: Option<(u8, bool, u8)>) {
+        let (e, fresh) = {
+            let mut m = self.part.lock().unwrap();
+            match m.get(&key) {
+                Some(e) => (e.clone(), false),
+                None => {
+                    let e = Arc::new(PartEntry {
+                        words: words.to_vec(),
+                        pipes: Mutex::new(BTreeSet::new()),
+                        counted: AtomicBool::new(false),
+                    });
+                    m.insert(key, e.clone());
+                    (e, true)
+                }
+            }
+        };
+        let new_pipe = pipe.is_some_and(|p| e.pipes.lock().unwrap().insert(p));
+        if !fresh && !new_pipe {
+            return;
+        }
+        self.add_units(fresh as u32 + new_pipe as u32);
+        let (prog, missing) = (self.prog.clone(), self.missing.clone());
+        self.queue(Box::new(move |s| {
+            let id = s.module_from_spv(key, &e.words, Origin::Startup);
+            if !e.counted.swap(true, Relaxed) {
+                prog.done.fetch_add(1, Relaxed);
+                if id.is_none() {
+                    missing.fetch_add(1, Relaxed);
+                }
+            }
+            if let (Some((blend, two_sided, variant)), true) = (pipe, new_pipe) {
+                if let Some(module) = id {
+                    s.build_part_pipe(
+                        PartKey {
+                            module,
+                            blend,
+                            two_sided,
+                            variant,
+                        },
+                        Origin::Startup,
+                    );
+                }
+                // Counted even when the module failed, or the step would wait for it forever.
+                prog.done.fetch_add(1, Relaxed);
+            }
+        }));
+    }
+}
+
+/// The particle materials the emitters name, their shaders and pipelines, queued as found.
+fn enumerate_particles(db: &AssetDb, st: &Stream) {
     let emitters = db.paths_of_classes(&["ParticleSpriteEmitter", "ParticleMeshEmitter"]);
     let mut mats: HashMap<String, (bool, bool, bool)> = HashMap::new(); // sprite, velocity, mesh
-    for (i, ep) in emitters.iter().enumerate() {
+    for ep in &emitters {
         if let Some(e) = db.emitter_info(ep)
             && !e.material.is_empty()
         {
@@ -218,36 +349,171 @@ fn enumerate(db: &AssetDb, o: &Opts, prog: &Progress) -> Jobs {
                 m.0 = true;
             }
         }
-        bar(i + 1, emitters.len());
     }
-    set("particle shaders");
     let mut mats: Vec<(String, (bool, bool, bool))> = mats.into_iter().collect();
     mats.sort();
-    for (i, (path, (sprite, velocity, mesh))) in mats.iter().enumerate() {
+    for (path, (sprite, velocity, mesh)) in &mats {
         if let Ok(sh) = particles::material_shaders(db, path) {
             let b = blend_of(sh.blend);
             let sk = fnv(bytemuck::cast_slice(&sh.sprite_spv));
             let mk = fnv(bytemuck::cast_slice(&sh.mesh_spv));
-            let sj = jobs.part.entry(sk).or_insert_with(|| PartJob { words: Some(sh.sprite_spv.clone()), pipes: BTreeSet::new() });
             // Sprites never cull, so their key's two_sided is always true (see `Renderer::part_key`).
+            st.want_part(sk, &sh.sprite_spv, None);
             if *sprite {
-                sj.pipes.insert((b, true, 0));
+                st.want_part(sk, &sh.sprite_spv, Some((b, true, 0)));
             }
             if *velocity {
-                sj.pipes.insert((b, true, 1));
+                st.want_part(sk, &sh.sprite_spv, Some((b, true, 1)));
             }
-            let mj = jobs.part.entry(mk).or_insert_with(|| PartJob { words: Some(sh.mesh_spv.clone()), pipes: BTreeSet::new() });
+            st.want_part(mk, &sh.mesh_spv, None);
             if *mesh {
-                mj.pipes.insert((b, sh.two_sided, 2));
+                st.want_part(mk, &sh.mesh_spv, Some((b, sh.two_sided, 2)));
             }
         }
-        bar(i + 1, mats.len());
     }
-    jobs
+}
+
+/// Every shader and pipeline the disc can ask for, from the asset index, queued as it is found (see `Stream`). Waits
+/// for the workers to finish them. Phases, in order: materials (the bulk), skeletal meshes (which materials need the
+/// skinned pipelines), the grey stand-in, particle materials.
+fn enumerate_and_build(store: &Arc<Store>, db: &AssetDb, o: &Opts, prog: &Arc<Progress>) {
+    let t0 = Instant::now();
+    let set = |p: &str| {
+        eprintln!(
+            "n1ffi: enumerate phase '{p}' at +{:.1} s",
+            t0.elapsed().as_secs_f64()
+        );
+        *prog.phase.lock().unwrap() = p.to_string();
+    };
+    let bar = |d: usize, t: usize| {
+        // Until the queue is complete the bar shows the materials pass; `Stream::add_units` takes over the total.
+        let _ = (d, t);
+    };
+    prog.done.store(0, Relaxed);
+    // About 1.1 units per material: measured 2,152 materials -> 2,370 units.
+    let n_paths = db
+        .paths_of_classes(&[
+            "Material",
+            "MaterialInstanceConstant",
+            "MaterialInstanceTimeVarying",
+            "DecalMaterial",
+        ])
+        .len();
+    let st = Stream {
+        store: store.clone(),
+        prog: prog.clone(),
+        missing: Arc::new(AtomicU32::new(0)),
+        queued: AtomicU32::new(0),
+        est: (n_paths as f32 * 1.1) as u32,
+        scene: Mutex::new(HashMap::new()),
+        part: Mutex::new(HashMap::new()),
+        held_back: std::env::var("BOTS_N1_STREAM")
+            .is_ok_and(|v| v == "0")
+            .then(|| Mutex::new(Vec::new())),
+    };
+    prog.total.store(st.est, Relaxed);
+    set("materials");
+    let seen: Mutex<Vec<(String, u64, u8)>> = Mutex::new(Vec::new());
+    let skin_mats: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+    // The materials pass is the bulk. Beside it, on their own threads: the skeletal meshes (which materials need the
+    // skinned pipelines) and the particle materials (found through the emitters), each queued as found.
+    let side = |name: &str| {
+        let t = Instant::now();
+        let r = std::thread::scope(|sc| {
+            let h1 = sc.spawn(|| {
+                for sp in db.paths_of_classes(&["SkeletalMesh"]) {
+                    if let Some(m) = db.skeletal(&sp) {
+                        skin_mats
+                            .lock()
+                            .unwrap()
+                            .extend(m.materials.iter().filter(|x| !x.is_empty()).cloned());
+                    }
+                }
+            });
+            let h2 = sc.spawn(|| enumerate_particles(db, &st));
+            plan::enumerate(db, o.features, o.bc5_ok, o.threads, &bar, &|path, p| {
+                let b = blend_of(p.blend);
+                st.want_scene(p.key, p, b, false);
+                seen.lock().unwrap().push((path.to_string(), p.key, b));
+            });
+            eprintln!(
+                "n1ffi: enumerate: materials done at +{:.1} s",
+                t.elapsed().as_secs_f64()
+            );
+            let _ = h1.join();
+            let _ = h2.join();
+        });
+        eprintln!(
+            "n1ffi: enumerate: {name} done at +{:.1} s",
+            t.elapsed().as_secs_f64()
+        );
+        r
+    };
+    // Only while the game is held (`threads` above `play_threads`): with the game running behind the step the CPU is
+    // not free (the reason the step uses 2 workers there), so the passes run one after the other. BOTS_N1_ENUM_SERIAL=1
+    // forces that.
+    let serial =
+        o.threads <= o.play_threads || std::env::var("BOTS_N1_ENUM_SERIAL").is_ok_and(|v| v != "0");
+    if serial {
+        plan::enumerate(db, o.features, o.bc5_ok, o.threads, &bar, &|path, p| {
+            let b = blend_of(p.blend);
+            st.want_scene(p.key, p, b, false);
+            seen.lock().unwrap().push((path.to_string(), p.key, b));
+        });
+        set("skeletal meshes");
+        for sp in db.paths_of_classes(&["SkeletalMesh"]) {
+            if let Some(m) = db.skeletal(&sp) {
+                skin_mats
+                    .lock()
+                    .unwrap()
+                    .extend(m.materials.iter().filter(|x| !x.is_empty()).cloned());
+            }
+        }
+        set("particles");
+        enumerate_particles(db, &st);
+    } else {
+        side("all passes");
+    }
+    // Materials that skeletal meshes name get the skinned pipelines too.
+    let skin_mats = skin_mats.into_inner().unwrap();
+    for (path, key, b) in seen.into_inner().unwrap() {
+        if skin_mats.contains(&path) {
+            let e = st.scene.lock().unwrap().get(&key).cloned();
+            if let Some(e) = e {
+                st.want_scene(key, &e.plan, b, true);
+            }
+        }
+    }
+    // The grey stand-in (a material with no graph and no texture), opaque, static and skinned.
+    {
+        let g = plan::plan(
+            o.features,
+            &assetdb::MaterialAsset::default(),
+            false,
+            &|_| Default::default(),
+        );
+        st.want_scene(g.key, &g, 0, false);
+        st.want_scene(g.key, &g, 0, true);
+    }
+    set("compiling");
+    // The queue is complete: the bar's total is exact from here.
+    prog.total.store(st.queued.load(Relaxed), Relaxed);
+    st.release();
+    wait_done(store, prog);
+    let missing = st.missing.load(Relaxed);
+    if missing > 0 {
+        eprintln!("n1ffi: precompile: {missing} shaders failed to build");
+    }
 }
 
 fn plan_clone(p: &plan::Plan) -> plan::Plan {
-    plan::Plan { c: p.c.clone(), flags: p.flags, blend: p.blend, two_sided: p.two_sided, key: p.key }
+    plan::Plan {
+        c: p.c.clone(),
+        flags: p.flags,
+        blend: p.blend,
+        two_sided: p.two_sided,
+        key: p.key,
+    }
 }
 
 /// Queues `jobs` on the store's workers and waits for them. Returns how many cached entries couldn't be built.
@@ -261,17 +527,22 @@ fn run(store: &Arc<Store>, jobs: Jobs, prog: &Arc<Progress>) -> u32 {
         store.spawn(
             false,
             Box::new(move |s| {
-                let id = match &job.src {
-                    SceneSrc::Plan(p) => s.build_scene_shader(skey, &p.c, p.flags, Origin::Startup),
-                    SceneSrc::Cached { spv, ntex } => s.build_scene_shader_cached(skey, *spv, *ntex, Origin::Startup),
-                };
+                let id = s.build_scene_shader_cached(skey, job.spv, job.ntex, Origin::Startup);
                 prog.done.fetch_add(1, Relaxed);
                 for (blend, skin) in job.pipes {
                     if let Some(shader) = id {
                         // Without dynamic cull state every combination is its own pipeline.
                         let culls: &[u8] = if dyn_cull { &[0] } else { &[0, 1, 2, 3] };
                         for &cull in culls {
-                            s.build_scene_pipe(SceneKey { shader, blend, skin, cull }, Origin::Startup);
+                            s.build_scene_pipe(
+                                SceneKey {
+                                    shader,
+                                    blend,
+                                    skin,
+                                    cull,
+                                },
+                                Origin::Startup,
+                            );
                         }
                     }
                     prog.done.fetch_add(1, Relaxed);
@@ -287,14 +558,19 @@ fn run(store: &Arc<Store>, jobs: Jobs, prog: &Arc<Progress>) -> u32 {
         store.spawn(
             false,
             Box::new(move |s| {
-                let id = match &job.words {
-                    Some(w) => s.module_from_spv(key, w, Origin::Startup),
-                    None => s.build_particle_module_cached(key, Origin::Startup),
-                };
+                let id = s.build_particle_module_cached(key, Origin::Startup);
                 prog.done.fetch_add(1, Relaxed);
                 for (blend, two_sided, variant) in job.pipes {
                     if let Some(module) = id {
-                        s.build_part_pipe(PartKey { module, blend, two_sided, variant }, Origin::Startup);
+                        s.build_part_pipe(
+                            PartKey {
+                                module,
+                                blend,
+                                two_sided,
+                                variant,
+                            },
+                            Origin::Startup,
+                        );
                     }
                     prog.done.fetch_add(1, Relaxed);
                 }
@@ -304,6 +580,12 @@ fn run(store: &Arc<Store>, jobs: Jobs, prog: &Arc<Progress>) -> u32 {
             }),
         );
     }
+    wait_done(store, prog);
+    missing.load(Relaxed)
+}
+
+/// Waits until every queued unit is done.
+fn wait_done(store: &Arc<Store>, prog: &Arc<Progress>) {
     while prog.done.load(Relaxed) < prog.total.load(Relaxed) {
         // The renderer is going away (B-223): its workers are stopped and the queued jobs dropped.
         if store.stopping() {
@@ -311,7 +593,6 @@ fn run(store: &Arc<Store>, jobs: Jobs, prog: &Arc<Progress>) -> u32 {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    missing.load(Relaxed)
 }
 
 /// Starts the startup step on its own thread; the returned `Progress` is for the progress UI. The step is over when
@@ -324,7 +605,11 @@ pub fn start(store: Arc<Store>, db: Arc<AssetDb>, mut o: Opts) -> Arc<Progress> 
         .spawn(move || {
             let t0 = Instant::now();
             let h = header(&db, &o);
-            let set = |s: &str| *p.phase.lock().unwrap() = s.to_string();
+            // B-248: each phase's start time, so a slow first launch says where it went.
+            let set = |s: &str| {
+                eprintln!("n1ffi: precompile phase '{s}' at {:.1} s", t0.elapsed().as_secs_f64());
+                *p.phase.lock().unwrap() = s.to_string();
+            };
             // B-248 (b): the compile workers start first and the persisted cache loads on its own thread beside them. On
             // MoltenVK the load recompiles every cached library: 211.7 s for a 62 MB cache with a cold OS shader cache
             // (int-2f7d-s8), and the workers used to wait for all of it. Off by default until a truly cold load has been
@@ -387,9 +672,7 @@ pub fn start(store: Arc<Store>, db: Arc<AssetDb>, mut o: Opts) -> Arc<Progress> 
                 if gone() {
                     return;
                 }
-                let jobs = enumerate(&db, &o, &p);
-                set("compiling");
-                run(&store, jobs, &p);
+                enumerate_and_build(&store, &db, &o, &p);
             }
             let (bytes, secs) = match loader.map(|h| h.join()) {
                 Some(Ok(((b, s), built))) => {
@@ -401,11 +684,13 @@ pub fn start(store: Arc<Store>, db: Arc<AssetDb>, mut o: Opts) -> Arc<Progress> 
             if let Some(h) = o.pregrade.take() {
                 set("grades");
                 let _ = h.join();
+                set("grades done");
             }
             if gone() {
                 return;
             }
             store.startup_done.store(true, Relaxed);
+            store.set_max_active(o.play_threads.max(1));
             save_manifest(&store, &h);
             store.save_cache();
             store.set_manifest_header(h);
@@ -444,7 +729,9 @@ pub fn maybe_save(store: &Arc<Store>) {
     }
     let c = &store.ctr;
     let built = c.pipes_live.load(Relaxed) + c.shaders_live.load(Relaxed);
-    if built == store.manifest_saved.load(Relaxed) || store.last_save.lock().unwrap().elapsed().as_secs() < 10 {
+    if built == store.manifest_saved.load(Relaxed)
+        || store.last_save.lock().unwrap().elapsed().as_secs() < 10
+    {
         return;
     }
     store.manifest_saved.store(built, Relaxed);
@@ -454,11 +741,13 @@ pub fn maybe_save(store: &Arc<Store>) {
         return;
     }
     let st = store.clone();
-    let spawned = std::thread::Builder::new().name("n1 manifest save".into()).spawn(move || {
-        save_manifest(&st, &h);
-        st.save_cache();
-        SAVING.store(false, Relaxed);
-    });
+    let spawned = std::thread::Builder::new()
+        .name("n1 manifest save".into())
+        .spawn(move || {
+            save_manifest(&st, &h);
+            st.save_cache();
+            SAVING.store(false, Relaxed);
+        });
     if spawned.is_err() {
         SAVING.store(false, Relaxed);
     }

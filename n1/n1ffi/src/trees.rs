@@ -119,8 +119,15 @@ pub struct Geometry {
 
 impl Geometry {
     fn encode(&self) -> Vec<u8> {
-        let mut o = Vec::with_capacity(16 + self.draws.len() * 12 + self.vertices.len() * 4 + self.indices.len() * 4);
-        for v in [MAGIC, (self.vertices.len() / STRIDE) as u32, self.indices.len() as u32, self.draws.len() as u32] {
+        let mut o = Vec::with_capacity(
+            16 + self.draws.len() * 12 + self.vertices.len() * 4 + self.indices.len() * 4,
+        );
+        for v in [
+            MAGIC,
+            (self.vertices.len() / STRIDE) as u32,
+            self.indices.len() as u32,
+            self.draws.len() as u32,
+        ] {
             o.extend_from_slice(&v.to_le_bytes());
         }
         for d in &self.draws {
@@ -151,15 +158,27 @@ impl Geometry {
                 count: u(6 + k * 3)?,
             });
         }
-        let vb = b.get(at * 4..(at + nv * STRIDE) * 4).context("truncated vertices")?;
+        let vb = b
+            .get(at * 4..(at + nv * STRIDE) * 4)
+            .context("truncated vertices")?;
         at += nv * STRIDE;
         let ib = b.get(at * 4..(at + ni) * 4).context("truncated indices")?;
-        let vertices: Vec<f32> = vb.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-        let indices: Vec<u32> = ib.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let vertices: Vec<f32> = vb
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let indices: Vec<u32> = ib
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
         if indices.iter().any(|&i| i as usize >= nv) {
             bail!("index out of range");
         }
-        Ok(Geometry { vertices, indices, draws })
+        Ok(Geometry {
+            vertices,
+            indices,
+            draws,
+        })
     }
 
     /// AABB centre and bounding radius around it, card corners at their largest extent (UE axes, tree-local).
@@ -174,10 +193,15 @@ impl Geometry {
         if lo[0] > hi[0] {
             return ([0.0; 3], 0.0);
         }
-        let ctr = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5];
+        let ctr = [
+            (lo[0] + hi[0]) * 0.5,
+            (lo[1] + hi[1]) * 0.5,
+            (lo[2] + hi[2]) * 0.5,
+        ];
         let mut r = 0f32;
         for c in self.vertices.chunks_exact(STRIDE) {
-            let d = ((c[0] - ctr[0]).powi(2) + (c[1] - ctr[1]).powi(2) + (c[2] - ctr[2]).powi(2)).sqrt();
+            let d = ((c[0] - ctr[0]).powi(2) + (c[1] - ctr[1]).powi(2) + (c[2] - ctr[2]).powi(2))
+                .sqrt();
             let card = (c[5] * c[5] + c[6] * c[6] + c[7] * c[7]).sqrt();
             r = r.max(d + card);
         }
@@ -210,7 +234,11 @@ pub struct TreeSettings {
 
 impl Default for TreeSettings {
     fn default() -> Self {
-        TreeSettings { max_distance: f32::INFINITY, leaf_density: 1.0, frustum_cull: true }
+        TreeSettings {
+            max_distance: f32::INFINITY,
+            leaf_density: 1.0,
+            frustum_cull: true,
+        }
     }
 }
 
@@ -219,9 +247,21 @@ impl TreeSettings {
     pub fn preset(name: &str) -> Option<Self> {
         Some(match name {
             "high" | "" => Self::default(),
-            "medium" => TreeSettings { max_distance: 20_000.0, leaf_density: 0.75, frustum_cull: true },
-            "low" => TreeSettings { max_distance: 10_000.0, leaf_density: 0.5, frustum_cull: true },
-            "off" => TreeSettings { max_distance: 0.0, leaf_density: 0.0, frustum_cull: true },
+            "medium" => TreeSettings {
+                max_distance: 20_000.0,
+                leaf_density: 0.75,
+                frustum_cull: true,
+            },
+            "low" => TreeSettings {
+                max_distance: 10_000.0,
+                leaf_density: 0.5,
+                frustum_cull: true,
+            },
+            "off" => TreeSettings {
+                max_distance: 0.0,
+                leaf_density: 0.0,
+                frustum_cull: true,
+            },
             _ => return None,
         })
     }
@@ -453,16 +493,31 @@ enum AssetResult {
 }
 
 fn cache_file(db: &AssetDb, asset: &str) -> std::path::PathBuf {
-    let n: String = asset.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '_' }).collect();
+    let n: String = asset
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
     db.cache_dir().join("trees").join(n + ".bin")
 }
 
 fn tree_tex(db: &AssetDb, material: &str) -> TreeTex {
     if material.is_empty() {
-        return TreeTex { tex: None, masked: false };
+        return TreeTex {
+            tex: None,
+            masked: false,
+        };
     }
     let m = db.material(material);
-    TreeTex { tex: m.diffuse.as_deref().and_then(|t| db.texture(t)), masked: m.blend == "BLEND_Masked" }
+    TreeTex {
+        tex: m.diffuse.as_deref().and_then(|t| db.texture(t)),
+        masked: m.blend == "BLEND_Masked",
+    }
 }
 
 fn load_asset(db: &AssetDb, path: &str) -> AssetResult {
@@ -481,23 +536,46 @@ fn load_asset(db: &AssetDb, path: &str) -> AssetResult {
     };
     AssetResult::Ready(LoadedTree {
         geom,
-        mats: [tree_tex(db, &m.branch), tree_tex(db, &m.frond), tree_tex(db, &m.leaf)],
+        mats: [
+            tree_tex(db, &m.branch),
+            tree_tex(db, &m.frond),
+            tree_tex(db, &m.leaf),
+        ],
     })
 }
 
 /// Builds a captured draw's vertices by running the game's vertex shader over its indices (loader thread, B-220).
 fn cap_compute(caps: &mut HashMap<u32, Cap>, j: &CapJob) {
     let cap = caps.entry(j.asset).or_default();
-    let streams: Vec<Stream> = j.streams.iter().map(|(data, stride)| Stream { data, stride: *stride }).collect();
+    let streams: Vec<Stream> = j
+        .streams
+        .iter()
+        .map(|(data, stride)| Stream {
+            data,
+            stride: *stride,
+        })
+        .collect();
     let (s0, s1) = (j.s0, j.s1);
-    let c: Vec<[f64; 4]> = (0..256).map(|r| [0, 1, 2, 3].map(|k| j.consts[r * 4 + k] as f64)).collect();
+    let c: Vec<[f64; 4]> = (0..256)
+        .map(|r| [0, 1, 2, 3].map(|k| j.consts[r * 4 + k] as f64))
+        .collect();
     let row = j.row;
     let l2w: M4 = [c[row - 3], c[row - 2], c[row - 1], c[row]];
-    let (Some(inv_l2w), Some(vp_inv)) = (inv4(&l2w), inv4(&[c[0], c[1], c[2], c[3]])) else { return };
-    let scale = (l2w[0][0].powi(2) + l2w[0][1].powi(2) + l2w[0][2].powi(2)).sqrt().max(1e-9);
+    let (Some(inv_l2w), Some(vp_inv)) = (inv4(&l2w), inv4(&[c[0], c[1], c[2], c[3]])) else {
+        return;
+    };
+    let scale = (l2w[0][0].powi(2) + l2w[0][1].powi(2) + l2w[0][2].powi(2))
+        .sqrt()
+        .max(1e-9);
     let rm = rot3(j.rotation);
     let vs_kind = j.vs_kind;
-    let group = if vs_kind == Kind::Branch { 0u8 } else if vs_kind == Kind::LeafCard { 1 } else { 2 };
+    let group = if vs_kind == Kind::Branch {
+        0u8
+    } else if vs_kind == Kind::LeafCard {
+        1
+    } else {
+        2
+    };
     let mut vm = Vm::new(&j.prog, &j.consts, &streams);
     let first = cap.indices.len() as u32;
     for &raw_vi in &j.indices {
@@ -510,7 +588,10 @@ fn cap_compute(caps: &mut HashMap<u32, Cap>, j: &CapJob) {
         let o = match vm.run(vi as usize) {
             Ok(o) => o,
             Err(e) => {
-                eprintln!("n1ffi: tree vertex shader run failed: {e:#} ({:?}, index_offset {})", vs_kind, j.index_offset);
+                eprintln!(
+                    "n1ffi: tree vertex shader run failed: {e:#} ({:?}, index_offset {})",
+                    vs_kind, j.index_offset
+                );
                 return;
             }
         };
@@ -523,22 +604,33 @@ fn cap_compute(caps: &mut HashMap<u32, Cap>, j: &CapJob) {
         let world = [w[0] / ww, w[1] / ww, w[2] / ww];
         let pos = {
             let at = vi as usize * 12;
-            let Some(b) = streams[s0].data.get(at..at + 12) else { return };
-            [0, 1, 2].map(|k| f32::from_be_bytes([b[4 * k], b[4 * k + 1], b[4 * k + 2], b[4 * k + 3]]) as f64)
+            let Some(b) = streams[s0].data.get(at..at + 12) else {
+                return;
+            };
+            [0, 1, 2].map(|k| {
+                f32::from_be_bytes([b[4 * k], b[4 * k + 1], b[4 * k + 2], b[4 * k + 3]]) as f64
+            })
         };
         let mut card = [0.0f64; 3];
         let local: [f64; 3];
         if vs_kind == Kind::LeafCard {
             // centre of the card in world space: (p · R, 1) · L2W
             let pr = [0, 1, 2].map(|j| pos[0] * rm[0][j] + pos[1] * rm[1][j] + pos[2] * rm[2][j]);
-            let ctr = [0, 1, 2].map(|j| pr[0] * l2w[0][j] + pr[1] * l2w[1][j] + pr[2] * l2w[2][j] + l2w[3][j]);
+            let ctr = [0, 1, 2]
+                .map(|j| pr[0] * l2w[0][j] + pr[1] * l2w[1][j] + pr[2] * l2w[2][j] + l2w[3][j]);
             let off = [world[0] - ctr[0], world[1] - ctr[1], world[2] - ctr[2]];
             for (k, row_c) in [7usize, 8, 9].iter().enumerate() {
-                card[k] = (off[0] * c[*row_c][0] + off[1] * c[*row_c][1] + off[2] * c[*row_c][2]) / scale;
+                card[k] =
+                    (off[0] * c[*row_c][0] + off[1] * c[*row_c][1] + off[2] * c[*row_c][2]) / scale;
             }
             local = pos;
         } else {
-            let lw = [0, 1, 2].map(|j| world[0] * inv_l2w[0][j] + world[1] * inv_l2w[1][j] + world[2] * inv_l2w[2][j] + inv_l2w[3][j]);
+            let lw = [0, 1, 2].map(|j| {
+                world[0] * inv_l2w[0][j]
+                    + world[1] * inv_l2w[1][j]
+                    + world[2] * inv_l2w[2][j]
+                    + inv_l2w[3][j]
+            });
             // local = lw · Rᵀ (R is orthonormal)
             local = [0, 1, 2].map(|j| lw[0] * rm[j][0] + lw[1] * rm[j][1] + lw[2] * rm[j][2]);
         }
@@ -560,17 +652,32 @@ fn cap_compute(caps: &mut HashMap<u32, Cap>, j: &CapJob) {
         };
         let n = (cap.verts.len() / STRIDE) as u32;
         cap.verts.extend_from_slice(&[
-            local[0] as f32, local[1] as f32, local[2] as f32,
-            o1[0] as f32, o1[1] as f32,
-            card[0] as f32, card[1] as f32, card[2] as f32,
-            nrm[0] as f32, nrm[1] as f32, nrm[2] as f32,
-            slot, vi as f32,
+            local[0] as f32,
+            local[1] as f32,
+            local[2] as f32,
+            o1[0] as f32,
+            o1[1] as f32,
+            card[0] as f32,
+            card[1] as f32,
+            card[2] as f32,
+            nrm[0] as f32,
+            nrm[1] as f32,
+            nrm[2] as f32,
+            slot,
+            vi as f32,
         ]);
         cap.vmap.insert(key, n);
         cap.indices.push(n);
     }
     let count = cap.indices.len() as u32 - first;
-    cap.draws.push(CapDraw { vs_kind, vb: j.vb, min_index: j.min_index, tex: j.tex.clone(), first, count });
+    cap.draws.push(CapDraw {
+        vs_kind,
+        vb: j.vb,
+        min_index: j.min_index,
+        tex: j.tex.clone(),
+        first,
+        count,
+    });
 }
 
 /// Ends one asset's capture: classifies fronds and writes the geometry cache. False when nothing was built.
@@ -578,14 +685,23 @@ fn cap_commit(db: &AssetDb, path: &str, comp_path: &str, cap: Cap, log: bool) ->
     if cap.draws.is_empty() || cap.verts.is_empty() {
         return false;
     }
-    let leaf_tex: HashSet<u32> = cap.draws.iter().filter(|d| d.vs_kind == Kind::LeafCard).flat_map(|d| d.tex.iter().copied()).collect();
+    let leaf_tex: HashSet<u32> = cap
+        .draws
+        .iter()
+        .filter(|d| d.vs_kind == Kind::LeafCard)
+        .flat_map(|d| d.tex.iter().copied())
+        .collect();
     let mut draws = Vec::new();
     for d in &cap.draws {
         let mut kind = d.vs_kind;
         if kind == Kind::Branch {
             // Branches and fronds share one vertex buffer, branches first in it. With one draw only, the
             // frond is the one that samples the leaf texture.
-            let same: Vec<&CapDraw> = cap.draws.iter().filter(|e| e.vs_kind == Kind::Branch && e.vb == d.vb).collect();
+            let same: Vec<&CapDraw> = cap
+                .draws
+                .iter()
+                .filter(|e| e.vs_kind == Kind::Branch && e.vb == d.vb)
+                .collect();
             let mins: HashSet<u32> = same.iter().map(|e| e.min_index).collect();
             if mins.len() > 1 {
                 if d.min_index > same.iter().map(|e| e.min_index).min().unwrap_or(0) {
@@ -595,9 +711,17 @@ fn cap_commit(db: &AssetDb, path: &str, comp_path: &str, cap: Cap, log: bool) ->
                 kind = Kind::Frond;
             }
         }
-        draws.push(GDraw { kind, first: d.first, count: d.count });
+        draws.push(GDraw {
+            kind,
+            first: d.first,
+            count: d.count,
+        });
     }
-    let geom = Geometry { vertices: cap.verts, indices: cap.indices, draws };
+    let geom = Geometry {
+        vertices: cap.verts,
+        indices: cap.indices,
+        draws,
+    };
     let file = cache_file(db, path);
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -622,7 +746,10 @@ fn cap_commit(db: &AssetDb, path: &str, comp_path: &str, cap: Cap, log: bool) ->
 enum CompSt {
     Idle,
     Loading,
-    Ready { base: [i32; 4], scale: [[f32; 4]; 12] },
+    Ready {
+        base: [i32; 4],
+        scale: [[f32; 4]; 12],
+    },
     Failed,
 }
 
@@ -726,7 +853,10 @@ pub struct TreeSystem {
 }
 
 fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 impl TreeSystem {
@@ -753,9 +883,18 @@ impl TreeSystem {
                             let done = list
                                 .into_iter()
                                 .map(|(asset, path, comp_path)| {
-                                    let ok = caps.remove(&asset).is_some_and(|cap| cap_commit(&d, &path, &comp_path, cap, log));
+                                    let ok = caps.remove(&asset).is_some_and(|cap| {
+                                        cap_commit(&d, &path, &comp_path, cap, log)
+                                    });
                                     // Not captured after all (the shader run failed): back to needing a capture.
-                                    Done::Asset(asset, if ok { load_asset(&d, &path) } else { AssetResult::NeedsCapture })
+                                    Done::Asset(
+                                        asset,
+                                        if ok {
+                                            load_asset(&d, &path)
+                                        } else {
+                                            AssetResult::NeedsCapture
+                                        },
+                                    )
                                 })
                                 .collect();
                             // The session is over: geometry of assets not committed is never reused.
@@ -789,7 +928,9 @@ impl TreeSystem {
         ]);
         if let Ok(extra) = std::env::var("BOTS_N1_TREE_VS") {
             for kv in extra.split(',') {
-                let Some((h, k)) = kv.split_once(':') else { continue };
+                let Some((h, k)) = kv.split_once(':') else {
+                    continue;
+                };
                 let kind = match k {
                     "branch" => Kind::Branch,
                     "leafcard" => Kind::LeafCard,
@@ -932,7 +1073,14 @@ impl TreeSystem {
                     let (center, radius) = t.geom.bounds();
                     match r.tree_add(&t) {
                         Ok(gpu) => {
-                            self.info.insert(h, AInfo { center, radius, gpu });
+                            self.info.insert(
+                                h,
+                                AInfo {
+                                    center,
+                                    radius,
+                                    gpu,
+                                },
+                            );
                             self.asset[h as usize] = AssetSt::Ready(gpu);
                         }
                         Err(e) => {
@@ -961,7 +1109,10 @@ impl TreeSystem {
     /// Per frame, before `Renderer::record`: takes finished loads, culls, and builds the instance list.
     pub fn prepare(&mut self, r: &mut Renderer, view_proj: &[f32; 16], eye: [f32; 3]) -> TFrame {
         self.take_done(r);
-        let mut st = TStats { placements: self.raw.len() as u32, ..Default::default() };
+        let mut st = TStats {
+            placements: self.raw.len() as u32,
+            ..Default::default()
+        };
         for a in &self.asset {
             match a {
                 AssetSt::Ready(_) => st.assets_ready += 1,
@@ -971,7 +1122,10 @@ impl TreeSystem {
                 AssetSt::Idle => {}
             }
         }
-        let mut out = TFrame { leaf_density: self.settings.leaf_density, ..Default::default() };
+        let mut out = TFrame {
+            leaf_density: self.settings.leaf_density,
+            ..Default::default()
+        };
         if !self.enabled || self.raw.is_empty() {
             self.last = st;
             return out;
@@ -985,20 +1139,29 @@ impl TreeSystem {
         let mut slot_of: HashMap<u32, usize> = HashMap::new();
         for i in 0..self.raw.len() {
             let t = self.raw[i];
-            let (Some(c), Some(a)) = (self.comp.get_mut(t.component as usize), self.asset.get_mut(t.asset as usize)) else {
+            let (Some(c), Some(a)) = (
+                self.comp.get_mut(t.component as usize),
+                self.asset.get_mut(t.asset as usize),
+            ) else {
                 continue;
             };
             if matches!(c, CompSt::Idle) {
                 *c = CompSt::Loading;
                 self.lazy += 1;
                 scenekit::lazy_log("tree component", &self.comp_paths[t.component as usize]);
-                let _ = self.tx.send(Job::Light(t.component, self.comp_paths[t.component as usize].clone()));
+                let _ = self.tx.send(Job::Light(
+                    t.component,
+                    self.comp_paths[t.component as usize].clone(),
+                ));
             }
             if matches!(a, AssetSt::Idle) {
                 *a = AssetSt::Loading;
                 self.lazy += 1;
                 scenekit::lazy_log("tree asset", &self.asset_paths[t.asset as usize]);
-                let _ = self.tx.send(Job::Asset(t.asset, self.asset_paths[t.asset as usize].clone()));
+                let _ = self.tx.send(Job::Asset(
+                    t.asset,
+                    self.asset_paths[t.asset as usize].clone(),
+                ));
             }
             if matches!(a, AssetSt::NeedCapture)
                 && self.tries.get(&t.asset).copied().unwrap_or(0) < 3
@@ -1007,26 +1170,55 @@ impl TreeSystem {
                 wanted.insert(t.asset);
                 // Geometry (so its bounds) is unknown until captured: the placement's origin and a generous radius.
                 let p = [t.transform[12], t.transform[13], t.transform[14]];
-                let d = ((p[0] - eye[0]).powi(2) + (p[1] - eye[1]).powi(2) + (p[2] - eye[2]).powi(2)).sqrt();
-                if d - cap_radius <= cap_dist && !planes.iter().any(|q| q[0] * p[0] + q[1] * p[1] + q[2] * p[2] + q[3] < -cap_radius) {
+                let d =
+                    ((p[0] - eye[0]).powi(2) + (p[1] - eye[1]).powi(2) + (p[2] - eye[2]).powi(2))
+                        .sqrt();
+                if d - cap_radius <= cap_dist
+                    && !planes
+                        .iter()
+                        .any(|q| q[0] * p[0] + q[1] * p[1] + q[2] * p[2] + q[3] < -cap_radius)
+                {
                     wanted_visible.insert(t.asset);
                 }
             }
-            let (AssetSt::Ready(_), CompSt::Ready { base, scale }) = (&*a, &*c) else { continue };
-            let Some(info) = self.info.get(&t.asset) else { continue };
+            let (AssetSt::Ready(_), CompSt::Ready { base, scale }) = (&*a, &*c) else {
+                continue;
+            };
+            let Some(info) = self.info.get(&t.asset) else {
+                continue;
+            };
             let f = full_transform(&t);
-            let scale_len = ((t.transform[0] as f64).powi(2) + (t.transform[1] as f64).powi(2) + (t.transform[2] as f64).powi(2)).sqrt() as f32;
+            let scale_len = ((t.transform[0] as f64).powi(2)
+                + (t.transform[1] as f64).powi(2)
+                + (t.transform[2] as f64).powi(2))
+            .sqrt() as f32;
             let ctr = info.center;
-            let wc = [0, 1, 2].map(|j| (ctr[0] as f64 * f[0][j] + ctr[1] as f64 * f[1][j] + ctr[2] as f64 * f[2][j] + f[3][j]) as f32);
+            let wc = [0, 1, 2].map(|j| {
+                (ctr[0] as f64 * f[0][j]
+                    + ctr[1] as f64 * f[1][j]
+                    + ctr[2] as f64 * f[2][j]
+                    + f[3][j]) as f32
+            });
             let radius = info.radius * scale_len;
-            let dist = ((wc[0] - eye[0]).powi(2) + (wc[1] - eye[1]).powi(2) + (wc[2] - eye[2]).powi(2)).sqrt();
+            let dist =
+                ((wc[0] - eye[0]).powi(2) + (wc[1] - eye[1]).powi(2) + (wc[2] - eye[2]).powi(2))
+                    .sqrt();
             if dist - radius > self.settings.max_distance {
                 continue;
             }
-            if self.settings.frustum_cull && planes.iter().any(|p| p[0] * wc[0] + p[1] * wc[1] + p[2] * wc[2] + p[3] < -radius) {
+            if self.settings.frustum_cull
+                && planes
+                    .iter()
+                    .any(|p| p[0] * wc[0] + p[1] * wc[1] + p[2] * wc[2] + p[3] < -radius)
+            {
                 continue;
             }
-            let inst = TInst { model: swz_model(&f), misc: [scale_len, 0.0, 0.0, 0.0], base: *base, sc: *scale };
+            let inst = TInst {
+                model: swz_model(&f),
+                misc: [scale_len, 0.0, 0.0, 0.0],
+                base: *base,
+                sc: *scale,
+            };
             let k = *slot_of.entry(info.gpu).or_insert_with(|| {
                 by_asset.push((info.gpu, Vec::new()));
                 by_asset.len() - 1
@@ -1034,7 +1226,11 @@ impl TreeSystem {
             by_asset[k].1.push(inst);
         }
         for (gpu, v) in by_asset {
-            out.calls.push(TCall { asset: gpu, first: out.insts.len() as u32, count: v.len() as u32 });
+            out.calls.push(TCall {
+                asset: gpu,
+                first: out.insts.len() as u32,
+                count: v.len() as u32,
+            });
             out.insts.extend(v);
         }
         st.instances = out.insts.len() as u32;
@@ -1063,7 +1259,10 @@ impl TreeSystem {
             }
             // B-199: only when an uncaptured tree is probably on screen. Starting whenever any placement in the level
             // needed one let the game draw its own scene for up to ~400 frames per session with nothing to capture.
-            if !self.enabled || self.last.wanted_visible == 0 || env_num("BOTS_N1_TREE_CAPTURE", 1u32) == 0 {
+            if !self.enabled
+                || self.last.wanted_visible == 0
+                || env_num("BOTS_N1_TREE_CAPTURE", 1u32) == 0
+            {
                 return 0;
             }
             self.phase = Phase::Survey;
@@ -1099,15 +1298,24 @@ impl TreeSystem {
         // B-199: a survey that has not seen a wanted tree drawn after a few frames gives up (BOTS_N1_TREE_SURVEY_STALL).
         // The in-view test is generous (origin plus a radius), so many sessions find nothing; each ran the full stall
         // limit with the game drawing its own scene, 35-200 ms a frame on a low-end laptop (mission 5: ~900 frames over 33 ms).
-        let survey_empty = self.phase == Phase::Survey && self.counts.is_empty() && self.stall > env_num("BOTS_N1_TREE_SURVEY_STALL", 8u32);
-        if self.frames_left == 0 || survey_empty || self.stall > env_num("BOTS_N1_TREE_STALL", 120u32) {
+        let survey_empty = self.phase == Phase::Survey
+            && self.counts.is_empty()
+            && self.stall > env_num("BOTS_N1_TREE_SURVEY_STALL", 8u32);
+        if self.frames_left == 0
+            || survey_empty
+            || self.stall > env_num("BOTS_N1_TREE_STALL", 120u32)
+        {
             if self.phase == Phase::Survey {
                 self.choose_targets();
             }
             let before = self.captured;
             self.commit();
             self.phase = Phase::Idle;
-            self.empty_sessions = if self.captured > before { 0 } else { (self.empty_sessions + 1).min(4) };
+            self.empty_sessions = if self.captured > before {
+                0
+            } else {
+                (self.empty_sessions + 1).min(4)
+            };
             self.cooldown = 120 << self.empty_sessions;
             return 0;
         }
@@ -1132,7 +1340,11 @@ impl TreeSystem {
     fn rebuild_grid(&mut self) {
         self.grid.clear();
         for (i, t) in self.raw.iter().enumerate() {
-            let k = (t.transform[12].floor() as i32, t.transform[13].floor() as i32, t.transform[14].floor() as i32);
+            let k = (
+                t.transform[12].floor() as i32,
+                t.transform[13].floor() as i32,
+                t.transform[14].floor() as i32,
+            );
             self.grid.entry(k).or_default().push(i);
         }
     }
@@ -1162,7 +1374,9 @@ impl TreeSystem {
         if self.grid.is_empty() {
             self.rebuild_grid();
         }
-        let Some((pi, _)) = self.find_placement(consts) else { return 0 };
+        let Some((pi, _)) = self.find_placement(consts) else {
+            return 0;
+        };
         let t = self.raw[pi];
         if !matches!(self.asset.get(t.asset as usize), Some(AssetSt::NeedCapture)) {
             return 0;
@@ -1178,7 +1392,13 @@ impl TreeSystem {
                     self.asset_paths[t.asset as usize]
                 );
             }
-            return if std::env::var_os("BOTS_N1_TREE_VSDUMP").is_some() && self.dumped.insert(vs_hash) { 2 } else { 0 };
+            return if std::env::var_os("BOTS_N1_TREE_VSDUMP").is_some()
+                && self.dumped.insert(vs_hash)
+            {
+                2
+            } else {
+                0
+            };
         }
         self.saw = true;
         match self.phase {
@@ -1192,7 +1412,11 @@ impl TreeSystem {
                     return 0;
                 }
                 *self.dbg.entry("probe_want").or_default() += 1;
-                1 | if matches!(self.progs.get(&vs_hash), Some(Some(_))) { 0 } else { 2 }
+                1 | if matches!(self.progs.get(&vs_hash), Some(Some(_))) {
+                    0
+                } else {
+                    2
+                }
             }
             Phase::Idle => 0,
         }
@@ -1202,7 +1426,10 @@ impl TreeSystem {
     pub fn set_ucode(&mut self, vs_hash: u64, text: &str) {
         if !self.vs_kinds.contains_key(&vs_hash) {
             if let Some(d) = std::env::var_os("BOTS_N1_TREE_VSDUMP") {
-                let _ = std::fs::write(std::path::Path::new(&d).join(format!("vs_{vs_hash:016X}.txt")), text);
+                let _ = std::fs::write(
+                    std::path::Path::new(&d).join(format!("vs_{vs_hash:016X}.txt")),
+                    text,
+                );
             }
             return;
         }
@@ -1225,7 +1452,9 @@ impl TreeSystem {
         let consts = unsafe { std::slice::from_raw_parts(d.consts, 1024) };
         let indices = unsafe { std::slice::from_raw_parts(d.indices, d.index_count as usize) };
         *self.dbg.entry("cap_calls").or_default() += 1;
-        let Some(&vs_kind) = self.vs_kinds.get(&d.vs_hash) else { return };
+        let Some(&vs_kind) = self.vs_kinds.get(&d.vs_hash) else {
+            return;
+        };
         let Some(Some(prog)) = self.progs.get(&d.vs_hash).cloned() else {
             *self.dbg.entry("no_prog").or_default() += 1;
             return;
@@ -1240,7 +1469,13 @@ impl TreeSystem {
             return;
         }
         let min_index = indices.iter().copied().min().unwrap_or(0);
-        let key = (d.vs_hash as u32 ^ (d.vs_hash >> 32) as u32, d.stream_addr[0], min_index, d.index_count, indices.first().copied().unwrap_or(0));
+        let key = (
+            d.vs_hash as u32 ^ (d.vs_hash >> 32) as u32,
+            d.stream_addr[0],
+            min_index,
+            d.index_count,
+            indices.first().copied().unwrap_or(0),
+        );
         if !self.cap_seen.insert((t.asset, key)) {
             *self.dbg.entry("dup").or_default() += 1;
             return;
@@ -1258,7 +1493,8 @@ impl TreeSystem {
                 if d.stream[k].is_null() || indices.is_empty() {
                     return (Vec::new(), stride);
                 }
-                let src = unsafe { std::slice::from_raw_parts(d.stream[k], d.stream_bytes[k] as usize) };
+                let src =
+                    unsafe { std::slice::from_raw_parts(d.stream[k], d.stream_bytes[k] as usize) };
                 let from = (lo as usize).saturating_mul(stride).min(src.len());
                 let to = (hi as usize + 1).saturating_mul(stride).min(src.len());
                 let mut data = vec![0u8; to];
@@ -1266,7 +1502,10 @@ impl TreeSystem {
                 (data, stride)
             })
             .collect();
-        let tex: Vec<u32> = d.tex_base[..(d.tex_count as usize).min(4)].iter().map(|w| w & !0xFFF).collect();
+        let tex: Vec<u32> = d.tex_base[..(d.tex_count as usize).min(4)]
+            .iter()
+            .map(|w| w & !0xFFF)
+            .collect();
         self.sent.entry(t.asset).or_insert(t.component);
         *self.dbg.entry("draws_sent").or_default() += 1;
         let job = CapJob {
@@ -1304,14 +1543,22 @@ impl TreeSystem {
             if !matches!(self.asset[asset as usize], AssetSt::NeedCapture) {
                 continue;
             }
-            list.push((asset, self.asset_paths[asset as usize].clone(), self.comp_paths[comp as usize].clone()));
+            list.push((
+                asset,
+                self.asset_paths[asset as usize].clone(),
+                self.comp_paths[comp as usize].clone(),
+            ));
             self.asset[asset as usize] = AssetSt::Loading;
             self.capturing.insert(asset);
             self.captured += 1;
             done += 1;
         }
         if had_draws {
-            let built = self.sync_caps.as_mut().map(std::mem::take).unwrap_or_default();
+            let built = self
+                .sync_caps
+                .as_mut()
+                .map(std::mem::take)
+                .unwrap_or_default();
             let _ = self.tx.send(Job::CapCommit(list, built));
         }
         // B-199: an asset the game drew but that did not capture uses up one of its 3 tries; one that looked visible
@@ -1333,7 +1580,10 @@ impl TreeSystem {
         if self.log {
             eprintln!(
                 "n1ffi: tree capture session ended: {done} assets sent to capture, {} total, {} capture frames this run; probe {:.2} ms in total; {:?}",
-                self.captured, self.capture_frames, self.probe_ns as f64 / 1e6, self.dbg
+                self.captured,
+                self.capture_frames,
+                self.probe_ns as f64 / 1e6,
+                self.dbg
             );
         }
         self.grid.clear();
@@ -1354,12 +1604,25 @@ impl TreeSystem {
     }
 
     pub fn uncaptured_paths(&self) -> Vec<&str> {
-        self.asset.iter().enumerate().filter(|(_, a)| matches!(a, AssetSt::NeedCapture)).map(|(i, _)| self.asset_paths[i].as_str()).collect()
+        self.asset
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| matches!(a, AssetSt::NeedCapture))
+            .map(|(i, _)| self.asset_paths[i].as_str())
+            .collect()
     }
 
     /// Frames still queued for the loader thread's results (debug).
     pub fn pending_jobs(&self) -> usize {
-        self.comp.iter().filter(|c| matches!(c, CompSt::Loading)).count() + self.asset.iter().filter(|a| matches!(a, AssetSt::Loading)).count()
+        self.comp
+            .iter()
+            .filter(|c| matches!(c, CompSt::Loading))
+            .count()
+            + self
+                .asset
+                .iter()
+                .filter(|a| matches!(a, AssetSt::Loading))
+                .count()
     }
 }
 
@@ -1371,41 +1634,59 @@ fn find_in_grid(
     fast: bool,
 ) -> Option<(usize, usize)> {
     for row in 0..64 {
-            if row == 4 || (consts[row * 4 + 3] - 1.0).abs() > 1e-6 {
-                continue;
-            }
-            let p = [consts[row * 4], consts[row * 4 + 1], consts[row * 4 + 2]];
-            // A placement matches when it is within 0.5 of the row on every axis, so its cell (its position's floor) is
-            // in floor(p - 0.5)..=floor(p + 0.5): two cells an axis, in the order the 27-cell walk visits them. B-260:
-            // the walk did 27 hash lookups for each of 64 rows for every draw of a capture frame, 2,400-3,700 draws,
-            // about 100-190 ms on the Deck, nearly all of it for draws that are not trees.
-            let (lo, hi) = if fast {
-                let f = |v: f32, d: f32| (v + d).floor() as i32;
-                ([f(p[0], -0.5), f(p[1], -0.5), f(p[2], -0.5)], [f(p[0], 0.5), f(p[1], 0.5), f(p[2], 0.5)])
-            } else {
-                let k = [p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32];
-                ([k[0] - 1, k[1] - 1, k[2] - 1], [k[0] + 1, k[1] + 1, k[2] + 1])
-            };
-            for x in lo[0]..=hi[0] {
-                for y in lo[1]..=hi[1] {
-                    for z in lo[2]..=hi[2] {
-                        let Some(v) = grid.get(&(x, y, z)) else { continue };
-                        for &i in v {
-                            let t = &raw[i].transform;
-                            if (t[12] - p[0]).abs() < 0.5 && (t[13] - p[1]).abs() < 0.5 && (t[14] - p[2]).abs() < 0.5 {
-                                return Some((i, row));
-                            }
+        if row == 4 || (consts[row * 4 + 3] - 1.0).abs() > 1e-6 {
+            continue;
+        }
+        let p = [consts[row * 4], consts[row * 4 + 1], consts[row * 4 + 2]];
+        // A placement matches when it is within 0.5 of the row on every axis, so its cell (its position's floor) is
+        // in floor(p - 0.5)..=floor(p + 0.5): two cells an axis, in the order the 27-cell walk visits them. B-260:
+        // the walk did 27 hash lookups for each of 64 rows for every draw of a capture frame, 2,400-3,700 draws,
+        // about 100-190 ms on the Deck, nearly all of it for draws that are not trees.
+        let (lo, hi) = if fast {
+            let f = |v: f32, d: f32| (v + d).floor() as i32;
+            (
+                [f(p[0], -0.5), f(p[1], -0.5), f(p[2], -0.5)],
+                [f(p[0], 0.5), f(p[1], 0.5), f(p[2], 0.5)],
+            )
+        } else {
+            let k = [
+                p[0].floor() as i32,
+                p[1].floor() as i32,
+                p[2].floor() as i32,
+            ];
+            (
+                [k[0] - 1, k[1] - 1, k[2] - 1],
+                [k[0] + 1, k[1] + 1, k[2] + 1],
+            )
+        };
+        for x in lo[0]..=hi[0] {
+            for y in lo[1]..=hi[1] {
+                for z in lo[2]..=hi[2] {
+                    let Some(v) = grid.get(&(x, y, z)) else {
+                        continue;
+                    };
+                    for &i in v {
+                        let t = &raw[i].transform;
+                        if (t[12] - p[0]).abs() < 0.5
+                            && (t[13] - p[1]).abs() < 0.5
+                            && (t[14] - p[2]).abs() < 0.5
+                        {
+                            return Some((i, row));
                         }
                     }
                 }
             }
         }
-        None
     }
-
+    None
+}
 
 fn cell_of(t: &[f32; 16]) -> (i32, i32, i32) {
-    (t[12].floor() as i32, t[13].floor() as i32, t[14].floor() as i32)
+    (
+        t[12].floor() as i32,
+        t[13].floor() as i32,
+        t[14].floor() as i32,
+    )
 }
 
 #[cfg(test)]
@@ -1415,7 +1696,13 @@ mod tests {
     fn tree(x: f32, y: f32, z: f32) -> N1Tree {
         let mut transform = [0.0; 16];
         (transform[12], transform[13], transform[14]) = (x, y, z);
-        N1Tree { transform, component: 0, asset: 0, rotation: [0; 3], pad: 0 }
+        N1Tree {
+            transform,
+            component: 0,
+            asset: 0,
+            rotation: [0; 3],
+            pad: 0,
+        }
     }
 
     /// B-260: the cell-range walk finds exactly what the 27-cell walk finds, including with placements closer than 0.5.
@@ -1423,10 +1710,14 @@ mod tests {
     fn fast_match_equals_full_walk() {
         let mut seed = 0x1234_5678_u64;
         let mut rnd = move || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((seed >> 33) as f32) / (1u64 << 31) as f32
         };
-        let raw: Vec<N1Tree> = (0..400).map(|_| tree(rnd() * 60.0 - 30.0, rnd() * 60.0 - 30.0, rnd() * 8.0)).collect();
+        let raw: Vec<N1Tree> = (0..400)
+            .map(|_| tree(rnd() * 60.0 - 30.0, rnd() * 60.0 - 30.0, rnd() * 8.0))
+            .collect();
         let mut grid: HashMap<(i32, i32, i32), Vec<usize>, CellHash> = HashMap::default();
         for (i, t) in raw.iter().enumerate() {
             grid.entry(cell_of(&t.transform)).or_default().push(i);
@@ -1442,9 +1733,17 @@ mod tests {
                 // a row near a real placement, at offsets across the 0.5 limit
                 let t = &raw[(rnd() * 400.0) as usize % 400].transform;
                 let off = |r: f32| (r - 0.5) * 1.2;
-                c[20 * 4..20 * 4 + 4].copy_from_slice(&[t[12] + off(rnd()), t[13] + off(rnd()), t[14] + off(rnd()), 1.0]);
+                c[20 * 4..20 * 4 + 4].copy_from_slice(&[
+                    t[12] + off(rnd()),
+                    t[13] + off(rnd()),
+                    t[14] + off(rnd()),
+                    1.0,
+                ]);
             }
-            let (a, b) = (find_in_grid(&grid, &raw, &c, true), find_in_grid(&grid, &raw, &c, false));
+            let (a, b) = (
+                find_in_grid(&grid, &raw, &c, true),
+                find_in_grid(&grid, &raw, &c, false),
+            );
             assert_eq!(a, b);
             hits += usize::from(a.is_some());
         }
@@ -1457,9 +1756,15 @@ mod tests {
         for fast in [false, true] {
             let t0 = std::time::Instant::now();
             for _ in 0..2000 {
-                assert!(std::hint::black_box(find_in_grid(&grid, &raw, std::hint::black_box(&c), fast)).is_none());
+                assert!(
+                    std::hint::black_box(find_in_grid(&grid, &raw, std::hint::black_box(&c), fast))
+                        .is_none()
+                );
             }
-            eprintln!("find_in_grid fast={fast}: {:.2} us per draw", t0.elapsed().as_secs_f64() * 1e6 / 2000.0);
+            eprintln!(
+                "find_in_grid fast={fast}: {:.2} us per draw",
+                t0.elapsed().as_secs_f64() * 1e6 / 2000.0
+            );
         }
     }
 }

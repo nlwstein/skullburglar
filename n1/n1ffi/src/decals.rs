@@ -80,19 +80,26 @@ impl Default for Decals {
 }
 
 fn env_f32(name: &str, default: f32) -> f32 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 impl Decals {
     pub fn new() -> Self {
         let uv = std::env::var("BOTS_N1_DECAL_UV").unwrap_or_default();
         Self {
-            on: std::env::var("BOTS_N1_DECALS").map(|v| v != "0").unwrap_or(true),
+            on: std::env::var("BOTS_N1_DECALS")
+                .map(|v| v != "0")
+                .unwrap_or(true),
             frame: Vec::new(),
             receivers: Vec::new(),
             cache: HashMap::new(),
             clock: 0,
-            budget: Duration::from_micros((env_f32("BOTS_N1_DECAL_MS", 1.0).max(0.0) * 1000.0) as u64),
+            budget: Duration::from_micros(
+                (env_f32("BOTS_N1_DECAL_MS", 1.0).max(0.0) * 1000.0) as u64,
+            ),
             bias: env_f32("BOTS_N1_DECAL_BIAS", 0.5),
             su: if uv.contains("+u") { 1.0 } else { -1.0 },
             sv: if uv.contains("+v") { 1.0 } else { -1.0 },
@@ -142,8 +149,12 @@ impl Decals {
             let lo = d.receiver_offset as usize;
             let hi = (lo + d.receiver_count as usize).min(self.receivers.len());
             for k in lo..hi {
-                let Some(inst) = host.get(self.receivers[k] as usize) else { continue };
-                let Some(SlotState::Ready(_)) = res.mesh_state(inst.mesh) else { continue };
+                let Some(inst) = host.get(self.receivers[k] as usize) else {
+                    continue;
+                };
+                let Some(SlotState::Ready(_)) = res.mesh_state(inst.mesh) else {
+                    continue;
+                };
                 let light = if inst.light == NONE {
                     NONE
                 } else {
@@ -220,7 +231,12 @@ impl Decals {
         inst: &Instance,
         light: u32,
     ) -> (Entry, usize) {
-        let empty = Entry { mesh: NONE, light: NONE, own_light: false, last: self.clock };
+        let empty = Entry {
+            mesh: NONE,
+            light: NONE,
+            own_light: false,
+            last: self.clock,
+        };
         let Some(m) = res.mesh_path(inst.mesh).and_then(|p| db.mesh(p)) else {
             return (empty, 0);
         };
@@ -262,7 +278,11 @@ impl Decals {
             );
         }
         let (center, radius) = sphere(&out.positions);
-        let section = [SectionDesc { first_index: 0, index_count: out.indices.len() as u32, material: 0 }];
+        let section = [SectionDesc {
+            first_index: 0,
+            index_count: out.indices.len() as u32,
+            material: 0,
+        }];
         let desc = MeshDesc {
             positions: &out.positions,
             uvs: &out.uvs,
@@ -285,7 +305,15 @@ impl Decals {
         } else {
             (NONE, false)
         };
-        (Entry { mesh, light, own_light, last: self.clock }, n)
+        (
+            Entry {
+                mesh,
+                light,
+                own_light,
+                last: self.clock,
+            },
+            n,
+        )
     }
 }
 
@@ -305,7 +333,15 @@ fn key_of(d: &N1Decal, inst: &Instance, light: u32) -> u64 {
             x.to_bits().hash(&mut h);
         }
     }
-    for x in d.location.iter().chain(&d.tangent).chain(&d.binormal).chain(&d.normal).chain(&d.tile).chain(&d.offset) {
+    for x in d
+        .location
+        .iter()
+        .chain(&d.tangent)
+        .chain(&d.binormal)
+        .chain(&d.normal)
+        .chain(&d.tile)
+        .chain(&d.offset)
+    {
         x.to_bits().hash(&mut h);
     }
     for x in [d.width, d.height, d.backface_angle] {
@@ -328,7 +364,11 @@ fn sphere(p: &[[f32; 3]]) -> ([f32; 3], f32) {
             hi[k] = hi[k].max(v[k]);
         }
     }
-    let c = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5];
+    let c = [
+        (lo[0] + hi[0]) * 0.5,
+        (lo[1] + hi[1]) * 0.5,
+        (lo[2] + hi[2]) * 0.5,
+    ];
     let r = p.iter().map(|v| dist(*v, c)).fold(0.0f32, f32::max);
     (c, r)
 }
@@ -343,7 +383,11 @@ fn add_s(a: [f32; 3], b: [f32; 3], s: f32) -> [f32; 3] {
     [a[0] + b[0] * s, a[1] + b[1] * s, a[2] + b[2] * s]
 }
 fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
     dot(sub(a, b), sub(a, b)).sqrt()
@@ -439,7 +483,11 @@ impl<'a> Clip<'a> {
             n[0] * c[0][1] + n[1] * c[1][1] + n[2] * c[2][1],
             n[0] * c[0][2] + n[1] * c[1][2] + n[2] * c[2][2],
         ];
-        let w = if self.mirrored { [-w[0], -w[1], -w[2]] } else { w };
+        let w = if self.mirrored {
+            [-w[0], -w[1], -w[2]]
+        } else {
+            w
+        };
         norm(w).unwrap_or(self.d.normal)
     }
 
@@ -550,10 +598,22 @@ impl<'a> Clip<'a> {
         let u = self.su * dot(rel, d.tangent) / d.width.max(1e-3) * d.tile[0] + 0.5 + d.offset[0];
         let w = self.sv * dot(rel, d.binormal) / d.height.max(1e-3) * d.tile[1] + 0.5 + d.offset[1];
         let n = norm(v.n).unwrap_or(d.normal);
-        let tdir = [d.tangent[0] * self.su, d.tangent[1] * self.su, d.tangent[2] * self.su];
+        let tdir = [
+            d.tangent[0] * self.su,
+            d.tangent[1] * self.su,
+            d.tangent[2] * self.su,
+        ];
         let t = norm(add_s(tdir, n, -dot(tdir, n))).unwrap_or(tdir);
-        let vdir = [d.binormal[0] * self.sv, d.binormal[1] * self.sv, d.binormal[2] * self.sv];
-        let sign = if dot(cross(n, t), vdir) < 0.0 { -1.0 } else { 1.0 };
+        let vdir = [
+            d.binormal[0] * self.sv,
+            d.binormal[1] * self.sv,
+            d.binormal[2] * self.sv,
+        ];
+        let sign = if dot(cross(n, t), vdir) < 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
         out.positions.push(add_s(v.p, d.normal, self.bias));
         out.normals.push(n);
         out.tangents.push([t[0], t[1], t[2], sign]);
@@ -561,7 +621,8 @@ impl<'a> Clip<'a> {
         out.uv1.push(v.uv1);
         if words {
             for k in 0..3 {
-                let b: [u8; 4] = std::array::from_fn(|c| v.l[k * 4 + c].round().clamp(0.0, 255.0) as u8);
+                let b: [u8; 4] =
+                    std::array::from_fn(|c| v.l[k * 4 + c].round().clamp(0.0, 255.0) as u8);
                 out.words.push(u32::from_le_bytes(b));
             }
         }
@@ -576,7 +637,12 @@ mod tests {
     fn floor() -> (assetdb::MeshAsset, Instance) {
         let m = assetdb::MeshAsset {
             name: "floor".into(),
-            positions: vec![[-200.0, -200.0, 0.0], [200.0, -200.0, 0.0], [200.0, 200.0, 0.0], [-200.0, 200.0, 0.0]],
+            positions: vec![
+                [-200.0, -200.0, 0.0],
+                [200.0, -200.0, 0.0],
+                [200.0, 200.0, 0.0],
+                [-200.0, 200.0, 0.0],
+            ],
             normals: vec![[0.0, 0.0, 1.0]; 4],
             uvs: vec![[0.0, 0.0]; 4],
             indices: vec![0, 1, 2, 0, 2, 3],
@@ -593,13 +659,25 @@ mod tests {
         t[10] = 1.0;
         t[15] = 1.0;
         t[12] = 1000.0;
-        let inst = Instance { transform: t, mesh: 0, light: NONE, mat_offset: 0, mat_count: 0, env: NONE };
+        let inst = Instance {
+            transform: t,
+            mesh: 0,
+            light: NONE,
+            mat_offset: 0,
+            mat_count: 0,
+            env: NONE,
+        };
         (m, inst)
     }
 
     /// A 100 x 100 decal pointing down at (1000, 0, 0), as the game fills one (Planes from the frame).
     fn decal(normal_z: f32) -> N1Decal {
-        let (l, t, b, n) = ([1000.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, normal_z]);
+        let (l, t, b, n) = (
+            [1000.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 0.0, normal_z],
+        );
         let pl = |d: [f32; 3], w: f32| [d[0], d[1], d[2], w];
         N1Decal {
             material: 0,
@@ -631,7 +709,11 @@ mod tests {
         o.indices
             .chunks_exact(3)
             .map(|t| {
-                let (a, b, c) = (o.positions[t[0] as usize], o.positions[t[1] as usize], o.positions[t[2] as usize]);
+                let (a, b, c) = (
+                    o.positions[t[0] as usize],
+                    o.positions[t[1] as usize],
+                    o.positions[t[2] as usize],
+                );
                 dot(cross(sub(b, a), sub(c, a)), cross(sub(b, a), sub(c, a))).sqrt() * 0.5
             })
             .sum()
@@ -641,17 +723,25 @@ mod tests {
     fn clips_floor_to_box() {
         let (m, inst) = floor();
         let d = decal(1.0);
-        let words: Vec<u32> = (0..12).map(|k| if k < 6 { 0x40404040 } else { 0x80808080 }).collect();
+        let words: Vec<u32> = (0..12)
+            .map(|k| if k < 6 { 0x40404040 } else { 0x80808080 })
+            .collect();
         let o = Clip::new(&d, &inst, 0.5, -1.0, -1.0).run(&m, Some(&words));
         assert!((area(&o) - 100.0 * 100.0).abs() < 1.0, "area {}", area(&o));
         assert_eq!(o.words.len(), o.positions.len() * 3);
         for (p, uv) in o.positions.iter().zip(&o.uvs) {
             assert!((p[2] - 0.5).abs() < 1e-4, "biased along the normal");
-            assert!((-1e-3..=1.0 + 1e-3).contains(&uv[0]) && (-1e-3..=1.0 + 1e-3).contains(&uv[1]), "{uv:?}");
+            assert!(
+                (-1e-3..=1.0 + 1e-3).contains(&uv[0]) && (-1e-3..=1.0 + 1e-3).contains(&uv[1]),
+                "{uv:?}"
+            );
             // u along -tangent (-Y), v along -binormal (+X).
             let du = 0.5 - p[1] / 100.0;
             let dv = 0.5 + (p[0] - 1000.0) / 100.0;
-            assert!((uv[0] - du).abs() < 1e-3 && (uv[1] - dv).abs() < 1e-3, "{p:?} {uv:?}");
+            assert!(
+                (uv[0] - du).abs() < 1e-3 && (uv[1] - dv).abs() < 1e-3,
+                "{p:?} {uv:?}"
+            );
         }
     }
 

@@ -112,7 +112,7 @@ pub struct Counters {
     pub saved_pipes: AtomicU32,
 }
 
-type Task = Box<dyn FnOnce(&Arc<Store>) + Send>;
+pub type Task = Box<dyn FnOnce(&Arc<Store>) + Send>;
 
 #[derive(Default)]
 struct Queue {
@@ -135,6 +135,11 @@ pub struct Store {
     inner: Mutex<Inner>,
     queue: Mutex<Queue>,
     wake: Condvar,
+    /// Where workers above `max_active` wait (B-248): off `wake`, so a `notify_one` is never spent on a parked worker.
+    park: Condvar,
+    /// B-248: only workers with an index below this take tasks. The startup step may use more workers while the
+    /// game is held; `set_max_active` lowers it to the play-time count when the step ends.
+    max_active: std::sync::atomic::AtomicUsize,
     idle: Condvar,
     threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     pub ctr: Counters,
@@ -184,10 +189,12 @@ fn blend_state(blend_id: u8) -> Option<vk::PipelineColorBlendAttachmentState> {
                 .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA),
         )),
         3 => Some(over(
-            base.src_color_blend_factor(vk::BlendFactor::SRC_ALPHA).dst_color_blend_factor(vk::BlendFactor::ONE),
+            base.src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+                .dst_color_blend_factor(vk::BlendFactor::ONE),
         )),
         4 => Some(over(
-            base.src_color_blend_factor(vk::BlendFactor::DST_COLOR).dst_color_blend_factor(vk::BlendFactor::ZERO),
+            base.src_color_blend_factor(vk::BlendFactor::DST_COLOR)
+                .dst_color_blend_factor(vk::BlendFactor::ZERO),
         )),
         _ => None,
     }
@@ -210,7 +217,8 @@ impl Store {
     ) -> Result<Arc<Store>> {
         // Empty now; the persisted data is merged in by `load_persisted_cache` on the startup thread, because some
         // drivers (MoltenVK recompiles every cached shader library) take seconds to read it.
-        let cache = unsafe { device.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)? };
+        let cache =
+            unsafe { device.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)? };
         if let Some(d) = &dir {
             let _ = std::fs::create_dir_all(d.join(format!("spv-{SPV_REV}")));
         }
@@ -224,6 +232,8 @@ impl Store {
             inner: Mutex::new(Inner::default()),
             queue: Mutex::new(Queue::default()),
             wake: Condvar::new(),
+            park: Condvar::new(),
+            max_active: std::sync::atomic::AtomicUsize::new(usize::MAX),
             idle: Condvar::new(),
             threads: Mutex::new(Vec::new()),
             ctr: Counters::default(),
@@ -253,7 +263,10 @@ impl Store {
             mark_loaded();
             return (0, 0.0);
         };
-        if std::env::var("BOTS_N1_PIPELINE_CACHE").map(|v| v == "0").unwrap_or(false) {
+        if std::env::var("BOTS_N1_PIPELINE_CACHE")
+            .map(|v| v == "0")
+            .unwrap_or(false)
+        {
             mark_loaded();
             return (0, 0.0);
         }
@@ -266,7 +279,10 @@ impl Store {
         }
         unsafe {
             // Reading the data is the slow part on some drivers; it makes a cache of its own, so it needs no lock.
-            match self.device.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default().initial_data(&data), None) {
+            match self.device.create_pipeline_cache(
+                &vk::PipelineCacheCreateInfo::default().initial_data(&data),
+                None,
+            ) {
                 Ok(c) => {
                     {
                         let mut g = self.gate.lock().unwrap_or_else(|p| p.into_inner());
@@ -303,19 +319,34 @@ impl Store {
             t.push(
                 std::thread::Builder::new()
                     .name(format!("n1-compile-{k}"))
-                    .spawn(move || s.worker())
+                    .spawn(move || s.worker(k))
                     .expect("spawn n1 compile worker"),
             );
         }
     }
 
-    fn worker(self: Arc<Self>) {
+    /// B-248: workers with an index at or above `n` stop taking tasks (they finish the one they run).
+    pub fn set_max_active(&self, n: usize) {
+        let _q = self.queue.lock().unwrap();
+        self.max_active.store(n, Relaxed);
+        self.wake.notify_all();
+    }
+
+    fn worker(self: Arc<Self>, k: usize) {
         loop {
             let task = {
                 let mut q = self.queue.lock().unwrap();
                 loop {
                     if q.stop {
                         return;
+                    }
+                    if k >= self.max_active.load(Relaxed) {
+                        q = self
+                            .park
+                            .wait_timeout(q, std::time::Duration::from_millis(250))
+                            .unwrap()
+                            .0;
+                        continue;
                     }
                     if let Some(t) = q.urgent.pop_front().or_else(|| q.normal.pop_front()) {
                         q.running += 1;
@@ -350,7 +381,13 @@ impl Store {
     /// (shader modules, pipelines) built.
     pub fn counts(&self) -> (usize, usize) {
         let i = self.inner.lock().unwrap();
-        (i.mods.len(), i.pipes.values().filter(|p| matches!(p, PState::Ready(_))).count())
+        (
+            i.mods.len(),
+            i.pipes
+                .values()
+                .filter(|p| matches!(p, PState::Ready(_)))
+                .count(),
+        )
     }
 
     /// Queue depth (waiting + running).
@@ -368,6 +405,7 @@ impl Store {
             q.urgent.clear();
             q.normal.clear();
             self.wake.notify_all();
+            self.park.notify_all();
         }
         let ts: Vec<_> = self.threads.lock().unwrap().drain(..).collect();
         for t in ts {
@@ -430,13 +468,15 @@ impl Store {
                         .stage_flags(fr),
                 );
             }
-            let sl = self
-                .device
-                .create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?;
+            let sl = self.device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
+                None,
+            )?;
             let layouts = [self.set0_layout, self.lm_layout, sl];
-            let pl = self
-                .device
-                .create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts), None)?;
+            let pl = self.device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts),
+                None,
+            )?;
             i.layouts.insert(ntex, (sl, pl));
             Ok((sl, pl))
         }
@@ -447,13 +487,19 @@ impl Store {
     /// SPIR-V for WGSL source, from the disk cache when it has it.
     pub fn spirv_cached(&self, src: &str) -> Result<(Arc<Vec<u32>>, u64)> {
         let h = fnv(src.as_bytes());
-        let file = self.dir.as_ref().map(|d| d.join(format!("spv-{SPV_REV}")).join(format!("{h:016x}.spv")));
+        let file = self.dir.as_ref().map(|d| {
+            d.join(format!("spv-{SPV_REV}"))
+                .join(format!("{h:016x}.spv"))
+        });
         if let Some(f) = &file
             && let Ok(b) = std::fs::read(f)
             && b.len() % 4 == 0
             && b.len() >= 20
         {
-            let words: Vec<u32> = b.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            let words: Vec<u32> = b
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
             if words[0] == 0x0723_0203 {
                 self.ctr.spv_hits.fetch_add(1, Relaxed);
                 return Ok((Arc::new(words), h));
@@ -461,7 +507,9 @@ impl Store {
         }
         let t = std::time::Instant::now();
         let words = shaders::spirv(src)?;
-        self.ctr.naga_us.fetch_add(t.elapsed().as_micros() as u64, Relaxed);
+        self.ctr
+            .naga_us
+            .fetch_add(t.elapsed().as_micros() as u64, Relaxed);
         self.ctr.spv_misses.fetch_add(1, Relaxed);
         if let Some(f) = &file {
             let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -474,7 +522,9 @@ impl Store {
     }
 
     fn spv_path(&self, name: &str) -> Option<PathBuf> {
-        self.dir.as_ref().map(|d| d.join(format!("spv-{SPV_REV}")).join(format!("{name}.spv")))
+        self.dir
+            .as_ref()
+            .map(|d| d.join(format!("spv-{SPV_REV}")).join(format!("{name}.spv")))
     }
 
     /// SPIR-V by its name in the disk cache (`{hash:016x}` for scene shaders, `p{hash:016x}` for particles).
@@ -483,7 +533,10 @@ impl Store {
         if b.len() < 20 || b.len() % 4 != 0 {
             return None;
         }
-        let w: Vec<u32> = b.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let w: Vec<u32> = b
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
         (w[0] == 0x0723_0203).then_some(w)
     }
 
@@ -506,8 +559,15 @@ impl Store {
     }
 
     /// The module for `key`, waiting (briefly) for whoever claimed it to finish.
-    fn wait_module(&self, key: u64) -> Option<u32> {
-        for _ in 0..2000 {
+    fn wait_module(&self, key: u64, origin: Origin) -> Option<u32> {
+        // B-248: the startup step's jobs must not give up on a module another worker is still building (a cold naga
+        // build can take seconds under load): the pipelines after it would be skipped and built late, in play.
+        let limit = if origin == Origin::Startup {
+            120_000
+        } else {
+            2000
+        };
+        for _ in 0..limit {
             match self.inner.lock().unwrap().by_key.get(&key) {
                 Some(MState::Ready(id)) => return Some(*id),
                 Some(MState::Building) => {}
@@ -528,11 +588,24 @@ impl Store {
         true
     }
 
-    fn finish_module(&self, key: u64, r: Result<(vk::ShaderModule, usize, u64)>, particle: bool, origin: Origin, ms: f64) -> Option<u32> {
+    fn finish_module(
+        &self,
+        key: u64,
+        r: Result<(vk::ShaderModule, usize, u64)>,
+        particle: bool,
+        origin: Origin,
+        ms: f64,
+    ) -> Option<u32> {
         let mut i = self.inner.lock().unwrap();
         match r {
             Ok((module, ntex, spv)) => {
-                i.mods.push(ModEntry { module, ntex, key, spv, particle });
+                i.mods.push(ModEntry {
+                    module,
+                    ntex,
+                    key,
+                    spv,
+                    particle,
+                });
                 let id = i.mods.len() as u32 - 1;
                 i.by_key.insert(key, MState::Ready(id));
                 match origin {
@@ -540,7 +613,10 @@ impl Store {
                     Origin::Live => self.ctr.shaders_live.fetch_add(1, Relaxed),
                 };
                 if self.log_misses && origin == Origin::Live {
-                    eprintln!("n1ffi: live shader {key:016x} built in {ms:.1} ms (startup done: {})", self.startup_done.load(Relaxed));
+                    eprintln!(
+                        "n1ffi: live shader {key:016x} built in {ms:.1} ms (startup done: {})",
+                        self.startup_done.load(Relaxed)
+                    );
                 }
                 Some(id)
             }
@@ -554,19 +630,34 @@ impl Store {
     }
 
     fn make_module(&self, words: &[u32]) -> Result<vk::ShaderModule> {
-        Ok(unsafe { self.device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(words), None)? })
+        Ok(unsafe {
+            self.device
+                .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(words), None)?
+        })
     }
 
     /// Builds a scene material shader (if nobody has): WGSL assembly, SPIR-V (disk cache or naga), module. Returns the
     /// module id when it is, or becomes, ready; `None` when another thread is still building it, or it failed.
-    pub fn build_scene_shader(&self, key: u64, c: &Compiled, flags: ShaderFlags, origin: Origin) -> Option<u32> {
+    pub fn build_scene_shader(
+        &self,
+        key: u64,
+        c: &Compiled,
+        flags: ShaderFlags,
+        origin: Origin,
+    ) -> Option<u32> {
         if !self.claim_module(key) {
-            return self.wait_module(key);
+            return self.wait_module(key, origin);
         }
         self.build_scene_shader_claimed(key, c, flags, origin)
     }
 
-    fn build_scene_shader_claimed(&self, key: u64, c: &Compiled, flags: ShaderFlags, origin: Origin) -> Option<u32> {
+    fn build_scene_shader_claimed(
+        &self,
+        key: u64,
+        c: &Compiled,
+        flags: ShaderFlags,
+        origin: Origin,
+    ) -> Option<u32> {
         let t = std::time::Instant::now();
         let r = (|| {
             let src = shaders::scene_source(c, flags);
@@ -578,15 +669,23 @@ impl Store {
 
     /// Builds a scene shader from the disk cache alone (a manifest entry): no WGSL, no packages. `None` if the SPIR-V
     /// isn't there (the caller falls back to enumeration) or it failed.
-    pub fn build_scene_shader_cached(&self, key: u64, spv: u64, ntex: usize, origin: Origin) -> Option<u32> {
+    pub fn build_scene_shader_cached(
+        &self,
+        key: u64,
+        spv: u64,
+        ntex: usize,
+        origin: Origin,
+    ) -> Option<u32> {
         if !self.claim_module(key) {
-            return self.wait_module(key);
+            return self.wait_module(key, origin);
         }
         let t = std::time::Instant::now();
         let r = match self.read_spv(&format!("{spv:016x}")) {
             Some(w) => {
                 self.ctr.spv_hits.fetch_add(1, Relaxed);
-                self.make_module(&w).map(|m| (m, ntex, spv)).map_err(Into::into)
+                self.make_module(&w)
+                    .map(|m| (m, ntex, spv))
+                    .map_err(Into::into)
             }
             None => {
                 // Not a failure: the caller will enumerate instead, which builds it from its WGSL.
@@ -600,10 +699,13 @@ impl Store {
     /// A particle module from the disk cache (a manifest entry).
     pub fn build_particle_module_cached(&self, key: u64, origin: Origin) -> Option<u32> {
         if !self.claim_module(key) {
-            return self.wait_module(key);
+            return self.wait_module(key, origin);
         }
         let r = match self.read_spv(&format!("p{key:016x}")) {
-            Some(w) => self.make_module(&w).map(|m| (m, 0, key)).map_err(Into::into),
+            Some(w) => self
+                .make_module(&w)
+                .map(|m| (m, 0, key))
+                .map_err(Into::into),
             None => {
                 self.inner.lock().unwrap().by_key.remove(&key);
                 return None;
@@ -615,7 +717,7 @@ impl Store {
     /// A module from SPIR-V words already in hand (particle materials), keyed by `key` (hash of its WGSL).
     pub fn module_from_spv(&self, key: u64, words: &[u32], origin: Origin) -> Option<u32> {
         if !self.claim_module(key) {
-            return self.wait_module(key);
+            return self.wait_module(key, origin);
         }
         if let Some(f) = self.spv_path(&format!("p{key:016x}"))
             && !f.exists()
@@ -629,13 +731,22 @@ impl Store {
         if self.startup_done.load(Relaxed) && origin == Origin::Live {
             self.ctr.late_shaders.fetch_add(1, Relaxed);
         }
-        let r = self.make_module(words).map(|m| (m, 0, key)).map_err(Into::into);
+        let r = self
+            .make_module(words)
+            .map(|m| (m, 0, key))
+            .map_err(Into::into);
         self.finish_module(key, r, true, origin, 0.0)
     }
 
     /// Asks for a scene shader without waiting: the render thread's call when a material arrives whose shader isn't
     /// built. `after`: pipelines to make once it is.
-    pub fn want_scene_shader(self: &Arc<Self>, key: u64, c: Compiled, flags: ShaderFlags, after: Vec<(u8, bool)>) {
+    pub fn want_scene_shader(
+        self: &Arc<Self>,
+        key: u64,
+        c: Compiled,
+        flags: ShaderFlags,
+        after: Vec<(u8, bool)>,
+    ) {
         if !self.claim_module(key) {
             return;
         }
@@ -647,7 +758,15 @@ impl Store {
             Box::new(move |s| {
                 if let Some(id) = s.build_scene_shader_claimed(key, &c, flags, Origin::Live) {
                     for (blend, skin) in after {
-                        s.build_scene_pipe(SceneKey { shader: id, blend, skin, cull: 0 }, Origin::Live);
+                        s.build_scene_pipe(
+                            SceneKey {
+                                shader: id,
+                                blend,
+                                skin,
+                                cull: 0,
+                            },
+                            Origin::Live,
+                        );
                     }
                 }
             }),
@@ -676,7 +795,13 @@ impl Store {
         true
     }
 
-    fn finish_pipe(&self, k: AnyKey, r: Result<vk::Pipeline>, origin: Origin, us: u64) -> Option<vk::Pipeline> {
+    fn finish_pipe(
+        &self,
+        k: AnyKey,
+        r: Result<vk::Pipeline>,
+        origin: Origin,
+        us: u64,
+    ) -> Option<vk::Pipeline> {
         let mut i = self.inner.lock().unwrap();
         self.ctr.pipe_us.fetch_add(us, Relaxed);
         self.ctr.pipe_max_us.fetch_max(us, Relaxed);
@@ -688,7 +813,11 @@ impl Store {
                     Origin::Live => self.ctr.pipes_live.fetch_add(1, Relaxed),
                 };
                 if self.log_misses && origin == Origin::Live {
-                    eprintln!("n1ffi: live pipeline {k:?} built in {:.1} ms (startup done: {})", us as f64 / 1e3, self.startup_done.load(Relaxed));
+                    eprintln!(
+                        "n1ffi: live pipeline {k:?} built in {:.1} ms (startup done: {})",
+                        us as f64 / 1e3,
+                        self.startup_done.load(Relaxed)
+                    );
                 }
                 Some(p)
             }
@@ -794,8 +923,11 @@ impl Store {
             } else {
                 std::mem::size_of::<crate::vkr::Vertex>()
             } as u32;
-            let bindings =
-                [vk::VertexInputBindingDescription { binding: 0, stride, input_rate: vk::VertexInputRate::VERTEX }];
+            let bindings = [vk::VertexInputBindingDescription {
+                binding: 0,
+                stride,
+                input_rate: vk::VertexInputRate::VERTEX,
+            }];
             let attr = |location, format, offset| vk::VertexInputAttributeDescription {
                 location,
                 binding: 0,
@@ -823,21 +955,35 @@ impl Store {
             let vi = vk::PipelineVertexInputStateCreateInfo::default()
                 .vertex_binding_descriptions(&bindings)
                 .vertex_attribute_descriptions(&attrs);
-            let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-            let vp = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
+            let ia = vk::PipelineInputAssemblyStateCreateInfo::default()
+                .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+            let vp = vk::PipelineViewportStateCreateInfo::default()
+                .viewport_count(1)
+                .scissor_count(1);
             // naga flips clip-space Y, so wgpu's Ccw is COUNTER_CLOCKWISE here; a mirrored transform flips it.
             let rs = vk::PipelineRasterizationStateCreateInfo::default()
                 .polygon_mode(vk::PolygonMode::FILL)
-                .cull_mode(if key.cull & 1 != 0 { vk::CullModeFlags::NONE } else { vk::CullModeFlags::BACK })
-                .front_face(if key.cull & 2 != 0 { vk::FrontFace::CLOCKWISE } else { vk::FrontFace::COUNTER_CLOCKWISE })
+                .cull_mode(if key.cull & 1 != 0 {
+                    vk::CullModeFlags::NONE
+                } else {
+                    vk::CullModeFlags::BACK
+                })
+                .front_face(if key.cull & 2 != 0 {
+                    vk::FrontFace::CLOCKWISE
+                } else {
+                    vk::FrontFace::COUNTER_CLOCKWISE
+                })
                 .line_width(1.0);
-            let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            let ms = vk::PipelineMultisampleStateCreateInfo::default()
+                .rasterization_samples(vk::SampleCountFlags::TYPE_1);
             let ds = vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(true)
                 .depth_write_enable(write)
                 .depth_compare_op(vk::CompareOp::GREATER); // reverse Z
-            let att = [blend
-                .unwrap_or(vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA))];
+            let att = [blend.unwrap_or(
+                vk::PipelineColorBlendAttachmentState::default()
+                    .color_write_mask(vk::ColorComponentFlags::RGBA),
+            )];
             let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&att);
             let dyns = [
                 vk::DynamicState::VIEWPORT,
@@ -882,26 +1028,68 @@ impl Store {
                 _ => c"vs_mesh",
             };
             let stages = [
-                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(module).name(entry),
-                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(module).name(c"fs"),
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::VERTEX)
+                    .module(module)
+                    .name(entry),
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::FRAGMENT)
+                    .module(module)
+                    .name(c"fs"),
             ];
             let f4 = vk::Format::R32G32B32A32_SFLOAT;
-            let sprite_binds =
-                [vk::VertexInputBindingDescription { binding: 0, stride: 80, input_rate: vk::VertexInputRate::INSTANCE }];
+            let sprite_binds = [vk::VertexInputBindingDescription {
+                binding: 0,
+                stride: 80,
+                input_rate: vk::VertexInputRate::INSTANCE,
+            }];
             let sprite_attrs: Vec<_> = (0..5)
-                .map(|k| vk::VertexInputAttributeDescription { location: k, binding: 0, format: f4, offset: k * 16 })
+                .map(|k| vk::VertexInputAttributeDescription {
+                    location: k,
+                    binding: 0,
+                    format: f4,
+                    offset: k * 16,
+                })
                 .collect();
             let mesh_binds = [
-                vk::VertexInputBindingDescription { binding: 0, stride: 32, input_rate: vk::VertexInputRate::VERTEX },
-                vk::VertexInputBindingDescription { binding: 1, stride: 80, input_rate: vk::VertexInputRate::INSTANCE },
+                vk::VertexInputBindingDescription {
+                    binding: 0,
+                    stride: 32,
+                    input_rate: vk::VertexInputRate::VERTEX,
+                },
+                vk::VertexInputBindingDescription {
+                    binding: 1,
+                    stride: 80,
+                    input_rate: vk::VertexInputRate::INSTANCE,
+                },
             ];
             let mut mesh_attrs = vec![
-                vk::VertexInputAttributeDescription { location: 0, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 0 },
-                vk::VertexInputAttributeDescription { location: 1, binding: 0, format: vk::Format::R32G32B32_SFLOAT, offset: 12 },
-                vk::VertexInputAttributeDescription { location: 2, binding: 0, format: vk::Format::R32G32_SFLOAT, offset: 24 },
+                vk::VertexInputAttributeDescription {
+                    location: 0,
+                    binding: 0,
+                    format: vk::Format::R32G32B32_SFLOAT,
+                    offset: 0,
+                },
+                vk::VertexInputAttributeDescription {
+                    location: 1,
+                    binding: 0,
+                    format: vk::Format::R32G32B32_SFLOAT,
+                    offset: 12,
+                },
+                vk::VertexInputAttributeDescription {
+                    location: 2,
+                    binding: 0,
+                    format: vk::Format::R32G32_SFLOAT,
+                    offset: 24,
+                },
             ];
             for k in 0..5u32 {
-                mesh_attrs.push(vk::VertexInputAttributeDescription { location: 3 + k, binding: 1, format: f4, offset: k * 16 });
+                mesh_attrs.push(vk::VertexInputAttributeDescription {
+                    location: 3 + k,
+                    binding: 1,
+                    format: f4,
+                    offset: k * 16,
+                });
             }
             let vi = if mesh {
                 vk::PipelineVertexInputStateCreateInfo::default()
@@ -912,20 +1100,30 @@ impl Store {
                     .vertex_binding_descriptions(&sprite_binds)
                     .vertex_attribute_descriptions(&sprite_attrs)
             };
-            let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-            let vp = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
+            let ia = vk::PipelineInputAssemblyStateCreateInfo::default()
+                .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+            let vp = vk::PipelineViewportStateCreateInfo::default()
+                .viewport_count(1)
+                .scissor_count(1);
             let rs = vk::PipelineRasterizationStateCreateInfo::default()
                 .polygon_mode(vk::PolygonMode::FILL)
-                .cull_mode(if mesh && !key.two_sided { vk::CullModeFlags::BACK } else { vk::CullModeFlags::NONE })
+                .cull_mode(if mesh && !key.two_sided {
+                    vk::CullModeFlags::BACK
+                } else {
+                    vk::CullModeFlags::NONE
+                })
                 .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
                 .line_width(1.0);
-            let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            let ms = vk::PipelineMultisampleStateCreateInfo::default()
+                .rasterization_samples(vk::SampleCountFlags::TYPE_1);
             let ds = vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(true)
                 .depth_write_enable(mesh && key.blend < 2)
                 .depth_compare_op(vk::CompareOp::GREATER);
-            let att = [blend
-                .unwrap_or(vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA))];
+            let att = [blend.unwrap_or(
+                vk::PipelineColorBlendAttachmentState::default()
+                    .color_write_mask(vk::ColorComponentFlags::RGBA),
+            )];
             let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&att);
             let dyns = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
             let dy = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyns);
@@ -963,24 +1161,36 @@ impl Store {
     ) -> Result<vk::Pipeline> {
         unsafe {
             let stages = [
-                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(module).name(c"vs"),
-                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(module).name(fs),
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::VERTEX)
+                    .module(module)
+                    .name(c"vs"),
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::FRAGMENT)
+                    .module(module)
+                    .name(fs),
             ];
             let vi = vk::PipelineVertexInputStateCreateInfo::default();
-            let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-            let vp = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
+            let ia = vk::PipelineInputAssemblyStateCreateInfo::default()
+                .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+            let vp = vk::PipelineViewportStateCreateInfo::default()
+                .viewport_count(1)
+                .scissor_count(1);
             let rs = vk::PipelineRasterizationStateCreateInfo::default()
                 .polygon_mode(vk::PolygonMode::FILL)
                 .cull_mode(vk::CullModeFlags::NONE)
                 .line_width(1.0);
-            let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            let ms = vk::PipelineMultisampleStateCreateInfo::default()
+                .rasterization_samples(vk::SampleCountFlags::TYPE_1);
             let ds = vk::PipelineDepthStencilStateCreateInfo::default();
-            let att = [vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA)];
+            let att = [vk::PipelineColorBlendAttachmentState::default()
+                .color_write_mask(vk::ColorComponentFlags::RGBA)];
             let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&att);
             let dyns = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
             let dy = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyns);
             let formats = [out];
-            let mut rendering = vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&formats);
+            let mut rendering =
+                vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&formats);
             let info = vk::GraphicsPipelineCreateInfo::default()
                 .stages(&stages)
                 .vertex_input_state(&vi)
@@ -1015,7 +1225,9 @@ impl Store {
         if self.cache_dirty_at.swap(built, Relaxed) == built && built != 0 {
             return;
         }
-        let Ok(data) = (unsafe { self.device.get_pipeline_cache_data(self.cache) }) else { return };
+        let Ok(data) = (unsafe { self.device.get_pipeline_cache_data(self.cache) }) else {
+            return;
+        };
         let f = d.join("pipeline_cache.bin");
         let tmp = f.with_extension(format!("tmp{}", std::process::id()));
         if std::fs::write(&tmp, &data).is_ok() {
@@ -1053,8 +1265,16 @@ impl Store {
                 continue;
             }
             match k {
-                AnyKey::Scene(k) => sn.scene_pipes.push((i.mods[k.shader as usize].key, k.blend, k.skin)),
-                AnyKey::Part(k) => sn.part_pipes.push((i.mods[k.module as usize].key, k.blend, k.two_sided, k.variant)),
+                AnyKey::Scene(k) => {
+                    sn.scene_pipes
+                        .push((i.mods[k.shader as usize].key, k.blend, k.skin))
+                }
+                AnyKey::Part(k) => sn.part_pipes.push((
+                    i.mods[k.module as usize].key,
+                    k.blend,
+                    k.two_sided,
+                    k.variant,
+                )),
             }
         }
         sn.scene_mods.sort();
