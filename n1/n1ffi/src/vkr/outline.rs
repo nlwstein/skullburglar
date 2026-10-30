@@ -48,42 +48,27 @@ fn fs_mask() -> @location(0) vec4<f32> {
 
 pub const MASK_FORMAT: vk::Format = vk::Format::R8_UNORM;
 
-/// The CPU reference of the shader's edge kernel (test only). Gaussian sigma (texels at 720p) and the taps -3..3 of the edge kernel; gain and colour of the blend. Mirrored by the
+/// The CPU reference of the shader's edge kernel (test only): gain and colour of the blend. Mirrored by the
 /// `OUTLINE_*` constants of post.wgsl (`constants_match_the_shader` checks the numbers).
 #[cfg(test)]
-pub const SIGMA: f32 = 1.3;
+pub const GAIN: f32 = 0.3;
 #[cfg(test)]
-pub const GAIN: f32 = 0.75;
-#[cfg(test)]
-pub const COLOR: [f32; 3] = [1.1, 0.12, 0.1];
+pub const COLOR: [f32; 3] = [1.1, 0.05, 0.04];
 
-/// The seven gaussian taps (-3..3), normalised to sum 1.
-#[cfg(test)]
-pub fn taps() -> [f32; 7] {
-    let mut w = [0f32; 7];
-    for (k, v) in w.iter_mut().enumerate() {
-        let i = k as f32 - 3.0;
-        *v = (-0.5 * i * i / (SIGMA * SIGMA)).exp();
-    }
-    let n: f32 = w.iter().sum();
-    w.map(|v| v / n)
-}
-
-/// The edge strength at a pixel: the gradient magnitude of the mask smoothed by a gaussian (a 7x7 derivative-of-gaussian
-/// filter). `mask(dx, dy)` is the mask at an offset from the pixel (0 or 1). A straight silhouette edge gives a bell
-/// about 4 px wide whose pixels sum to 1; mirrors `outline_edge` in post.wgsl.
+/// The edge strength at a pixel: max - min of the mask over the 3x3 neighbourhood. `mask(dx, dy)` is the mask at an
+/// offset from the pixel (0 or 1). A straight silhouette edge gives two pixels of 1, one inside and one outside;
+/// mirrors `outline_edge` in post.wgsl.
 #[cfg(test)]
 pub fn edge_strength(mask: impl Fn(i32, i32) -> f32) -> f32 {
-    let w = taps();
-    let (mut gx, mut gy) = (0.0, 0.0);
-    for j in -3..=3i32 {
-        for i in -3..=3i32 {
+    let (mut lo, mut hi) = (1.0f32, 0.0f32);
+    for j in -1..=1i32 {
+        for i in -1..=1i32 {
             let m = mask(i, j);
-            gx += m * (-(i as f32) / (SIGMA * SIGMA)) * w[(i + 3) as usize] * w[(j + 3) as usize];
-            gy += m * (-(j as f32) / (SIGMA * SIGMA)) * w[(i + 3) as usize] * w[(j + 3) as usize];
+            lo = lo.min(m);
+            hi = hi.max(m);
         }
     }
-    (gx * gx + gy * gy).sqrt()
+    hi - lo
 }
 
 /// The blended channel: `c` lerped toward the outline colour by `GAIN * edge` (post.wgsl `with_outline`).
@@ -265,37 +250,27 @@ mod tests {
     #[test]
     fn constants_match_the_shader() {
         let src = include_str!("../post.wgsl");
-        for v in taps() {
-            assert!(src.contains(&format!("{v:.6}")), "tap {v:.6} missing from post.wgsl");
-        }
-        assert!(src.contains(&format!("OUTLINE_SIGMA = {SIGMA:?};")));
         assert!(src.contains(&format!("OUTLINE_GAIN = {GAIN:?};")));
         assert!(src.contains(&format!("vec3<f32>({:?}, {:?}, {:?})", COLOR[0], COLOR[1], COLOR[2])));
     }
 
     #[test]
-    fn taps_sum_to_one_and_are_symmetric() {
-        let w = taps();
-        assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-6);
-        for k in 0..3 {
-            assert!((w[k] - w[6 - k]).abs() < 1e-7);
-        }
+    fn a_straight_edge_is_two_pixels_one_inside_one_outside() {
+        // Pixels -5..=4 relative to the edge between x = -1 (clear) and x = 0 (covered).
+        let prof: Vec<f32> = (-5..=4).map(|x| edge_strength(step(x))).collect();
+        let on: Vec<usize> = (0..prof.len()).filter(|&k| prof[k] > 0.5).collect();
+        assert_eq!(on, vec![4, 5], "{prof:?}");
+        assert!(prof.iter().all(|v| *v == 0.0 || *v == 1.0));
     }
 
     #[test]
-    fn a_straight_edge_is_a_four_pixel_bell_summing_to_one() {
-        // Pixels -5..=4 relative to the edge between x = -1 (clear) and x = 0 (covered).
-        let prof: Vec<f32> = (-5..=4).map(|x| edge_strength(step(x))).collect();
-        let sum: f32 = prof.iter().sum();
-        // The 7-tap kernel is cut at +-3 texels: the bell holds about 95% of the step.
-        assert!((sum - 1.0).abs() < 0.07, "sum {sum}");
-        // Symmetric about the boundary: pixel -1 (outside) and 0 (inside) are the peak pair.
-        assert!((prof[4] - prof[5]).abs() < 1e-5);
-        assert!(prof[4] > prof[3] && prof[5] > prof[6]);
-        // Two pixels out on either side it is already weak (the measured profile: 0.78 / 0.24 of the peak).
-        assert!(prof[2] < 0.35 * prof[4] && prof[7] < 0.35 * prof[5]);
-        // Far away: nothing.
-        assert_eq!(prof[0].max(prof[9]) < 1e-3, true);
+    fn a_one_pixel_gap_or_speck_is_outlined_all_round() {
+        // A single marked pixel: the 3x3 around it is all edge.
+        let speck = |dx: i32, dy: i32| if dx == 0 && dy == 0 { 1.0 } else { 0.0 };
+        assert_eq!(edge_strength(speck), 1.0);
+        assert_eq!(edge_strength(|dx, dy| speck(dx - 1, dy + 1)), 1.0);
+        // Two pixels away it is clear.
+        assert_eq!(edge_strength(|dx, dy| speck(dx - 2, dy)), 0.0);
     }
 
     #[test]
@@ -307,7 +282,7 @@ mod tests {
     #[test]
     fn blend_lerps_toward_the_colour() {
         assert_eq!(blend(0.4, 0.0, 0), 0.4);
-        // Full edge strength 1 -> t = GAIN.
+        // Edge 1 -> t = GAIN.
         assert!((blend(0.0, 1.0, 0) - GAIN * COLOR[0]).abs() < 1e-6);
         // A bright channel is pulled down toward a low outline colour (green on white).
         assert!(blend(1.0, 1.0, 1) < 1.0);

@@ -115,16 +115,14 @@ fn fs_blur(i: VOut) -> @location(0) vec4<f32> {
 }
 
 // B-277(e): the port draws a red outline around enemies the game highlights (bSpecialHighlight). It marks the pawn in
-// the scene's alpha and edge-detects it; measured against the port with and without the flag (dual render, pixel
-// profiles across the silhouette) the line is soft, centred on the silhouette, about 4 px wide (inside 2, outside 2) at
-// 720p, i.e. the gradient magnitude of the mask blurred with a gaussian of sigma 1.3 px. It lerps toward a red:
-// out = c + gain * edge * (colour - c), in the linear light before the gamma. `outline_edge` mirrors `edge_strength` in
-// vkr/outline.rs (same sigma, taps and weights); gain and colour are OUTLINE_GAIN / OUTLINE_COLOR here and there.
-// The kernel scales with the render height (720 = 1), so a larger render keeps the same look.
-const OUTLINE_SIGMA = 1.3;
-const OUTLINE_W = array<f32, 7>(0.021532, 0.094521, 0.229614, 0.308665, 0.229614, 0.094521, 0.021532);  // gaussian taps -3..3, sum 1
-const OUTLINE_GAIN = 0.75;
-const OUTLINE_COLOR = vec3<f32>(1.1, 0.12, 0.1);
+// the scene's alpha and edge-detects it; measured against the port with and without the flag (dual render) the line is
+// crisp and hugs the silhouette, a couple of pixels wide at 720p. Here: the edge is where the unblurred, binary mask
+// changes inside its 3x3 neighbourhood (max - min), so it is one pixel inside plus one pixel outside the silhouette.
+// The colour lerps toward a red: out = c + gain * edge * (colour - c), in the linear light before the gamma.
+// `outline_edge` mirrors `edge_strength` in vkr/outline.rs; gain and colour are OUTLINE_GAIN / OUTLINE_COLOR here and
+// there. The neighbourhood scales with the render height (720 = 1), so a larger render keeps the same look.
+const OUTLINE_GAIN = 0.3;
+const OUTLINE_COLOR = vec3<f32>(1.1, 0.05, 0.04);
 
 fn omask_at(frag: vec2<f32>, d: vec2<f32>, sc: f32) -> f32 {
     let dims = vec2<f32>(textureDimensions(omask));
@@ -132,27 +130,17 @@ fn omask_at(frag: vec2<f32>, d: vec2<f32>, sc: f32) -> f32 {
 }
 
 fn outline_edge(frag: vec2<f32>) -> f32 {
-    let sc = f32(textureDimensions(omask).y) / 720.0;
-    // Cheap exit: nothing marked or all marked around (five taps 3 texels out).
-    let m0 = omask_at(frag, vec2<f32>(0.0), sc);
-    let ring = omask_at(frag, vec2<f32>(3.0, 0.0), sc) + omask_at(frag, vec2<f32>(-3.0, 0.0), sc)
-             + omask_at(frag, vec2<f32>(0.0, 3.0), sc) + omask_at(frag, vec2<f32>(0.0, -3.0), sc);
-    let tot = m0 + ring;
-    if (tot < 0.01 || tot > 4.99) {
-        return 0.0;
-    }
-    let w = OUTLINE_W;
-    var gx = 0.0;
-    var gy = 0.0;
-    for (var j = -3; j <= 3; j++) {
-        for (var i = -3; i <= 3; i++) {
+    let sc = max(1.0, round(f32(textureDimensions(omask).y) / 720.0));
+    var lo = 1.0;
+    var hi = 0.0;
+    for (var j = -1; j <= 1; j++) {
+        for (var i = -1; i <= 1; i++) {
             let m = omask_at(frag, vec2<f32>(f32(i), f32(j)), sc);
-            // derivative of the gaussian: -x / sigma^2 * g(x), the other axis smoothed by g
-            gx += m * (-f32(i) / (OUTLINE_SIGMA * OUTLINE_SIGMA)) * w[i + 3] * w[j + 3];
-            gy += m * (-f32(j) / (OUTLINE_SIGMA * OUTLINE_SIGMA)) * w[i + 3] * w[j + 3];
+            lo = min(lo, m);
+            hi = max(hi, m);
         }
     }
-    return length(vec2<f32>(gx, gy));
+    return hi - lo;
 }
 
 fn with_outline(c: vec3<f32>, frag: vec4<f32>) -> vec3<f32> {
