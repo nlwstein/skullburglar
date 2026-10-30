@@ -248,6 +248,15 @@ fn fs_gangsta(i: VOut) -> @location(0) vec4<f32> {
     return mat_out(mix(vec3<f32>(1.0), vec3<f32>(1.0) + streak, a) * col, i.pos);
 }
 
+// FX_Damage.DamageEffectMaterial (DamageEffectMaterial_MIC, B-292), g0.x = CriticalHealthFadeParameter. The scene fades
+// toward a 75% desaturated copy. The material's hit-arrow render target is not drawn (it is black without a hit).
+@fragment
+fn fs_damage(i: VOut) -> @location(0) vec4<f32> {
+    let s = textureSample(src, smp, i.uv).rgb;
+    let d = desat(s, 0.75, vec3<f32>(0.3, 0.59, 0.11));
+    return mat_out(mix(s, d, clamp(p.g0.x, 0.0, 1.0)));
+}
+
 @fragment
 fn fs_copy(i: VOut) -> @location(0) vec4<f32> {
     return gamma_out(textureLoad(src, vec2<i32>(i.pos.xy - vec2<f32>(p.dof.w, p.dof2.w)), 0).rgb, i.pos);

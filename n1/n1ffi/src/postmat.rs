@@ -22,6 +22,11 @@ pub enum Kind {
     /// half the scene desaturates, darkens behind a closing vignette and fades to black; over the second half animated
     /// dark red clouds (`DeathScreenBackground_Alphas`, `HeatVisionClouds_Alpha`) fade in and stay.
     Death,
+    /// Critical-health damage (`FX_Damage.DamageEffectMaterial_MIC`, B-292): scalar `CriticalHealthFadeParameter`
+    /// (0..1, driven by the HUD from the player's health) fades the scene toward 75% desaturation. The material also
+    /// reads the `DamageEffectTexture` render target (hit arrows); with no hit it is black, which leaves exactly this
+    /// term (`DamageRamp` alpha is 0 at its start). The hit arrows themselves are not drawn.
+    Damage,
 }
 
 impl Kind {
@@ -30,6 +35,7 @@ impl Kind {
         match self {
             Kind::Gangsta => &["C1HUD.SlowmoEffect_MatInst", "FX_GangsterFire.GangsterFire_MAT02"],
             Kind::Death => &["UI_DeathEffect.FaderDeath_MIC", "UI_DeathEffect.FaderDeath_MAT"],
+            Kind::Damage => &["FX_Damage.DamageEffectMaterial_MIC", "FX_Damage.DamageEffectMaterial"],
         }
     }
 
@@ -38,6 +44,7 @@ impl Kind {
         match self {
             Kind::Gangsta => "fs_gangsta",
             Kind::Death => "fs_death",
+            Kind::Damage => "fs_damage",
         }
     }
 
@@ -46,10 +53,11 @@ impl Kind {
         match self {
             Kind::Gangsta => ["FX_GangsterFire.streak", "FX_GangsterFire.EyeMask"],
             Kind::Death => ["UI_DeathEffect.DeathScreenBackground_Alphas", "UI_DeathEffect.HeatVisionClouds_Alpha"],
+            Kind::Damage => ["", ""],
         }
     }
 
-    pub const ALL: [Kind; 2] = [Kind::Gangsta, Kind::Death];
+    pub const ALL: [Kind; 3] = [Kind::Gangsta, Kind::Death, Kind::Damage];
 
     pub fn of(path: &str) -> Option<Kind> {
         Kind::ALL.into_iter().find(|k| k.paths().iter().any(|p| p.eq_ignore_ascii_case(path)))
@@ -87,6 +95,13 @@ fn log_chain(mats: &[String]) {
     }
 }
 
+/// `BOTS_N1_DAMAGE_FX=0` leaves the critical-health desaturation out (the pre-B-292 path).
+fn damage_fx_on() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BOTS_N1_DAMAGE_FX").map_or(true, |v| v != "0"))
+}
+
 /// The active ported effects of a post feed, in chain order. A material whose strength is zero (or not positive) is
 /// left out, so the pass isn't recorded at all.
 pub fn effects(p: &PostFeed) -> Vec<Effect> {
@@ -97,6 +112,9 @@ pub fn effects(p: &PostFeed) -> Vec<Effect> {
     log_chain(&p.material_effects);
     for m in &p.material_effects {
         let Some(kind) = Kind::of(m) else { continue };
+        if kind == Kind::Damage && !damage_fx_on() {
+            continue;
+        }
         if out.iter().any(|e: &Effect| e.kind == kind) {
             continue;
         }
@@ -104,6 +122,14 @@ pub fn effects(p: &PostFeed) -> Vec<Effect> {
             Kind::Gangsta => {
                 // A version 2 feed has no parameters: the material in the chain means the mode is on.
                 let a = p.param(m, "PARAMAmount").unwrap_or(1.0);
+                if a.is_finite() && a > 0.0 {
+                    Some(Effect { kind, params: [a.min(1.0), 0.0, 0.0, 0.0] })
+                } else {
+                    None
+                }
+            }
+            Kind::Damage => {
+                let a = p.param(m, "CriticalHealthFadeParameter").unwrap_or(0.0);
                 if a.is_finite() && a > 0.0 {
                     Some(Effect { kind, params: [a.min(1.0), 0.0, 0.0, 0.0] })
                 } else {
@@ -164,6 +190,17 @@ mod tests {
         let g = "C1HUD.SlowmoEffect_MatInst";
         let e = effects(&feed(&[m, g], &[(m, "StartTime", 1.0), (g, "PARAMAmount", 1.0)]));
         assert_eq!(e.iter().map(|x| x.kind).collect::<Vec<_>>(), [Kind::Death, Kind::Gangsta]);
+    }
+
+    #[test]
+    fn damage_fade() {
+        let m = "FX_Damage.DamageEffectMaterial_MIC";
+        let e = effects(&feed(&["GEN_PostProcess.AmbushPP_MAT01", m], &[(m, "CriticalHealthFadeParameter", 0.65)]));
+        assert_eq!(e, [Effect { kind: Kind::Damage, params: [0.65, 0.0, 0.0, 0.0] }]);
+        // Off at zero and without the parameter; clamped at one.
+        assert!(effects(&feed(&[m], &[(m, "CriticalHealthFadeParameter", 0.0)])).is_empty());
+        assert!(effects(&feed(&[m], &[])).is_empty());
+        assert_eq!(effects(&feed(&[m], &[(m, "CriticalHealthFadeParameter", 2.0)]))[0].params[0], 1.0);
     }
 
     #[test]
