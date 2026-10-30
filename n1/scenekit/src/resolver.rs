@@ -33,6 +33,8 @@ struct Slot {
     last_used: u64,
     /// Requested by a preload (B-199), not by a draw.
     preload: bool,
+    /// B-287: given back by eviction and not asked for since: not waiting for anything.
+    idle: bool,
 }
 
 /// A run-time material instance: the scene feed puts its parameter values after `?` in the path.
@@ -325,6 +327,7 @@ impl Resolver {
             requested: false,
             last_used: 0,
             preload: false,
+            idle: false,
         });
         let h = slots.len() as u32 - 1;
         by_path.insert(path.to_string(), h);
@@ -364,6 +367,8 @@ impl Resolver {
             match m.state {
                 SlotState::Ready(_) => s.meshes_ready += 1,
                 SlotState::Missing => s.meshes_missing += 1,
+                // B-287: a slot eviction gave back and nothing has asked for since isn't waiting for anything.
+                SlotState::Pending if !m.requested && m.idle => {}
                 SlotState::Pending => s.meshes_pending += 1,
             }
         }
@@ -770,6 +775,7 @@ impl Resolver {
             self.forgets.push_back(Forget::Mesh(slot.path.clone()));
             slot.state = SlotState::Pending;
             slot.requested = false;
+            slot.idle = true;
             self.evict.meshes += 1;
         }
         for slot in &self.materials {
