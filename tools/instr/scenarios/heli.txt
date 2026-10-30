@@ -1,0 +1,38 @@
+# Boss aircraft (B-277 / issue 24): load the mission 6 checkpoints and take plain + dual shots over 60 s. State-driven.
+#   botsctl.py run scenarios/weapons_chapters.txt --out DIR --set SECS=120
+default SECS=120
+mark start
+wait -t 1800 phase==front_end || phase==movie || phase==dialog || phase==menu
+press_until "game.scenes~=MainMenu" START every=1000 timeout=120
+dismiss
+wait -t 1800 precompile.done==1
+mark precompile_done
+
+exec LoadChapter 61509
+until "game.chapter==61509 && phase==in_play && phase_s>=5" timeout=600
+mark ch61509
+sleep 10
+shot h61509-a
+dualshot h61509-a
+sleep 15
+shot h61509-b
+dualshot h61509-b
+sleep 15
+dualshot h61509-c
+sleep 15
+dualshot h61509-d
+
+exec LoadChapter 61512
+until "game.chapter==61512 && phase==in_play && phase_s>=5" timeout=600
+mark ch61512
+sleep 10
+shot h61512-a
+dualshot h61512-a
+sleep 15
+shot h61512-b
+dualshot h61512-b
+sleep 15
+dualshot h61512-c
+sleep 15
+dualshot h61512-d
+mark end

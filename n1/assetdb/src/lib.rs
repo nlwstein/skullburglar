@@ -646,6 +646,21 @@ impl AssetDb {
         self.materials.lock().unwrap().remove(path);
     }
 
+    /// B-287: drops the cached CPU copy of a mesh the renderer gave back (`mesh` reloads it if asked again).
+    pub fn forget_mesh(&self, path: &str) {
+        self.meshes.lock().unwrap().remove(path);
+    }
+
+    /// B-287: drops the cached CPU copy of a texture (its mip data is most of the process's resident memory).
+    pub fn forget_texture(&self, path: &str) {
+        self.textures.lock().unwrap().remove(path);
+    }
+
+    /// B-287: drops the cached CPU copy of a skinned mesh.
+    pub fn forget_skeletal(&self, path: &str) {
+        self.skeletals.lock().unwrap().remove(path);
+    }
+
     /// A material's named parameters (MIC overrides over the base material's defaults): see `ue3::matir::params_by`.
     pub fn material_params(&self, path: &str) -> Option<ue3::matir::NamedParams> {
         ue3::matir::params_by(path, |q| self.locate(q, false, None).ok().flatten())

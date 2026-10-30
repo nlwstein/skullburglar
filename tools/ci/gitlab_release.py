@@ -70,6 +70,9 @@ def main():
     if missing:  # all there, or no release
         sys.exit(f"missing packages: {', '.join(missing)}")
     files = FILES + [(label, name) for label, name in OPTIONAL if name in have]
+    left_out = [name for _, name in OPTIONAL if name not in have]
+    if left_out:  # allowed (experimental builds), but never quiet: the job log and the pipeline's warning say so
+        print(f"WARNING: released without {', '.join(left_out)}: their build jobs failed or didn't run", file=sys.stderr)
     release = call("POST", "/releases", {
         "tag_name": f"v{VERSION}",
         "ref": SHA,

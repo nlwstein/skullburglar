@@ -210,7 +210,31 @@ class SplitTestAssignment final : public rex::input::DeviceAssignment {
   std::vector<std::vector<rex::input::DeviceId>> users_ = std::vector<std::vector<rex::input::DeviceId>>(4);
 };
 
+// BOTS_PAD_USER=<n> (test aid, B-268): real pads drive guest user <ordinal> + <n> instead of <ordinal>, as when a second
+// controller (or a virtual one) connects ahead of the one being played. Scripted input stays on user 0.
+class PadUserAssignment final : public rex::input::DeviceAssignment {
+ public:
+  explicit PadUserAssignment(uint32_t shift) : shift_(shift) {}
+  void OnDevicesChanged(const std::vector<rex::input::DeviceInfo>& devices) override {
+    for (auto& u : users_) u.clear();
+    for (const auto& device : devices) {
+      if (device.synthetic) users_[0].push_back(device.id);
+      else if (device.ordinal + shift_ < users_.size()) users_[device.ordinal + shift_].push_back(device.id);
+    }
+  }
+  void DevicesForUser(uint32_t user_index, std::vector<rex::input::DeviceId>& out) const override {
+    out.clear();
+    if (user_index < users_.size()) out = users_[user_index];
+  }
+
+ private:
+  uint32_t shift_;
+  std::vector<std::vector<rex::input::DeviceId>> users_ = std::vector<std::vector<rex::input::DeviceId>>(4);
+};
+
 std::unique_ptr<rex::input::DeviceAssignment> MakePadAssignment() {
+  if (const char* shift = std::getenv("BOTS_PAD_USER"); shift && *shift)
+    return std::make_unique<PadUserAssignment>(uint32_t(std::atoi(shift)));
   if (std::getenv("BOTS_SPLIT_TEST")) return std::make_unique<SplitTestAssignment>();
   int pad = CoopPad();
   if (pad <= 0) return nullptr;

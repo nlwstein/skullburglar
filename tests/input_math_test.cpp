@@ -54,6 +54,26 @@ int main() {
   CHECK(LagProportion(kNoLagAmount, 1.0 / 60, 1.0) > 0.999999);
   CHECK(LagProportion(kNoLagAmount, 1.0 / 240, 1.0) > 0.99);
 
+  // Mouse noise gate: off by default, holds sub-threshold motion, releases once it adds up, keeps fractions.
+  CHECK(!MouseGateHolds(1, 0, 0));
+  CHECK(!MouseGateHolds(0.1, 0, 0));
+  CHECK(MouseGateHolds(1, 0, 2));
+  CHECK(MouseGateHolds(1, 1, 2));
+  CHECK(!MouseGateHolds(2, 0, 2));
+  CHECK(!MouseGateHolds(0, -3, 2));
+  {
+    double ax = 0;  // 1 px every frame, gate 3: held for two frames, then the whole 3 px passes
+    int released = 0;
+    double passed = 0;
+    for (int i = 0; i < 9; ++i) {
+      ax += 1;
+      if (!MouseGateHolds(ax, 0, 3)) { passed += ax; ax = 0; ++released; }
+    }
+    CHECK(released == 3 && Near(passed, 9, 1e-9));
+    ax = 0;  // jitter +1, -1 never passes
+    for (int i = 0; i < 100; ++i) { ax += (i % 2) ? -1 : 1; CHECK(MouseGateHolds(ax, 0, 2)); }
+  }
+
   if (failures) return 1;
   std::puts("input_math: all passed");
   return 0;

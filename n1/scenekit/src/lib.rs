@@ -409,6 +409,15 @@ pub trait Backend {
     fn remove_material(&mut self, id: u32) {
         let _ = id;
     }
+    /// B-287: gives back a mesh from `add_mesh` the resolver evicted (default: keep it).
+    fn free_mesh(&mut self, _id: u32) {}
+    /// B-287: gives back a texture from `add_texture` no material or light map uses; false when it can't be freed yet
+    /// (default: keep it).
+    fn free_texture(&mut self, _id: u32) -> bool {
+        false
+    }
+    /// B-287: gives back a component light from `add_component_light` (default: keep it).
+    fn free_light(&mut self, _id: u32) {}
     fn add_mesh(&mut self, m: &MeshDesc) -> u32;
     fn add_light(&mut self, colors: &[[f32; 3]]) -> u32;
     /// A component's full baked light; `lightmaps` are texture ids for `ComponentLight::Map` (NONE = missing). The

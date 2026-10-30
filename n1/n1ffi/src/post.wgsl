@@ -36,6 +36,7 @@ struct P {
 @group(0) @binding(4) var bloom2: texture_2d<f32>;
 @group(0) @binding(5) var depth: texture_depth_2d;
 @group(0) @binding(6) var wrap: sampler;   // repeat addressing, for post-material textures
+@group(0) @binding(7) var omask: texture_2d<f32>;   // B-277(e): enemy outline mask (R8), read when taps[5].w > 0
 
 struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
@@ -113,10 +114,50 @@ fn fs_blur(i: VOut) -> @location(0) vec4<f32> {
     return acc;
 }
 
-fn gamma_out(c: vec3<f32>) -> vec4<f32> {
-    // B-240: the view's screen fade (camera and cinematic fades). The port's composite folds it into its pre-gamma
-    // multiplier (c5.rgb = ColorScale * (1 - OverlayColor.a): pow(saturate(c * c5.rgb), 1 / 2.2)); the overlay
-    // colour (OverlayColor.rgb * a) is added after gamma. Composite and copy carry them in tap slots 4 and 5.
+// B-277(e): the port draws a red outline around enemies the game highlights (bSpecialHighlight). It marks the pawn in
+// the scene's alpha and edge-detects it; measured against the port with and without the flag (dual render) the line is
+// crisp and hugs the silhouette, a couple of pixels wide at 720p. Here: the edge is where the unblurred, binary mask
+// changes inside its 3x3 neighbourhood (max - min), so it is one pixel inside plus one pixel outside the silhouette.
+// The colour lerps toward a red: out = c + gain * edge * (colour - c), in the linear light before the gamma.
+// `outline_edge` mirrors `edge_strength` in vkr/outline.rs; gain and colour are OUTLINE_GAIN / OUTLINE_COLOR here and
+// there. The neighbourhood scales with the render height (720 = 1), so a larger render keeps the same look.
+const OUTLINE_GAIN = 0.3;
+const OUTLINE_COLOR = vec3<f32>(1.1, 0.05, 0.04);
+
+fn omask_at(frag: vec2<f32>, d: vec2<f32>, sc: f32) -> f32 {
+    let dims = vec2<f32>(textureDimensions(omask));
+    return textureSampleLevel(omask, smp, (frag + d * sc) / dims, 0.0).r;
+}
+
+fn outline_edge(frag: vec2<f32>) -> f32 {
+    let sc = max(1.0, round(f32(textureDimensions(omask).y) / 720.0));
+    var lo = 1.0;
+    var hi = 0.0;
+    for (var j = -1; j <= 1; j++) {
+        for (var i = -1; i <= 1; i++) {
+            let m = omask_at(frag, vec2<f32>(f32(i), f32(j)), sc);
+            lo = min(lo, m);
+            hi = max(hi, m);
+        }
+    }
+    return hi - lo;
+}
+
+fn with_outline(c: vec3<f32>, frag: vec4<f32>) -> vec3<f32> {
+    let mode = p.taps[5].w;
+    if (mode < 0.5) {
+        return c;
+    }
+    let f = frag.xy - vec2<f32>(p.dof.w, p.dof2.w);
+    if (mode > 1.5) {
+        return vec3<f32>(omask_at(f, vec2<f32>(0.0), 1.0), 0.0, 0.0) + c * 0.25;
+    }
+    let t = clamp(OUTLINE_GAIN * outline_edge(f), 0.0, 1.0);
+    return mix(c, OUTLINE_COLOR, t);
+}
+
+fn gamma_out(c0: vec3<f32>, frag: vec4<f32>) -> vec4<f32> {
+    let c = with_outline(c0, frag);
     var g = pow(clamp(c * p.taps[4].xyz, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(p.comp.y));
     g = min(g + p.taps[5].xyz, vec3<f32>(1.0));
     if (p.c.z < 0.5) {
@@ -139,7 +180,7 @@ fn composite(px: vec2<i32>, uv: vec2<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_comp(i: VOut) -> @location(0) vec4<f32> {
-    return gamma_out(composite(vec2<i32>(i.pos.xy - vec2<f32>(p.dof.w, p.dof2.w)), i.uv));
+    return gamma_out(composite(vec2<i32>(i.pos.xy - vec2<f32>(p.dof.w, p.dof2.w)), i.uv), i.pos);
 }
 
 @fragment
@@ -166,9 +207,9 @@ fn mat_tex1(uv: vec2<f32>) -> vec4<f32> {
     return select(c, xe_pwl_raw(c), p.g1.z > 0.5);
 }
 
-fn mat_out(c: vec3<f32>) -> vec4<f32> {
+fn mat_out(c: vec3<f32>, frag: vec4<f32>) -> vec4<f32> {
     if (p.comp.w > 0.5) {
-        return gamma_out(c);
+        return gamma_out(c, frag);
     }
     return vec4<f32>(c, 1.0);
 }
@@ -204,12 +245,21 @@ fn fs_gangsta(i: VOut) -> @location(0) vec4<f32> {
     let sx = select(h, 2.0 - h, n.x > 0.0) * 0.5;
     let suv = vec2<f32>(4.0, 0.6) * vec2<f32>(sx, r) + t * vec2<f32>(0.0, -1.0);
     let streak = mat_tex0(suv).rgb * 10.0 * pow(1.5 * r, 8.0);
-    return mat_out(mix(vec3<f32>(1.0), vec3<f32>(1.0) + streak, a) * col);
+    return mat_out(mix(vec3<f32>(1.0), vec3<f32>(1.0) + streak, a) * col, i.pos);
+}
+
+// FX_Damage.DamageEffectMaterial (DamageEffectMaterial_MIC, B-292), g0.x = CriticalHealthFadeParameter. The scene fades
+// toward a 75% desaturated copy. The material's hit-arrow render target is not drawn (it is black without a hit).
+@fragment
+fn fs_damage(i: VOut) -> @location(0) vec4<f32> {
+    let s = textureSample(src, smp, i.uv).rgb;
+    let d = desat(s, 0.75, vec3<f32>(0.3, 0.59, 0.11));
+    return mat_out(mix(s, d, clamp(p.g0.x, 0.0, 1.0)), i.pos);
 }
 
 @fragment
 fn fs_copy(i: VOut) -> @location(0) vec4<f32> {
-    return gamma_out(textureLoad(src, vec2<i32>(i.pos.xy - vec2<f32>(p.dof.w, p.dof2.w)), 0).rgb);
+    return gamma_out(textureLoad(src, vec2<i32>(i.pos.xy - vec2<f32>(p.dof.w, p.dof2.w)), 0).rgb, i.pos);
 }
 
 // UI_DeathEffect.FaderDeath_MAT (FaderDeath_MIC): g0.x StartTime, g0.y EffectLength. tex0 DeathScreenBackground_Alphas,
@@ -229,7 +279,7 @@ fn fs_death(i: VOut) -> @location(0) vec4<f32> {
         let cloud = clamp((vec3<f32>(r1, 0.0, 0.0) + vec3<f32>(2.0 * r2, 0.1 * r2, 0.0)) * mat_tex0(uv).b,
                           vec3<f32>(0.0), vec3<f32>(1.0));
         let flicker = clamp(ceil(sin(t * tau / 0.3) * floor(cos(t * tau / 0.4))), 0.7, 1.0);
-        return mat_out(mix(vec3<f32>(0.0), cloud * flicker, clamp((n - 0.5) * 2.0, 0.0, 1.0)));
+        return mat_out(mix(vec3<f32>(0.0), cloud * flicker, clamp((n - 0.5) * 2.0, 0.0, 1.0)), i.pos);
     }
     // first half: a closing vignette that also pulls the scene inward, desaturation up to 80%, then fade to black
     let k = 2.0 * clamp(n, 0.0, 0.5);
@@ -238,5 +288,5 @@ fn fs_death(i: VOut) -> @location(0) vec4<f32> {
     let s = textureSample(src, smp, coord).rgb * (1.0 - q);
     let d = desat(s, clamp(k, 0.0, 0.8), vec3<f32>(0.3, 0.59, 0.11));
     let out_max = 1.0 - 2.0 * clamp(k - 0.5, 0.0, 1.0);
-    return mat_out(clamp(d, vec3<f32>(0.0), vec3<f32>(1.0)) * out_max);
+    return mat_out(clamp(d, vec3<f32>(0.0), vec3<f32>(1.0)) * out_max, i.pos);
 }

@@ -1,0 +1,64 @@
+# Control for the soak (B-277): fresh-process loads of the chapters whose n1 minigun looked dark late in the soak.
+# 50 the Helker MP7, aim and dual-shot (port | n1), play SECS seconds (shots every SECS/2), dual-shot again. The game must run
+# with BOTS_HYBRID_DUAL=1 and BOTS_INPUT_RANDOM=<s>:<seed> so 50 keeps moving. Counters: the 5 s `hybrid n1:` and `gfx native:`
+# log lines (see tools/instr/soak_report.py), correlated by the `mark chNNNNN` times in the summary.
+#   botsctl.py run scenarios/soak.txt --out DIR --set SECS=90
+default SECS=90
+mark start
+wait -t 1800 phase==front_end || phase==movie || phase==dialog || phase==menu
+press_until "game.scenes~=MainMenu" START every=1000 timeout=120
+dismiss
+wait -t 1800 precompile.done==1
+mark precompile_done
+exec LoadChapter 61500
+until "game.chapter==61500 && phase==in_play && phase_s>=5" timeout=600
+mark ch61500
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot c1-61500-a
+sleep 3
+sample ${SECS} shot_every=0 name=c1-61500
+trigger L 1.0 4000
+sleep 2
+dualshot c1-61500-b
+mark end61500
+exec LoadChapter 61465
+until "game.chapter==61465 && phase==in_play && phase_s>=5" timeout=600
+mark ch61465
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot c2-61465-a
+sleep 3
+sample ${SECS} shot_every=0 name=c2-61465
+trigger L 1.0 4000
+sleep 2
+dualshot c2-61465-b
+mark end61465
+exec LoadChapter 61500
+until "game.chapter==61500 && phase==in_play && phase_s>=5" timeout=600
+mark ch61500
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot c3-61500-a
+sleep 3
+sample ${SECS} shot_every=0 name=c3-61500
+trigger L 1.0 4000
+sleep 2
+dualshot c3-61500-b
+mark end61500
+mark end

@@ -1,0 +1,123 @@
+diff --git a/src/system/xam/content_manager.cpp b/src/system/xam/content_manager.cpp
+index 7bd6092..e7cc835 100644
+--- a/src/system/xam/content_manager.cpp
++++ b/src/system/xam/content_manager.cpp
+@@ -30,6 +30,15 @@ namespace rex {
+ namespace system {
+ namespace xam {
+ 
++namespace {
++// std::filesystem::exists(path) throws for errors other than "not found", for example a path over MAX_PATH on
++// Windows (ERROR_FILENAME_EXCED_RANGE) in a deep user data root. A kernel call must report that, not throw.
++bool PathExists(const std::filesystem::path& path) {
++  std::error_code ec;
++  return std::filesystem::exists(path, ec);
++}
++}  // namespace
++
+ static const char* kThumbnailFileName = "__thumbnail.png";
+ 
+ static const char* kGameUserContentDirName = "profile";
+@@ -60,7 +69,7 @@ ContentPackage::~ContentPackage() {
+ }
+ 
+ void ContentPackage::LoadPackageLicenseMask(const std::filesystem::path header_path) {
+-  if (!std::filesystem::exists(header_path)) {
++  if (!PathExists(header_path)) {
+     return;
+   }
+ 
+@@ -176,7 +185,7 @@ std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(uint32_t device
+ std::unique_ptr<ContentPackage> ContentManager::ResolvePackage(
+     const std::string_view root_name, uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data) {
+   auto package_path = ResolvePackagePath(xuid, data);
+-  if (!std::filesystem::exists(package_path)) {
++  if (!PathExists(package_path)) {
+     return nullptr;
+   }
+   auto package = std::make_unique<ContentPackage>(kernel_state_, root_name, data, package_path);
+@@ -185,7 +194,7 @@ std::unique_ptr<ContentPackage> ContentManager::ResolvePackage(
+ 
+ bool ContentManager::ContentExists(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data) {
+   auto path = ResolvePackagePath(xuid, data);
+-  return std::filesystem::exists(path);
++  return PathExists(path);
+ }
+ 
+ X_RESULT ContentManager::WriteContentHeaderFile(uint64_t xuid, XCONTENT_AGGREGATE_DATA data,
+@@ -202,8 +211,10 @@ X_RESULT ContentManager::WriteContentHeaderFile(uint64_t xuid, XCONTENT_AGGREGAT
+       ResolvePackageHeaderPath(data.file_name(), used_xuid, data.title_id, data.content_type);
+   auto parent_path = header_path.parent_path();
+ 
+-  if (!std::filesystem::exists(parent_path)) {
+-    if (!std::filesystem::create_directories(parent_path)) {
++  if (!PathExists(parent_path)) {
++    std::error_code ec;  // long or unwritable paths must fail the call, not throw out of the kernel
++    std::filesystem::create_directories(parent_path, ec);
++    if (ec || !std::filesystem::exists(parent_path, ec)) {
+       return X_ERROR_ACCESS_DENIED;
+     }
+   }
+@@ -228,7 +239,7 @@ X_RESULT ContentManager::ReadContentHeaderFile(const std::string_view file_name,
+   auto header_file_path = ResolvePackageHeaderPath(file_name, xuid, title_id, content_type);
+   constexpr uint32_t header_size = sizeof(XCONTENT_AGGREGATE_DATA);
+ 
+-  if (!std::filesystem::exists(header_file_path)) {
++  if (!PathExists(header_file_path)) {
+     return X_ERROR_FILE_NOT_FOUND;
+   }
+ 
+@@ -265,10 +276,12 @@ X_RESULT ContentManager::CreateContent(const std::string_view root_name, uint64_
+   }
+ 
+   auto package_path = ResolvePackagePath(xuid, data);
+-  if (std::filesystem::exists(package_path)) {
++  if (PathExists(package_path)) {
+     return X_ERROR_ALREADY_EXISTS;
+   }
+-  if (!std::filesystem::create_directories(package_path)) {
++  std::error_code mkdir_ec;
++  std::filesystem::create_directories(package_path, mkdir_ec);
++  if (mkdir_ec || !std::filesystem::exists(package_path, mkdir_ec)) {
+     return X_ERROR_ACCESS_DENIED;
+   }
+   auto package = ResolvePackage(root_name, xuid, data);
+@@ -295,7 +308,7 @@ X_RESULT ContentManager::OpenContent(const std::string_view root_name, uint64_t
+   }
+ 
+   auto package_path = ResolvePackagePath(xuid, data);
+-  if (!std::filesystem::exists(package_path)) {
++  if (!PathExists(package_path)) {
+     return X_ERROR_FILE_NOT_FOUND;
+   }
+   auto package = ResolvePackage(root_name, xuid, data);
+@@ -334,7 +347,7 @@ X_RESULT ContentManager::GetContentThumbnail(uint64_t xuid, const XCONTENT_AGGRE
+   auto global_lock = global_critical_region_.Acquire();
+   auto package_path = ResolvePackagePath(xuid, data);
+   auto thumb_path = package_path / kThumbnailFileName;
+-  if (std::filesystem::exists(thumb_path)) {
++  if (PathExists(thumb_path)) {
+     auto file = rex::filesystem::OpenFile(thumb_path, "rb");
+     fseek(file, 0, SEEK_END);
+     size_t file_len = ftell(file);
+@@ -352,8 +365,9 @@ X_RESULT ContentManager::SetContentThumbnail(uint64_t xuid, const XCONTENT_AGGRE
+                                              std::vector<uint8_t> buffer) {
+   auto global_lock = global_critical_region_.Acquire();
+   auto package_path = ResolvePackagePath(xuid, data);
+-  std::filesystem::create_directories(package_path);
+-  if (std::filesystem::exists(package_path)) {
++  std::error_code mkdir_ec;
++  std::filesystem::create_directories(package_path, mkdir_ec);
++  if (!mkdir_ec && std::filesystem::exists(package_path, mkdir_ec)) {
+     auto thumb_path = package_path / kThumbnailFileName;
+     auto file = rex::filesystem::OpenFile(thumb_path, "wb");
+     fwrite(buffer.data(), 1, buffer.size(), file);
+@@ -582,7 +596,7 @@ static X_RESULT ExtractEntry(rex::filesystem::Entry* entry,
+ }
+ 
+ X_RESULT ContentManager::InstallContent(const std::filesystem::path& package_path) {
+-  if (!std::filesystem::exists(package_path)) {
++  if (!PathExists(package_path)) {
+     return X_ERROR_FILE_NOT_FOUND;
+   }
+ 

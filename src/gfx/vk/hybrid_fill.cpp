@@ -164,6 +164,8 @@ struct N1Host {
   bool any_scene = false;
   uint32_t packages = 0, holds = 0;
   double load_ms = 4, hold_s = 30, gap_s = 0.5;
+  // B-287: a gap at least this long (s) is a level change: n1 gives back what the last levels didn't use.
+  double evict_gap_s = 3;
   // B-221: the handover to n1 (HybridState::n1_ready) waits, up to `ready_wait_s` after the startup step, for the
   // front-end preload to drain, so the title is never frozen by the level-resume hold. BOTS_N1_BOOT_SPREAD=0: no wait.
   double ready_wait_s = 30;
@@ -224,6 +226,7 @@ void* Renderer::EnsureN1(VkFormat format) {
   host->budget = uint32_t(std::atoi(EnvOr("BOTS_N1_BUDGET", "8")));
   host->load_ms = std::atof(EnvOr("BOTS_N1_LOAD_MS", "4"));
   host->hold_s = std::atof(EnvOr("BOTS_N1_PRELOAD_HOLD_S", "30"));
+  host->evict_gap_s = std::atof(EnvOr("BOTS_N1_EVICT_GAP_S", "3"));
   host->ready_wait_s = std::atoi(EnvOr("BOTS_N1_BOOT_SPREAD", "1")) != 0 ? std::atof(EnvOr("BOTS_N1_BOOT_WAIT_S", "30")) : 0;
   host->log_seconds = std::atof(EnvOr("BOTS_N1_LOG", "60"));  // players: a line a minute; test launchers set 5
   N1Init init{};
@@ -465,6 +468,14 @@ void Renderer::HoldN1Preload(void* h, bool may_flush) {
     return;
   }
   n1_resumed_ = now;
+  // B-287: a long gap is a level change (a menu pause is shorter than a loading screen): release what the levels
+  // before the last one used, before the new level loads (only with BOTS_N1_EVICT=1).
+  if (host->any_scene && std::chrono::duration<double>(now - host->last_scene).count() >= host->evict_gap_s) {
+    const auto e0 = std::chrono::steady_clock::now();
+    const uint32_t freed = n1_level_boundary(host->r);
+    REXLOG_INFO("hybrid n1: level change: {} meshes released in {:.1f} ms", freed,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - e0).count());
+  }
   N1Stats st{};
   n1_load_stats(host->r, &st);
   const uint64_t lazy0 = st.lazy_meshes + st.lazy_materials + st.lazy_lights + st.lazy_skel;
@@ -649,7 +660,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   n1_set_decals(host->r, host->decals.data(), uint32_t(host->decals.size()), host->scene.decal_receivers.data(),
                 uint32_t(host->scene.decal_receivers.size()));
   // Skinned primitives: bones are passed as published (n1 rebuilds unset ones from the reference pose).
-  static_assert(sizeof(N1SkelInstance) == 108, "N1SkelInstance layout (n1ffi.h with the B-265 lod field)");
+  static_assert(sizeof(N1SkelInstance) == 112, "N1SkelInstance layout (n1ffi.h with the B-265 lod and B-277e flags fields)");
   host->skeletal.clear();
   host->skel_materials.clear();
   for (const HybridScene::Skel& in : host->scene.skeletal) {
@@ -659,6 +670,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     out.mesh = Handle(host->skel_meshes, in.mesh, host->r, n1_skel_mesh);
     out.env = Handle(host->envs, in.env, host->r, n1_env);
     out.bone_offset = in.bone_offset, out.bone_count = in.bone_count;
+    out.flags = in.flags;  // B-277(e): bSpecialHighlight -> n1 draws the enemy outline (BOTS_N1_OUTLINE=0: off)
     out.lod = in.lod;  // B-265: n1 rebuilds bones outside this LOD (BOTS_N1_LOD_BONES=0: off)
     out.mat_offset = uint32_t(host->skel_materials.size());
     out.mat_count = in.mat_count;
@@ -930,6 +942,12 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
       REXLOG_INFO("hybrid n1 decals: {} this frame -> {} pieces drawn, {} cached; {} built since start ({} tris), {:.3f} ms "
                   "this frame", st.decals, st.decal_draws, st.decal_cached, st.decal_builds, st.decal_triangles,
                   st.decal_build_ms);
+    if (st.evict_boundaries)
+      REXLOG_INFO("hybrid n1 evict: {} level changes, {} sweeps (last {:.1f} ms, worst {:.1f} ms); released {} meshes {} "
+                  "skinned {} textures {} materials {} lights, {:.0f} MB of GPU buffers ({} textures held back, {} "
+                  "CPU copies queued)", st.evict_boundaries, st.evict_sweeps, st.evict_last_ms, st.evict_max_ms,
+                  st.meshes_freed, st.skin_meshes_freed, st.textures_freed, st.materials_freed, st.lights_freed,
+                  double(st.bytes_freed) / 1048576.0, st.textures_kept, st.forgets_pending);
     REXLOG_INFO("hybrid n1 compile: t={:.1f} s: built {}+{} shaders and {}+{} pipelines (startup+play), {} late "
                 "shaders and {} late pipelines, {} failed; {:.1f} s in the driver (worst {:.0f} ms), spirv cache "
                 "{}/{}; render thread: {} draws skipped, {} on the stand-in, {} partial frames, backlog {}; n1_record "

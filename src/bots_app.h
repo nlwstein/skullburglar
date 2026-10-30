@@ -199,6 +199,11 @@ class BotsApp : public rex::ReXApp {
       return;
     }
 #endif
+    // A folder 260+ characters deep only works in the extended-length form (path_utf8.h; B-291): the settings and
+    // saves under the user data root, the shader cache, and the game files below. Short paths are left as they are.
+    paths.user_data_root = bots::LongPath(paths.user_data_root);
+    paths.cache_root = bots::LongPath(paths.cache_root);
+    paths.config_path = bots::LongPath(paths.config_path);
     if (!fs::exists(paths.config_path, ec)) paths.config_path = paths.user_data_root / "bots.toml";
     config_path_ = paths.config_path;
     UseBundleLogDir();
@@ -208,6 +213,7 @@ class BotsApp : public rex::ReXApp {
       paths.game_data_root =
           configured.empty() ? bots::setup::AutoGameDir(rex::filesystem::GetExecutableFolder()) : configured;
     }
+    paths.game_data_root = bots::LongPath(paths.game_data_root);
   }
 
   // In the macOS app bundle, log to ~/Library/Logs/Skullburglar/bots-<time>.log (newest 10 kept) unless --log_file
@@ -302,6 +308,46 @@ class BotsApp : public rex::ReXApp {
 #endif
   }
   bool picker_left_fullscreen_ = false;
+
+#if defined(_WIN32)
+  // The SDK's launcher font covers Latin-1 and Japanese, so a Cyrillic or Greek folder name (a Russian "Documents")
+  // drew as "?". Merge Segoe UI's Greek and Cyrillic glyphs into it; without the file the "?" stays.
+  void OnConfigureFonts(ImFontAtlas* atlas) override {
+    wchar_t windir[MAX_PATH];
+    const UINT n = GetWindowsDirectoryW(windir, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return;
+    const std::filesystem::path font = std::filesystem::path(windir) / L"Fonts" / L"segoeui.ttf";
+    std::error_code ec;
+    if (!std::filesystem::exists(font, ec)) return;
+    static const ImWchar kRanges[] = {0x0370, 0x03FF,   // Greek and Coptic
+                                      0x0400, 0x052F,   // Cyrillic and its supplement
+                                      0x2DE0, 0x2DFF,   // Cyrillic extended-A
+                                      0xA640, 0xA69F,   // Cyrillic extended-B
+                                      0};
+    // The first source that has a glyph draws it. The SDK's Japanese font (MS Gothic) has Greek and Cyrillic too, as
+    // full-width glyphs, so with only the merge below the letters come out double-spaced. Keep them out of the
+    // sources the SDK added; the ranges are copied with ImGui's allocator because the atlas frees them.
+    for (int i = 0; i < atlas->Sources.Size; ++i) {
+      ImFontConfig& other = atlas->Sources[i];
+      if (other.GlyphExcludeRanges) continue;
+      constexpr int kCount = sizeof(kRanges) / sizeof(kRanges[0]);
+      ImWchar* ranges = static_cast<ImWchar*>(IM_ALLOC(sizeof(ImWchar) * kCount));
+      for (int k = 0; k < kCount; ++k) ranges[k] = kRanges[k];
+      other.GlyphExcludeRanges = ranges;
+    }
+    ImFontConfig config;
+    config.MergeMode = true;
+    config.OversampleH = config.OversampleV = 1;
+    config.PixelSnapH = true;
+    // ImGui opens the file by a UTF-8 name, so a non-ASCII Windows folder works.
+    int len = WideCharToMultiByte(CP_UTF8, 0, font.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string path(len > 0 ? len - 1 : 0, '\0');
+    if (len > 1) WideCharToMultiByte(CP_UTF8, 0, font.c_str(), -1, path.data(), len, nullptr, nullptr);
+    // 15 against the base font's 10: sizes of merged fonts are relative to the first source, and this makes the
+    // letters as tall as the Latin ones next to them.
+    atlas->AddFontFromFileTTF(path.c_str(), 15.0f, &config, kRanges);
+  }
+#endif
 
   // Shader precompile progress (B-053); the dialog deletes itself when done.
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {

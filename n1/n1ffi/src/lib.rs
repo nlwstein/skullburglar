@@ -201,6 +201,21 @@ pub struct N1Stats {
     pub decal_build_ms: f32,
     pub decal_builds: u64,
     pub decal_triangles: u64,
+    /// B-287: level-change eviction, cumulative. Boundaries seen, sweeps run; what the renderer gave back (static and
+    /// skinned meshes, textures, materials, baked lights, GPU bytes); textures a sweep couldn't free yet; CPU copies
+    /// still queued to drop; the last and longest sweep (ms).
+    pub evict_boundaries: u64,
+    pub evict_sweeps: u64,
+    pub meshes_freed: u64,
+    pub skin_meshes_freed: u64,
+    pub textures_freed: u64,
+    pub materials_freed: u64,
+    pub lights_freed: u64,
+    pub bytes_freed: u64,
+    pub textures_kept: u64,
+    pub forgets_pending: u32,
+    pub evict_last_ms: f32,
+    pub evict_max_ms: f32,
 }
 
 /// B-199: one package's worth of things to load, found on a scan thread.
@@ -271,6 +286,7 @@ struct Preload {
 impl Inner {
     /// Queues what finished scans found.
     fn take_preloads(&mut self) {
+        self.resolver.drain_forgets(self.renderer.knobs.evict_budget);
         while let Ok(l) = self.preload.rx.try_recv() {
             let mut q = 0usize;
             // Its copies win over other packages' for paths in several (cooked levels carry their own copies).
@@ -362,6 +378,19 @@ impl Inner {
         out.copies_pending = copies;
         out.staging_bytes = staging;
         out.preload_scanning = self.preload.scanning.load(Relaxed);
+        let e = &self.resolver.evict;
+        out.evict_boundaries = e.boundaries;
+        out.evict_sweeps = e.sweeps;
+        out.meshes_freed = rc.meshes_freed;
+        out.skin_meshes_freed = rc.skin_meshes_freed;
+        out.textures_freed = rc.textures_freed;
+        out.materials_freed = rc.materials_freed;
+        out.lights_freed = rc.lights_freed;
+        out.bytes_freed = rc.bytes_freed;
+        out.textures_kept = e.textures_kept;
+        out.forgets_pending = e.forgets_pending;
+        out.evict_last_ms = e.last_ms;
+        out.evict_max_ms = e.max_ms;
     }
 }
 
@@ -1293,6 +1322,25 @@ pub unsafe extern "C" fn n1_upload(
                 -1
             }
         }
+    })
+}
+
+/// B-287: the game's level just changed (a new level is about to draw). Gives back what the last few levels didn't use
+/// (off unless `BOTS_N1_EVICT=1`, `BOTS_N1_EVICT_KEEP` is how many levels stay). Returns how many meshes the sweep
+/// gave back (0 when nothing ran).
+#[unsafe(no_mangle)]
+pub extern "C" fn n1_level_boundary(r: *const N1Renderer) -> u32 {
+    with(r, 0, |i| {
+        let k = i.renderer.knobs;
+        if !k.evict {
+            return 0;
+        }
+        let before = i.renderer.ctr.meshes_freed + i.renderer.ctr.skin_meshes_freed;
+        let keep = k.evict_keep as usize;
+        i.resolver.level_boundary(&mut i.renderer, keep);
+        let db = i.db.clone();
+        i.skins.level_boundary(&mut i.renderer, &db, keep);
+        (i.renderer.ctr.meshes_freed + i.renderer.ctr.skin_meshes_freed - before) as u32
     })
 }
 
