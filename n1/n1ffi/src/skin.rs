@@ -59,6 +59,10 @@ pub struct Skins {
     pub late: u64,
     pub preloads: u64,
     preloaded: Vec<bool>,
+    /// `BOTS_N1_SKINLOG=<substring of a mesh path>`: log (on change) what n1 does with those meshes each frame.
+    trace: Option<String>,
+    trace_last: HashMap<u32, String>,
+    trace_frame: u64,
 }
 
 impl Skins {
@@ -88,6 +92,9 @@ impl Skins {
             late: 0,
             preloads: 0,
             preloaded: Vec::new(),
+            trace: std::env::var("BOTS_N1_SKINLOG").ok().filter(|v| !v.is_empty()),
+            trace_last: HashMap::new(),
+            trace_frame: 0,
         }
     }
 
@@ -202,7 +209,11 @@ impl Skins {
         f.draws.clear();
         self.culled = 0;
         self.skipped = 0;
+        self.trace_frame += 1;
         for inst in instances {
+            let traced = self.trace.as_deref().is_some_and(|t| {
+                self.paths.get(inst.mesh as usize).is_some_and(|p| p.contains(t))
+            });
             let Some(state) = self.states.get_mut(inst.mesh as usize) else {
                 continue;
             };
@@ -218,6 +229,9 @@ impl Skins {
                         .send((inst.mesh, self.paths[inst.mesh as usize].clone()));
                 }
                 self.skipped += 1;
+                if traced {
+                    Self::trace_note(&mut self.trace_last, self.trace_frame, inst, "pending".into());
+                }
                 continue;
             }
             let State::Ready {
@@ -235,6 +249,9 @@ impl Skins {
                 .any(|p| p[0] * b[0] + p[1] * b[1] + p[2] * b[2] + p[3] < -b[3])
             {
                 self.culled += 1;
+                if traced {
+                    Self::trace_note(&mut self.trace_last, self.trace_frame, inst, "culled".into());
+                }
                 continue;
             }
             // Palette.
@@ -253,6 +270,8 @@ impl Skins {
                 ));
             }
             let ii = f.insts.len() as u32;
+            let draws_before = f.draws.len();
+            let mut trace_sig = String::new();
             let env = if inst.env == NONE {
                 NONE
             } else {
@@ -279,10 +298,18 @@ impl Skins {
                 };
                 let mut id = res.material_id(r, h);
                 if id == scenekit::SKIP {
+                    if traced {
+                        trace_sig += &format!(" s{}:skip", s.material);
+                    }
                     continue;
                 }
                 if id == NONE || id as usize >= r.materials.len() {
                     id = r.grey_material();
+                    if traced {
+                        trace_sig += &format!(" s{}:grey", s.material);
+                    }
+                } else if traced {
+                    trace_sig += &format!(" s{}:{}", s.material, id);
                 }
                 f.draws.push(SkinDraw {
                     material: id,
@@ -292,6 +319,23 @@ impl Skins {
                     instance: ii,
                 });
             }
+            if traced {
+                let sig = format!(
+                    "lod {} bones {} draws {}{}",
+                    inst.lod,
+                    inst.bone_count,
+                    f.draws.len() - draws_before,
+                    trace_sig
+                );
+                Self::trace_note(&mut self.trace_last, self.trace_frame, inst, sig);
+            }
+        }
+    }
+
+    fn trace_note(last: &mut HashMap<u32, String>, frame: u64, inst: &SkelInstance, sig: String) {
+        if last.get(&inst.mesh) != Some(&sig) {
+            eprintln!("n1ffi: skinlog frame {frame} mesh {} {sig}", inst.mesh);
+            last.insert(inst.mesh, sig);
         }
     }
 }
