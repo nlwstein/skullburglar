@@ -1,8 +1,8 @@
 #!/bin/sh
 # One platform's release build in GitLab CI, inside its build image or on the macOS runner (.gitlab-ci.yml):
 #   tools/ci/gitlab_build.sh <linux|windows|macos|ios|tvos|android>
-# Gets the game executable and shader refs from the private assets project, restores stored codegen output when there
-# is some for this tree (tools/ci/codegen_publish.sh), builds and packages, and uploads the packages to this project's
+# Gets the game executable and shader refs from the private assets project, restores the codegen output the pipeline's
+# `codegen` job stored for this tree (tools/ci/codegen_publish.sh; a desktop build without it runs codegen itself), builds and packages, and uploads the packages to this project's
 # package registry as <PACKAGE>/<VERSION> (PACKAGE defaults to skullburglar). iOS and tvOS (experimental) build an
 # unsigned IPA instead (tools/ios/build.sh; signed when it's installed): skullburglar-<VERSION>-<ios|tvos>.ipa. Android
 # (experimental) builds an arm64 APK (tools/android/build.sh): skullburglar-<VERSION>-android.apk, signed with the
@@ -32,17 +32,17 @@ tools/ci/sdk.sh out/sdk
 KEY=$(tools/ci/codegen_key.sh out/sdk)
 PROJ=$(echo "$ASSETS_PROJECT" | sed 's#/#%2F#g')
 rm -rf generated/default
-if get -o out/codegen.tar.xz "$CI_API_V4_URL/projects/$PROJ/packages/generic/codegen/$KEY/codegen.tar.xz" 2>/dev/null
+if get -o out/codegen.tar.xz "$CI_API_V4_URL/projects/$PROJ/packages/generic/${CODEGEN_PACKAGE:-codegen}/$KEY/codegen.tar.xz" 2>/dev/null
 then
   tar -xJf out/codegen.tar.xz -C generated
   echo "codegen: using stored output $KEY"
 else
-  echo "codegen: nothing stored for $KEY, so codegen runs here (store it with tools/ci/codegen_publish.sh)"
+  echo "codegen: nothing stored for $KEY, so codegen runs here (the pipeline's codegen job should have stored it)"
 fi
 
 case $PLATFORM in android)
   # Cross-compiled with the NDK, which can't run the recompiler either: stored codegen output only, as for iOS.
-  [ -f generated/default/sources.cmake ] || { echo "no stored codegen output for $KEY: run tools/ci/codegen_publish.sh" >&2; exit 1; }
+  [ -f generated/default/sources.cmake ] || { echo "no stored codegen output for $KEY: the pipeline's codegen job should have stored it (tools/ci/codegen_publish.sh stores it by hand)" >&2; exit 1; }
   # Releases keep one signing key, so an installed copy updates in place (an uninstall deletes the game files).
   if [ -n "${ANDROID_KEYSTORE:-}" ]; then
     mkdir -p out/android
@@ -66,7 +66,7 @@ esac
 
 case $PLATFORM in ios|tvos)
   # The recompiler doesn't run on iOS, so these builds need stored codegen output for this tree.
-  [ -f generated/default/sources.cmake ] || { echo "no stored codegen output for $KEY: run tools/ci/codegen_publish.sh" >&2; exit 1; }
+  [ -f generated/default/sources.cmake ] || { echo "no stored codegen output for $KEY: the pipeline's codegen job should have stored it (tools/ci/codegen_publish.sh stores it by hand)" >&2; exit 1; }
   step build
   # iOS and tvOS are MoltenVK's device class 3, like macOS.
   PLATFORM=$PLATFORM SDK=out/sdk REFS=out/assets/pipelines/class3.refs JOBS=$(sysctl -n hw.ncpu) VERSION=$VERSION \
