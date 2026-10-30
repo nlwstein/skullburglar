@@ -52,7 +52,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   SetupDialog(rex::ui::ImGuiDrawer* drawer, std::filesystem::path game_dir, std::filesystem::path default_game_dir,
               bool game_dir_locked, std::filesystem::path config_path, PlayFn play, QuitFn quit)
       : ImGuiDialog(drawer),
-        game_dir_(std::move(game_dir)),
+        game_dir_(bots::LongPath(game_dir)),
         default_game_dir_(std::move(default_game_dir)),
         game_dir_locked_(game_dir_locked),
         config_path_(std::move(config_path)),
@@ -344,7 +344,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   void DrawGameFiles() {
     ImGui::TextUnformatted("Game files");
     if (installed_ && !show_reinstall_) {
-      ImGui::TextDisabled("Installed in %s", bots::PathUtf8(game_dir_).c_str());
+      ImGui::TextDisabled("Installed in %s", bots::PlainPathUtf8(game_dir_).c_str());
       DrawUnusedCopy();
       if (ImGui::SmallButton("Reinstall from a disc image...")) show_reinstall_ = true;
       return;
@@ -356,7 +356,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     } else {
       ImGui::TextUnformatted("Reinstall into:");
     }
-    ImGui::TextDisabled("%s", bots::PathUtf8(game_dir_).c_str());
+    ImGui::TextDisabled("%s", bots::PlainPathUtf8(game_dir_).c_str());
     DrawFolderChoice();
     ImGui::BeginDisabled(Extracting());
     ImGui::SetNextItemWidth(-110.0f);
@@ -421,7 +421,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   void DrawUnusedCopy() {
     if (old_game_dir_.empty() || SamePath(old_game_dir_, game_dir_) || !IsGameDir(old_game_dir_)) return;
     ImGui::TextWrapped("The game files in %s aren't used any more: delete that folder to free about 7 GB.",
-                       bots::PathUtf8(old_game_dir_).c_str());
+                       bots::PlainPathUtf8(old_game_dir_).c_str());
   }
 
   void UseGameDir(const std::filesystem::path& dir) {
@@ -431,7 +431,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     }
     folder_error_.clear();
     error_.clear();
-    game_dir_ = dir;
+    game_dir_ = bots::LongPath(dir);  // a folder 260+ characters deep needs the extended-length form (path_utf8.h)
     installed_ = IsGameDir(game_dir_);
     REXLOG_INFO("setup: game folder {} ({})", bots::PathUtf8(game_dir_), installed_ ? "installed" : "missing");
     if (installed_ || SamePath(game_dir_, default_game_dir_)) RememberGameDir();
@@ -447,7 +447,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
 
   void DrawSettings() {
     ImGui::TextUnformatted("Settings");
-    ImGui::TextDisabled("Saved in %s", bots::PathUtf8(config_path_).c_str());
+    ImGui::TextDisabled("Saved in %s", bots::PlainPathUtf8(config_path_).c_str());
     for (auto& s : settings_) {
       if (s.binding) continue;  // DrawBindings
       if (!s.section.empty()) {
@@ -692,7 +692,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     std::error_code ec;
     if (!SamePath(game_dir_, DefaultGameDir()) && !IsGameDir(game_dir_) && std::filesystem::exists(game_dir_, ec) &&
         !(std::filesystem::is_directory(game_dir_, ec) && std::filesystem::is_empty(game_dir_, ec))) {
-      error_ = bots::PathUtf8(game_dir_) + " already exists and doesn't hold the game's files. Choose another folder.";
+      error_ = bots::PlainPathUtf8(game_dir_) + " already exists and doesn't hold the game's files. Choose another folder.";
       return;
     }
     progress_ = std::make_shared<ExtractProgress>();

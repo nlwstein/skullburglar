@@ -6,6 +6,7 @@
 #include "update_check.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -221,7 +222,11 @@ std::string WriteConfig(const toml::table& table, const fs::path& config_path) {
   std::error_code ec;
   fs::create_directories(config_path.parent_path(), ec);
   std::ofstream out(config_path, std::ios::trunc);
-  if (!out) return "Can't write " + bots::PathUtf8(config_path);
+  if (!out) {
+    // The reason matters: a path that is too long reads "No such file or directory" and looks like a missing folder.
+    const std::string why = ec ? ec.message() : std::error_code(errno, std::generic_category()).message();
+    return "Can't write " + bots::PlainPathUtf8(config_path) + " (" + why + ")";
+  }
   out << "# bots settings (also editable in the launcher, which opens on start)\n" << table << "\n";
   return {};
 }
@@ -300,7 +305,7 @@ fs::path ConfigPath(const fs::path& config_path, const std::string& key) {
 }
 
 std::string SetConfigPath(const fs::path& config_path, const std::string& key, const fs::path& path) {
-  const std::string text = bots::PathUtf8(path);
+  const std::string text = bots::PlainPathUtf8(path);  // never the \\?\ form (path_utf8.h): bots.toml stays readable
   toml::table table = ReadConfig(config_path);
   table.erase(key);
   table.erase(key + "_hex");

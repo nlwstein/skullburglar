@@ -93,15 +93,21 @@ inline std::filesystem::path AutoGameDir(const std::filesystem::path& exe_dir) {
 // files, else its game subfolder. The game's files are never spread into a folder that holds something else, so the
 // chosen folder is the target only when it already holds the game, and a game subfolder that holds something else is
 // refused: the result is empty and `error` says why. A reinstall replaces only the game's own entries (game_swap.h).
-inline std::filesystem::path ChosenGameDir(const std::filesystem::path& chosen, std::string& error) {
+inline std::filesystem::path ChosenGameDir(const std::filesystem::path& chosen_path, std::string& error) {
   namespace fs = std::filesystem;
   error.clear();
-  if (chosen.empty()) return {};
+  if (chosen_path.empty()) return {};
+  const fs::path chosen = bots::LongPath(chosen_path);  // 260+ characters needs the extended-length form
   if (IsGameDir(chosen)) return chosen;
   const fs::path target = chosen / "game";
   if (IsGameDir(target)) return target;
   std::error_code ec;
-  if (fs::exists(target, ec) && !(fs::is_directory(target, ec) && fs::is_empty(target, ec))) {
+  const bool exists = fs::exists(target, ec);
+  if (ec) {  // not "missing": Windows can't look at it (a path past the limit, no access ...). Say so, don't pretend.
+    error = "Can't open " + bots::PlainPathUtf8(target) + " (" + ec.message() + "). Choose another folder.";
+    return {};
+  }
+  if (exists && !(fs::is_directory(target, ec) && fs::is_empty(target, ec))) {
     error = bots::PathUtf8(target) + " already exists and doesn't hold the game's files. Choose another folder.";
     return {};
   }

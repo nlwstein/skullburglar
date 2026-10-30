@@ -199,6 +199,11 @@ class BotsApp : public rex::ReXApp {
       return;
     }
 #endif
+    // A folder 260+ characters deep only works in the extended-length form (path_utf8.h; B-291): the settings and
+    // saves under the user data root, the shader cache, and the game files below. Short paths are left as they are.
+    paths.user_data_root = bots::LongPath(paths.user_data_root);
+    paths.cache_root = bots::LongPath(paths.cache_root);
+    paths.config_path = bots::LongPath(paths.config_path);
     if (!fs::exists(paths.config_path, ec)) paths.config_path = paths.user_data_root / "bots.toml";
     config_path_ = paths.config_path;
     UseBundleLogDir();
@@ -208,6 +213,7 @@ class BotsApp : public rex::ReXApp {
       paths.game_data_root =
           configured.empty() ? bots::setup::AutoGameDir(rex::filesystem::GetExecutableFolder()) : configured;
     }
+    paths.game_data_root = bots::LongPath(paths.game_data_root);
   }
 
   // In the macOS app bundle, log to ~/Library/Logs/Skullburglar/bots-<time>.log (newest 10 kept) unless --log_file

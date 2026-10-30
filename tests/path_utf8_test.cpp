@@ -187,6 +187,30 @@ int main() {
   CHECK(FileUrl("C:/Data/x") == "file:///C:/Data/x");
   CHECK(FileUrl("/O'Brien & co") == "file:///O%27Brien%20%26%20co");
 
+  // Long Windows paths: extended-length form only for long absolute paths, canonical, never for short ones.
+  {
+    using bots::ExtendedPathText; using bots::PlainPathText; using bots::kLongPathThreshold;
+    const std::string pad(60, 'P');
+    const std::string deep = "C:\\lg\\" + pad + "\\" + pad + "\\" + pad;  // 195 characters
+    CHECK(deep.size() > kLongPathThreshold);
+    CHECK(ExtendedPathText(deep) == "\\\\?\\" + deep);
+    CHECK(ExtendedPathText("C:/lg/" + pad + "/" + pad + "/" + pad) == "\\\\?\\" + deep);  // slashes become backslashes
+    CHECK(ExtendedPathText(deep + "\\x\\..\\.\\y\\\\") == "\\\\?\\" + deep + "\\y");        // . .. and doubled separators
+    CHECK(ExtendedPathText("C:\\short\\game") == "C:\\short\\game");                        // short: untouched
+    CHECK(ExtendedPathText("C:/short/game") == "C:/short/game");
+    CHECK(ExtendedPathText(deep, 300) == deep);                                              // threshold
+    CHECK(ExtendedPathText("\\\\?\\" + deep) == "\\\\?\\" + deep);                          // already extended
+    CHECK(ExtendedPathText(pad + "\\" + pad + "\\" + pad + "\\" + pad) == pad + "\\" + pad + "\\" + pad + "\\" + pad);  // relative
+    CHECK(ExtendedPathText("/home/" + pad + "/" + pad + "/" + pad + "/" + pad).starts_with("/home"));        // Unix path
+    CHECK(ExtendedPathText("\\\\srv\\share\\" + pad + "\\" + pad + "\\" + pad) ==
+          "\\\\?\\UNC\\srv\\share\\" + pad + "\\" + pad + "\\" + pad);
+    CHECK(PlainPathText("\\\\?\\" + deep) == deep);
+    CHECK(PlainPathText("\\\\?\\UNC\\srv\\share\\x") == "\\\\srv\\share\\x");
+    CHECK(PlainPathText("C:\\x") == "C:\\x");
+    CHECK(PlainPathText("\\\\?\\Volume{1}\\x") == "\\\\?\\Volume{1}\\x");  // not a drive form: left alone
+    CHECK(PlainPathText(ExtendedPathText(deep)) == deep);
+  }
+
   // An unset variable is an empty path.
   CHECK(EnvPath("BOTS_PATH_UTF8_TEST_UNSET_VARIABLE").empty());
 
