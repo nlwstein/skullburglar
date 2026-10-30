@@ -114,26 +114,45 @@ fn fs_blur(i: VOut) -> @location(0) vec4<f32> {
     return acc;
 }
 
-// B-277(e): the port draws a red outline around enemies the game highlights (bSpecialHighlight): a thin line one pixel
-// outside the marked pawn's silhouette (OUTLINE_DIAG: the weaker corner-only shoulder), added in linear light before the
-// gamma. Measured on the port with and without the flag: K below, strong pixels 1.0 and shoulders 0.35 of it.
-// `outline_edge` mirrors `edge_weight` in vkr/outline.rs.
-const OUTLINE_K = vec3<f32>(0.143, 0.0082, 0.0080);
-const OUTLINE_DIAG = 0.35;
+// B-277(e): the port draws a red outline around enemies the game highlights (bSpecialHighlight). It marks the pawn in
+// the scene's alpha and edge-detects it; measured against the port with and without the flag (dual render, pixel
+// profiles across the silhouette) the line is soft, centred on the silhouette, about 4 px wide (inside 2, outside 2) at
+// 720p, i.e. the gradient magnitude of the mask blurred with a gaussian of sigma 1.3 px. It lerps toward a red:
+// out = c + gain * edge * (colour - c), in the linear light before the gamma. `outline_edge` mirrors `edge_strength` in
+// vkr/outline.rs (same sigma, taps and weights); gain and colour are OUTLINE_GAIN / OUTLINE_COLOR here and there.
+// The kernel scales with the render height (720 = 1), so a larger render keeps the same look.
+const OUTLINE_SIGMA = 1.3;
+const OUTLINE_W = array<f32, 7>(0.021532, 0.094521, 0.229614, 0.308665, 0.229614, 0.094521, 0.021532);  // gaussian taps -3..3, sum 1
+const OUTLINE_GAIN = 0.75;
+const OUTLINE_COLOR = vec3<f32>(1.1, 0.12, 0.1);
 
-fn omask_at(px: vec2<i32>, lim: vec2<i32>) -> f32 {
-    return textureLoad(omask, clamp(px, vec2<i32>(0), lim), 0).r;
+fn omask_at(frag: vec2<f32>, d: vec2<f32>, sc: f32) -> f32 {
+    let dims = vec2<f32>(textureDimensions(omask));
+    return textureSampleLevel(omask, smp, (frag + d * sc) / dims, 0.0).r;
 }
 
-fn outline_edge(px: vec2<i32>) -> f32 {
-    let lim = vec2<i32>(textureDimensions(omask)) - 1;
-    let c = omask_at(px, lim);
-    let n = omask_at(px + vec2<i32>(-1, 0), lim) + omask_at(px + vec2<i32>(1, 0), lim)
-          + omask_at(px + vec2<i32>(0, -1), lim) + omask_at(px + vec2<i32>(0, 1), lim);
-    let d = omask_at(px + vec2<i32>(-1, -1), lim) + omask_at(px + vec2<i32>(1, -1), lim)
-          + omask_at(px + vec2<i32>(-1, 1), lim) + omask_at(px + vec2<i32>(1, 1), lim);
-    let e = select(select(0.0, OUTLINE_DIAG, d > 0.0), 1.0, n > 0.0);
-    return (1.0 - c) * e;
+fn outline_edge(frag: vec2<f32>) -> f32 {
+    let sc = f32(textureDimensions(omask).y) / 720.0;
+    // Cheap exit: nothing marked or all marked around (five taps 3 texels out).
+    let m0 = omask_at(frag, vec2<f32>(0.0), sc);
+    let ring = omask_at(frag, vec2<f32>(3.0, 0.0), sc) + omask_at(frag, vec2<f32>(-3.0, 0.0), sc)
+             + omask_at(frag, vec2<f32>(0.0, 3.0), sc) + omask_at(frag, vec2<f32>(0.0, -3.0), sc);
+    let tot = m0 + ring;
+    if (tot < 0.01 || tot > 4.99) {
+        return 0.0;
+    }
+    let w = OUTLINE_W;
+    var gx = 0.0;
+    var gy = 0.0;
+    for (var j = -3; j <= 3; j++) {
+        for (var i = -3; i <= 3; i++) {
+            let m = omask_at(frag, vec2<f32>(f32(i), f32(j)), sc);
+            // derivative of the gaussian: -x / sigma^2 * g(x), the other axis smoothed by g
+            gx += m * (-f32(i) / (OUTLINE_SIGMA * OUTLINE_SIGMA)) * w[i + 3] * w[j + 3];
+            gy += m * (-f32(j) / (OUTLINE_SIGMA * OUTLINE_SIGMA)) * w[i + 3] * w[j + 3];
+        }
+    }
+    return length(vec2<f32>(gx, gy));
 }
 
 fn with_outline(c: vec3<f32>, frag: vec4<f32>) -> vec3<f32> {
@@ -141,11 +160,12 @@ fn with_outline(c: vec3<f32>, frag: vec4<f32>) -> vec3<f32> {
     if (mode < 0.5) {
         return c;
     }
-    let px = vec2<i32>(frag.xy - vec2<f32>(p.dof.w, p.dof2.w));
+    let f = frag.xy - vec2<f32>(p.dof.w, p.dof2.w);
     if (mode > 1.5) {
-        return vec3<f32>(omask_at(px, vec2<i32>(textureDimensions(omask)) - 1) * p.inv_hi.r, 0.0, 0.0) + c * 0.25;
+        return vec3<f32>(omask_at(f, vec2<f32>(0.0), 1.0), 0.0, 0.0) + c * 0.25;
     }
-    return c + OUTLINE_K * outline_edge(px);
+    let t = clamp(OUTLINE_GAIN * outline_edge(f), 0.0, 1.0);
+    return mix(c, OUTLINE_COLOR, t);
 }
 
 fn gamma_out(c0: vec3<f32>, frag: vec4<f32>) -> vec4<f32> {

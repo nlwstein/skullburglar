@@ -20,7 +20,7 @@ Scenario files: one step per line, # comments. Steps the driver handles itself:
   burst NAME COUNT [MS]                     COUNT consecutive frames into DIR/shots/NAME/; with MS a trace: every
                                             present in the TSV, a frame copied every MS (and after any 50 ms gap)
   dualshot NAME                             hybrid dual render (port + n1) into the game's BOTS_HYBRID_DUAL_DIR
-  bitedit CLASS OFFSET MASK clear|restore   clear MASK in the word at OFFSET of every live CLASS object that has it set
+  bitedit CLASS OFFSET MASK clear|set|restore [NAME]   clear (or set) MASK in the word at OFFSET of every live CLASS object (whose name contains NAME); restore puts the words back
                                             (a bool property, e.g. bSpecialHighlight: 0x1CC 0x40000000); `restore` sets the
                                             bits it cleared back. Writes guest memory: for paused A/B captures only.
   sleep SECS                                (only for settling; never to wait for a state: use wait)
@@ -335,8 +335,9 @@ class Run:
         return r
 
     def step_bitedit(self, words):
-        """bitedit CLASS OFFSET MASK clear|restore (see the module docstring)."""
+        """bitedit CLASS OFFSET MASK clear|set|restore [NAME_SUBSTRING] (see the module docstring)."""
         cls, off, mask, mode = words[1], int(words[2], 0), int(words[3], 0), words[4]
+        sub = words[5] if len(words) > 5 else ""
         if mode == "restore":
             for addr, val in getattr(self, "bits", {}).items():
                 self.send(f"exec poke {addr:X} {val:X}")
@@ -345,7 +346,7 @@ class Run:
             self.bits = {}
             return
         objs = self.send(f"objs {cls} 2000").get("objs", [])
-        addrs = sorted({int(o.rsplit("@", 1)[1], 16) + off for o in objs if "Default__" not in o})
+        addrs = sorted({int(o.rsplit("@", 1)[1], 16) + off for o in objs if "Default__" not in o and sub in o})
         for a in addrs:
             self.send(f"exec words {a:X} 1 bitedit")
         time.sleep(1.5)
@@ -357,11 +358,14 @@ class Run:
                 found[int(m.group(1), 16)] = int(m.group(2), 16)
         self.bits = {}
         for a, v in sorted(found.items()):
-            if v & mask:
+            if mode == "set" and not v & mask:
+                self.bits[a] = v
+                self.send(f"exec poke {a:X} {v | mask:X}")
+            elif mode == "clear" and v & mask:
                 self.bits[a] = v
                 self.send(f"exec poke {a:X} {v & ~mask:X}")
         time.sleep(1.0)
-        self.log(f"  bitedit: {len(addrs)} {cls} objects, {len(found)} read, cleared {mask:#x} in "
+        self.log(f"  bitedit: {len(addrs)} {cls} objects, {len(found)} read, {mode} {mask:#x} in "
                  f"{len(self.bits)}: {[f'{a:08X}' for a in self.bits]}")
 
     def step_dismiss(self, words):

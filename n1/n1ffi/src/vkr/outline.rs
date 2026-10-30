@@ -48,25 +48,50 @@ fn fs_mask() -> @location(0) vec4<f32> {
 
 pub const MASK_FORMAT: vk::Format = vk::Format::R8_UNORM;
 
-/// The edge weight of the mask pixel `c` (0 or 1) given its four side neighbours and four diagonal neighbours (each 0
-/// or 1). Mirrors `outline_edge` in post.wgsl: a pixel outside the mask next to it is the line (1), a pixel only
-/// diagonal to it is the weak shoulder (`DIAG`), anything else 0. The shader and this function must agree; the tests
-/// below pin the shape.
-pub fn edge_weight(c: f32, sides: [f32; 4], diags: [f32; 4]) -> f32 {
-    let n: f32 = sides.iter().sum();
-    let d: f32 = diags.iter().sum();
-    let e = if n > 0.0 {
-        1.0
-    } else if d > 0.0 {
-        DIAG
-    } else {
-        0.0
-    };
-    (1.0 - c) * e
+/// The CPU reference of the shader's edge kernel (test only). Gaussian sigma (texels at 720p) and the taps -3..3 of the edge kernel; gain and colour of the blend. Mirrored by the
+/// `OUTLINE_*` constants of post.wgsl (`constants_match_the_shader` checks the numbers).
+#[cfg(test)]
+pub const SIGMA: f32 = 1.3;
+#[cfg(test)]
+pub const GAIN: f32 = 0.75;
+#[cfg(test)]
+pub const COLOR: [f32; 3] = [1.1, 0.12, 0.1];
+
+/// The seven gaussian taps (-3..3), normalised to sum 1.
+#[cfg(test)]
+pub fn taps() -> [f32; 7] {
+    let mut w = [0f32; 7];
+    for (k, v) in w.iter_mut().enumerate() {
+        let i = k as f32 - 3.0;
+        *v = (-0.5 * i * i / (SIGMA * SIGMA)).exp();
+    }
+    let n: f32 = w.iter().sum();
+    w.map(|v| v / n)
 }
 
-/// The weight of a pixel that touches the mask only at a corner (post.wgsl `OUTLINE_DIAG`).
-pub const DIAG: f32 = 0.35;
+/// The edge strength at a pixel: the gradient magnitude of the mask smoothed by a gaussian (a 7x7 derivative-of-gaussian
+/// filter). `mask(dx, dy)` is the mask at an offset from the pixel (0 or 1). A straight silhouette edge gives a bell
+/// about 4 px wide whose pixels sum to 1; mirrors `outline_edge` in post.wgsl.
+#[cfg(test)]
+pub fn edge_strength(mask: impl Fn(i32, i32) -> f32) -> f32 {
+    let w = taps();
+    let (mut gx, mut gy) = (0.0, 0.0);
+    for j in -3..=3i32 {
+        for i in -3..=3i32 {
+            let m = mask(i, j);
+            gx += m * (-(i as f32) / (SIGMA * SIGMA)) * w[(i + 3) as usize] * w[(j + 3) as usize];
+            gy += m * (-(j as f32) / (SIGMA * SIGMA)) * w[(i + 3) as usize] * w[(j + 3) as usize];
+        }
+    }
+    (gx * gx + gy * gy).sqrt()
+}
+
+/// The blended channel: `c` lerped toward the outline colour by `GAIN * edge` (post.wgsl `with_outline`).
+#[cfg(test)]
+pub fn blend(c: f32, edge: f32, channel: usize) -> f32 {
+    let t = (GAIN * edge).clamp(0.0, 1.0);
+    c + t * (COLOR[channel] - c)
+}
 
 pub(super) struct Outline {
     module: vk::ShaderModule,
@@ -226,6 +251,11 @@ impl Renderer {
 mod tests {
     use super::*;
 
+    /// Mask of a vertical edge: covered for x >= 0 (offsets are relative to the pixel at `px`).
+    fn step(px: i32) -> impl Fn(i32, i32) -> f32 {
+        move |dx, _| if px + dx >= 0 { 1.0 } else { 0.0 }
+    }
+
     #[test]
     fn shaders_compile() {
         crate::shaders::spirv(MASK_WGSL).expect("mask shader");
@@ -233,47 +263,55 @@ mod tests {
     }
 
     #[test]
-    fn line_is_outside_the_mask() {
-        // Inside the mask: nothing, whatever its neighbours.
-        assert_eq!(edge_weight(1.0, [1.0, 1.0, 1.0, 1.0], [1.0; 4]), 0.0);
-        assert_eq!(edge_weight(1.0, [0.0; 4], [0.0; 4]), 0.0);
-        // Outside and touching a covered pixel on a side: the full line.
-        assert_eq!(edge_weight(0.0, [1.0, 0.0, 0.0, 0.0], [0.0; 4]), 1.0);
-        assert_eq!(edge_weight(0.0, [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 0.0, 0.0]), 1.0);
-    }
-
-    #[test]
-    fn corner_only_is_the_weak_shoulder() {
-        assert_eq!(edge_weight(0.0, [0.0; 4], [0.0, 0.0, 1.0, 0.0]), DIAG);
-        assert_eq!(edge_weight(0.0, [0.0; 4], [1.0; 4]), DIAG);
-    }
-
-    #[test]
-    fn far_from_the_mask_is_empty() {
-        assert_eq!(edge_weight(0.0, [0.0; 4], [0.0; 4]), 0.0);
-    }
-
-    #[test]
-    fn a_one_pixel_dot_gets_a_ring_one_pixel_wide() {
-        // 7x7 grid, one covered pixel in the middle: the 4 side neighbours are 1, the 4 corners are DIAG, nothing else.
-        let m = |x: i32, y: i32| if x == 3 && y == 3 { 1.0 } else { 0.0 };
-        let w = |x: i32, y: i32| {
-            edge_weight(
-                m(x, y),
-                [m(x - 1, y), m(x + 1, y), m(x, y - 1), m(x, y + 1)],
-                [m(x - 1, y - 1), m(x + 1, y - 1), m(x - 1, y + 1), m(x + 1, y + 1)],
-            )
-        };
-        let mut sum = 0.0;
-        for y in 0..7 {
-            for x in 0..7 {
-                sum += w(x, y);
-            }
+    fn constants_match_the_shader() {
+        let src = include_str!("../post.wgsl");
+        for v in taps() {
+            assert!(src.contains(&format!("{v:.6}")), "tap {v:.6} missing from post.wgsl");
         }
-        assert!((sum - (4.0 + 4.0 * DIAG)).abs() < 1e-6);
-        assert_eq!(w(3, 3), 0.0);
-        assert_eq!(w(3, 2), 1.0);
-        assert_eq!(w(2, 2), DIAG);
-        assert_eq!(w(3, 1), 0.0);
+        assert!(src.contains(&format!("OUTLINE_SIGMA = {SIGMA:?};")));
+        assert!(src.contains(&format!("OUTLINE_GAIN = {GAIN:?};")));
+        assert!(src.contains(&format!("vec3<f32>({:?}, {:?}, {:?})", COLOR[0], COLOR[1], COLOR[2])));
+    }
+
+    #[test]
+    fn taps_sum_to_one_and_are_symmetric() {
+        let w = taps();
+        assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        for k in 0..3 {
+            assert!((w[k] - w[6 - k]).abs() < 1e-7);
+        }
+    }
+
+    #[test]
+    fn a_straight_edge_is_a_four_pixel_bell_summing_to_one() {
+        // Pixels -5..=4 relative to the edge between x = -1 (clear) and x = 0 (covered).
+        let prof: Vec<f32> = (-5..=4).map(|x| edge_strength(step(x))).collect();
+        let sum: f32 = prof.iter().sum();
+        // The 7-tap kernel is cut at +-3 texels: the bell holds about 95% of the step.
+        assert!((sum - 1.0).abs() < 0.07, "sum {sum}");
+        // Symmetric about the boundary: pixel -1 (outside) and 0 (inside) are the peak pair.
+        assert!((prof[4] - prof[5]).abs() < 1e-5);
+        assert!(prof[4] > prof[3] && prof[5] > prof[6]);
+        // Two pixels out on either side it is already weak (the measured profile: 0.78 / 0.24 of the peak).
+        assert!(prof[2] < 0.35 * prof[4] && prof[7] < 0.35 * prof[5]);
+        // Far away: nothing.
+        assert_eq!(prof[0].max(prof[9]) < 1e-3, true);
+    }
+
+    #[test]
+    fn nothing_marked_or_all_marked_has_no_edge() {
+        assert_eq!(edge_strength(|_, _| 0.0), 0.0);
+        assert!(edge_strength(|_, _| 1.0) < 1e-6);
+    }
+
+    #[test]
+    fn blend_lerps_toward_the_colour() {
+        assert_eq!(blend(0.4, 0.0, 0), 0.4);
+        // Full edge strength 1 -> t = GAIN.
+        assert!((blend(0.0, 1.0, 0) - GAIN * COLOR[0]).abs() < 1e-6);
+        // A bright channel is pulled down toward a low outline colour (green on white).
+        assert!(blend(1.0, 1.0, 1) < 1.0);
+        // Clamped: a huge edge never overshoots the colour.
+        assert!((blend(0.2, 100.0, 2) - COLOR[2]).abs() < 1e-6);
     }
 }
