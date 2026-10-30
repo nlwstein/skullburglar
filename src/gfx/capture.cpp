@@ -21,6 +21,7 @@
 //
 // The same recording feeds shadow mode (BOTS_GFX_SHADOW, shadow.cpp): a frame every N seconds, rendered natively
 // in-process and compared with the presented one, without writing files.
+#include "../path_utf8.h"
 #include "capture.h"
 #include "capture_format.h"
 #include "shadow.h"
@@ -356,7 +357,7 @@ int64_t CapturePre(uint32_t entry, PPCContext& ctx) {
     uint64_t mem_bytes = 0;
     Finish(c, dir, &mem_bytes);
     REXLOG_INFO("gfx capture: frame {}: {} calls, {} blob bytes, {} KB PM4 ({} lost), {} MB memory -> {}", c.frame,
-                c.calls.size(), c.blobs.size(), c.pm4.size() >> 10, c.pm4_lost, mem_bytes >> 20, dir.string());
+                c.calls.size(), c.blobs.size(), c.pm4.size() >> 10, c.pm4_lost, mem_bytes >> 20, bots::PathUtf8(dir));
     std::ofstream(dir / "meta.json") << fmt::format(
         "{{\"version\": 2, \"frame\": {}, \"device\": {}, \"device_bytes\": {}, \"front_buffer\": {}, "
         "\"calls\": {}, \"record_bytes\": {}, \"mem_bytes\": {}, \"pm4_bytes\": {}, \"pm4_lost\": {}}}\n",

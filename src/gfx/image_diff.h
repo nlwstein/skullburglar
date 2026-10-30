@@ -1,6 +1,7 @@
 // Comparing the native renderer's output with the emulated frame (bots-replay and shadow mode).
 #pragma once
 
+#include "../path_utf8.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -54,7 +55,7 @@ inline ImageDiff CompareImages(const std::vector<uint8_t>& image, uint32_t w, ui
 
 inline bool WritePpm(const std::filesystem::path& path, const uint8_t* data, uint32_t width, uint32_t height,
                      size_t stride, uint32_t pixel_bytes) {
-  std::FILE* f = std::fopen(path.string().c_str(), "wb");
+  std::FILE* f = bots::OpenFile(path, "wb");
   if (!f) return false;
   std::fprintf(f, "P6\n%u %u\n255\n", width, height);
   for (uint32_t y = 0; y < height; ++y) {

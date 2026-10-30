@@ -11,6 +11,7 @@
 // Enter on the keyboard plays from anywhere in the window.
 #pragma once
 
+#include "../path_utf8.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -61,9 +62,9 @@ class SetupDialog : public rex::ui::ImGuiDialog {
         pad_(std::make_unique<PadNav>()) {
     installed_ = IsGameDir(game_dir_);
     if (installed_) old_game_dir_ = game_dir_;
-    if (const char* iso = std::getenv("BOTS_SETUP_ISO"); iso && *iso) SetIsoPath(iso);
+    if (const std::string iso = bots::PathUtf8(bots::EnvPath("BOTS_SETUP_ISO")); !iso.empty()) SetIsoPath(iso);
 #if !(defined(__APPLE__) && TARGET_OS_IPHONE)
-    if (const char* folder = std::getenv("BOTS_SETUP_FOLDER"); folder && *folder && !game_dir_locked_) {
+    if (const std::filesystem::path folder = bots::EnvPath("BOTS_SETUP_FOLDER"); !folder.empty() && !game_dir_locked_) {
       UseGameDir(ChosenGameDir(folder, folder_error_));
     }
 #endif
@@ -73,7 +74,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     const char* reinstall = std::getenv("BOTS_SETUP_REINSTALL");
     auto_reinstall_ = auto_ && reinstall && std::strcmp(reinstall, "1") == 0;
     REXLOG_INFO("setup: window open (version {}, game files {} at {}, settings file {})", AppVersion(),
-                installed_ ? "installed" : "missing", game_dir_.string(), config_path_.string());
+                installed_ ? "installed" : "missing", bots::PathUtf8(game_dir_), bots::PathUtf8(config_path_));
     if (UpdateCheckAvailable() && Value("check_updates") == "true") StartUpdateCheck();
     StartFirewallWatch();
   }
@@ -343,7 +344,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   void DrawGameFiles() {
     ImGui::TextUnformatted("Game files");
     if (installed_ && !show_reinstall_) {
-      ImGui::TextDisabled("Installed in %s", game_dir_.string().c_str());
+      ImGui::TextDisabled("Installed in %s", bots::PathUtf8(game_dir_).c_str());
       DrawUnusedCopy();
       if (ImGui::SmallButton("Reinstall from a disc image...")) show_reinstall_ = true;
       return;
@@ -355,7 +356,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     } else {
       ImGui::TextUnformatted("Reinstall into:");
     }
-    ImGui::TextDisabled("%s", game_dir_.string().c_str());
+    ImGui::TextDisabled("%s", bots::PathUtf8(game_dir_).c_str());
     DrawFolderChoice();
     ImGui::BeginDisabled(Extracting());
     ImGui::SetNextItemWidth(-110.0f);
@@ -363,7 +364,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     ImGui::SameLine();
     if (ImGui::Button("Browse...", ImVec2(-1, 0))) {
       auto picked = OpenPicker(PickIsoFile);
-      if (!picked.empty()) SetIsoPath(picked.string());
+      if (!picked.empty()) SetIsoPath(bots::PathUtf8(picked));
     }
     if (!installed_) ImGui::SetItemDefaultFocus();
     ImGui::BeginDisabled(iso_path_[0] == 0);
@@ -403,7 +404,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       const std::filesystem::path chosen = OpenPicker(PickFolder);
       if (!chosen.empty()) UseGameDir(ChosenGameDir(chosen, folder_error_));
     }
-    if (game_dir_ != default_game_dir_) {
+    if (!SamePath(game_dir_, default_game_dir_)) {
       ImGui::SameLine();
       if (ImGui::SmallButton("Use the default folder")) UseGameDir(default_game_dir_);
     }
@@ -418,9 +419,9 @@ class SetupDialog : public rex::ui::ImGuiDialog {
 
   // An installed copy that the chosen folder replaced: say it can go, never delete it.
   void DrawUnusedCopy() {
-    if (old_game_dir_.empty() || old_game_dir_ == game_dir_ || !IsGameDir(old_game_dir_)) return;
+    if (old_game_dir_.empty() || SamePath(old_game_dir_, game_dir_) || !IsGameDir(old_game_dir_)) return;
     ImGui::TextWrapped("The game files in %s aren't used any more: delete that folder to free about 7 GB.",
-                       old_game_dir_.string().c_str());
+                       bots::PathUtf8(old_game_dir_).c_str());
   }
 
   void UseGameDir(const std::filesystem::path& dir) {
@@ -432,21 +433,21 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     error_.clear();
     game_dir_ = dir;
     installed_ = IsGameDir(game_dir_);
-    REXLOG_INFO("setup: game folder {} ({})", game_dir_.string(), installed_ ? "installed" : "missing");
-    if (installed_ || game_dir_ == default_game_dir_) RememberGameDir();
+    REXLOG_INFO("setup: game folder {} ({})", bots::PathUtf8(game_dir_), installed_ ? "installed" : "missing");
+    if (installed_ || SamePath(game_dir_, default_game_dir_)) RememberGameDir();
   }
 
   // bots.toml names the folder only when it isn't the default, so a player who never chooses one keeps no entry.
   void RememberGameDir() {
-    const std::string value = game_dir_ == default_game_dir_ ? std::string() : game_dir_.string();
-    if (value.empty() && !ConfigHasKey(config_path_, "game_data_root")) return;  // nothing to change
-    std::string err = SetConfigString(config_path_, "game_data_root", value);
+    const std::filesystem::path value = SamePath(game_dir_, default_game_dir_) ? std::filesystem::path() : game_dir_;
+    if (value.empty() && !ConfigHasPath(config_path_, "game_data_root")) return;  // nothing to change
+    std::string err = SetConfigPath(config_path_, "game_data_root", value);
     if (!err.empty()) REXLOG_WARN("setup: {}", err);
   }
 
   void DrawSettings() {
     ImGui::TextUnformatted("Settings");
-    ImGui::TextDisabled("Saved in %s", config_path_.string().c_str());
+    ImGui::TextDisabled("Saved in %s", bots::PathUtf8(config_path_).c_str());
     for (auto& s : settings_) {
       if (s.binding) continue;  // DrawBindings
       if (!s.section.empty()) {
@@ -689,17 +690,17 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     // Never spread the game's files into a folder that holds something else (only a chosen or configured folder
     // could; the per-user default is ours). A reinstall over the game replaces only the game's own entries.
     std::error_code ec;
-    if (game_dir_ != DefaultGameDir() && !IsGameDir(game_dir_) && std::filesystem::exists(game_dir_, ec) &&
+    if (!SamePath(game_dir_, DefaultGameDir()) && !IsGameDir(game_dir_) && std::filesystem::exists(game_dir_, ec) &&
         !(std::filesystem::is_directory(game_dir_, ec) && std::filesystem::is_empty(game_dir_, ec))) {
-      error_ = game_dir_.string() + " already exists and doesn't hold the game's files. Choose another folder.";
+      error_ = bots::PathUtf8(game_dir_) + " already exists and doesn't hold the game's files. Choose another folder.";
       return;
     }
     progress_ = std::make_shared<ExtractProgress>();
     result_ = std::make_shared<ExtractResult>();
-    std::filesystem::path iso = iso_path_;
+    std::filesystem::path iso = bots::PathFromUtf8(iso_path_);  // the text box is UTF-8
     // Strip quotes from a pasted "C:\...\game.iso".
-    std::string s = iso.string();
-    if (s.size() >= 2 && s.front() == '"' && s.back() == '"') iso = s.substr(1, s.size() - 2);
+    std::string s = bots::PathUtf8(iso);
+    if (s.size() >= 2 && s.front() == '"' && s.back() == '"') iso = bots::PathFromUtf8(s.substr(1, s.size() - 2));
     done_ = std::make_shared<std::atomic<bool>>(false);
     worker_ = std::thread([iso, dest = game_dir_, progress = progress_, result = result_,
                            done = done_]() {
@@ -739,7 +740,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   void Play() {
     std::string err = SaveSettings(settings_, config_path_);
     if (!err.empty()) REXLOG_WARN("setup: {}", err);
-    REXLOG_INFO("setup: play with game files in {}", game_dir_.string());
+    REXLOG_INFO("setup: play with game files in {}", bots::PathUtf8(game_dir_));
     auto play = play_;
     auto dir = game_dir_;
     pad_.reset();  // the controllers are the game's from here

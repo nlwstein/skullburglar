@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "path_utf8.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -165,7 +166,7 @@ class BotsApp : public rex::ReXApp {
         char stamp[32];
         const std::time_t now = std::time(nullptr);
         std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", std::localtime(&now));
-        rex::cvar::SetFlagByName("log_file", (docs / "logs" / ("bots-" + std::string(stamp) + ".log")).string());
+        rex::cvar::SetFlagByName("log_file", bots::PathUtf8(docs / "logs" / ("bots-" + std::string(stamp) + ".log")));
       }
       return;
     }
@@ -193,7 +194,7 @@ class BotsApp : public rex::ReXApp {
         char stamp[32];
         const std::time_t now = std::time(nullptr);
         std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", std::localtime(&now));
-        rex::cvar::SetFlagByName("log_file", (data / "logs" / ("bots-" + std::string(stamp) + ".log")).string());
+        rex::cvar::SetFlagByName("log_file", bots::PathUtf8(data / "logs" / ("bots-" + std::string(stamp) + ".log")));
       }
       return;
     }
@@ -203,10 +204,9 @@ class BotsApp : public rex::ReXApp {
     UseBundleLogDir();
     game_root_given_ = !paths.game_data_root.empty();
     if (paths.game_data_root.empty()) {
-      std::string configured = bots::setup::ConfigString(config_path_, "game_data_root");
-      paths.game_data_root = configured.empty()
-                                 ? bots::setup::AutoGameDir(rex::filesystem::GetExecutableFolder())
-                                 : fs::path(configured);
+      const std::filesystem::path configured = bots::setup::ConfigPath(config_path_, "game_data_root");
+      paths.game_data_root =
+          configured.empty() ? bots::setup::AutoGameDir(rex::filesystem::GetExecutableFolder()) : configured;
     }
   }
 
@@ -220,7 +220,7 @@ class BotsApp : public rex::ReXApp {
     fs::create_directories(dir, ec);
     std::vector<fs::path> old;
     for (const auto& entry : fs::directory_iterator(dir, ec)) {
-      const auto name = entry.path().filename().string();
+      const auto name = bots::PathUtf8(entry.path().filename());
       if (name.starts_with("bots-") && entry.path().extension() == ".log") old.push_back(entry.path());
     }
     std::sort(old.begin(), old.end());  // the names sort by time
@@ -228,7 +228,7 @@ class BotsApp : public rex::ReXApp {
     char stamp[32];
     const std::time_t now = std::time(nullptr);
     std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", std::localtime(&now));
-    rex::cvar::SetFlagByName("log_file", (dir / ("bots-" + std::string(stamp) + ".log")).string());
+    rex::cvar::SetFlagByName("log_file", bots::PathUtf8(dir / ("bots-" + std::string(stamp) + ".log")));
   }
 
   // The launcher opens on every start and starts the runtime when the player presses Play. Skipped

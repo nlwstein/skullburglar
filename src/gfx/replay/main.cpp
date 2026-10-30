@@ -4,6 +4,7 @@
 //   bots-replay CAPDIR --render OUT.ppm  render with the native renderer, compare with the capture's reference
 //
 // Runs the capture's PM4 through the same executor the game uses in-process.
+#include "../../path_utf8.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -197,7 +198,7 @@ int Render(Capture& capture, const std::filesystem::path& out, int repeat) {
     std::fclose(f);
   }
   if (!bots::gfx::WritePpm(out, image.data(), w, h, size_t(w) * 3, 3)) {
-    throw std::runtime_error("cannot write " + out.string());
+    throw std::runtime_error("cannot write " + bots::PathUtf8(out));
   }
   std::printf("frame: %ux%u from resolve to %08X -> %s\n", w, h, renderer.last_resolve_address(), out.c_str());
   if (!ReadPpm(capture.dir / "reference.ppm", reference, rw, rh)) {

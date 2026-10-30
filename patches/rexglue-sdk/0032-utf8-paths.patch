@@ -1,0 +1,386 @@
+diff --git a/src/core/cvar.cpp b/src/core/cvar.cpp
+index 228728de..766cb84f 100644
+--- a/src/core/cvar.cpp
++++ b/src/core/cvar.cpp
+@@ -20,6 +20,7 @@
+ #include <CLI/CLI.hpp>
+ 
+ #include <rex/cvar.h>
++#include <rex/filesystem.h>
+ #include <rex/logging.h>
+ #include <rex/platform/env.h>
+ 
+@@ -638,16 +639,17 @@ std::vector<std::string> Init(int argc, char** argv) {
+ 
+ void LoadConfig(const std::filesystem::path& config_path) {
+   if (!std::filesystem::exists(config_path)) {
+-    REXLOG_DEBUG("Config file not found: {}", config_path.string());
++    REXLOG_DEBUG("Config file not found: {}", rex::path_to_utf8(config_path));
+     return;
+   }
+ 
+   try {
+-    auto config = toml::parse_file(config_path.string());
++    std::ifstream stream(config_path, std::ios::binary);
++    auto config = toml::parse(stream, rex::path_to_utf8(config_path));
+     ApplyTomlTable(config, "");
+-    REXLOG_DEBUG("Loaded config from {}", config_path.string());
++    REXLOG_DEBUG("Loaded config from {}", rex::path_to_utf8(config_path));
+   } catch (const toml::parse_error& err) {
+-    REXLOG_ERROR("Failed to parse config {}: {}", config_path.string(), err.what());
++    REXLOG_ERROR("Failed to parse config {}: {}", rex::path_to_utf8(config_path), err.what());
+   }
+ }
+ 
+diff --git a/src/core/logging.cpp b/src/core/logging.cpp
+index 1645848c..96b5b67c 100644
+--- a/src/core/logging.cpp
++++ b/src/core/logging.cpp
+@@ -13,6 +13,7 @@
+ #include <cctype>
+ #include <charconv>
+ #include <filesystem>
++#include <fstream>
+ #include <mutex>
+ #include <unordered_map>
+ #include <vector>
+@@ -23,6 +24,7 @@
+ #include <toml++/toml.hpp>
+ 
+ #include <rex/cvar.h>
++#include <rex/filesystem.h>
+ #include <rex/logging.h>
+ #include <rex/platform.h>
+ #include <rex/platform/env.h>
+@@ -80,7 +82,7 @@ std::filesystem::path NextSequentialLogPath(const std::filesystem::path& logs_di
+   for (const auto& entry : std::filesystem::directory_iterator(logs_dir, ec)) {
+     if (!entry.is_regular_file())
+       continue;
+-    auto stem = entry.path().stem().string();
++    auto stem = rex::path_to_utf8(entry.path().stem());
+     if (stem.starts_with(prefix)) {
+       auto num_str = stem.substr(prefix.size());
+       int num = 0;
+@@ -217,17 +219,19 @@ void InitLogging(const LogConfig& config) {
+   }
+ 
+   // File sink (rotating) with sequential naming fallback
+-  std::string resolved_path;
++  // Paths are UTF-8 in the config; on Windows the sink opens the file by its wide name (SPDLOG_WCHAR_FILENAMES), so a
++  // folder name the ANSI code page can't hold still works.
++  std::filesystem::path resolved_path;
+   if (config.log_file) {
+-    resolved_path = config.log_file;
++    resolved_path = rex::to_path(config.log_file);
+   } else if (!config.app_name.empty()) {
+     auto log_dir = config.log_dir.empty() ? std::filesystem::current_path() / "logs"
+-                                          : std::filesystem::path(config.log_dir);
+-    resolved_path = NextSequentialLogPath(log_dir, config.app_name).string();
++                                          : rex::to_path(config.log_dir);
++    resolved_path = NextSequentialLogPath(log_dir, config.app_name);
+   }
+   if (!resolved_path.empty()) {
+     auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+-        resolved_path, static_cast<size_t>(REXCVAR_GET(log_max_file_size_mb)) * 1024 * 1024,
++        resolved_path.native(), static_cast<size_t>(REXCVAR_GET(log_max_file_size_mb)) * 1024 * 1024,
+         static_cast<size_t>(REXCVAR_GET(log_max_files)), false);
+     sink->set_level(spdlog::level::trace);
+     sink->set_pattern(config.file_pattern);
+@@ -544,7 +548,8 @@ std::map<std::string, std::string> ParseCategoryLevelsFromConfig(
+     return result;
+ 
+   try {
+-    auto config = toml::parse_file(config_path.string());
++    std::ifstream stream(config_path, std::ios::binary);
++    auto config = toml::parse(stream, rex::path_to_utf8(config_path));
+     auto* log_table = config["log"].as_table();
+     if (!log_table)
+       return result;
+diff --git a/src/system/achievement_manager.cpp b/src/system/achievement_manager.cpp
+index f4e0efd9..a3d68411 100644
+--- a/src/system/achievement_manager.cpp
++++ b/src/system/achievement_manager.cpp
+@@ -18,6 +18,7 @@
+ #include <utility>
+ 
+ #include <fmt/format.h>
++#include <rex/filesystem.h>
+ #include <rex/logging.h>
+ #include <toml++/toml.hpp>
+ 
+@@ -77,10 +78,11 @@ void AchievementManager::ReplaceAchievements(std::vector<AchievementInfo> achiev
+ 
+ bool AchievementManager::LoadMetadataFile(const std::filesystem::path& path) {
+   try {
+-    auto table = toml::parse_file(path.string());
++    std::ifstream stream(path, std::ios::binary);
++    auto table = toml::parse(stream, rex::path_to_utf8(path));
+     const auto* entries = table["achievements"].as_array();
+     if (!entries) {
+-      REXSYS_WARN("Achievement metadata has no [[achievements]] entries: {}", path.string());
++      REXSYS_WARN("Achievement metadata has no [[achievements]] entries: {}", rex::path_to_utf8(path));
+       return false;
+     }
+ 
+@@ -104,10 +106,10 @@ bool AchievementManager::LoadMetadataFile(const std::filesystem::path& path) {
+         ++loaded;
+       }
+     }
+-    REXSYS_DEBUG("Loaded achievements.toml: {} entries from {}", loaded, path.string());
++    REXSYS_DEBUG("Loaded achievements.toml: {} entries from {}", loaded, rex::path_to_utf8(path));
+     return true;
+   } catch (const toml::parse_error& error) {
+-    REXSYS_WARN("Failed to parse {}: {}", path.string(), error.what());
++    REXSYS_WARN("Failed to parse {}: {}", rex::path_to_utf8(path), error.what());
+     return false;
+   }
+ }
+@@ -228,7 +230,8 @@ void AchievementManager::LoadUnlockState() {
+ 
+   bool migrated = false;
+   try {
+-    auto table = toml::parse_file(save_path.string());
++    std::ifstream stream(save_path, std::ios::binary);
++    auto table = toml::parse(stream, rex::path_to_utf8(save_path));
+     std::lock_guard lock(mutex_);
+     if (const auto* unlocked = table["unlocked"].as_table()) {
+       for (const auto& [key, value] : *unlocked) {
+@@ -253,15 +256,15 @@ void AchievementManager::LoadUnlockState() {
+     }
+     if (!unlocked_achievements_.empty()) {
+       REXSYS_DEBUG("Loaded {} persisted unlocks from {}", unlocked_achievements_.size(),
+-                   save_path.string());
++                   rex::path_to_utf8(save_path));
+     }
+   } catch (const std::exception& error) {
+-    REXSYS_WARN("Failed to parse unlock save {}: {}", save_path.string(), error.what());
++    REXSYS_WARN("Failed to parse unlock save {}: {}", rex::path_to_utf8(save_path), error.what());
+     return;
+   }
+ 
+   if (migrated) {
+-    REXSYS_DEBUG("Migrating legacy achievement save format: {}", save_path.string());
++    REXSYS_DEBUG("Migrating legacy achievement save format: {}", rex::path_to_utf8(save_path));
+     SaveUnlockState();
+   }
+ }
+@@ -285,7 +288,7 @@ void AchievementManager::SaveUnlockState() const {
+     std::filesystem::create_directories(save_path.parent_path(), ec);
+   }
+   if (ec) {
+-    REXSYS_WARN("Achievement save: cannot create {}: {}", save_path.parent_path().string(),
++    REXSYS_WARN("Achievement save: cannot create {}: {}", rex::path_to_utf8(save_path.parent_path()),
+                 ec.message());
+     return;
+   }
+@@ -300,7 +303,7 @@ void AchievementManager::SaveUnlockState() const {
+   {
+     std::ofstream file(temporary_path, std::ios::binary);
+     if (!file) {
+-      REXSYS_WARN("Achievement save: cannot write {}", temporary_path.string());
++      REXSYS_WARN("Achievement save: cannot write {}", rex::path_to_utf8(temporary_path));
+       return;
+     }
+     file << content;
+diff --git a/src/system/gpu_plugin_loader.cpp b/src/system/gpu_plugin_loader.cpp
+index 754fa138..01479d1a 100644
+--- a/src/system/gpu_plugin_loader.cpp
++++ b/src/system/gpu_plugin_loader.cpp
+@@ -60,13 +60,13 @@ std::unique_ptr<IGraphicsSystem> LoadGpuPlugin(std::string_view name, std::strin
+     REXSYS_ERROR(
+         "GPU plugin '{}' not found at {}. Stage it next to the executable "
+         "(GPU_PLUGINS {} in rexglue_configure_target).",
+-        name, path.string(), name);
++        name, rex::path_to_utf8(path), name);
+     return nullptr;
+   }
+ 
+   platform::DynamicLibrary library;
+   if (!library.Load(path, platform::SymbolResolution::kImmediate)) {
+-    REXSYS_ERROR("GPU plugin '{}' failed to load: {}", name, path.string());
++    REXSYS_ERROR("GPU plugin '{}' failed to load: {}", name, rex::path_to_utf8(path));
+     return nullptr;
+   }
+ 
+@@ -74,14 +74,14 @@ std::unique_ptr<IGraphicsSystem> LoadGpuPlugin(std::string_view name, std::strin
+   auto create_fn = library.GetSymbol<GpuCreateFn>(kGpuCreateSymbol);
+   if (!abi_version_fn || !create_fn) {
+     REXSYS_ERROR("GPU plugin '{}' is not a rexglue GPU plugin (missing {} / {} exports): {}", name,
+-                 kGpuAbiVersionSymbol, kGpuCreateSymbol, path.string());
++                 kGpuAbiVersionSymbol, kGpuCreateSymbol, rex::path_to_utf8(path));
+     return nullptr;
+   }
+ 
+   uint32_t plugin_abi = abi_version_fn();
+   if (plugin_abi != kGpuPluginAbiVersion) {
+     REXSYS_ERROR("GPU plugin '{}' has ABI version {}, host expects {}: {}", name, plugin_abi,
+-                 kGpuPluginAbiVersion, path.string());
++                 kGpuPluginAbiVersion, rex::path_to_utf8(path));
+     return nullptr;
+   }
+ 
+@@ -98,7 +98,7 @@ std::unique_ptr<IGraphicsSystem> LoadGpuPlugin(std::string_view name, std::strin
+   }
+ 
+   LoadedPlugins().push_back(std::move(library));
+-  REXSYS_DEBUG("GPU plugin '{}' loaded ({})", name, path.filename().string());
++  REXSYS_DEBUG("GPU plugin '{}' loaded ({})", name, rex::path_to_utf8(path.filename()));
+   return std::unique_ptr<IGraphicsSystem>(graphics_system);
+ }
+ 
+diff --git a/src/system/runtime.cpp b/src/system/runtime.cpp
+index c10694c8..3c552533 100644
+--- a/src/system/runtime.cpp
++++ b/src/system/runtime.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <rex/chrono/clock.h>
+ #include <rex/cvar.h>
++#include <rex/filesystem.h>
+ #include <rex/filesystem/devices/host_path_device.h>
+ #include <rex/filesystem/devices/null_device.h>
+ #include <rex/filesystem/vfs.h>
+@@ -299,7 +300,7 @@ bool Runtime::SetupVfs() {
+ 
+   auto abs_game_root = std::filesystem::absolute(game_data_root_);
+   if (!std::filesystem::exists(abs_game_root)) {
+-    REXSYS_ERROR("Runtime::SetupVfs: game_data_root does not exist: {}", abs_game_root.string());
++    REXSYS_ERROR("Runtime::SetupVfs: game_data_root does not exist: {}", rex::path_to_utf8(abs_game_root));
+     return false;
+   }
+ 
+@@ -315,7 +316,7 @@ bool Runtime::SetupVfs() {
+     REXSYS_ERROR("Runtime::SetupVfs: Failed to register host path device");
+     return false;
+   }
+-  REXSYS_DEBUG("  Mounted {} at {}", abs_game_root.string(), mount_path);
++  REXSYS_DEBUG("  Mounted {} at {}", rex::path_to_utf8(abs_game_root), mount_path);
+ 
+   // Register symbolic links for game: and D:
+   file_system_->RegisterSymbolicLink("game:", mount_path);
+@@ -331,7 +332,7 @@ bool Runtime::SetupVfs() {
+           std::make_unique<rex::filesystem::HostPathDevice>(update_mount, abs_update_root, true);
+       if (update_device->Initialize() && file_system_->RegisterDevice(std::move(update_device))) {
+         file_system_->RegisterSymbolicLink("update:", update_mount);
+-        REXSYS_DEBUG("  Mounted {} at update:", abs_update_root.string());
++        REXSYS_DEBUG("  Mounted {} at update:", rex::path_to_utf8(abs_update_root));
+       }
+     }
+   }
+diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
+index b94fe9e4..1859b2bc 100644
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -108,14 +108,14 @@ bool ReXApp::SetupEnvironment() {
+   std::filesystem::path game_dir;
+   std::string game_data_cvar = REXCVAR_GET(game_data_root);
+   if (!game_data_cvar.empty()) {
+-    game_dir = game_data_cvar;
++    game_dir = rex::to_path(game_data_cvar);
+   }
+ 
+   // User data: cvar override, or platform user directory
+   std::filesystem::path user_dir;
+   std::string user_data_cvar = REXCVAR_GET(user_data_root);
+   if (!user_data_cvar.empty()) {
+-    user_dir = user_data_cvar;
++    user_dir = rex::to_path(user_data_cvar);
+   } else {
+     user_dir = rex::filesystem::GetUserFolder() / GetName();
+   }
+@@ -124,14 +124,14 @@ bool ReXApp::SetupEnvironment() {
+   std::filesystem::path update_dir;
+   std::string update_data_cvar = REXCVAR_GET(update_data_root);
+   if (!update_data_cvar.empty()) {
+-    update_dir = update_data_cvar;
++    update_dir = rex::to_path(update_data_cvar);
+   }
+ 
+   // Cache: cvar override, or user_dir/cache
+   std::filesystem::path cache_dir;
+   std::string cache_root_cvar = REXCVAR_GET(cache_root);
+   if (!cache_root_cvar.empty()) {
+-    cache_dir = cache_root_cvar;
++    cache_dir = rex::to_path(cache_root_cvar);
+   } else {
+     cache_dir = user_dir / "cache";
+   }
+@@ -139,7 +139,7 @@ bool ReXApp::SetupEnvironment() {
+   std::filesystem::path metadata_dir;
+   std::string metadata_root_cvar = REXCVAR_GET(metadata_root);
+   if (!metadata_root_cvar.empty()) {
+-    metadata_dir = metadata_root_cvar;
++    metadata_dir = rex::to_path(metadata_root_cvar);
+   }
+ 
+   PathConfig path_config{game_dir,  user_dir,     update_dir,
+@@ -168,7 +168,7 @@ bool ReXApp::SetupEnvironment() {
+                                         log_level_str, category_levels);
+   if (log_file_cvar.empty()) {
+     log_config.app_name = std::string(GetName());
+-    log_config.log_dir = (exe_dir / "logs").string();
++    log_config.log_dir = rex::path_to_utf8(exe_dir / "logs");
+   }
+ 
+   rex::InitLogging(log_config);
+@@ -180,21 +180,21 @@ bool ReXApp::SetupEnvironment() {
+   OnPostInitLogging();
+ 
+   if (std::filesystem::exists(config_path_))
+-    REXLOG_DEBUG("Loaded config: {}", config_path_.filename().string());
++    REXLOG_DEBUG("Loaded config: {}", rex::path_to_utf8(config_path_.filename()));
+ 
+   REXLOG_DEBUG("{} starting", GetName());
+   if (!game_data_root_.empty()) {
+-    REXLOG_DEBUG("  Game directory: {}", game_data_root_.string());
++    REXLOG_DEBUG("  Game directory: {}", rex::path_to_utf8(game_data_root_));
+   }
+   if (!user_data_root_.empty()) {
+-    REXLOG_DEBUG("  User data:      {}", user_data_root_.string());
++    REXLOG_DEBUG("  User data:      {}", rex::path_to_utf8(user_data_root_));
+   }
+   if (!update_data_root_.empty()) {
+-    REXLOG_DEBUG("  Update data:    {}", update_data_root_.string());
++    REXLOG_DEBUG("  Update data:    {}", rex::path_to_utf8(update_data_root_));
+   }
+-  REXLOG_DEBUG("  Cache root:     {}", cache_root_.string());
++  REXLOG_DEBUG("  Cache root:     {}", rex::path_to_utf8(cache_root_));
+   if (!metadata_root_.empty()) {
+-    REXLOG_DEBUG("  Metadata root:  {}", metadata_root_.string());
++    REXLOG_DEBUG("  Metadata root:  {}", rex::path_to_utf8(metadata_root_));
+   }
+ 
+   return true;
+@@ -208,7 +208,7 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
+     return false;
+   }
+   if (!std::filesystem::is_directory(paths.game_data_root)) {
+-    auto msg = fmt::format("--game_data_root does not exist: {}", paths.game_data_root.string());
++    auto msg = fmt::format("--game_data_root does not exist: {}", rex::path_to_utf8(paths.game_data_root));
+     REXLOG_ERROR("{}", msg);
+     rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
+     return false;
+@@ -276,7 +276,7 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
+     std::replace(host_tail.begin(), host_tail.end(), '\\', '/');
+     auto xex_host = paths.game_data_root / host_tail;
+     if (!std::filesystem::is_regular_file(xex_host)) {
+-      auto msg = fmt::format("Entrypoint XEX not found: {}", xex_host.string());
++      auto msg = fmt::format("Entrypoint XEX not found: {}", rex::path_to_utf8(xex_host));
+       REXLOG_ERROR("{}", msg);
+       rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
+       return false;
+diff --git a/thirdparty/CMakeLists.txt b/thirdparty/CMakeLists.txt
+index f102b56a..2b922c34 100644
+--- a/thirdparty/CMakeLists.txt
++++ b/thirdparty/CMakeLists.txt
+@@ -177,6 +177,10 @@ set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
+ set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+ set(SPDLOG_BUILD_BENCH OFF CACHE BOOL "" FORCE)
+ set(SPDLOG_INSTALL ON CACHE BOOL "" FORCE)
++# Windows: log files open by their wide name, so a log folder with non-ANSI characters (a Cyrillic user name) works.
++if(WIN32)
++  set(SPDLOG_WCHAR_FILENAMES ON CACHE BOOL "" FORCE)
++endif()
+ add_subdirectory(spdlog)
+ target_compile_options(spdlog PRIVATE -w)
+ 

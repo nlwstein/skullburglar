@@ -11,6 +11,7 @@
 // (bots::ios::DataDir), which an app update keeps, so reinstalling or re-signing the same bundle id doesn't ask for them
 // again. The import only runs while they are missing.
 
+#include "../path_utf8.h"
 #include "ios/ios_app.h"
 #include "setup/app_paths.h"
 #include "setup/iso_extract.h"
@@ -424,7 +425,7 @@ void StartFile(BotsUploadRequest* request, NSDictionary<NSString*, NSString*>* q
   }
   std::error_code ec;
   fs::create_directories(path.parent_path(), ec);
-  request.target = path.string();
+  request.target = bots::PathUtf8(path);
   request.fd = open((request.target + ".part").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
   if (request.fd < 0) {
     RespondText(connection, 507, @"Could not store a game file on the device.");
@@ -462,7 +463,7 @@ void Finish(nw_connection_t connection) {
     RespondText(connection, 507, @"Could not finish the import on the device.");
     return;
   }
-  REXLOG_INFO("import: game files installed in {}", g_game_dir.string());
+  REXLOG_INFO("import: game files installed in {}", bots::PathUtf8(g_game_dir));
   g_status.Set(State::kDone, 1, 1, @"Installed. Starting the game…");
   RespondText(connection, 200, @"Installed.");
 }
@@ -916,7 +917,7 @@ void ImportGame(const std::filesystem::path& game_dir, std::function<void()> don
   window.windowLevel = UIWindowLevelNormal + 2;  // over the game's window
   window.rootViewController = controller;
   [window makeKeyAndVisible];
-  REXLOG_INFO("import: no game files in {}, waiting for a disc image", game_dir.string());
+  REXLOG_INFO("import: no game files in {}, waiting for a disc image", bots::PathUtf8(game_dir));
 
   __block NSTimer* timer = nil;
   __block int linger = 0;

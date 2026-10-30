@@ -57,4 +57,13 @@ std::string ConfigString(const std::filesystem::path& config_path, const std::st
 std::string SetConfigString(const std::filesystem::path& config_path, const std::string& key,
                             const std::string& value);
 
+// A folder in bots.toml. Text that is valid UTF-8 is stored under `key` as it is. A Linux folder name can hold bytes
+// that aren't UTF-8 (a Latin-1 name from an old SD card), and toml++ would silently change them on save, so such a
+// path goes under `<key>_hex` as the hex of its bytes instead. ConfigPath reads either; SetConfigPath removes both
+// when `path` is empty.
+std::filesystem::path ConfigPath(const std::filesystem::path& config_path, const std::string& key);
+bool ConfigHasPath(const std::filesystem::path& config_path, const std::string& key);
+std::string SetConfigPath(const std::filesystem::path& config_path, const std::string& key,
+                          const std::filesystem::path& path);
+
 }  // namespace bots::setup
