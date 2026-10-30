@@ -2,6 +2,7 @@
 // app (a macOS bundle, an AppImage, an unpacked tarball folder, a Windows install folder) whose only job is to update
 // itself. tools/update_probe_test.sh builds it twice (old and new version), serves a fake releases file and runs it.
 //   update_probe           open: records its version in $PROBE_MARKER (the "game started" sign) and exits
+//   update_probe clean     run CleanUpOldUpdates() (the temp-folder sweep the launcher does at start)
 //   update_probe update    check the releases file, install a newer version if there is one, print what happened
 // Built with the same defines as a release (BOTS_VERSION, BOTS_UPDATE_URL, BOTS_UPDATE_PUBKEY), plus
 // BOTS_ALLOW_HTTP_UPDATE_URL for the local test server (tools/update_probe_test.sh makes a throwaway key):
@@ -30,6 +31,12 @@ int main(int argc, char** argv) {
       std::this_thread::sleep_for(std::chrono::seconds(60));
       return 0;
     }
+    // clean: what the launcher does on every start, run on its own: remove update leftovers from the temp folder.
+    if (!std::strcmp(argv[i], "clean")) {
+      CleanUpOldUpdates();
+      std::printf("cleaned\n");
+      return 0;
+    }
     // note: print what the launcher would say about an update that never finished.
     if (!std::strcmp(argv[i], "note")) {
       std::printf("note: %s\n", TakeFailedUpdateNote().c_str());
@@ -37,7 +44,7 @@ int main(int argc, char** argv) {
     }
   }
   if (const char* marker = std::getenv("PROBE_MARKER"); marker && *marker && !update) {
-    std::ofstream(marker, std::ios::app) << "started " << AppVersion() << " ran as " << argv[0] << ", install at " << SelfExeFolder().string() << " (install kind "
+    std::ofstream(marker, std::ios::app) << "started " << AppVersion() << " ran as " << argv[0] << ", install at " << PathToUtf8(SelfExeFolder()) << " (install kind "
                                          << int(CurrentInstallKind()) << ")\n";
     return 0;
   }

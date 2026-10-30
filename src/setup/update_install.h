@@ -35,6 +35,10 @@ InstallKind CurrentInstallKind();
 // The folder holding the running executable (empty when unknown).
 std::filesystem::path SelfExeFolder();
 
+// A path as UTF-8 text. On Windows path::string() goes through the ANSI code page and throws for a name it can't hold, so
+// use this wherever a path becomes text (a message, a comparison).
+std::string PathToUtf8(const std::filesystem::path& p);
+
 // What InstallUpdateAt replaces: the app bundle (macOS), the AppImage file (Linux), else the folder holding the
 // executable (Windows). Empty for kNone.
 std::filesystem::path InstallTarget(InstallKind kind);
