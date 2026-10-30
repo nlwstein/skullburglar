@@ -6,6 +6,7 @@
 // sites pass a constant (C1Character/C1VehicleBase/C1GunTurret: IsCheatActive(2)), so the cheat id
 // is peeked from the bytecode before the original runs: EX_IntZero 0x25, EX_IntOne 0x26,
 // EX_IntConstByte 0x2C <byte>.
+#include "path_utf8.h"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -1408,7 +1409,7 @@ const std::string& QuitText() {
       for (size_t i = at + kKey.size(); i < data.size() && uint8_t(data[i]) >= 0x20 && value.size() < 40; ++i)
         value.push_back(data[i]);
     }
-    REXLOG_INFO("main menu: Quit label from {}: {}", file.filename().string(), value.empty() ? "(not found)" : "found");
+    REXLOG_INFO("main menu: Quit label from {}: {}", bots::PathUtf8(file.filename()), value.empty() ? "(not found)" : "found");
     return value.empty() ? std::string("Quit") : value;
   }();
   return text;

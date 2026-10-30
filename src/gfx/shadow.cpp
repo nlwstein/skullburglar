@@ -9,6 +9,7 @@
 //   BOTS_GFX_SHADOW_LIVE=1    render every frame with one persistent renderer instead, guest memory tracked
 //                             (vk/memory_sync.h): surfaces, textures and resolves carry over between frames as they
 //                             will after the cutover. Samples still compare every BOTS_GFX_SHADOW seconds.
+#include "../path_utf8.h"
 #include "shadow.h"
 
 #include <algorithm>
@@ -204,8 +205,8 @@ void ShadowCompare(uint64_t frame, const rex::ui::RawImage& reference, const uin
     std::error_code ec;
     std::filesystem::create_directories(s.dir, ec);
     const auto base = std::filesystem::path(s.dir) / ("f" + std::to_string(frame));
-    WritePpm(base.string() + "-native.ppm", s.image.data(), s.width, s.height, size_t(s.width) * 3, 3);
-    WritePpm(base.string() + "-reference.ppm", reference.data.data(), reference.width, reference.height,
+    WritePpm(bots::PathUtf8(base) + "-native.ppm", s.image.data(), s.width, s.height, size_t(s.width) * 3, 3);
+    WritePpm(bots::PathUtf8(base) + "-reference.ppm", reference.data.data(), reference.width, reference.height,
              reference.stride, 4);
   }
   s.frame = UINT64_MAX;

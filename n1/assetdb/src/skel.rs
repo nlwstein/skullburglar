@@ -65,7 +65,7 @@ impl AssetDb {
     }
 
     fn load_skeletal(&self, path: &str) -> Result<Option<Arc<SkelAsset>>> {
-        let Some((pkg, idx)) = self.locate(path, false)? else {
+        let Some((pkg, idx)) = self.locate(path, false, Some("SkeletalMesh"))? else {
             return Ok(None);
         };
         if pkg.class_name(idx) != "SkeletalMesh" {

@@ -2127,8 +2127,14 @@ impl Renderer {
             let env_spec = self.knobs.env_spec && self.debug_bits & 512 == 0;
             // B-261 flag bit 4: tangent-space ReflectionVector (debug bit 12, 4096, off).
             let refl_ts = self.knobs.refl_ts && self.debug_bits & 4096 == 0;
-            globals.amb_up[3] =
-                (post as u32 | (lv as u32) << 1 | (spec as u32) << 2 | (env_spec as u32) << 3 | (refl_ts as u32) << 4) as f32;
+            // B-277 flag bit 5: tangent-space view for a Fresnel's Normal input (debug bit 13, 8192, off).
+            let fresnel_ts = self.knobs.fresnel_ts && self.debug_bits & 8192 == 0;
+            globals.amb_up[3] = (post as u32
+                | (lv as u32) << 1
+                | (spec as u32) << 2
+                | (env_spec as u32) << 3
+                | (refl_ts as u32) << 4
+                | (fresnel_ts as u32) << 5) as f32;
             put(b, GLOBALS_AT, bytemuck::bytes_of(&globals));
             for (k, blk) in blocks.iter().enumerate() {
                 put(b, POST_AT + 256 * k as u64, bytemuck::cast_slice(blk));

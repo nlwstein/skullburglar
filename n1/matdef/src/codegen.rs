@@ -226,8 +226,14 @@ pub fn compile_gamma(
             }
             Node::Fresnel { exp, n: nn } => {
                 let k = p([*exp, 0.0, 0.0, 0.0]);
-                let nv = nn.map(|j| format!("normalize(n{j}.xyz)")).unwrap_or("fi.nrm".into());
-                (format!("vec4<f32>(pow(1.0 - max(dot({nv}, fi.view), 0.0), mp.c[{k}].x))"), 1)
+                // B-277: UE3's Normal input is tangent space, so it pairs with the tangent-space view vector (the
+                // way `ReflVec` pairs it with `view_ts`); the world normal pairs with the world view. Dotting a
+                // tangent-space normal with the world view gave a near-constant term (a launcher drawn flat white).
+                let dot = match nn {
+                    Some(j) => format!("select(dot(normalize(n{j}.xyz), fi.view), dot(normalize(n{j}.xyz), fi.view_ts), fi.fresnel_ts)"),
+                    None => "dot(fi.nrm, fi.view)".to_string(),
+                };
+                (format!("vec4<f32>(pow(1.0 - max({dot}, 0.0), mp.c[{k}].x))"), 1)
             }
             Node::WorldPos => ("vec4<f32>(fi.wpos, 1.0)".into(), 3),
             Node::PixelDepth => ("vec4<f32>(fi.depth)".into(), 1),
@@ -331,5 +337,21 @@ mod refl_tests {
         assert!(at("let n1:") < at("let n0:"), "normal first:\n{}", c.body);
         assert!(c.body.contains("reflect(-fi.view_ts, normalize(n1.xyz))"));
         assert!(c.body.contains("fi.refl_ts"));
+    }
+
+    /// B-277: a Fresnel with a Normal input pairs it with the tangent-space view behind a flag; without one it keeps
+    /// the world normal and the world view.
+    #[test]
+    fn fresnel_with_a_normal_input_uses_the_tangent_space_view() {
+        let mut def = MatDef {
+            nodes: vec![Node::Const { v: [0.0, 0.0, 1.0, 0.0], n: 3 }, Node::Fresnel { exp: 6.0, n: Some(0) }],
+            diffuse: Some(1),
+            ..Default::default()
+        };
+        let c = compile(&def, &[]);
+        assert!(c.body.contains("dot(normalize(n0.xyz), fi.view_ts), fi.fresnel_ts"), "{}", c.body);
+        def.nodes[1] = Node::Fresnel { exp: 6.0, n: None };
+        let c = compile(&def, &[]);
+        assert!(c.body.contains("dot(fi.nrm, fi.view)") && !c.body.contains("view_ts"), "{}", c.body);
     }
 }

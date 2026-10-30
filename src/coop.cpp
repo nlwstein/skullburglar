@@ -1,3 +1,4 @@
+#include "path_utf8.h"
 #include "coop.h"
 #include "script_input.h"
 
@@ -84,7 +85,7 @@ std::filesystem::path PlayerTwoPath(std::filesystem::path p) {
   p = p.lexically_normal();
   if (!p.has_filename()) p = p.parent_path();
   std::filesystem::path out = p;
-  out.replace_filename(p.stem().string() + "-p2" + p.extension().string());
+  out.replace_filename(bots::PathFromUtf8(bots::PathUtf8(p.stem()) + "-p2" + bots::PathUtf8(p.extension())));
   return out;
 }
 
@@ -95,7 +96,7 @@ std::vector<std::string> PlayerTwoEnvironment() {
 #if defined(_WIN32)
   if (wchar_t* block = GetEnvironmentStringsW()) {
     for (wchar_t* e = block; *e; e += wcslen(e) + 1) {
-      in.push_back(std::filesystem::path(e).string());
+      in.push_back(bots::PathUtf8(std::filesystem::path(e)));  // wide to UTF-8
     }
     FreeEnvironmentStringsW(block);
   }
@@ -121,7 +122,7 @@ bool Spawn(const std::vector<std::string>& args, const std::vector<std::string>&
 #if defined(_WIN32)
   std::wstring cmdline;
   for (const auto& a : args) {
-    std::wstring w = std::filesystem::path(a).wstring();
+    std::wstring w = bots::PathFromUtf8(a).wstring();  // args are UTF-8
     if (!cmdline.empty()) cmdline += L' ';
     cmdline += L'"';
     for (size_t i = 0; i < w.size(); ++i) {  // CommandLineToArgvW quoting
@@ -141,7 +142,7 @@ bool Spawn(const std::vector<std::string>& args, const std::vector<std::string>&
     cmdline += L'"';
   }
   std::wstring block;
-  for (const auto& kv : env) block += std::filesystem::path(kv).wstring() + L'\0';
+  for (const auto& kv : env) block += bots::PathFromUtf8(kv).wstring() + L'\0';
   block += L'\0';
   STARTUPINFOW si{};
   si.cb = sizeof(si);
@@ -289,7 +290,7 @@ void SpawnPlayerTwo(const std::filesystem::path& game_data_root,
                     const std::filesystem::path& cache_root) {
   if (CoopPlayer() != 1) return;
   namespace fs = std::filesystem;
-  std::vector<std::string> args = {rex::filesystem::GetExecutablePath().string()};
+  std::vector<std::string> args = {bots::PathUtf8(rex::filesystem::GetExecutablePath())};
   // Player 1's settings (command line, bots.toml, setup window) carry over, except the per-player
   // ones; player 2's user folder has no bots.toml of its own. REX_* env values are inherited.
   static const std::set<std::string> kPerPlayer = {
@@ -312,11 +313,11 @@ void SpawnPlayerTwo(const std::filesystem::path& game_data_root,
   }
   args.push_back("--coop=true");
   args.push_back("--coop_player=2");
-  args.push_back("--game_data_root=" + game_data_root.string());
-  args.push_back("--user_data_root=" + user2.string());
-  args.push_back("--cache_root=" + cache2.string());
+  args.push_back("--game_data_root=" + bots::PathUtf8(game_data_root));
+  args.push_back("--user_data_root=" + bots::PathUtf8(user2));
+  args.push_back("--cache_root=" + bots::PathUtf8(cache2));
   if (std::string log = rex::cvar::GetFlagByName("log_file"); !log.empty()) {
-    args.push_back("--log_file=" + PlayerTwoPath(log).string());
+    args.push_back("--log_file=" + bots::PathUtf8(PlayerTwoPath(bots::PathFromUtf8(log))));
   }
   std::string joined;
   for (const auto& a : args) joined += " " + a;

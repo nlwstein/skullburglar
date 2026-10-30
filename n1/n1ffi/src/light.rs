@@ -394,6 +394,8 @@ pub struct Knobs {
     /// B-261: a material's ReflectionVector is the tangent-space reflection about its Normal output, as the port's shaders
     /// compute it (`BOTS_N1_REFL_TS=0`: the old world-space reflection about the vertex normal).
     pub refl_ts: bool,
+    /// B-277: a Fresnel with a Normal input uses the tangent-space view vector (`BOTS_N1_FRESNEL_TS=0`: the world-space view).
+    pub fresnel_ts: bool,
     /// Clamp mesh particles' instance colour rgb to 1 like the original's 8-bit colour (B-246). `BOTS_N1_MESH_VCOL_CLAMP=0` off.
     pub mesh_vcol_clamp: bool,
     /// B-264: the vertex-light buffer grows by a GPU copy of the old words (the CPU writes only the new ones) and syncs on
@@ -451,6 +453,7 @@ impl Knobs {
             mesh_lit: env_flag("BOTS_N1_MESH_LIT", true),
             mesh_vcol_clamp: env_flag("BOTS_N1_MESH_VCOL_CLAMP", true),
             refl_ts: env_flag("BOTS_N1_REFL_TS", true),
+            fresnel_ts: env_flag("BOTS_N1_FRESNEL_TS", true),
             light_grow: env_flag("BOTS_N1_LIGHT_GROW", true),
             lod_bones: env_flag("BOTS_N1_LOD_BONES", true),
         }

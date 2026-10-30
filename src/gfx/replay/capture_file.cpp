@@ -1,3 +1,4 @@
+#include "../../path_utf8.h"
 #include "capture_file.h"
 
 #include <sys/mman.h>
@@ -12,7 +13,7 @@ namespace {
 
 std::vector<uint8_t> ReadAll(const std::filesystem::path& path) {
   std::ifstream f(path, std::ios::binary);
-  if (!f) throw std::runtime_error("cannot open " + path.string());
+  if (!f) throw std::runtime_error("cannot open " + bots::PathUtf8(path));
   return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
 }
 

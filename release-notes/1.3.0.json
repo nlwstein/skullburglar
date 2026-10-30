@@ -1,0 +1,7 @@
+[
+ "The launcher no longer crashes at start when your user folder or the game folder has letters outside your Windows language (for example a Cyrillic \"Documents\" folder on an English Windows). Settings, saves and logs are found again in those folders, on Windows, macOS and Linux.",
+ "\"Update now\" also works when the game is installed in a folder with such a name on Windows.",
+ "\"Update now\" now works for the Linux .tar.xz download too (it already did for the AppImage). Installs from 1.2.0 or older need this one update downloaded by hand.",
+ "In the Carter boss fight, the new renderer draws the helicopter again; after a long session it could go invisible.",
+ "The Grenade Launcher, the dual pistols and other shiny weapons and surfaces no longer draw flat white in the new renderer."
+]

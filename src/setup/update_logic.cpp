@@ -335,7 +335,7 @@ bool MacAppNeedsMove(const std::string& exe_dir) {
 }
 
 InstallKind InstallKindFor(const std::string& os, const std::string& exe_dir, const std::string& appimage,
-                           bool windows_setup_install) {
+                           bool windows_setup_install, bool linux_tarball_marker) {
   if (os == "windows") return exe_dir.empty() || !windows_setup_install ? InstallKind::kNone : InstallKind::kWindowsSetup;
   if (os == "macos") {
     std::filesystem::path d(exe_dir);
@@ -345,9 +345,61 @@ InstallKind InstallKindFor(const std::string& os, const std::string& exe_dir, co
     if (MacAppNeedsMove(exe_dir)) return InstallKind::kNone;
     return InstallKind::kMacBundle;
   }
-  // An unpacked tarball never updates itself: it has no marker of what belongs to the package, so it keeps "Download it".
-  if (os == "linux") return appimage.empty() ? InstallKind::kNone : InstallKind::kLinuxAppImage;
+  // An AppImage first; an unpacked tarball only when it has the marker the package ships (never a build tree).
+  if (os == "linux") {
+    if (!appimage.empty()) return InstallKind::kLinuxAppImage;
+    return linux_tarball_marker && !exe_dir.empty() ? InstallKind::kLinuxTarball : InstallKind::kNone;
+  }
   return InstallKind::kNone;
+}
+
+std::string CheckTarMembers(const std::string& names, const std::string& verbose, std::string* top) {
+  auto lines = [](const std::string& text) {
+    std::vector<std::string> v;
+    size_t i = 0;
+    while (i < text.size()) {
+      size_t e = text.find('\n', i);
+      if (e == std::string::npos) e = text.size();
+      v.push_back(text.substr(i, e - i));
+      i = e + 1;
+    }
+    return v;
+  };
+  auto has_dotdot = [](const std::string& path) {
+    size_t i = 0;
+    while (i <= path.size()) {
+      size_t e = path.find('/', i);
+      if (e == std::string::npos) e = path.size();
+      if (path.compare(i, e - i, "..") == 0) return true;
+      i = e + 1;
+    }
+    return false;
+  };
+  const std::vector<std::string> n = lines(names), v = lines(verbose);
+  if (n.empty()) return "the package is empty";
+  if (n.size() != v.size()) return "the package's file list is unreadable";
+  std::string first;
+  for (size_t i = 0; i < n.size(); ++i) {
+    const std::string& name = n[i];
+    if (name.empty() || name[0] == '/') return "the package has an absolute path (" + name + ")";
+    if (has_dotdot(name)) return "the package has a path that climbs out of its folder (" + name + ")";
+    std::string head = name.substr(0, name.find('/'));
+    if (head == ".") return "the package has an unexpected path (" + name + ")";
+    if (i == 0) first = head;
+    if (head != first) return "the package has more than one top-level folder";
+    if (v[i].empty()) return "the package's file list is unreadable";
+    const char type = v[i][0];
+    if (type == 'l') {
+      size_t arrow = v[i].find(" -> ");
+      if (arrow == std::string::npos) return "the package's file list is unreadable";
+      const std::string target = v[i].substr(arrow + 4);  // conservative: everything after the first arrow
+      if (target.empty() || target[0] == '/' || has_dotdot(target)) return "the package has a link that leaves its folder (" + name + ")";
+    } else if (type != '-' && type != 'd') {
+      return "the package has a special file (" + name + ")";
+    }
+  }
+  if (top) *top = first;
+  return {};
 }
 
 const char* AssetKey(InstallKind kind) {
@@ -355,6 +407,7 @@ const char* AssetKey(InstallKind kind) {
     case InstallKind::kWindowsSetup: return "windows";
     case InstallKind::kMacBundle: return "macos";
     case InstallKind::kLinuxAppImage: return "linux_appimage";
+    case InstallKind::kLinuxTarball: return "linux_tar";
     default: return "";
   }
 }
