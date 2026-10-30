@@ -31,7 +31,12 @@ pub struct SkelInstance {
     /// B-265: the LOD the game posed this frame (`PredictedLODLevel`): only that LOD's `RequiredBones` are current in
     /// SpaceBases. 0 (or a LOD the mesh doesn't have): every bone is taken as given.
     pub lod: u32,
+    /// B-277(e): bit 0 = the owner has `bSpecialHighlight` (the engine outlines it in red).
+    pub flags: u32,
 }
+
+/// `SkelInstance::flags` bit 0 (`bots::outline::kSkelOutline` on the C++ side).
+pub const FLAG_OUTLINE: u32 = 1;
 
 enum State {
     Pending {
@@ -262,6 +267,7 @@ impl Skins {
                 bone_base: base,
                 env,
                 bounds: inst.bounds,
+                outline: inst.flags & FLAG_OUTLINE != 0,
             });
             for s in &asset.sections {
                 let over = if (s.material as u32) < inst.mat_count {
@@ -420,6 +426,7 @@ mod tests {
             bounds: [0.0; 4],
             env: NONE,
             lod,
+            flags: 0,
         }
     }
 

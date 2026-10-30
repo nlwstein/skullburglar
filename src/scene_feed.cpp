@@ -72,6 +72,7 @@
 #include <rex/ppc/context.h>
 
 #include "hybrid_state.h"
+#include "outline_flag.h"
 
 namespace bots::scenefeed {
 namespace {
@@ -182,7 +183,8 @@ struct Offsets {
   bool primitive = false, mesh = false, static_mesh = false, skeletal = false, particle = false, decal = false;
   Field scene_info, local_to_world, bounds, hidden_game, last_render_time, owner, cull_dist, cached_cull, materials,
       static_mesh_ref,
-      forced_lod, skeletal_mesh_ref, space_bases, predicted_lod, template_ref, decal_material;
+      forced_lod, skeletal_mesh_ref, space_bases, predicted_lod, template_ref, decal_material,
+      special_highlight;  // B-277(e): SkeletalMeshComponent.bSpecialHighlight (the enemy outline)
   bool actor = false;
   Field actor_hidden;
   bool skel_asset = false;
@@ -268,6 +270,7 @@ const ClassInfo& ClassifySlow(uint32_t cls) {
       o.skeletal_mesh_ref = FindProp(cls, "SkeletalMesh");
       o.space_bases = FindProp(cls, "SpaceBases");
       o.predicted_lod = FindProp(cls, "PredictedLODLevel");
+      o.special_highlight = FindProp(cls, "bSpecialHighlight");
       REXLOG_INFO("scenefeed: SkeletalMeshComponent SkeletalMesh +{:X} SpaceBases +{:X} PredictedLODLevel +{:X}",
                   o.skeletal_mesh_ref.offset, o.space_bases.offset, o.predicted_lod.offset);
     }
@@ -2828,6 +2831,10 @@ void Live(uint8_t* base) {
       }
       // B-265: the game updates only the current LOD's bones; n1 rebuilds the others (it draws LOD0).
       sk.lod = g_off.predicted_lod.ok() ? uint32_t(std::max(0, int32_t(U32(c + g_off.predicted_lod.offset)))) : 0;
+      // B-277(e): the engine outlines a pawn in red while its mesh component has bSpecialHighlight set.
+      sk.flags = g_off.special_highlight.ok()
+                     ? bots::outline::SkelFlags(U32(c + g_off.special_highlight.offset), g_off.special_highlight.mask)
+                     : 0;
       if (g_off.bounds.ok()) {  // FBoxSphereBounds {Origin, BoxExtent, SphereRadius}
         const uint32_t b = c + g_off.bounds.offset;
         sk.bounds[0] = F32(b), sk.bounds[1] = F32(b + 4), sk.bounds[2] = F32(b + 8), sk.bounds[3] = F32(b + 24);

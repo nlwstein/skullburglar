@@ -20,6 +20,9 @@ Scenario files: one step per line, # comments. Steps the driver handles itself:
   burst NAME COUNT [MS]                     COUNT consecutive frames into DIR/shots/NAME/; with MS a trace: every
                                             present in the TSV, a frame copied every MS (and after any 50 ms gap)
   dualshot NAME                             hybrid dual render (port + n1) into the game's BOTS_HYBRID_DUAL_DIR
+  bitedit CLASS OFFSET MASK clear|set|restore [NAME]   clear (or set) MASK in the word at OFFSET of every live CLASS object (whose name contains NAME); restore puts the words back
+                                            (a bool property, e.g. bSpecialHighlight: 0x1CC 0x40000000); `restore` sets the
+                                            bits it cleared back. Writes guest memory: for paused A/B captures only.
   sleep SECS                                (only for settling; never to wait for a state: use wait)
   mark NAME                                 a timestamp in the summary
   default VAR=VALUE                         ${VAR} when --set doesn't give it
@@ -37,6 +40,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shlex
 import socket
 import subprocess
@@ -330,6 +334,40 @@ class Run:
             subprocess.run(self.args.fetch_cmd.format(src=path, dst=os.path.join(self.out, "shots")), shell=True)
         return r
 
+    def step_bitedit(self, words):
+        """bitedit CLASS OFFSET MASK clear|set|restore [NAME_SUBSTRING] (see the module docstring)."""
+        cls, off, mask, mode = words[1], int(words[2], 0), int(words[3], 0), words[4]
+        sub = words[5] if len(words) > 5 else ""
+        if mode == "restore":
+            for addr, val in getattr(self, "bits", {}).items():
+                self.send(f"exec poke {addr:X} {val:X}")
+            time.sleep(1.0)
+            self.log(f"  bitedit: restored {len(getattr(self, 'bits', {}))} words")
+            self.bits = {}
+            return
+        objs = self.send(f"objs {cls} 2000").get("objs", [])
+        addrs = sorted({int(o.rsplit("@", 1)[1], 16) + off for o in objs if "Default__" not in o and sub in o})
+        for a in addrs:
+            self.send(f"exec words {a:X} 1 bitedit")
+        time.sleep(1.5)
+        lines = self.send(f"log {4 * len(addrs) + 50} bitedit").get("lines", [])
+        found = {}
+        for ln in lines:
+            m = re.search(r"bitedit ([0-9A-F]{8}) \+0 = ([0-9A-F]{8})", ln)
+            if m:
+                found[int(m.group(1), 16)] = int(m.group(2), 16)
+        self.bits = {}
+        for a, v in sorted(found.items()):
+            if mode == "set" and not v & mask:
+                self.bits[a] = v
+                self.send(f"exec poke {a:X} {v | mask:X}")
+            elif mode == "clear" and v & mask:
+                self.bits[a] = v
+                self.send(f"exec poke {a:X} {v & ~mask:X}")
+        time.sleep(1.0)
+        self.log(f"  bitedit: {len(addrs)} {cls} objects, {len(found)} read, {mode} {mask:#x} in "
+                 f"{len(self.bits)}: {[f'{a:08X}' for a in self.bits]}")
+
     def step_dismiss(self, words):
         btn = words[1] if len(words) > 1 and "=" not in words[1] else "B"
         opts = dict(w.split("=", 1) for w in words[1:] if "=" in w)
@@ -413,6 +451,8 @@ class Run:
         elif op == "dualshot":  # the pair goes to the game's BOTS_HYBRID_DUAL_DIR, named after the tag
             r = self.send(f"dualshot {words[1]}")
             self.log(f"dualshot {words[1]}: {'ok, into ' + str(r.get('dir')) if r.get('ok') else r.get('error')}")
+        elif op == "bitedit":
+            self.step_bitedit(words)
         elif op == "sleep":
             time.sleep(float(words[1]))
         elif op == "mark":
@@ -428,6 +468,9 @@ class Run:
             if text.startswith("wait"):
                 self.log(f"  waited {r.get('waited_s', 0):.1f}s, phase {get(r, 'status.phase')} "
                          f"map {get(r, 'status.game.map')}")
+            elif op in ("objs", "enemies", "inspect", "elems"):  # queries: keep the answer in driver.log
+                r = {k: v for k, v in r.items() if k != "status"}
+                self.log("  " + json.dumps(r, separators=(",", ":"))[:20000])
         self.steps.append({"step": line, "secs": round(time.time() - t, 2)})
 
     def run(self, lines):

@@ -76,6 +76,7 @@ typedef struct N1SkelInstance {
   uint32_t env;          /* n1_env handle (owner's DynamicLightEnvironmentComponent) or N1_NONE */
   uint32_t lod;          /* B-265: PredictedLODLevel. Bones outside that LOD's RequiredBones are stale in SpaceBases and
                             are rebuilt from the reference pose (0: all bones as given) */
+  uint32_t flags;        /* B-277(e): bit 0 = the owner has bSpecialHighlight, draw the red enemy outline */
 } N1SkelInstance;
 
 /* B-186 particles. One emitter instance (sprite or mesh) and its live particles. Rows are `row_floats` floats each,
