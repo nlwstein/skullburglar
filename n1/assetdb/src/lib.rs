@@ -426,7 +426,7 @@ impl AssetDb {
     /// The emitter at an object path of class `ParticleSpriteEmitter` / `ParticleMeshEmitter`: its material, screen
     /// alignment and type data.
     pub fn emitter_info(&self, path: &str) -> Option<ue3::particle::EmitterInfo> {
-        let (p, ei) = self.locate(path, false).ok().flatten()?;
+        let (p, ei) = self.locate(path, false, None).ok().flatten()?;
         ue3::particle::read_emitter(&p, ei).ok()
     }
 
@@ -481,7 +481,17 @@ impl AssetDb {
     }
 
     /// The package holding `path` (preferred packages first) and the export index there.
-    fn locate(&self, path: &str, textures: bool) -> Result<Option<(Arc<Package>, i32)>> {
+    ///
+    /// `want` is the export class the caller can use. A path can exist in several packages with different classes
+    /// (a level's StaticMesh copy of a vehicle that another package ships as a SkeletalMesh); the preferred set only
+    /// grows over a session, so without this an earlier level's wrong-class copy shadowed the right one.
+    /// With no class match the first hit is returned, as before (`ASSETDB_CLASSAWARE=0` forces that).
+    fn locate(
+        &self,
+        path: &str,
+        textures: bool,
+        want: Option<&str>,
+    ) -> Result<Option<(Arc<Package>, i32)>> {
         let map = if textures {
             &self.index.textures
         } else {
@@ -496,15 +506,20 @@ impl AssetDb {
             .map(|&i| &self.index.packages[i as usize].0)
             .collect();
         order.sort_by_key(|n| !pref.contains(*n));
-        for name in order {
-            let pkg = self.package(name)?;
-            let map = self.path_map(name, &pkg);
-            let found = map.get(&(textures, path.to_string())).copied();
-            if let Some(i) = found {
-                return Ok(Some((pkg, i)));
-            }
-        }
-        Ok(None)
+        let want = want.filter(|_| std::env::var_os("ASSETDB_CLASSAWARE").is_none_or(|v| v != "0"));
+        pick_class(
+            want,
+            order.into_iter().filter_map(|name| {
+                let found = (|| -> Result<Option<(Arc<Package>, i32)>> {
+                    let pkg = self.package(name)?;
+                    let map = self.path_map(name, &pkg);
+                    let i = map.get(&(textures, path.to_string())).copied();
+                    Ok(i.map(|i| (pkg, i)))
+                })();
+                found.transpose()
+            }),
+            |(pkg, i), class| pkg.class_name(*i) == class,
+        )
     }
 
     /// LOD0 of a StaticMesh by object path; `None` when no package has it (or it fails to parse).
@@ -532,7 +547,7 @@ impl AssetDb {
                 return Ok(Some(Arc::new(m)));
             }
         }
-        let Some((pkg, idx)) = self.locate(path, false)? else {
+        let Some((pkg, idx)) = self.locate(path, false, Some("StaticMesh"))? else {
             return Ok(None);
         };
         if pkg.class_name(idx) != "StaticMesh" {
@@ -609,7 +624,7 @@ impl AssetDb {
             return m.clone();
         }
         let mut mo = self.resolve_material(ue3::matir::base_path(path), 0);
-        mo.def = ue3::matir::build_by(path, |q| self.locate(q, false).ok().flatten()).map(Arc::new);
+        mo.def = ue3::matir::build_by(path, |q| self.locate(q, false, None).ok().flatten()).map(Arc::new);
         // A class the mesh/decal compiler can't express draws as a constant 0.0 (invisible or black surfaces): say so
         // once per material, so a gap shows up in the log instead of as a missing floor or a flat colour.
         // `BOTS_N1_MATLOG=0` silences it.
@@ -633,7 +648,7 @@ impl AssetDb {
 
     /// A material's named parameters (MIC overrides over the base material's defaults): see `ue3::matir::params_by`.
     pub fn material_params(&self, path: &str) -> Option<ue3::matir::NamedParams> {
-        ue3::matir::params_by(path, |q| self.locate(q, false).ok().flatten())
+        ue3::matir::params_by(path, |q| self.locate(q, false, None).ok().flatten())
     }
 
     /// N9's view of a material for particles: the expression graph (EmissiveColor, Opacity, OpacityMask,
@@ -645,7 +660,7 @@ impl AssetDb {
         let (base, mut params) = ue3::matir::path_overrides(path);
         let mut path = base.to_string();
         for _ in 0..6 {
-            let (p, ei) = self.locate(&path, false).ok().flatten()?;
+            let (p, ei) = self.locate(&path, false, None).ok().flatten()?;
             let class = p.class_name(ei).to_string();
             if class == "MaterialInstanceConstant" {
                 ue3::matir::instance_params(&p, ei, &mut params);
@@ -672,7 +687,7 @@ impl AssetDb {
 
     fn resolve_material(&self, path: &str, depth: u32) -> MaterialAsset {
         let mut mo = MaterialAsset::default();
-        let Ok(Some((p, ei))) = self.locate(path, false) else {
+        let Ok(Some((p, ei))) = self.locate(path, false, None) else {
             mo.class = "missing".into();
             return mo;
         };
@@ -726,7 +741,7 @@ impl AssetDb {
     /// What a texture's shader needs to know about it, from the export's properties alone (no mips are read):
     /// `None` when the path is unknown, the format is unsupported or the header doesn't parse.
     pub fn texture_meta(&self, path: &str) -> Option<TexMeta> {
-        let (pkg, idx) = self.locate(path, true).ok().flatten()?;
+        let (pkg, idx) = self.locate(path, true, None).ok().flatten()?;
         let (props, _) = ue3::props::object_props(&pkg, idx).ok()?;
         let name = |n: &str| -> String {
             props
@@ -800,7 +815,7 @@ impl AssetDb {
                 return Ok(Some(Arc::new(self.trim(t))));
             }
         }
-        let Some((pkg, idx)) = self.locate(path, true)? else {
+        let Some((pkg, idx)) = self.locate(path, true, None)? else {
             return Ok(None);
         };
         let ta = convert_texture(path, ue3::texture::read_texture(&pkg, idx, &self.tfc)?)?;
@@ -1028,7 +1043,7 @@ impl AssetDb {
         if let Some(m) = self.tree_mats.lock().unwrap().get(asset) {
             return m.clone();
         }
-        let found = match self.locate(asset, false) {
+        let found = match self.locate(asset, false, None) {
             Ok(Some((pkg, _))) => ue3::speedtree::tree_assets(&pkg)
                 .into_iter()
                 .find(|a| a.path == asset)
@@ -1551,4 +1566,67 @@ fn decode_light(b: &[u8]) -> Result<HashMap<String, Arc<Vec<[f32; 3]>>>> {
         out.insert(k, Arc::new(v));
     }
     Ok(out)
+}
+
+/// The first hit whose class is `want`, else the first hit (none wanted: the first). Hits are taken lazily, so packages
+/// after a match are never opened.
+fn pick_class<T>(
+    want: Option<&str>,
+    hits: impl Iterator<Item = Result<T>>,
+    class_is: impl Fn(&T, &str) -> bool,
+) -> Result<Option<T>> {
+    let mut first = None;
+    for hit in hits {
+        let hit = hit?;
+        if want.is_none_or(|w| class_is(&hit, w)) {
+            return Ok(Some(hit));
+        }
+        first.get_or_insert(hit);
+    }
+    Ok(first)
+}
+
+#[cfg(test)]
+mod pick_tests {
+    use super::pick_class;
+
+    // (package, class of the path's export there): the shapes of the 61509 helicopter, where a level package holds a
+    // StaticMesh copy of the path and the vehicle package holds the SkeletalMesh.
+    fn hits(v: &[(&'static str, &'static str)]) -> impl Iterator<Item = anyhow::Result<(&'static str, &'static str)>> {
+        v.to_vec().into_iter().map(Ok)
+    }
+    fn is(h: &(&str, &str), c: &str) -> bool {
+        h.1 == c
+    }
+
+    #[test]
+    fn picks_the_wanted_class_over_an_earlier_package() {
+        let v = [("level_a", "StaticMesh"), ("vehicles", "SkeletalMesh")];
+        let got = pick_class(Some("SkeletalMesh"), hits(&v), is).unwrap();
+        assert_eq!(got, Some(("vehicles", "SkeletalMesh")));
+    }
+
+    #[test]
+    fn no_class_match_falls_back_to_the_first_hit() {
+        let v = [("level_a", "StaticMesh"), ("level_b", "StaticMesh")];
+        assert_eq!(pick_class(Some("SkeletalMesh"), hits(&v), is).unwrap(), Some(("level_a", "StaticMesh")));
+    }
+
+    #[test]
+    fn no_wanted_class_is_the_first_hit_and_nothing_is_none() {
+        let v = [("level_a", "Texture2D"), ("level_b", "StaticMesh")];
+        assert_eq!(pick_class(None, hits(&v), is).unwrap(), Some(("level_a", "Texture2D")));
+        assert_eq!(pick_class(Some("StaticMesh"), hits(&[]), is).unwrap(), None);
+    }
+
+    #[test]
+    fn stops_at_the_first_match() {
+        let seen = std::cell::Cell::new(0);
+        let it = ["StaticMesh", "SkeletalMesh", "SkeletalMesh"].into_iter().map(|c| {
+            seen.set(seen.get() + 1);
+            anyhow::Ok(("p", c))
+        });
+        assert!(pick_class(Some("SkeletalMesh"), it, is).unwrap().is_some());
+        assert_eq!(seen.get(), 2);
+    }
 }
