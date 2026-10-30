@@ -35,6 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 mod gprof;
+mod outline;
 mod pgpu;
 mod shadow;
 mod tgpu;
@@ -176,6 +177,8 @@ pub struct SkinInst {
     pub env: u32,
     /// World bounds, UE3 axes.
     pub bounds: [f32; 4],
+    /// B-277(e): draw the enemy outline for this instance.
+    pub outline: bool,
 }
 
 /// One skinned draw: a section of a skinned mesh (`add_skin_mesh` id) for `SkinFrame::insts[instance]`.
@@ -444,6 +447,10 @@ pub struct Renderer {
     gpu_insts: Vec<GpuInstance>,
     spheres: Vec<([f32; 3], f32)>,
     inst_env: Vec<u32>,
+    /// B-277(e): per instance, draw the enemy outline.
+    inst_outline: Vec<bool>,
+    outline: Option<outline::Outline>,
+    outline_mask: Option<Rt>,
     draws: Vec<Draw>,
     pg: pgpu::PGpu,
     /// B-189: light-environment shadow maps and their depth pipelines.
@@ -620,6 +627,7 @@ impl Renderer {
                 b(4, vk::DescriptorType::SAMPLED_IMAGE, fr),
                 b(5, vk::DescriptorType::SAMPLED_IMAGE, fr),
                 b(6, vk::DescriptorType::SAMPLER, fr),
+                b(7, vk::DescriptorType::SAMPLED_IMAGE, fr),
             ];
             let post_layout = device.create_descriptor_set_layout(
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&post),
@@ -667,6 +675,11 @@ impl Renderer {
             )?;
             let mut allocator = allocator;
             let shadows = shadow::Shadows::new(&device, &mut allocator, set0_layout, store.cache, &knobs)?;
+            let outline = if knobs.outline != 0 {
+                Some(outline::Outline::new(&device, set0_layout, store.cache)?)
+            } else {
+                None
+            };
             let gprof = gprof::GpuProf::from_env(&instance, &device, ctx.physical_device);
             let mut r = Self {
                 laps: Laps::new(),
@@ -738,6 +751,9 @@ impl Renderer {
                 gpu_insts: Vec::new(),
                 spheres: Vec::new(),
                 inst_env: Vec::new(),
+                inst_outline: Vec::new(),
+                outline,
+                outline_mask: None,
                 draws: Vec::new(),
                 pg,
                 shadows,
@@ -1430,6 +1446,12 @@ impl Renderer {
         self.bloom = Some([a, b, c]);
         self.graded = Some(self.rt(HDR_FORMAT, w, h, false, "n1 graded")?);
         self.destc = Some(self.rt(HDR_FORMAT, w, h, false, "n1 dest color")?);
+        if let Some(m) = self.outline_mask.take() {
+            self.defer(Garbage::Image(m.image, m.view, m.alloc));
+        }
+        if self.knobs.outline != 0 {
+            self.outline_mask = Some(self.rt(outline::MASK_FORMAT, w, h, false, "n1 outline mask")?);
+        }
         Ok(())
     }
 
@@ -1752,6 +1774,7 @@ impl Renderer {
         self.gpu_insts.clear();
         self.spheres.clear();
         self.inst_env.clear();
+        self.inst_outline.clear();
         self.draws.clear();
         st.instances = instances.len() as u32;
         let env_of = |h: u32| -> u32 {
@@ -1815,6 +1838,7 @@ impl Renderer {
             self.gpu_insts.push(g);
             self.spheres.push(([wc[0], wc[2], wc[1]], radius));
             self.inst_env.push(env_of(inst.env));
+            self.inst_outline.push(false);
             let dist =
                 ((wc[0] - eye[0]).powi(2) + (wc[1] - eye[1]).powi(2) + (wc[2] - eye[2]).powi(2))
                     .sqrt();
@@ -1872,6 +1896,7 @@ impl Renderer {
             let b = si.bounds;
             self.spheres.push(([b[0], b[2], b[1]], b[3]));
             self.inst_env.push(si.env);
+            self.inst_outline.push(si.outline);
         }
         for d in &skin.draws {
             let Some(mt) = self.materials.get(d.material as usize) else {
@@ -2100,6 +2125,18 @@ impl Renderer {
             o[6] = [time, pwl[0] as u32 as f32, pwl[1] as u32 as f32, real];
             blocks.push(o);
         }
+        // B-277(e): the passes that write the output (composite, copy, the last post material) add the outline from the
+        // mask when this frame drew one: taps[5].w = 1 (2: show the mask).
+        let outline_on = self.outline_active();
+        if outline_on {
+            let mode = self.knobs.outline as f32;
+            blocks[5][15][3] = mode;
+            blocks[6][15][3] = mode;
+            if !mats.is_empty() {
+                let n = blocks.len();
+                blocks[n - 1][15][3] = mode;
+            }
+        }
         {
             let inst: Vec<u8> = bytemuck::cast_slice(&self.gpu_insts).to_vec();
             let iw: Vec<u8> = bytemuck::cast_slice(&inst_words).to_vec();
@@ -2265,7 +2302,13 @@ impl Renderer {
                     image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
                 }];
                 let set = s.post_sets[k];
+                let i5 = img(self.outline_mask.as_ref().map_or(*src, |m| m.view));
                 let writes = [
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(7)
+                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .image_info(&i5),
                     vk::WriteDescriptorSet::default()
                         .dst_set(set)
                         .dst_binding(0)
@@ -2442,7 +2485,7 @@ impl Renderer {
                 .image_view(depth.view)
                 .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(if pg_sprites {
+                .store_op(if pg_sprites || outline_on {
                     vk::AttachmentStoreOp::STORE
                 } else {
                     vk::AttachmentStoreOp::DONT_CARE
@@ -2686,6 +2729,24 @@ impl Renderer {
                 st.draws += self.pg_record(cmd, si, &pf, false);
                 d.cmd_end_rendering(cmd);
             }
+            if outline_on {
+                // B-277(e): the marked pawns into the R8 mask, tested against the scene depth (read-only).
+                if !pg_sprites {
+                    let dep = layout_barrier(
+                        depth.image,
+                        vk::ImageAspectFlags::DEPTH,
+                        vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                        vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                        vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                        vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ | vk::AccessFlags::SHADER_READ,
+                    );
+                    barrier(cao | tests, tests | frag, &[dep]);
+                }
+                let mask_img = self.outline_mask.as_ref().unwrap().image;
+                barrier(frag, cao, &[to_att(mask_img)]);
+                st.draws += self.record_outline(cmd, set0, rw, rh);
+                barrier(cao, frag, &[to_read(mask_img)]);
+            }
             barrier(cao, frag, &[to_read(hdr.image)]);
             if let Some(g) = &self.gprof {
                 g.mark(d, cmd, 4);
@@ -2735,7 +2796,7 @@ impl Renderer {
             let dep = layout_barrier(
                 depth.image,
                 vk::ImageAspectFlags::DEPTH,
-                if pg_sprites {
+                if pg_sprites || outline_on {
                     vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL
                 } else {
                     vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL
@@ -3272,7 +3333,7 @@ impl Drop for Renderer {
                     self.free(Garbage::Image(t.image, t.view, a));
                 }
             }
-            let mut rts: Vec<Rt> = [self.hdr.take(), self.depth.take(), self.graded.take(), self.destc.take()].into_iter().flatten().collect();
+            let mut rts: Vec<Rt> = [self.hdr.take(), self.depth.take(), self.graded.take(), self.destc.take(), self.outline_mask.take()].into_iter().flatten().collect();
             if let Some(b) = self.bloom.take() {
                 rts.extend(b);
             }
@@ -3301,6 +3362,9 @@ impl Drop for Renderer {
             }
             self.device.destroy_shader_module(self.post_module, None);
             self.shadows.destroy(&self.device, self.allocator.as_mut().unwrap());
+            if let Some(mut o) = self.outline.take() {
+                o.destroy(&self.device);
+            }
             self.allocator.take();
         }
     }

@@ -404,6 +404,8 @@ pub struct Knobs {
     /// are rebuilt from the reference pose: the game leaves them stale (a killed enemy at LOD 2 kept its standing face and
     /// fingers while the body fell, drawn as spikes). `BOTS_N1_LOD_BONES=0`: the old path (every finite bone as given).
     pub lod_bones: bool,
+    /// B-277(e): the red outline around enemies with bSpecialHighlight. 0 off, 1 on (default), 2 shows the raw mask.
+    pub outline: u32,
 }
 
 fn env_flag(name: &str, default: bool) -> bool {
@@ -453,6 +455,7 @@ impl Knobs {
             refl_ts: env_flag("BOTS_N1_REFL_TS", true),
             light_grow: env_flag("BOTS_N1_LIGHT_GROW", true),
             lod_bones: env_flag("BOTS_N1_LOD_BONES", true),
+            outline: env_num("BOTS_N1_OUTLINE", 1u32),
         }
     }
 }

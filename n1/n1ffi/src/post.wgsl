@@ -36,6 +36,7 @@ struct P {
 @group(0) @binding(4) var bloom2: texture_2d<f32>;
 @group(0) @binding(5) var depth: texture_depth_2d;
 @group(0) @binding(6) var wrap: sampler;   // repeat addressing, for post-material textures
+@group(0) @binding(7) var omask: texture_2d<f32>;   // B-277(e): enemy outline mask (R8), read when taps[5].w > 0
 
 struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
@@ -113,10 +114,42 @@ fn fs_blur(i: VOut) -> @location(0) vec4<f32> {
     return acc;
 }
 
-fn gamma_out(c: vec3<f32>) -> vec4<f32> {
-    // B-240: the view's screen fade (camera and cinematic fades). The port's composite folds it into its pre-gamma
-    // multiplier (c5.rgb = ColorScale * (1 - OverlayColor.a): pow(saturate(c * c5.rgb), 1 / 2.2)); the overlay
-    // colour (OverlayColor.rgb * a) is added after gamma. Composite and copy carry them in tap slots 4 and 5.
+// B-277(e): the port draws a red outline around enemies the game highlights (bSpecialHighlight): a thin line one pixel
+// outside the marked pawn's silhouette (OUTLINE_DIAG: the weaker corner-only shoulder), added in linear light before the
+// gamma. Measured on the port with and without the flag: K below, strong pixels 1.0 and shoulders 0.35 of it.
+// `outline_edge` mirrors `edge_weight` in vkr/outline.rs.
+const OUTLINE_K = vec3<f32>(0.143, 0.0082, 0.0080);
+const OUTLINE_DIAG = 0.35;
+
+fn omask_at(px: vec2<i32>, lim: vec2<i32>) -> f32 {
+    return textureLoad(omask, clamp(px, vec2<i32>(0), lim), 0).r;
+}
+
+fn outline_edge(px: vec2<i32>) -> f32 {
+    let lim = vec2<i32>(textureDimensions(omask)) - 1;
+    let c = omask_at(px, lim);
+    let n = omask_at(px + vec2<i32>(-1, 0), lim) + omask_at(px + vec2<i32>(1, 0), lim)
+          + omask_at(px + vec2<i32>(0, -1), lim) + omask_at(px + vec2<i32>(0, 1), lim);
+    let d = omask_at(px + vec2<i32>(-1, -1), lim) + omask_at(px + vec2<i32>(1, -1), lim)
+          + omask_at(px + vec2<i32>(-1, 1), lim) + omask_at(px + vec2<i32>(1, 1), lim);
+    let e = select(select(0.0, OUTLINE_DIAG, d > 0.0), 1.0, n > 0.0);
+    return (1.0 - c) * e;
+}
+
+fn with_outline(c: vec3<f32>, frag: vec4<f32>) -> vec3<f32> {
+    let mode = p.taps[5].w;
+    if (mode < 0.5) {
+        return c;
+    }
+    let px = vec2<i32>(frag.xy - vec2<f32>(p.dof.w, p.dof2.w));
+    if (mode > 1.5) {
+        return vec3<f32>(omask_at(px, vec2<i32>(textureDimensions(omask)) - 1) * p.inv_hi.r, 0.0, 0.0) + c * 0.25;
+    }
+    return c + OUTLINE_K * outline_edge(px);
+}
+
+fn gamma_out(c0: vec3<f32>, frag: vec4<f32>) -> vec4<f32> {
+    let c = with_outline(c0, frag);
     var g = pow(clamp(c * p.taps[4].xyz, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(p.comp.y));
     g = min(g + p.taps[5].xyz, vec3<f32>(1.0));
     if (p.c.z < 0.5) {
@@ -139,7 +172,7 @@ fn composite(px: vec2<i32>, uv: vec2<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_comp(i: VOut) -> @location(0) vec4<f32> {
-    return gamma_out(composite(vec2<i32>(i.pos.xy - vec2<f32>(p.dof.w, p.dof2.w)), i.uv));
+    return gamma_out(composite(vec2<i32>(i.pos.xy - vec2<f32>(p.dof.w, p.dof2.w)), i.uv), i.pos);
 }
 
 @fragment
@@ -166,9 +199,9 @@ fn mat_tex1(uv: vec2<f32>) -> vec4<f32> {
     return select(c, xe_pwl_raw(c), p.g1.z > 0.5);
 }
 
-fn mat_out(c: vec3<f32>) -> vec4<f32> {
+fn mat_out(c: vec3<f32>, frag: vec4<f32>) -> vec4<f32> {
     if (p.comp.w > 0.5) {
-        return gamma_out(c);
+        return gamma_out(c, frag);
     }
     return vec4<f32>(c, 1.0);
 }
@@ -204,12 +237,12 @@ fn fs_gangsta(i: VOut) -> @location(0) vec4<f32> {
     let sx = select(h, 2.0 - h, n.x > 0.0) * 0.5;
     let suv = vec2<f32>(4.0, 0.6) * vec2<f32>(sx, r) + t * vec2<f32>(0.0, -1.0);
     let streak = mat_tex0(suv).rgb * 10.0 * pow(1.5 * r, 8.0);
-    return mat_out(mix(vec3<f32>(1.0), vec3<f32>(1.0) + streak, a) * col);
+    return mat_out(mix(vec3<f32>(1.0), vec3<f32>(1.0) + streak, a) * col, i.pos);
 }
 
 @fragment
 fn fs_copy(i: VOut) -> @location(0) vec4<f32> {
-    return gamma_out(textureLoad(src, vec2<i32>(i.pos.xy - vec2<f32>(p.dof.w, p.dof2.w)), 0).rgb);
+    return gamma_out(textureLoad(src, vec2<i32>(i.pos.xy - vec2<f32>(p.dof.w, p.dof2.w)), 0).rgb, i.pos);
 }
 
 // UI_DeathEffect.FaderDeath_MAT (FaderDeath_MIC): g0.x StartTime, g0.y EffectLength. tex0 DeathScreenBackground_Alphas,
@@ -229,7 +262,7 @@ fn fs_death(i: VOut) -> @location(0) vec4<f32> {
         let cloud = clamp((vec3<f32>(r1, 0.0, 0.0) + vec3<f32>(2.0 * r2, 0.1 * r2, 0.0)) * mat_tex0(uv).b,
                           vec3<f32>(0.0), vec3<f32>(1.0));
         let flicker = clamp(ceil(sin(t * tau / 0.3) * floor(cos(t * tau / 0.4))), 0.7, 1.0);
-        return mat_out(mix(vec3<f32>(0.0), cloud * flicker, clamp((n - 0.5) * 2.0, 0.0, 1.0)));
+        return mat_out(mix(vec3<f32>(0.0), cloud * flicker, clamp((n - 0.5) * 2.0, 0.0, 1.0)), i.pos);
     }
     // first half: a closing vignette that also pulls the scene inward, desaturation up to 80%, then fade to black
     let k = 2.0 * clamp(n, 0.0, 0.5);
@@ -238,5 +271,5 @@ fn fs_death(i: VOut) -> @location(0) vec4<f32> {
     let s = textureSample(src, smp, coord).rgb * (1.0 - q);
     let d = desat(s, clamp(k, 0.0, 0.8), vec3<f32>(0.3, 0.59, 0.11));
     let out_max = 1.0 - 2.0 * clamp(k - 0.5, 0.0, 1.0);
-    return mat_out(clamp(d, vec3<f32>(0.0), vec3<f32>(1.0)) * out_max);
+    return mat_out(clamp(d, vec3<f32>(0.0), vec3<f32>(1.0)) * out_max, i.pos);
 }
