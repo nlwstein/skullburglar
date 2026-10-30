@@ -803,6 +803,11 @@ impl Resolver {
                 continue;
             }
             r.free_light(id);
+            // Its package's lights were all preloaded once (`lights_complete`: a light not known yet is "none"). Now one
+            // is gone, so a later reference must load it again instead of reading as unlit.
+            if let Some(pkg) = slot.path.split('.').next() {
+                self.lights_complete.remove(pkg);
+            }
             self.light_tex.remove(&(h as u32));
             slot.state = SlotState::Pending;
             slot.requested = false;
