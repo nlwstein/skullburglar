@@ -254,7 +254,7 @@ fn fs_gangsta(i: VOut) -> @location(0) vec4<f32> {
 fn fs_damage(i: VOut) -> @location(0) vec4<f32> {
     let s = textureSample(src, smp, i.uv).rgb;
     let d = desat(s, 0.75, vec3<f32>(0.3, 0.59, 0.11));
-    return mat_out(mix(s, d, clamp(p.g0.x, 0.0, 1.0)));
+    return mat_out(mix(s, d, clamp(p.g0.x, 0.0, 1.0)), i.pos);
 }
 
 @fragment
