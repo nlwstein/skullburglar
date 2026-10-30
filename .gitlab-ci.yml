@@ -37,6 +37,15 @@ variables:
   ASSETS_PROJECT: $CI_PROJECT_NAMESPACE/skullburglar-assets
   PSR: semantic-release -c tools/ci/semantic-release.toml
 
+n1-tests:
+  stage: check
+  image: rust:1.97.1
+  interruptible: true
+  script:
+    # n1's unit tests include WGSL validation of every shader: a shader that fails it would still build and only fail
+    # at runtime, so run them on every pipeline.
+    - cd n1 && cargo test --release --locked --workspace
+
 checks:
   stage: check
   image: python:3.12
