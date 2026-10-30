@@ -11,7 +11,7 @@
 //   fs_comp   DOF lerp, the 15% mix of the bloom-kernel blur, saturate, gamma 2.2
 //   fs_copy   low-end path: gamma only
 //   fs_comp_lin  fs_comp without the gamma, into a full-res target, when post materials follow (B-266)
-//   fs_gangsta, fs_death   post materials (B-266, n1ffi/src/postmat.rs): read the linear scene, write linear or (the last one)
+//   fs_gangsta, fs_death, fs_damage, fs_scope   post materials (B-266, n1ffi/src/postmat.rs): read the linear scene, write linear or (the last one)
 //             gamma_out into the target. Their block: g0 the material's parameters, g1.x time (the game's world
 //             time, the clock the materials' parameters use), g1.w real time (seconds, any origin), g1.y/z 1 = tex0/tex1
 //             take Xenos's gamma curve (raw upload), comp.w 1 = last pass. tex0/tex1 sit in the bloom bindings.
@@ -202,6 +202,12 @@ fn mat_tex0(uv: vec2<f32>) -> vec4<f32> {
     return select(c, xe_pwl_raw(c), p.g1.y > 0.5);
 }
 
+// The same texture with clamped addressing (the scope reads it past its edges and expects the edge texel there).
+fn mat_tex0_clamp(uv: vec2<f32>) -> vec4<f32> {
+    let c = textureSample(bloom, smp, uv);
+    return select(c, xe_pwl_raw(c), p.g1.y > 0.5);
+}
+
 fn mat_tex1(uv: vec2<f32>) -> vec4<f32> {
     let c = textureSample(bloom2, wrap, uv);
     return select(c, xe_pwl_raw(c), p.g1.z > 0.5);
@@ -255,6 +261,29 @@ fn fs_damage(i: VOut) -> @location(0) vec4<f32> {
     let s = textureSample(src, smp, i.uv).rgb;
     let d = desat(s, 0.75, vec3<f32>(0.3, 0.59, 0.11));
     return mat_out(mix(s, d, clamp(p.g0.x, 0.0, 1.0)), i.pos);
+}
+
+// C1HUD.SniperScope_V02_MAT (SniperScope_MIC, B-295), g0.x = its scalar parameter (0 = the 16:9 mapping). tex0
+// SniperScope_v02_EFCT (R: reticle lines on mid grey, G: lit marks, B: lens falloff). Decoded node by node from the
+// material graph: lens = scene * EFCT.b(r2, r2) with r2 the squared distance from the mapped centre; top edge
+// darkened by (1 - 1.0..2.5 * (1 - v)^4); reticle = clamp(lens * clamp(1 + 4 (R - 0.5), sat(r2), 1), EFCT.g, 1).
+@fragment
+fn fs_scope(i: VOut) -> @location(0) vec4<f32> {
+    let uv = i.uv;
+    let s = textureSample(src, smp, uv).rgb;
+    let wide = uv * vec2<f32>(4.25, 2.25) - vec2<f32>(2.1165, 1.1205);
+    let narrow = uv * vec2<f32>(2.75, 2.25) - vec2<f32>(1.3695, 1.1205);
+    let q = abs(mix(wide, narrow, clamp(p.g0.x, 0.0, 1.0)));
+    let r2 = dot(q, q);
+    var lens = s * mat_tex0_clamp(vec2<f32>(r2, r2)).b;
+    let t = 1.0 - uv.y;
+    let t4 = t * t * t * t;
+    lens = lens * clamp(vec3<f32>(1.0) - t4 * vec3<f32>(2.5, 1.0, 0.5), vec3<f32>(0.0), vec3<f32>(1.0));
+    let rc = vec2<f32>(1.0 - abs(uv.x * 4.0 - 1.5 - 0.5) * 2.0, uv.y * 4.0 - 1.5);
+    let ret = mat_tex0_clamp(rc);
+    let lines = clamp(1.0 + 4.0 * (ret.r - 0.5), clamp(r2, 0.0, 1.0), 1.0);
+    let lit = vec3<f32>(ret.g);
+    return mat_out(clamp(lens * lines, lit, vec3<f32>(1.0)), i.pos);
 }
 
 @fragment

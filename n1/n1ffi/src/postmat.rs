@@ -27,6 +27,12 @@ pub enum Kind {
     /// reads the `DamageEffectTexture` render target (hit arrows); with no hit it is black, which leaves exactly this
     /// term (`DamageRamp` alpha is 0 at its start). The hit arrows themselves are not drawn.
     Damage,
+    /// Sniper scope (`C1HUD.SniperScope_MIC`, an instance of `SniperScope_V02_MAT`, B-295): in the player's chain only
+    /// while scoped. The scene through a lens mask (blue channel of `SniperScope_v02_EFCT`, sampled along its diagonal at
+    /// the squared distance from the centre) with a darkened top edge, then the reticle drawn by the red channel
+    /// (dark lines) and the green channel (a lit dot) of the same texture. Scalar `g0.x` is the material's one scalar
+    /// parameter, which picks the 16:9 or the narrower screen mapping; without the parameter it is 0 (16:9).
+    Scope,
 }
 
 impl Kind {
@@ -36,6 +42,7 @@ impl Kind {
             Kind::Gangsta => &["C1HUD.SlowmoEffect_MatInst", "FX_GangsterFire.GangsterFire_MAT02"],
             Kind::Death => &["UI_DeathEffect.FaderDeath_MIC", "UI_DeathEffect.FaderDeath_MAT"],
             Kind::Damage => &["FX_Damage.DamageEffectMaterial_MIC", "FX_Damage.DamageEffectMaterial"],
+            Kind::Scope => &["C1HUD.SniperScope_MIC", "C1HUD.SniperScope_V02_MAT"],
         }
     }
 
@@ -45,6 +52,7 @@ impl Kind {
             Kind::Gangsta => "fs_gangsta",
             Kind::Death => "fs_death",
             Kind::Damage => "fs_damage",
+            Kind::Scope => "fs_scope",
         }
     }
 
@@ -54,10 +62,11 @@ impl Kind {
             Kind::Gangsta => ["FX_GangsterFire.streak", "FX_GangsterFire.EyeMask"],
             Kind::Death => ["UI_DeathEffect.DeathScreenBackground_Alphas", "UI_DeathEffect.HeatVisionClouds_Alpha"],
             Kind::Damage => ["", ""],
+            Kind::Scope => ["C1HUD.SniperScope_v02_EFCT", ""],
         }
     }
 
-    pub const ALL: [Kind; 3] = [Kind::Gangsta, Kind::Death, Kind::Damage];
+    pub const ALL: [Kind; 4] = [Kind::Gangsta, Kind::Death, Kind::Damage, Kind::Scope];
 
     pub fn of(path: &str) -> Option<Kind> {
         Kind::ALL.into_iter().find(|k| k.paths().iter().any(|p| p.eq_ignore_ascii_case(path)))
@@ -102,6 +111,13 @@ fn damage_fx_on() -> bool {
     *ON.get_or_init(|| std::env::var("BOTS_N1_DAMAGE_FX").map_or(true, |v| v != "0"))
 }
 
+/// `BOTS_N1_SCOPE_FX=0` leaves the sniper scope overlay out (the pre-B-295 path: the scene is shown unmasked).
+fn scope_fx_on() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BOTS_N1_SCOPE_FX").map_or(true, |v| v != "0"))
+}
+
 /// The active ported effects of a post feed, in chain order. A material whose strength is zero (or not positive) is
 /// left out, so the pass isn't recorded at all.
 pub fn effects(p: &PostFeed) -> Vec<Effect> {
@@ -113,6 +129,9 @@ pub fn effects(p: &PostFeed) -> Vec<Effect> {
     for m in &p.material_effects {
         let Some(kind) = Kind::of(m) else { continue };
         if kind == Kind::Damage && !damage_fx_on() {
+            continue;
+        }
+        if kind == Kind::Scope && !scope_fx_on() {
             continue;
         }
         if out.iter().any(|e: &Effect| e.kind == kind) {
@@ -135,6 +154,12 @@ pub fn effects(p: &PostFeed) -> Vec<Effect> {
                 } else {
                     None
                 }
+            }
+            Kind::Scope => {
+                // Its only scalar parameter, whatever its name (the game sets it from the screen's aspect ratio).
+                let k = p.material_params.iter().find(|(pm, _, _)| pm.eq_ignore_ascii_case(m)).map_or(0.0, |(_, _, v)| *v);
+                let k = if k.is_finite() { k.clamp(0.0, 1.0) } else { 0.0 };
+                Some(Effect { kind, params: [k, 0.0, 0.0, 0.0] })
             }
             Kind::Death => {
                 // StartTime is in the material's Time (the world time n1 already has); without it there's no ramp.
@@ -201,6 +226,17 @@ mod tests {
         assert!(effects(&feed(&[m], &[(m, "CriticalHealthFadeParameter", 0.0)])).is_empty());
         assert!(effects(&feed(&[m], &[])).is_empty());
         assert_eq!(effects(&feed(&[m], &[(m, "CriticalHealthFadeParameter", 2.0)]))[0].params[0], 1.0);
+    }
+
+    #[test]
+    fn scope_in_chain() {
+        let m = "C1HUD.SniperScope_MIC";
+        // Present in the chain: on, with the parameter (0 without it).
+        assert_eq!(effects(&feed(&["a.b", m], &[]))[0], Effect { kind: Kind::Scope, params: [0.0; 4] });
+        assert_eq!(effects(&feed(&[m], &[(m, "AnyName", 1.0)]))[0].params[0], 1.0);
+        assert_eq!(effects(&feed(&[m], &[("other", "x", 1.0)]))[0].params[0], 0.0);
+        assert!(effects(&feed(&["a.b"], &[])).is_empty());
+        assert_eq!(Kind::of("c1hud.sniperscope_v02_mat"), Some(Kind::Scope));
     }
 
     #[test]
