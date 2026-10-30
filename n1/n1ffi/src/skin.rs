@@ -257,8 +257,10 @@ impl Skins {
             // Palette.
             let n = asset.parents.len();
             let base = f.bones.len() as u32;
+            // BOTS_N1_FORCE_LOD=N (test aid): pose every skinned instance as if the game had picked LOD N.
+            let lod = force_lod().unwrap_or(inst.lod);
             let required = if r.knobs.lod_bones {
-                lod_required(asset, inst.lod)
+                lod_required(asset, lod)
             } else {
                 None
             };
@@ -321,9 +323,11 @@ impl Skins {
             }
             if traced {
                 let sig = format!(
-                    "lod {} bones {} draws {}{}",
-                    inst.lod,
+                    "lod {} bones {} required {}/{} draws {}{}",
+                    force_lod().unwrap_or(inst.lod),
                     inst.bone_count,
+                    required.map_or(n, |q| q.iter().filter(|b| **b).count()),
+                    n,
                     f.draws.len() - draws_before,
                     trace_sig
                 );
@@ -338,6 +342,11 @@ impl Skins {
             last.insert(inst.mesh, sig);
         }
     }
+}
+
+fn force_lod() -> Option<u32> {
+    static V: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("BOTS_N1_FORCE_LOD").ok().and_then(|v| v.parse().ok()))
 }
 
 /// The bones current for `lod`: `None` (all of them) for LOD0 or a LOD the mesh doesn't have.
