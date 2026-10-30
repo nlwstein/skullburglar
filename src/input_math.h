@@ -75,4 +75,11 @@ inline double LagProportion(double lag_amount, double dt, double lag_time_scale)
   return 1.0 - std::pow(lag_amount, -dt * lag_time_scale * 100.0);
 }
 
+// Mouse noise gate (B-269): motion accumulated since the last frame is held back, not dropped, while its length is
+// below `gate` pixels, so a sensor that jitters by a pixel back and forth cancels out and steady slow motion still
+// gets through once it adds up. gate <= 0 (the default) never holds anything.
+inline bool MouseGateHolds(double acc_x, double acc_y, double gate) {
+  return gate > 0 && std::hypot(acc_x, acc_y) < gate;
+}
+
 }  // namespace bots::input
