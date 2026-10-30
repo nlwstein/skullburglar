@@ -1,0 +1,163 @@
+# Carter boss aircraft (B-277 / issue 24), fresh-load control: chapters 61509 and 61512, the boss pawn's position from
+# `objs C1UnmannedTurret` each round, the camera turned to the middle of its circle, plain + dual shot each round.
+#   botsctl.py run scenarios/boss_fresh.txt --out DIR   (game with BOTS_HYBRID_DUAL=1)
+default ROUNDS=1
+mark start
+wait -t 1800 phase==front_end || phase==movie || phase==dialog || phase==menu
+press_until "game.scenes~=MainMenu" START every=1000 timeout=120
+dismiss
+wait -t 1800 precompile.done==1
+mark precompile_done
+exec LoadChapter 61509
+until "game.chapter==61509 && phase==in_play && phase_s>=5" timeout=600
+mark ch61509
+sleep 8
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61509-00
+shot b61509-00
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61509-01
+shot b61509-01
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61509-02
+shot b61509-02
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61509-03
+shot b61509-03
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61509-04
+shot b61509-04
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61509-05
+shot b61509-05
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61509-06
+shot b61509-06
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61509-07
+shot b61509-07
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61509-08
+shot b61509-08
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61509-09
+shot b61509-09
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61509-10
+shot b61509-10
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61509-11
+shot b61509-11
+sleep 2
+exec LoadChapter 61512
+until "game.chapter==61512 && phase==in_play && phase_s>=5" timeout=600
+mark ch61512
+sleep 8
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61512-00
+shot b61512-00
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61512-01
+shot b61512-01
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61512-02
+shot b61512-02
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61512-03
+shot b61512-03
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61512-04
+shot b61512-04
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61512-05
+shot b61512-05
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61512-06
+shot b61512-06
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61512-07
+shot b61512-07
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61512-08
+shot b61512-08
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61512-09
+shot b61512-09
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61512-10
+shot b61512-10
+sleep 2
+objs C1UnmannedTurret 6
+macro aim_at 13400 10900 3500 2500
+sleep 3
+dualshot b61512-11
+shot b61512-11
+sleep 2
+mark end

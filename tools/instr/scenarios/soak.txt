@@ -1,0 +1,507 @@
+# Long-session soak (B-277 / issue 24): ONE process, chapters chained with LoadChapter, no restart. Per chapter: load, give
+# 50 the Helker MP7, aim and dual-shot (port | n1), play SECS seconds (shots every SECS/2), dual-shot again. The game must run
+# with BOTS_HYBRID_DUAL=1 and BOTS_INPUT_RANDOM=<s>:<seed> so 50 keeps moving. Counters: the 5 s `hybrid n1:` and `gfx native:`
+# log lines (see tools/instr/soak_report.py), correlated by the `mark chNNNNN` times in the summary.
+#   botsctl.py run scenarios/soak.txt --out DIR --set SECS=90
+default SECS=90
+mark start
+wait -t 1800 phase==front_end || phase==movie || phase==dialog || phase==menu
+press_until "game.scenes~=MainMenu" START every=1000 timeout=120
+dismiss
+wait -t 1800 precompile.done==1
+mark precompile_done
+
+# --- chapter 11005 (1/26)
+exec LoadChapter 11005
+until "game.chapter==11005 && phase==in_play && phase_s>=5" timeout=600
+mark ch11005
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s01-11005-a
+sleep 3
+sample ${SECS} shot_every=45 name=s01-11005
+trigger L 1.0 4000
+sleep 2
+dualshot s01-11005-b
+mark end11005
+
+# --- chapter 11040 (2/26)
+exec LoadChapter 11040
+until "game.chapter==11040 && phase==in_play && phase_s>=5" timeout=600
+mark ch11040
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s02-11040-a
+sleep 3
+sample ${SECS} shot_every=45 name=s02-11040
+trigger L 1.0 4000
+sleep 2
+dualshot s02-11040-b
+mark end11040
+
+# --- chapter 12065 (3/26)
+exec LoadChapter 12065
+until "game.chapter==12065 && phase==in_play && phase_s>=5" timeout=600
+mark ch12065
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s03-12065-a
+sleep 3
+sample ${SECS} shot_every=45 name=s03-12065
+trigger L 1.0 4000
+sleep 2
+dualshot s03-12065-b
+mark end12065
+
+# --- chapter 21115 (4/26)
+exec LoadChapter 21115
+until "game.chapter==21115 && phase==in_play && phase_s>=5" timeout=600
+mark ch21115
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s04-21115-a
+sleep 3
+sample ${SECS} shot_every=45 name=s04-21115
+trigger L 1.0 4000
+sleep 2
+dualshot s04-21115-b
+mark end21115
+
+# --- chapter 31165 (5/26)
+exec LoadChapter 31165
+until "game.chapter==31165 && phase==in_play && phase_s>=5" timeout=600
+mark ch31165
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s05-31165-a
+sleep 3
+sample ${SECS} shot_every=45 name=s05-31165
+trigger L 1.0 4000
+sleep 2
+dualshot s05-31165-b
+mark end31165
+
+# --- chapter 31190 (6/26)
+exec LoadChapter 31190
+until "game.chapter==31190 && phase==in_play && phase_s>=5" timeout=600
+mark ch31190
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s06-31190-a
+sleep 3
+sample ${SECS} shot_every=45 name=s06-31190
+trigger L 1.0 4000
+sleep 2
+dualshot s06-31190-b
+mark end31190
+
+# --- chapter 32215 (7/26)
+exec LoadChapter 32215
+until "game.chapter==32215 && phase==in_play && phase_s>=5" timeout=600
+mark ch32215
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s07-32215-a
+sleep 3
+sample ${SECS} shot_every=45 name=s07-32215
+trigger L 1.0 4000
+sleep 2
+dualshot s07-32215-b
+mark end32215
+
+# --- chapter 32240 (8/26)
+exec LoadChapter 32240
+until "game.chapter==32240 && phase==in_play && phase_s>=5" timeout=600
+mark ch32240
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s08-32240-a
+sleep 3
+sample ${SECS} shot_every=45 name=s08-32240
+trigger L 1.0 4000
+sleep 2
+dualshot s08-32240-b
+mark end32240
+
+# --- chapter 33250 (9/26)
+exec LoadChapter 33250
+until "game.chapter==33250 && phase==in_play && phase_s>=5" timeout=600
+mark ch33250
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s09-33250-a
+sleep 3
+sample ${SECS} shot_every=45 name=s09-33250
+trigger L 1.0 4000
+sleep 2
+dualshot s09-33250-b
+mark end33250
+
+# --- chapter 33265 (10/26)
+exec LoadChapter 33265
+until "game.chapter==33265 && phase==in_play && phase_s>=5" timeout=600
+mark ch33265
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s10-33265-a
+sleep 3
+sample ${SECS} shot_every=45 name=s10-33265
+trigger L 1.0 4000
+sleep 2
+dualshot s10-33265-b
+mark end33265
+
+# --- chapter 41270 (11/26)
+exec LoadChapter 41270
+until "game.chapter==41270 && phase==in_play && phase_s>=5" timeout=600
+mark ch41270
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s11-41270-a
+sleep 3
+sample ${SECS} shot_every=45 name=s11-41270
+trigger L 1.0 4000
+sleep 2
+dualshot s11-41270-b
+mark end41270
+
+# --- chapter 42295 (12/26)
+exec LoadChapter 42295
+until "game.chapter==42295 && phase==in_play && phase_s>=5" timeout=600
+mark ch42295
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s12-42295-a
+sleep 3
+sample ${SECS} shot_every=45 name=s12-42295
+trigger L 1.0 4000
+sleep 2
+dualshot s12-42295-b
+mark end42295
+
+# --- chapter 43310 (13/26)
+exec LoadChapter 43310
+until "game.chapter==43310 && phase==in_play && phase_s>=5" timeout=600
+mark ch43310
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s13-43310-a
+sleep 3
+sample ${SECS} shot_every=45 name=s13-43310
+trigger L 1.0 4000
+sleep 2
+dualshot s13-43310-b
+mark end43310
+
+# --- chapter 44330 (14/26)
+exec LoadChapter 44330
+until "game.chapter==44330 && phase==in_play && phase_s>=5" timeout=600
+mark ch44330
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s14-44330-a
+sleep 3
+sample ${SECS} shot_every=45 name=s14-44330
+trigger L 1.0 4000
+sleep 2
+dualshot s14-44330-b
+mark end44330
+
+# --- chapter 45335 (15/26)
+exec LoadChapter 45335
+until "game.chapter==45335 && phase==in_play && phase_s>=5" timeout=600
+mark ch45335
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s15-45335-a
+sleep 3
+sample ${SECS} shot_every=45 name=s15-45335
+trigger L 1.0 4000
+sleep 2
+dualshot s15-45335-b
+mark end45335
+
+# --- chapter 51355 (16/26)
+exec LoadChapter 51355
+until "game.chapter==51355 && phase==in_play && phase_s>=5" timeout=600
+mark ch51355
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s16-51355-a
+sleep 3
+sample ${SECS} shot_every=45 name=s16-51355
+trigger L 1.0 4000
+sleep 2
+dualshot s16-51355-b
+mark end51355
+
+# --- chapter 52400 (17/26)
+exec LoadChapter 52400
+until "game.chapter==52400 && phase==in_play && phase_s>=5" timeout=600
+mark ch52400
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s17-52400-a
+sleep 3
+sample ${SECS} shot_every=45 name=s17-52400
+trigger L 1.0 4000
+sleep 2
+dualshot s17-52400-b
+mark end52400
+
+# --- chapter 53440 (18/26)
+exec LoadChapter 53440
+until "game.chapter==53440 && phase==in_play && phase_s>=5" timeout=600
+mark ch53440
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s18-53440-a
+sleep 3
+sample ${SECS} shot_every=45 name=s18-53440
+trigger L 1.0 4000
+sleep 2
+dualshot s18-53440-b
+mark end53440
+
+# --- chapter 54460 (19/26)
+exec LoadChapter 54460
+until "game.chapter==54460 && phase==in_play && phase_s>=5" timeout=600
+mark ch54460
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s19-54460-a
+sleep 3
+sample ${SECS} shot_every=45 name=s19-54460
+trigger L 1.0 4000
+sleep 2
+dualshot s19-54460-b
+mark end54460
+
+# --- chapter 61465 (20/26)
+exec LoadChapter 61465
+until "game.chapter==61465 && phase==in_play && phase_s>=5" timeout=600
+mark ch61465
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s20-61465-a
+sleep 3
+sample ${SECS} shot_every=45 name=s20-61465
+trigger L 1.0 4000
+sleep 2
+dualshot s20-61465-b
+mark end61465
+
+# --- chapter 61500 (21/26)
+exec LoadChapter 61500
+until "game.chapter==61500 && phase==in_play && phase_s>=5" timeout=600
+mark ch61500
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s21-61500-a
+sleep 3
+sample ${SECS} shot_every=45 name=s21-61500
+trigger L 1.0 4000
+sleep 2
+dualshot s21-61500-b
+mark end61500
+
+# --- chapter 61512 (22/26)
+exec LoadChapter 61512
+until "game.chapter==61512 && phase==in_play && phase_s>=5" timeout=600
+mark ch61512
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s22-61512-a
+sleep 3
+sample ${SECS} shot_every=45 name=s22-61512
+trigger L 1.0 4000
+sleep 2
+dualshot s22-61512-b
+mark end61512
+
+# --- chapter 71515 (23/26)
+exec LoadChapter 71515
+until "game.chapter==71515 && phase==in_play && phase_s>=5" timeout=600
+mark ch71515
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s23-71515-a
+sleep 3
+sample ${SECS} shot_every=45 name=s23-71515
+trigger L 1.0 4000
+sleep 2
+dualshot s23-71515-b
+mark end71515
+
+# --- chapter 72540 (24/26)
+exec LoadChapter 72540
+until "game.chapter==72540 && phase==in_play && phase_s>=5" timeout=600
+mark ch72540
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s24-72540-a
+sleep 3
+sample ${SECS} shot_every=45 name=s24-72540
+trigger L 1.0 4000
+sleep 2
+dualshot s24-72540-b
+mark end72540
+
+# --- chapter 73575 (25/26)
+exec LoadChapter 73575
+until "game.chapter==73575 && phase==in_play && phase_s>=5" timeout=600
+mark ch73575
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s25-73575-a
+sleep 3
+sample ${SECS} shot_every=45 name=s25-73575
+trigger L 1.0 4000
+sleep 2
+dualshot s25-73575-b
+mark end73575
+
+# --- chapter 81610 (26/26)
+exec LoadChapter 81610
+until "game.chapter==81610 && phase==in_play && phase_s>=5" timeout=600
+mark ch81610
+sleep 6
+try exec EnableCheats
+sleep 1
+try exec GiveWeapon C1GameNonNative.FcWeapon_BasicSMG
+sleep 3
+trigger L 1.0 4000
+sleep 2
+dualshot s26-81610-a
+sleep 3
+sample ${SECS} shot_every=45 name=s26-81610
+trigger L 1.0 4000
+sleep 2
+dualshot s26-81610-b
+mark end81610
+mark end
