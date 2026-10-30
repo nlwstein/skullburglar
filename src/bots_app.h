@@ -303,6 +303,33 @@ class BotsApp : public rex::ReXApp {
   }
   bool picker_left_fullscreen_ = false;
 
+#if defined(_WIN32)
+  // The SDK's launcher font covers Latin-1 and Japanese, so a Cyrillic or Greek folder name (a Russian "Documents")
+  // drew as "?". Merge Segoe UI's Greek and Cyrillic glyphs into it; without the file the "?" stays.
+  void OnConfigureFonts(ImFontAtlas* atlas) override {
+    wchar_t windir[MAX_PATH];
+    const UINT n = GetWindowsDirectoryW(windir, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return;
+    const std::filesystem::path font = std::filesystem::path(windir) / L"Fonts" / L"segoeui.ttf";
+    std::error_code ec;
+    if (!std::filesystem::exists(font, ec)) return;
+    static const ImWchar kRanges[] = {0x0370, 0x03FF,   // Greek and Coptic
+                                      0x0400, 0x052F,   // Cyrillic and its supplement
+                                      0x2DE0, 0x2DFF,   // Cyrillic extended-A
+                                      0xA640, 0xA69F,   // Cyrillic extended-B
+                                      0};
+    ImFontConfig config;
+    config.MergeMode = true;
+    config.OversampleH = config.OversampleV = 1;
+    config.PixelSnapH = true;
+    // ImGui opens the file by a UTF-8 name, so a non-ASCII Windows folder works.
+    int len = WideCharToMultiByte(CP_UTF8, 0, font.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string path(len > 0 ? len - 1 : 0, '\0');
+    if (len > 1) WideCharToMultiByte(CP_UTF8, 0, font.c_str(), -1, path.data(), len, nullptr, nullptr);
+    atlas->AddFontFromFileTTF(path.c_str(), 12.0f, &config, kRanges);
+  }
+#endif
+
   // Shader precompile progress (B-053); the dialog deletes itself when done.
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
     new ShaderProgressDialog(
