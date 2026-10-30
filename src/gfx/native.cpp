@@ -520,8 +520,15 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
 
   // The host report runs on its own thread: on one player's PC (issue #29) it took ~230 ms every time, a dropped frame
   // every 600 when it ran here. A report still running when the next is due skips that one.
+  // Once per session unless diagnostic logging is on (BOTS_DIAG=1; the launcher's setting, 1.5.0).
   void RequestHostReport(std::chrono::steady_clock::time_point now) {
+    static const bool periodic = [] {
+      const char* v = std::getenv("BOTS_DIAG");
+      return v && *v && std::strcmp(v, "0") != 0;
+    }();
     std::lock_guard lock(host_mutex_);
+    if (host_requested_ && !periodic) return;
+    host_requested_ = true;
     if (host_quit_) return;
     if (host_pending_) {
       ++host_skipped_;
@@ -738,8 +745,8 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   std::thread host_thread_;
   std::mutex host_mutex_;
   std::condition_variable host_cv_;
-  std::chrono::steady_clock::time_point host_now_;  // host_mutex_ guards these four
-  bool host_pending_ = false, host_quit_ = false;
+  std::chrono::steady_clock::time_point host_now_;  // host_mutex_ guards these five
+  bool host_pending_ = false, host_quit_ = false, host_requested_ = false;
   uint32_t host_skipped_ = 0;
   uint32_t indirect_depth_ = 0;
   bool query_wait_ = false;
