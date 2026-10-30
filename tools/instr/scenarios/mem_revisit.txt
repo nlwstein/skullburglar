@@ -1,0 +1,53 @@
+# Revisit pop-in (B-287): 11040 first visit, three other chapters, then 11040 again, with a dual shot every 2 s of
+# play from 2 to 12 s after each load. Compare the two visits (and eviction with and without the re-preload).
+mark start
+wait -t 1800 phase==front_end || phase==movie || phase==dialog || phase==menu
+press_until "game.scenes~=MainMenu" START every=1000 timeout=120
+dismiss
+wait -t 1800 precompile.done==1
+mark precompile_done
+exec LoadChapter 11040
+until "game.chapter==11040 && phase==in_play && phase_s>=1" timeout=600
+mark v1-11040
+until "game.chapter==11040 && phase==in_play && phase_s>=2" timeout=60
+dualshot v1-11040-t02
+until "game.chapter==11040 && phase==in_play && phase_s>=4" timeout=60
+dualshot v1-11040-t04
+until "game.chapter==11040 && phase==in_play && phase_s>=6" timeout=60
+dualshot v1-11040-t06
+until "game.chapter==11040 && phase==in_play && phase_s>=8" timeout=60
+dualshot v1-11040-t08
+until "game.chapter==11040 && phase==in_play && phase_s>=10" timeout=60
+dualshot v1-11040-t10
+until "game.chapter==11040 && phase==in_play && phase_s>=12" timeout=60
+dualshot v1-11040-t12
+sleep 20
+exec LoadChapter 12065
+until "game.chapter==12065 && phase==in_play && phase_s>=12" timeout=600
+mark far-12065
+sleep 40
+exec LoadChapter 21115
+until "game.chapter==21115 && phase==in_play && phase_s>=12" timeout=600
+mark far-21115
+sleep 40
+exec LoadChapter 31165
+until "game.chapter==31165 && phase==in_play && phase_s>=12" timeout=600
+mark far-31165
+sleep 40
+exec LoadChapter 11040
+until "game.chapter==11040 && phase==in_play && phase_s>=1" timeout=600
+mark v2-11040
+until "game.chapter==11040 && phase==in_play && phase_s>=2" timeout=60
+dualshot v2-11040-t02
+until "game.chapter==11040 && phase==in_play && phase_s>=4" timeout=60
+dualshot v2-11040-t04
+until "game.chapter==11040 && phase==in_play && phase_s>=6" timeout=60
+dualshot v2-11040-t06
+until "game.chapter==11040 && phase==in_play && phase_s>=8" timeout=60
+dualshot v2-11040-t08
+until "game.chapter==11040 && phase==in_play && phase_s>=10" timeout=60
+dualshot v2-11040-t10
+until "game.chapter==11040 && phase==in_play && phase_s>=12" timeout=60
+dualshot v2-11040-t12
+sleep 20
+mark end

@@ -39,6 +39,8 @@
 #include <vector>
 
 #include <rex/logging.h>
+
+#include "hybrid_state.h"
 #include <rex/ppc/context.h>
 
 extern "C" void __imp__sub_825A4DB0(PPCContext& __restrict ctx, uint8_t* base);
@@ -223,7 +225,13 @@ void Tick(uint8_t* base) {
 extern "C" void sub_825A4DB0(PPCContext& __restrict ctx, uint8_t* base) {
   using namespace bots::levelstream;
   const uint32_t callback = ctx.r4.u32;
-  const std::string name = (LogLevel() || PrefetchOn()) ? FString(base, ctx.r3.u32) : std::string();
+  const std::string name = (LogLevel() || PrefetchOn() || callback == kLoadMapCallback) ? FString(base, ctx.r3.u32) : std::string();
+  // B-287: the map being loaded, for the renderer's level start (what the last visit to this map used loads again).
+  if (callback == kLoadMapCallback && !name.empty())
+    if (bots::HybridState* hs = bots::FindHybridState()) {
+      std::lock_guard lock(hs->map_mutex);
+      hs->map_name = name;
+    }
   const WorldClock clock = Clock(base);
   if (LogLevel())
     REXLOG_INFO("stream: LoadPackageAsync {} (callback {:08X}, world t={:.3f} begun={})", name, callback, clock.t,

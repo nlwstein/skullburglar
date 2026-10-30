@@ -102,6 +102,36 @@ pub struct EvictCounters {
     pub forgets_pending: u32,
 }
 
+/// B-287: the static meshes, materials and baked lights one visit to a level used (named or loaded since its start),
+/// kept so the next visit can load them again at the start.
+#[derive(Default, Clone, Debug, PartialEq)]
+pub struct VisitSet {
+    pub meshes: Vec<String>,
+    pub materials: Vec<String>,
+    pub lights: Vec<String>,
+}
+
+impl VisitSet {
+    /// Adds what `other` holds (once each): a level visited again keeps what any visit used, since what a visit names
+    /// depends on how far it got (streamed sublevels, how long the player stayed).
+    pub fn merge(&mut self, other: &VisitSet) {
+        fn add(into: &mut Vec<String>, from: &[String]) {
+            let have: HashSet<String> = into.iter().cloned().collect();
+            into.extend(from.iter().filter(|p| !have.contains(*p)).cloned());
+        }
+        add(&mut self.meshes, &other.meshes);
+        add(&mut self.materials, &other.materials);
+        add(&mut self.lights, &other.lights);
+    }
+
+    pub fn len(&self) -> usize {
+        self.meshes.len() + self.materials.len() + self.lights.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// B-287: the clock value eviction goes by: what was last named before it is dead. `keep` levels stay resident.
 pub fn eviction_cutoff(boundaries: &[u64], keep: usize) -> Option<u64> {
     let keep = keep.max(1);
@@ -739,6 +769,34 @@ impl Resolver {
         n
     }
 
+    /// B-287: what this visit (since the last `level_boundary`) used and still holds. Call it before `level_boundary`.
+    pub fn visit_set(&self) -> VisitSet {
+        let since = self.boundaries.last().copied().unwrap_or(0);
+        let pick = |slots: &[Slot]| -> Vec<String> {
+            slots
+                .iter()
+                .filter(|s| s.last_used >= since && matches!(s.state, SlotState::Ready(_)) && !s.path.contains('?'))
+                .map(|s| s.path.clone())
+                .collect()
+        };
+        VisitSet { meshes: pick(&self.meshes), materials: pick(&self.materials), lights: pick(&self.lights) }
+    }
+
+    /// B-287: requests what a past visit used; the ones still resident are left alone. Returns the new requests.
+    pub fn preload_visit(&mut self, v: &VisitSet) -> usize {
+        let mut n = 0;
+        for p in &v.materials {
+            n += self.preload(PreloadKind::Material, p) as usize;
+        }
+        for p in &v.meshes {
+            n += self.preload(PreloadKind::Mesh, p) as usize;
+        }
+        for p in &v.lights {
+            n += self.preload(PreloadKind::Light, p) as usize;
+        }
+        n
+    }
+
     /// B-287: a level change. Counts the boundary and, when `keep` levels have passed, gives back every mesh, material,
     /// light and texture nothing named since the boundary `keep` levels ago (so the last `keep` levels stay resident:
     /// what the level you just left and the one before it used, plus anything that shows up every level). Handles stay
@@ -1012,6 +1070,19 @@ impl FeedFrame {
 #[cfg(test)]
 mod evict_tests {
     use super::*;
+
+    #[test]
+    fn visit_merge_keeps_each_path_once() {
+        let mut a = VisitSet { meshes: vec!["m1".into(), "m2".into()], materials: vec![], lights: vec!["l1".into()] };
+        let b = VisitSet { meshes: vec!["m2".into(), "m3".into()], materials: vec!["x".into()], lights: vec!["l1".into(), "l2".into()] };
+        a.merge(&b);
+        assert_eq!(a.meshes, vec!["m1", "m2", "m3"]);
+        assert_eq!(a.materials, vec!["x"]);
+        assert_eq!(a.lights, vec!["l1", "l2"]);
+        assert_eq!(a.len(), 6);
+        a.merge(&b);
+        assert_eq!(a.len(), 6);
+    }
 
     #[test]
     fn cutoff_waits_for_keep_levels() {

@@ -410,6 +410,9 @@ pub struct Knobs {
     /// didn't name (off by default: everything stays resident unless `BOTS_N1_EVICT=1`; `BOTS_N1_EVICT_KEEP=<levels>`, default 2).
     pub evict: bool,
     pub evict_keep: u32,
+    /// B-287: with eviction on, a level start loads again what the last visit to that level used (and a reopened package
+    /// its list), behind the loading screen (`BOTS_N1_REPRELOAD=0`: off, assets given back return one draw at a time).
+    pub repreload: bool,
     /// B-287: render-thread time one frame spends on eviction work (`BOTS_N1_EVICT_MS`, default 1.0) and on destroying
     /// the GPU objects it gave back (`BOTS_N1_FREE_MS`, default 1.5).
     pub evict_budget: std::time::Duration,
@@ -466,6 +469,7 @@ impl Knobs {
             lod_bones: env_flag("BOTS_N1_LOD_BONES", true),
             evict: env_flag("BOTS_N1_EVICT", false),
             evict_keep: env_num("BOTS_N1_EVICT_KEEP", 2u32).max(1),
+            repreload: env_flag("BOTS_N1_REPRELOAD", true),
             evict_budget: std::time::Duration::from_micros((env_num("BOTS_N1_EVICT_MS", 1.0f64).max(0.05) * 1000.0) as u64),
             free_budget: std::time::Duration::from_micros((env_num("BOTS_N1_FREE_MS", 1.5f64).max(0.05) * 1000.0) as u64),
         }
