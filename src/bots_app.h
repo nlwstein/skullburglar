@@ -318,6 +318,17 @@ class BotsApp : public rex::ReXApp {
                                       0x2DE0, 0x2DFF,   // Cyrillic extended-A
                                       0xA640, 0xA69F,   // Cyrillic extended-B
                                       0};
+    // The first source that has a glyph draws it. The SDK's Japanese font (MS Gothic) has Greek and Cyrillic too, as
+    // full-width glyphs, so with only the merge below the letters come out double-spaced. Keep them out of the
+    // sources the SDK added; the ranges are copied with ImGui's allocator because the atlas frees them.
+    for (int i = 0; i < atlas->Sources.Size; ++i) {
+      ImFontConfig& other = atlas->Sources[i];
+      if (other.GlyphExcludeRanges) continue;
+      constexpr int kCount = sizeof(kRanges) / sizeof(kRanges[0]);
+      ImWchar* ranges = static_cast<ImWchar*>(IM_ALLOC(sizeof(ImWchar) * kCount));
+      for (int k = 0; k < kCount; ++k) ranges[k] = kRanges[k];
+      other.GlyphExcludeRanges = ranges;
+    }
     ImFontConfig config;
     config.MergeMode = true;
     config.OversampleH = config.OversampleV = 1;
@@ -326,7 +337,9 @@ class BotsApp : public rex::ReXApp {
     int len = WideCharToMultiByte(CP_UTF8, 0, font.c_str(), -1, nullptr, 0, nullptr, nullptr);
     std::string path(len > 0 ? len - 1 : 0, '\0');
     if (len > 1) WideCharToMultiByte(CP_UTF8, 0, font.c_str(), -1, path.data(), len, nullptr, nullptr);
-    atlas->AddFontFromFileTTF(path.c_str(), 12.0f, &config, kRanges);
+    // 15 against the base font's 10: sizes of merged fonts are relative to the first source, and this makes the
+    // letters as tall as the Latin ones next to them.
+    atlas->AddFontFromFileTTF(path.c_str(), 15.0f, &config, kRanges);
   }
 #endif
 
