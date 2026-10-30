@@ -31,7 +31,7 @@ workflow:
       when: never
     - if: $CI_COMMIT_BRANCH
 
-stages: [check, plan, build, release]
+stages: [check, plan, codegen, build, release]
 
 variables:
   ASSETS_PROJECT: $CI_PROJECT_NAMESPACE/skullburglar-assets
@@ -95,12 +95,50 @@ plan:
     reports:
       dotenv: plan.env
 
+# Codegen output for this tree's key (tools/ci/codegen_key.sh), stored once in the assets project so every build restores
+# it instead of running codegen (~35 minutes): the iOS, tvOS and Android builds can't run the recompiler at all. Stored
+# already: this job ends in about a minute. Not stored: it runs codegen and uploads the result (tools/ci/codegen_publish.sh),
+# then every build below takes it from the registry. A failure here stops all builds, so a missing codegen output can't
+# pass quietly. resource_group: pipelines with the same missing key wait for one another, so the second finds it stored
+# instead of uploading a duplicate. Not interruptible: a newer push would throw away up to half an hour of work that the
+# next pipeline needs anyway.
+codegen:
+  stage: codegen
+  needs:
+    - job: plan
+      optional: true
+  image: docker:29-cli
+  interruptible: false
+  resource_group: codegen
+  timeout: 3h
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH =~ /(^|\/)(apple|ios|tvos|android)/
+    - if: $CI_COMMIT_BRANCH =~ /^release\//
+  script:
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ] && [ "$RELEASE" != true ] && [ "${BUILD:-}" != 1 ]; then
+        echo "Nothing to release: no codegen needed."
+        exit 0
+      fi
+    - docker build -q -t skullburglar-ci-linux docker/linux-steamrt
+    - JOB=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.job.id=$CI_JOB_ID" --filter "label=com.gitlab.gitlab-runner.type=build")
+    - test -n "$JOB"
+    - >-
+      docker run --rm --name "skullburglar-ci-$CI_JOB_ID" --volumes-from "$JOB" -w "$CI_PROJECT_DIR"
+      -e CI_JOB_TOKEN -e CI_SERVER_HOST -e CI_API_V4_URL -e CI_PROJECT_ID -e ASSETS_PROJECT -e CODEGEN_PACKAGE
+      -e CCACHE_DIR=/ccache -v "skullburglar-ccache-linux:/ccache"
+      skullburglar-ci-linux tools/ci/codegen_publish.sh
+  after_script:
+    - docker rm -f "skullburglar-ci-$CI_JOB_ID" >/dev/null 2>&1 || true
+
 .build:
   stage: build
   extends: .desktop
   needs:
     - job: plan
       optional: true
+    - codegen
   image: docker:29-cli
   interruptible: true
   timeout: 4h
@@ -119,7 +157,7 @@ plan:
     - test -n "$JOB"
     - >-
       docker run --rm --name "skullburglar-ci-$CI_JOB_ID" --volumes-from "$JOB" -w "$CI_PROJECT_DIR"
-      -e CI_JOB_TOKEN -e CI_SERVER_HOST -e CI_API_V4_URL -e CI_PROJECT_ID -e VERSION -e PACKAGE -e ASSETS_PROJECT -e UPDATE_URL
+      -e CI_JOB_TOKEN -e CI_SERVER_HOST -e CI_API_V4_URL -e CI_PROJECT_ID -e VERSION -e PACKAGE -e ASSETS_PROJECT -e CODEGEN_PACKAGE -e UPDATE_URL
       -e CCACHE_DIR=/ccache -v "skullburglar-ccache-$PLATFORM:/ccache"
       "skullburglar-ci-$PLATFORM" tools/ci/gitlab_build.sh "$PLATFORM"
   after_script:
@@ -144,6 +182,7 @@ build:macos:
   needs:
     - job: plan
       optional: true
+    - codegen
   tags: [macos]
   interruptible: true
   timeout: 4h
@@ -172,6 +211,7 @@ build:macos:
   needs:
     - job: plan
       optional: true
+    - codegen
   interruptible: true
   allow_failure: true
   timeout: 4h
@@ -209,6 +249,7 @@ build:android:
   needs:
     - job: plan
       optional: true
+    - codegen
   image: docker:29-cli
   interruptible: true
   allow_failure: true
@@ -233,7 +274,7 @@ build:android:
     - test -n "$JOB"
     - >-
       docker run --rm --name "skullburglar-ci-$CI_JOB_ID" --volumes-from "$JOB" -w "$CI_PROJECT_DIR"
-      -e CI_JOB_TOKEN -e CI_SERVER_HOST -e CI_API_V4_URL -e CI_PROJECT_ID -e VERSION -e PACKAGE -e ASSETS_PROJECT
+      -e CI_JOB_TOKEN -e CI_SERVER_HOST -e CI_API_V4_URL -e CI_PROJECT_ID -e VERSION -e PACKAGE -e ASSETS_PROJECT -e CODEGEN_PACKAGE
       -e ANDROID_KEYSTORE -e ANDROID_KEYSTORE_PASS
       -e CCACHE_DIR=/ccache -v "skullburglar-ccache-android:/ccache"
       skullburglar-ci-android tools/ci/gitlab_build.sh android
