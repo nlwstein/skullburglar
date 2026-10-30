@@ -2,7 +2,7 @@
 # Pack a tools/ci/build.sh output into release files, named skullburglar-<version>-<platform>-<arch>.*
 #   VERSION=0.1.0 tools/ci/package.sh <linux|windows|macos> <out dir>
 # Writes <out>/release/:
-#   linux    .tar.xz (the game folder) and .AppImage (the same files, one executable), symbols .tar.xz
+#   linux    .tar.xz (the game folder, plus an install-kind marker file) and .AppImage (the same files, one executable), symbols .tar.xz
 #   windows  -setup.exe (NSIS, packaging/windows/installer.nsi; installs and updates), symbols .zip (PDBs)
 #   macos    .dmg (Skullburglar.app, an Applications link and the README), symbols .zip (dSYMs)
 # The AppImage is built with appimagetool and the type 2 runtime, both pinned by checksum.
@@ -28,7 +28,11 @@ fetch() {  # url sha256 dest
 
 case $PLATFORM in
 linux)
+  # The tarball (and only it) carries a marker saying "this is an unpacked tarball": the launcher's Update now acts on
+  # a folder only when it holds this file (src/setup/update_install.cpp), never on a build tree.
+  printf 'linux-tarball\n' > "$NAME/install-kind"
   tar -cJf "$REL/$NAME.tar.xz" "$NAME"
+  rm "$NAME/install-kind"
   tar -cJf "$REL/$NAME-symbols.tar.xz" "$NAME-symbols"
   A=$PKG/AppDir
   cp -R "$NAME" "$A"

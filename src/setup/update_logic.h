@@ -31,7 +31,7 @@ struct UpdateInfo {
   std::string page;    // its download page
   std::string error;   // why the check failed, for the log
   bool signed_ok = false;  // the newest release's entry carries a valid signature (see ParseReleases)
-  // The newest release's packages by the releases file's key: windows, macos, linux_appimage (linux_tar is listed too, but never installed from). Only entries
+  // The newest release's packages by the releases file's key: windows, macos, linux_appimage, linux_tar. Only entries
   // that passed ParseReleases' checks are here.
   std::map<std::string, Asset> downloads;
 };
@@ -57,15 +57,24 @@ enum class InstallKind {
   kWindowsSetup,  // the per-user setup program's install folder: the setup program, run silently
   kMacBundle,     // Skullburglar.app: the disk image's app replaces the bundle
   kLinuxAppImage, // a running AppImage: the new file replaces it
+  kLinuxTarball,  // an unpacked .tar.xz (it carries an install-kind marker): the new folder is swapped in as a whole
 };
 
 // `os` is "windows", "macos" or "linux". `exe_dir` is the folder holding the executable, `appimage` is the AppImage
 // file this process runs from (empty unless it really is one: update_install.cpp checks $APPIMAGE against $APPDIR).
 // `windows_setup_install` says the folder was made by the setup program (it has uninstall.exe and the registry entry
 // naming it): an unzipped copy must never have the setup run over it. A macOS app must be a bundle (Contents/MacOS)
-// that isn't on a disk image or in App Translocation's random folder. An unpacked Linux tarball has no self-update.
+// that isn't on a disk image or in App Translocation's random folder. `linux_tarball_marker` says the folder holds the
+// install-kind marker file that only the tarball ships (update_install.cpp checks it): a dev or build tree, or any
+// folder without it, never updates.
 InstallKind InstallKindFor(const std::string& os, const std::string& exe_dir, const std::string& appimage,
-                           bool windows_setup_install = false);
+                           bool windows_setup_install = false, bool linux_tarball_marker = false);
+
+// Checks the member list of a tarball before anything is unpacked. `names` is `tar -tJf` output (one name per line),
+// `verbose` is `tar -tvJf` output for the same archive (same number of lines). Refuses absolute names, a ".."
+// component, hard links, devices, pipes, symlinks that are absolute or contain "..", and more than one top-level
+// folder. Empty on success (`top` then names the one top-level folder), else why not.
+std::string CheckTarMembers(const std::string& names, const std::string& verbose, std::string* top = nullptr);
 
 // macOS only: whether the app runs from a disk image or App Translocation's random folder, which is why it can't
 // update itself; the launcher then says to move it to Applications first.

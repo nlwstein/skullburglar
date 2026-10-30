@@ -113,7 +113,12 @@ int main() {
   CHECK(!MacAppNeedsMove("/Applications/Skullburglar.app/Contents/MacOS"));
   CHECK(InstallKindFor("macos", "/opt/build/out/bots-dir", "") == InstallKind::kNone);  // not a bundle
   CHECK(InstallKindFor("linux", "/tmp/.mount_abc", "/opt/games/Skullburglar.AppImage") == InstallKind::kLinuxAppImage);
-  CHECK(InstallKindFor("linux", "/opt/games/skullburglar-1.0.0-linux-x86_64", "") == InstallKind::kNone);  // tarball: link only
+  CHECK(InstallKindFor("linux", "/opt/games/skullburglar-1.0.0-linux-x86_64", "") == InstallKind::kNone);  // no marker: link only
+  CHECK(InstallKindFor("linux", "/opt/games/skullburglar-1.0.0-linux-x86_64", "", false, true) == InstallKind::kLinuxTarball);
+  CHECK(InstallKindFor("linux", "", "", false, true) == InstallKind::kNone);
+  CHECK(InstallKindFor("linux", "/tmp/.mount_abc", "/opt/games/Skullburglar.AppImage", false, true) == InstallKind::kLinuxAppImage);
+  CHECK(InstallKindFor("macos", "/x/skullburglar", "", false, true) == InstallKind::kNone);  // the marker means nothing there
+  CHECK(std::string(AssetKey(InstallKind::kLinuxTarball)) == "linux_tar");
   CHECK(InstallKindFor("freebsd", "/x", "") == InstallKind::kNone);
   {
     UpdateInfo i = ParseReleases(Releases(Dl("windows", "w.exe", kSha, "10", "/dl/w.exe") + "," +
@@ -122,7 +127,28 @@ int main() {
     CHECK(PickAsset(i, InstallKind::kWindowsSetup) && PickAsset(i, InstallKind::kWindowsSetup)->file == "w.exe");
     CHECK(!PickAsset(i, InstallKind::kMacBundle));      // this release has no disk image
     CHECK(!PickAsset(i, InstallKind::kLinuxAppImage));  // nor an AppImage
+    CHECK(PickAsset(i, InstallKind::kLinuxTarball) && PickAsset(i, InstallKind::kLinuxTarball)->file == "t.tar.xz");
     CHECK(!PickAsset(i, InstallKind::kNone));
+  }
+
+  // Tarball member lists (what `tar -tJf` and `tar -tvJf` print).
+  {
+    const std::string ok_names = "p-1/\np-1/bots\np-1/libvulkan.so.1\np-1/install-kind\n";
+    const std::string ok_verbose =
+        "drwxr-xr-x u/g 0 2026-01-01 00:00 p-1/\n-rwxr-xr-x u/g 9 2026-01-01 00:00 p-1/bots\n"
+        "lrwxrwxrwx u/g 0 2026-01-01 00:00 p-1/libvulkan.so.1 -> libvulkan.so.1.3.2\n-rw-r--r-- u/g 14 2026-01-01 00:00 p-1/install-kind\n";
+    std::string top;
+    CHECK(CheckTarMembers(ok_names, ok_verbose, &top).empty() && top == "p-1");
+    CHECK(!CheckTarMembers("", "").empty());
+    CHECK(!CheckTarMembers("p-1/\n../evil\n", "drwxr-xr-x u/g 0 d t p-1/\n-rw-r--r-- u/g 1 d t ../evil\n").empty());
+    CHECK(!CheckTarMembers("p-1/\np-1/a/../../evil\n", "d u/g 0 d t p-1/\n- u/g 1 d t p-1/a/../../evil\n").empty());
+    CHECK(!CheckTarMembers("/etc/passwd\n", "-rw-r--r-- u/g 1 d t /etc/passwd\n").empty());
+    CHECK(!CheckTarMembers("p-1/\np-2/x\n", "d u/g 0 d t p-1/\n- u/g 1 d t p-2/x\n").empty());  // two top folders
+    CHECK(!CheckTarMembers("p-1/\np-1/l\n", "d u/g 0 d t p-1/\nl u/g 0 d t p-1/l -> /etc\n").empty());
+    CHECK(!CheckTarMembers("p-1/\np-1/l\n", "d u/g 0 d t p-1/\nl u/g 0 d t p-1/l -> ../../etc\n").empty());
+    CHECK(!CheckTarMembers("p-1/\np-1/h\n", "d u/g 0 d t p-1/\nh u/g 0 d t p-1/h link to p-1/bots\n").empty());
+    CHECK(!CheckTarMembers("p-1/\np-1/dev\n", "d u/g 0 d t p-1/\nc u/g 1,3 d t p-1/dev\n").empty());
+    CHECK(!CheckTarMembers("p-1/\n", "d u/g 0 d t p-1/\n-extra\n").empty());  // lists disagree
   }
 
   // Ed25519: RFC 8032 section 7.1 test vectors 1 to 3, and tampering.

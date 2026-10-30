@@ -115,8 +115,10 @@ Logs
   macOS    ~/Library/Logs/Skullburglar
   Linux    logs/ next to bots; the AppImage writes ~/.local/state/bots-recomp/logs
 
-Updating: on Windows run the new setup (it finds your install and updates it); elsewhere replace the AppImage,
-folder or app with the new version from https://skullburglar.stz.sh. Game files, saves and settings stay.
+Updating: the launcher's "Update now" button does it for the Windows setup, the macOS app, the Linux AppImage and an
+unpacked Linux .tar.xz (the folder is swapped as a whole; the game folder, logs and any files you added stay). Otherwise,
+or if you prefer, replace the AppImage, folder or app with the new version from https://skullburglar.stz.sh. Game
+files, saves and settings stay.
 
 
 Reporting a problem
