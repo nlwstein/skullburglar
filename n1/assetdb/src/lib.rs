@@ -343,7 +343,7 @@ impl AssetDb {
     /// The class of an object and the bytes that follow its property list in its export (native serialization), for
     /// tools that decode what the property reader skips (`mictail`).
     pub fn object_tail(&self, path: &str) -> Option<(String, Vec<u8>)> {
-        let (pkg, idx) = self.locate(path, false).ok().flatten()?;
+        let (pkg, idx) = self.locate(path, false, None).ok().flatten()?;
         let (_, r) = ue3::props::object_props(&pkg, idx).ok()?;
         let data = pkg.export_data(idx);
         Some((pkg.class_name(idx).to_string(), data[r.o..].to_vec()))
@@ -351,7 +351,7 @@ impl AssetDb {
 
     /// The Parent of a MaterialInstanceConstant (object path), for tools.
     pub fn material_parent(&self, path: &str) -> Option<String> {
-        let (pkg, idx) = self.locate(path, false).ok().flatten()?;
+        let (pkg, idx) = self.locate(path, false, None).ok().flatten()?;
         let (props, _) = ue3::props::object_props(&pkg, idx).ok()?;
         let o = props.get("Parent").map(|x| x.as_obj()).filter(|&o| o != 0)?;
         Some(pkg.obj_path(o))
@@ -359,13 +359,13 @@ impl AssetDb {
 
     /// An object's property list as JSON (`ue3::pmaterial::export_json`), for tools.
     pub fn object_json(&self, path: &str) -> Option<serde_json::Value> {
-        let (pkg, idx) = self.locate(path, false).ok().flatten()?;
+        let (pkg, idx) = self.locate(path, false, None).ok().flatten()?;
         ue3::pmaterial::export_json(&pkg, idx).ok()
     }
 
     /// A name of the package that holds `path` (by name-table index), for tools decoding native bytes.
     pub fn name_in_package_of(&self, path: &str, i: usize) -> Option<String> {
-        let (pkg, _) = self.locate(path, false).ok().flatten()?;
+        let (pkg, _) = self.locate(path, false, None).ok().flatten()?;
         pkg.names.get(i).cloned()
     }
 

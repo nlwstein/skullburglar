@@ -2127,7 +2127,7 @@ impl Renderer {
             let env_spec = self.knobs.env_spec && self.debug_bits & 512 == 0;
             // B-261 flag bit 4: tangent-space ReflectionVector (debug bit 12, 4096, off).
             let refl_ts = self.knobs.refl_ts && self.debug_bits & 4096 == 0;
-            // B-288 flag bit 5: tangent-space view for a Fresnel's Normal input (debug bit 13, 8192, off).
+            // B-277 flag bit 5: tangent-space view for a Fresnel's Normal input (debug bit 13, 8192, off).
             let fresnel_ts = self.knobs.fresnel_ts && self.debug_bits & 8192 == 0;
             globals.amb_up[3] = (post as u32
                 | (lv as u32) << 1

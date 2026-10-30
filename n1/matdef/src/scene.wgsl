@@ -128,7 +128,7 @@ struct FragIn {
     depth: f32,
     view_ts: vec3<f32>,
     refl_ts: bool,        // B-261: ReflectionVector in tangent space about the material Normal (flag bit 4)
-    fresnel_ts: bool,     // B-288: a Fresnel with a Normal input dots it with the tangent-space view (flag bit 5)
+    fresnel_ts: bool,     // B-277: a Fresnel with a Normal input dots it with the tangent-space view (flag bit 5)
     light_ts: vec3<f32>,  // UE3 LightVector: the key light (sun or light environment directional), tangent space
 };
 

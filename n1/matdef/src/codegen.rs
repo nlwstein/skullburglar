@@ -226,7 +226,7 @@ pub fn compile_gamma(
             }
             Node::Fresnel { exp, n: nn } => {
                 let k = p([*exp, 0.0, 0.0, 0.0]);
-                // B-288: UE3's Normal input is tangent space, so it pairs with the tangent-space view vector (the
+                // B-277: UE3's Normal input is tangent space, so it pairs with the tangent-space view vector (the
                 // way `ReflVec` pairs it with `view_ts`); the world normal pairs with the world view. Dotting a
                 // tangent-space normal with the world view gave a near-constant term (a launcher drawn flat white).
                 let dot = match nn {
@@ -339,7 +339,7 @@ mod refl_tests {
         assert!(c.body.contains("fi.refl_ts"));
     }
 
-    /// B-288: a Fresnel with a Normal input pairs it with the tangent-space view behind a flag; without one it keeps
+    /// B-277: a Fresnel with a Normal input pairs it with the tangent-space view behind a flag; without one it keeps
     /// the world normal and the world view.
     #[test]
     fn fresnel_with_a_normal_input_uses_the_tangent_space_view() {
