@@ -150,6 +150,13 @@ typedef struct N1Stats {
   uint32_t decals, decal_draws, decal_cached;
   float decal_build_ms;
   uint64_t decal_builds, decal_triangles;
+  /* B-287: level-change eviction, cumulative: boundaries seen, sweeps run; given back (static and skinned meshes,
+   * textures, materials, baked lights, GPU bytes); textures a sweep couldn't free yet; CPU copies still queued to
+   * drop; the last and longest sweep (ms). */
+  uint64_t evict_boundaries, evict_sweeps, meshes_freed, skin_meshes_freed, textures_freed, materials_freed,
+      lights_freed, bytes_freed, textures_kept;
+  uint32_t forgets_pending;
+  float evict_last_ms, evict_max_ms;
 } N1Stats;
 
 /* NULL on failure; see n1_last_error. */
@@ -349,6 +356,11 @@ int32_t n1_preload_package(const N1Renderer* r, const char* name);
 int32_t n1_upload(const N1Renderer* r, VkCommandBuffer cmd, uint64_t serial, uint64_t completed, uint32_t budget_us,
                   N1Stats* stats);
 void n1_load_stats(const N1Renderer* r, N1Stats* stats);
+
+/* B-287: the game's level just changed. Releases the meshes, textures, materials and baked lights the last few levels
+ * didn't use (off unless BOTS_N1_EVICT=1; BOTS_N1_EVICT_KEEP is how many levels stay). Returns how many meshes were
+ * given back. */
+uint32_t n1_level_boundary(const N1Renderer* r);
 
 int32_t n1_record(N1Renderer* r, VkCommandBuffer cmd, const N1Target* target, const N1Camera* camera,
                   const N1Instance* instances, uint32_t count, const uint32_t* materials, uint32_t material_count,

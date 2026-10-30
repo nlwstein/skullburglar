@@ -64,6 +64,14 @@ pub struct Skins {
     pub late: u64,
     pub preloads: u64,
     preloaded: Vec<bool>,
+    /// B-287: `build` calls so far, the clock `used` and `boundaries` are on; the clock at each level change.
+    clock: u64,
+    used: Vec<u64>,
+    /// B-287: skinned meshes eviction gave back that nothing has named since: not waiting for anything.
+    idle: Vec<bool>,
+    boundaries: Vec<u64>,
+    /// B-287: skinned meshes given back to the renderer, cumulative.
+    pub evicted: u64,
 }
 
 impl Skins {
@@ -93,6 +101,11 @@ impl Skins {
             late: 0,
             preloads: 0,
             preloaded: Vec::new(),
+            clock: 0,
+            used: Vec::new(),
+            idle: Vec::new(),
+            boundaries: Vec::new(),
+            evicted: 0,
         }
     }
 
@@ -105,6 +118,8 @@ impl Skins {
         self.paths.push(path.to_string());
         self.states.push(State::Pending { requested: false });
         self.preloaded.push(false);
+        self.used.push(0);
+        self.idle.push(false);
         h
     }
 
@@ -123,6 +138,29 @@ impl Skins {
         false
     }
 
+    /// B-287: a level change: gives back the skinned meshes nothing named since `keep` levels ago (the handle stays
+    /// valid and reloads when named again). `Resolver::level_boundary` is the same rule for static meshes.
+    pub fn level_boundary(&mut self, r: &mut Renderer, db: &AssetDb, keep: usize) {
+        self.clock += 1;
+        self.boundaries.push(self.clock);
+        let Some(cutoff) = scenekit::eviction_cutoff(&self.boundaries, keep) else {
+            return;
+        };
+        for (h, state) in self.states.iter_mut().enumerate() {
+            if !matches!(state, State::Ready { .. }) || self.used[h] >= cutoff {
+                continue;
+            }
+            if let State::Ready { gpu, .. } = state {
+                r.free_skin_mesh(*gpu);
+            }
+            db.forget_skeletal(&self.paths[h]);
+            *state = State::Pending { requested: false };
+            self.preloaded[h] = false;
+            self.idle[h] = true;
+            self.evicted += 1;
+        }
+    }
+
     /// Preloaded meshes not loaded yet.
     pub fn preload_pending(&self) -> u32 {
         self.states
@@ -135,9 +173,11 @@ impl Skins {
     /// (ready, pending, missing)
     pub fn counts(&self) -> (u32, u32, u32) {
         let mut c = (0, 0, 0);
-        for s in &self.states {
+        for (h, s) in self.states.iter().enumerate() {
             match s {
                 State::Ready { .. } => c.0 += 1,
+                // B-287: one eviction gave back (`idle`: not asked for again yet) isn't waiting for anything.
+                State::Pending { requested: false } if self.idle[h] => {}
                 State::Pending { .. } => c.1 += 1,
                 State::Missing => c.2 += 1,
             }
@@ -166,6 +206,7 @@ impl Skins {
             let Ok((h, asset)) = self.rx.try_recv() else {
                 break;
             };
+            self.used[h as usize] = self.clock;
             self.states[h as usize] = match asset {
                 Some(a) => match r.add_skin_mesh(&a.verts, &a.indices) {
                     Ok(gpu) => {
@@ -211,6 +252,8 @@ impl Skins {
             let Some(state) = self.states.get_mut(inst.mesh as usize) else {
                 continue;
             };
+            self.used[inst.mesh as usize] = self.clock;
+            self.idle[inst.mesh as usize] = false;
             if let State::Pending { requested } = state {
                 if *requested {
                     self.late += self.preloaded[inst.mesh as usize] as u64;

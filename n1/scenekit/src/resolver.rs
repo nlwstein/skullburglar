@@ -14,7 +14,7 @@ use crate::{
 use anyhow::{Context, Result};
 use assetdb::{AssetDb, ComponentLight, MaterialAsset, MeshAsset, TexFmt, TextureAsset};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -29,10 +29,12 @@ struct Slot {
     path: String,
     state: SlotState,
     requested: bool,
-    /// `translate` call that last named it (materials only).
+    /// `translate` call that last named it, or the one in progress when it was loaded (B-287: what eviction goes by).
     last_used: u64,
     /// Requested by a preload (B-199), not by a draw.
     preload: bool,
+    /// B-287: given back by eviction and not asked for since: not waiting for anything.
+    idle: bool,
 }
 
 /// A run-time material instance: the scene feed puts its parameter values after `?` in the path.
@@ -78,6 +80,54 @@ enum Request {
     Mesh(u32, String),
     Material(u32, String),
     Light(u32, String),
+}
+
+/// B-287: what level-change eviction has done, cumulative since start (`Resolver::evict`).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct EvictCounters {
+    /// Level boundaries seen (`level_boundary`) and sweeps that ran.
+    pub boundaries: u64,
+    pub sweeps: u64,
+    pub meshes: u64,
+    pub materials: u64,
+    pub textures: u64,
+    pub lights: u64,
+    /// Textures a sweep wanted to give back but couldn't yet (copy still queued): kept until the next sweep.
+    pub textures_kept: u64,
+    /// The last sweep and the longest one, ms of render-thread time (CPU-side marking and releasing; the GPU frees and
+    /// the CPU-copy drops are spread over later frames).
+    pub last_ms: f32,
+    pub max_ms: f32,
+    /// CPU copies still waiting to be dropped (`drain_forgets`).
+    pub forgets_pending: u32,
+}
+
+/// B-287: the clock value eviction goes by: what was last named before it is dead. `keep` levels stay resident.
+pub fn eviction_cutoff(boundaries: &[u64], keep: usize) -> Option<u64> {
+    let keep = keep.max(1);
+    (boundaries.len() >= keep).then(|| boundaries[boundaries.len() - keep])
+}
+
+/// B-287: texture ids still wanted: those live materials sample plus live lights' light maps.
+fn live_textures<'a>(
+    mats: impl Iterator<Item = &'a Vec<u32>>,
+    lights: impl Iterator<Item = &'a [u32; 3]>,
+) -> HashSet<u32> {
+    let mut s = HashSet::new();
+    for m in mats {
+        s.extend(m.iter().copied());
+    }
+    for l in lights {
+        s.extend(l.iter().copied().filter(|&t| t != NONE));
+    }
+    s
+}
+
+/// B-287: a CPU-side copy `AssetDb` holds for something eviction gave back: dropped later, a few per frame.
+enum Forget {
+    Mesh(String),
+    Material(String),
+    Texture(String),
 }
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -142,6 +192,15 @@ pub struct Resolver {
     out_overrides: Vec<u32>,
     /// `translate` calls so far (the clock for `last_used`).
     frame: u64,
+    /// B-287: renderer material ids each mesh slot's sections use, texture ids each material samples (diffuse first),
+    /// and the light-map texture ids of each light slot: what eviction counts to know what is still referenced.
+    mesh_mats: HashMap<u32, Vec<u32>>,
+    mat_tex: HashMap<u32, Vec<u32>>,
+    light_tex: HashMap<u32, [u32; 3]>,
+    /// B-287: the clock value at each level change (`level_boundary`).
+    boundaries: Vec<u64>,
+    forgets: VecDeque<Forget>,
+    pub evict: EvictCounters,
 }
 
 fn tex_format(f: TexFmt) -> TexFormat {
@@ -198,6 +257,12 @@ impl Resolver {
             out_instances: Vec::new(),
             out_overrides: Vec::new(),
             frame: 0,
+            mesh_mats: HashMap::new(),
+            mat_tex: HashMap::new(),
+            light_tex: HashMap::new(),
+            boundaries: Vec::new(),
+            forgets: VecDeque::new(),
+            evict: EvictCounters::default(),
         }
     }
 
@@ -262,6 +327,7 @@ impl Resolver {
             requested: false,
             last_used: 0,
             preload: false,
+            idle: false,
         });
         let h = slots.len() as u32 - 1;
         by_path.insert(path.to_string(), h);
@@ -301,6 +367,8 @@ impl Resolver {
             match m.state {
                 SlotState::Ready(_) => s.meshes_ready += 1,
                 SlotState::Missing => s.meshes_missing += 1,
+                // B-287: a slot eviction gave back and nothing has asked for since isn't waiting for anything.
+                SlotState::Pending if !m.requested && m.idle => {}
                 SlotState::Pending => s.meshes_pending += 1,
             }
         }
@@ -408,6 +476,9 @@ impl Resolver {
                 }
             }
         }
+        let mut used: Vec<u32> = std::iter::once(texture).chain(textures.iter().copied()).filter(|&t| t != NONE).collect();
+        used.sort_unstable();
+        used.dedup();
         let id = r.add_material(&MaterialDesc {
             texture,
             blend: Blend::from_ue3(def.map(|d| d.blend.as_str()).filter(|b| !b.is_empty()).unwrap_or(&m.blend)),
@@ -421,6 +492,7 @@ impl Resolver {
             eprintln!("n1ffi: material #{id} is {path}");
         }
         self.mat_ids.insert(path.to_string(), id);
+        self.mat_tex.insert(id, used);
         id
     }
 
@@ -429,7 +501,7 @@ impl Resolver {
         r: &mut impl Backend,
         m: &MeshAsset,
         mats: &[(String, MatLoad)],
-    ) -> u32 {
+    ) -> (u32, Vec<u32>) {
         let sections: Vec<SectionDesc> = m
             .sections
             .iter()
@@ -450,7 +522,10 @@ impl Resolver {
                 }
             })
             .collect();
-        r.add_mesh(&MeshDesc {
+        let mut used: Vec<u32> = sections.iter().map(|s| s.material).filter(|&x| x != NONE).collect();
+        used.sort_unstable();
+        used.dedup();
+        let id = r.add_mesh(&MeshDesc {
             positions: &m.positions,
             uvs: &m.uvs,
             normals: &m.normals,
@@ -461,7 +536,8 @@ impl Resolver {
             sections: &sections,
             center: m.center,
             radius: m.radius,
-        })
+        });
+        (id, used)
     }
 
     fn apply(&mut self, r: &mut impl Backend, l: Loaded) {
@@ -472,15 +548,21 @@ impl Resolver {
                 materials,
             } => {
                 let st = match mesh {
-                    Some(m) => SlotState::Ready(self.upload_mesh(r, &m, &materials)),
+                    Some(m) => {
+                        let (id, mats) = self.upload_mesh(r, &m, &materials);
+                        self.mesh_mats.insert(handle, mats);
+                        SlotState::Ready(id)
+                    }
                     None => SlotState::Missing,
                 };
                 self.meshes[handle as usize].state = st;
+                self.meshes[handle as usize].last_used = self.frame;
             }
             Loaded::Material { handle, material } => {
                 let path = self.materials[handle as usize].path.clone();
                 let id = self.upload_material(r, &path, &material);
                 self.materials[handle as usize].state = SlotState::Ready(id);
+                self.materials[handle as usize].last_used = self.frame;
             }
             Loaded::Light { handle, light, lightmaps } => {
                 let mut ids = [NONE; 3];
@@ -508,6 +590,8 @@ impl Resolver {
                     Some(id) if id != NONE => SlotState::Ready(id),
                     _ => SlotState::Missing,
                 };
+                self.lights[handle as usize].last_used = self.frame;
+                self.light_tex.insert(handle, ids);
             }
         }
     }
@@ -543,7 +627,9 @@ impl Resolver {
     }
 
     fn ensure_mesh(&mut self, r: &mut impl Backend, h: u32) -> Option<u32> {
+        let frame = self.frame;
         let slot = self.meshes.get_mut(h as usize)?;
+        slot.last_used = frame;
         match slot.state {
             SlotState::Ready(id) => return Some(id),
             SlotState::Missing => return None,
@@ -643,6 +729,7 @@ impl Resolver {
             }
             if self.mat_ids.remove(&slot.path).is_some() {
                 r.remove_material(id);
+                self.mat_tex.remove(&id);
             }
             self.db.forget_material(&slot.path);
             slot.state = SlotState::Pending;
@@ -652,10 +739,130 @@ impl Resolver {
         n
     }
 
+    /// B-287: a level change. Counts the boundary and, when `keep` levels have passed, gives back every mesh, material,
+    /// light and texture nothing named since the boundary `keep` levels ago (so the last `keep` levels stay resident:
+    /// what the level you just left and the one before it used, plus anything that shows up every level). Handles stay
+    /// valid; a later reference reloads lazily. Returns true when a sweep ran.
+    pub fn level_boundary(&mut self, r: &mut impl Backend, keep: usize) -> bool {
+        self.frame += 1;
+        self.boundaries.push(self.frame);
+        self.evict.boundaries += 1;
+        let Some(cutoff) = eviction_cutoff(&self.boundaries, keep) else {
+            return false;
+        };
+        let t0 = std::time::Instant::now();
+        self.sweep(r, cutoff);
+        let ms = t0.elapsed().as_secs_f32() * 1000.0;
+        self.evict.sweeps += 1;
+        self.evict.last_ms = ms;
+        self.evict.max_ms = self.evict.max_ms.max(ms);
+        true
+    }
+
+    fn sweep(&mut self, r: &mut impl Backend, cutoff: u64) {
+        // Meshes first (they hold materials), then materials, lights, and last the textures nothing left uses.
+        let mut live_mats: HashSet<u32> = HashSet::new();
+        for (h, slot) in self.meshes.iter_mut().enumerate() {
+            let SlotState::Ready(id) = slot.state else { continue };
+            if slot.last_used >= cutoff {
+                if let Some(m) = self.mesh_mats.get(&(h as u32)) {
+                    live_mats.extend(m.iter().copied());
+                }
+                continue;
+            }
+            r.free_mesh(id);
+            self.mesh_mats.remove(&(h as u32));
+            self.forgets.push_back(Forget::Mesh(slot.path.clone()));
+            slot.state = SlotState::Pending;
+            slot.requested = false;
+            slot.idle = true;
+            self.evict.meshes += 1;
+        }
+        for slot in &self.materials {
+            if let SlotState::Ready(id) = slot.state {
+                if slot.last_used >= cutoff {
+                    live_mats.insert(id);
+                }
+            }
+        }
+        let dead_mats: Vec<(String, u32)> =
+            self.mat_ids.iter().filter(|(_, id)| !live_mats.contains(id)).map(|(p, &id)| (p.clone(), id)).collect();
+        let dead_ids: HashSet<u32> = dead_mats.iter().map(|d| d.1).collect();
+        for (path, id) in dead_mats {
+            self.mat_ids.remove(&path);
+            r.remove_material(id);
+            self.mat_tex.remove(&id);
+            self.forgets.push_back(Forget::Material(path));
+            self.evict.materials += 1;
+        }
+        for slot in &mut self.materials {
+            if matches!(slot.state, SlotState::Ready(id) if dead_ids.contains(&id)) {
+                slot.state = SlotState::Pending;
+                slot.requested = false;
+            }
+        }
+        let mut live_lights: Vec<u32> = Vec::new();
+        for (h, slot) in self.lights.iter_mut().enumerate() {
+            let SlotState::Ready(id) = slot.state else { continue };
+            if slot.last_used >= cutoff {
+                live_lights.push(h as u32);
+                continue;
+            }
+            r.free_light(id);
+            // Its package's lights were all preloaded once (`lights_complete`: a light not known yet is "none"). Now one
+            // is gone, so a later reference must load it again instead of reading as unlit.
+            if let Some(pkg) = slot.path.split('.').next() {
+                self.lights_complete.remove(pkg);
+            }
+            self.light_tex.remove(&(h as u32));
+            slot.state = SlotState::Pending;
+            slot.requested = false;
+            self.evict.lights += 1;
+        }
+        let live_tex = live_textures(self.mat_ids.values().filter_map(|id| self.mat_tex.get(id)), live_lights.iter().filter_map(|h| self.light_tex.get(h)));
+        let dead_tex: Vec<(String, u32)> =
+            self.tex_ids.iter().filter(|(_, id)| !live_tex.contains(id)).map(|(k, &id)| (k.clone(), id)).collect();
+        for (key, id) in dead_tex {
+            if r.free_texture(id) {
+                self.tex_ids.remove(&key);
+                self.evict.textures += 1;
+                let name = key.rsplit_once('|').map_or(key.as_str(), |x| x.0).to_string();
+                let still = self.tex_ids.keys().any(|k| k.rsplit_once('|').is_some_and(|x| x.0 == name));
+                if !still {
+                    self.forgets.push_back(Forget::Texture(name));
+                }
+            } else {
+                self.evict.textures_kept += 1;
+            }
+        }
+        self.evict.forgets_pending = self.forgets.len() as u32;
+    }
+
+    /// B-287: drops queued CPU copies from `AssetDb`, as many as fit in `budget`.
+    pub fn drain_forgets(&mut self, budget: std::time::Duration) {
+        if self.forgets.is_empty() {
+            return;
+        }
+        let t0 = std::time::Instant::now();
+        while let Some(f) = self.forgets.pop_front() {
+            match f {
+                Forget::Mesh(p) => self.db.forget_mesh(&p),
+                Forget::Material(p) => self.db.forget_material(&p),
+                Forget::Texture(p) => self.db.forget_texture(&p),
+            }
+            if t0.elapsed() >= budget {
+                break;
+            }
+        }
+        self.evict.forgets_pending = self.forgets.len() as u32;
+    }
+
     fn ensure_light(&mut self, r: &mut impl Backend, h: u32) -> u32 {
+        let frame = self.frame;
         let Some(slot) = self.lights.get_mut(h as usize) else {
             return NONE;
         };
+        slot.last_used = frame;
         match slot.state {
             SlotState::Ready(id) => return id,
             SlotState::Missing => return NONE,
@@ -799,5 +1006,31 @@ impl FeedFrame {
         v.sort();
         v.dedup();
         v
+    }
+}
+
+#[cfg(test)]
+mod evict_tests {
+    use super::*;
+
+    #[test]
+    fn cutoff_waits_for_keep_levels() {
+        assert_eq!(eviction_cutoff(&[], 2), None);
+        assert_eq!(eviction_cutoff(&[10], 2), None);
+        assert_eq!(eviction_cutoff(&[10, 20], 2), Some(10));
+        assert_eq!(eviction_cutoff(&[10, 20, 30], 2), Some(20));
+        assert_eq!(eviction_cutoff(&[10, 20, 30], 1), Some(30));
+        assert_eq!(eviction_cutoff(&[10], 0), Some(10));
+    }
+
+    #[test]
+    fn live_textures_union() {
+        let a = vec![1, 2];
+        let b = vec![2, 3];
+        let l = [7, NONE, 9];
+        let s = live_textures([&a, &b].into_iter(), [&l].into_iter());
+        let mut v: Vec<u32> = s.into_iter().collect();
+        v.sort_unstable();
+        assert_eq!(v, vec![1, 2, 3, 7, 9]);
     }
 }
