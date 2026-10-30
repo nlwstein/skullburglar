@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 #if defined(_WIN32)
 #include <stdlib.h>
@@ -126,6 +127,73 @@ inline bool SamePath(const std::filesystem::path& a, const std::filesystem::path
   std::error_code ec;
   return std::filesystem::exists(a, ec) && std::filesystem::exists(b, ec) && std::filesystem::equivalent(a, b, ec) && !ec;
 }
+
+// Long Windows paths. A path of 260 characters or more fails in every Win32 file call unless it is spelled in the
+// extended-length form \\?\C:\folder (and the program has opted in with a manifest, which bots.exe has not, so the
+// registry's LongPathsEnabled switch doesn't help either). A game or settings folder that deep used to fail with
+// "file not found" for the files below it, quietly. The text helpers below are plain string code so they are testable
+// everywhere; the path versions only change a path on Windows.
+//
+// A path becomes extended-length only when it is long (kLongPathThreshold, below MAX_PATH by about the deepest game
+// file's relative length), absolute, and not already extended; it is then also made canonical, because \\?\ turns off
+// Windows' own handling of "/", "." and "..". Shorter paths are never touched.
+inline constexpr size_t kLongPathThreshold = 180;
+
+inline std::string ExtendedPathText(std::string_view text, size_t threshold = kLongPathThreshold) {
+  if (text.size() <= threshold || text.starts_with("\\\\?\\") || text.starts_with("//?/")) return std::string(text);
+  const bool drive = text.size() >= 3 && ((text[0] >= 'A' && text[0] <= 'Z') || (text[0] >= 'a' && text[0] <= 'z')) &&
+                     text[1] == ':' && (text[2] == '\\' || text[2] == '/');
+  const bool unc = text.size() >= 3 && (text[0] == '\\' || text[0] == '/') && text[0] == text[1] && text[2] != '\\' &&
+                   text[2] != '/' && text[2] != '?' && text[2] != '.';
+  if (!drive && !unc) return std::string(text);
+  std::vector<std::string> parts;
+  size_t i = drive ? 2 : 0;
+  while (i < text.size()) {
+    while (i < text.size() && (text[i] == '\\' || text[i] == '/')) ++i;
+    size_t j = i;
+    while (j < text.size() && text[j] != '\\' && text[j] != '/') ++j;
+    const std::string_view part = text.substr(i, j - i);
+    if (part == "..") {
+      if (!parts.empty()) parts.pop_back();
+    } else if (!part.empty() && part != ".") {
+      parts.emplace_back(part);
+    }
+    i = j;
+  }
+  std::string out;
+  if (drive) {
+    out = "\\\\?\\";
+    out.push_back(text[0]);
+    out.push_back(':');
+  } else {
+    out = "\\\\?\\UNC";  // \\server\share\x -> \\?\UNC\server\share\x
+  }
+  for (const std::string& part : parts) out += "\\" + part;
+  if (drive && parts.empty()) out += "\\";
+  return out;
+}
+
+// The text as a player would write it: without the extended-length prefix.
+inline std::string PlainPathText(std::string_view text) {
+  if (text.starts_with("\\\\?\\UNC\\")) return "\\\\" + std::string(text.substr(8));
+  if (text.size() >= 6 && text.starts_with("\\\\?\\") && text[5] == ':') return std::string(text.substr(4));
+  return std::string(text);
+}
+
+// The path to use for file calls: extended-length on Windows when it is long, as is everywhere else.
+inline std::filesystem::path LongPath(const std::filesystem::path& p) {
+#if defined(_WIN32)
+  if (p.empty()) return p;
+  const std::string text = PathUtf8(p);
+  const std::string extended = ExtendedPathText(text);
+  return extended == text ? p : PathFromUtf8(extended);
+#else
+  return p;
+#endif
+}
+
+// The path for settings, logs and the UI: without the extended-length prefix.
+inline std::string PlainPathUtf8(const std::filesystem::path& p) { return PlainPathText(PathUtf8(p)); }
 
 // A file:// URL for a path, for SDL_OpenURL: every byte outside A-Z a-z 0-9 - . _ ~ / : is %-escaped, so spaces, "%",
 // "#", "?" and non-ASCII names (which macOS's URL parser rejects) all survive.
