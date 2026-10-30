@@ -128,6 +128,7 @@ struct FragIn {
     depth: f32,
     view_ts: vec3<f32>,
     refl_ts: bool,        // B-261: ReflectionVector in tangent space about the material Normal (flag bit 4)
+    fresnel_ts: bool,     // B-288: a Fresnel with a Normal input dots it with the tangent-space view (flag bit 5)
     light_ts: vec3<f32>,  // UE3 LightVector: the key light (sun or light environment directional), tangent space
 };
 
@@ -243,6 +244,7 @@ fn fs(i: VOut, @builtin(front_facing) ff: bool) -> @location(0) vec4<f32> {
     }
     fi.light_ts = vec3<f32>(dot(Lk, T0), dot(Lk, B), dot(Lk, N));
     fi.refl_ts = (u32(g.amb_up.w) & 16u) != 0u;
+    fi.fresnel_ts = (u32(g.amb_up.w) & 32u) != 0u;
     let m = eval_material(fi);
     if (MASKED && m.mask < CLIP) { discard; }
 
