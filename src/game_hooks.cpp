@@ -2824,9 +2824,15 @@ void Apply(uint8_t* base, float dt) {
         const uint32_t o = split_screen::Prop(base, pin, name);
         return o != 0xFFFFFFFF ? F(base, pin + o) : -999.f;
       };
-      REXLOG_INFO("FEELLOG dt={:.6f} yaw={} raw={:.4f} aTurn={:.4f} powerturn={:.4f} lagprop={:.4f} smooth={}", dt, yaw,
-                  prop("RawJoyLookRight"), prop("aTurn"), prop("PowerTurn"), prop("LagProportion"),
-                  (LoadU32(base, pin + f.smooth_off) & f.smooth_mask) != 0);
+      // bUsingGamepad (UPlayerInput, set natively from InputAxis/InputKey's bGamepad), the mouse axes as the script sees
+      // them, and the left stick's raw forward axis: B-268 measures a pad-held-down session against a mouse feed.
+      const uint32_t ug = split_screen::FindFunction(base, pin, "bUsingGamepad");
+      const int using_pad = ug ? int((LoadU32(base, pin + LoadU32(base, ug + 0x64)) & LoadU32(base, ug + 0x84)) != 0) : -1;
+      REXLOG_INFO("FEELLOG dt={:.6f} yaw={} raw={:.4f} aTurn={:.4f} powerturn={:.4f} lagprop={:.4f} smooth={} "
+                  "mx={:.4f} my={:.4f} up={:.4f} usingpad={} cid={}", dt, yaw, prop("RawJoyLookRight"),
+                  prop("aTurn"), prop("PowerTurn"), prop("LagProportion"),
+                  (LoadU32(base, pin + f.smooth_off) & f.smooth_mask) != 0, prop("aMouseX"), prop("aMouseY"),
+                  prop("RawJoyUp"), using_pad, int32_t(LoadU32(base, player + 0x60)));  // LocalPlayer.ControllerId
     }
     if (logged_pin[i] != pin) {
       logged_pin[i] = pin;
@@ -2864,6 +2870,19 @@ extern "C" void sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base) {
   MemoryDumpTick(base, dt);
   press_start::Tick(base, dt);
   quit_option::Tick(ctx, base);
+  // B-268: the keyboard/mouse events go to the ControllerId of player 1's LocalPlayer (the pad that pressed START),
+  // not a fixed 0; UE3 drops input whose id matches no local player. BOTS_MOUSE_CID=<n> forces an id (0 = old build).
+  static const int forced_cid = [] {
+    const char* v = std::getenv("BOTS_MOUSE_CID");
+    return v && *v ? std::atoi(v) : -1;
+  }();
+  uint32_t cid = 0;
+  if (forced_cid >= 0) {
+    cid = uint32_t(forced_cid);
+  } else if (const uint32_t player = split_screen::Player(base, 0); player) {
+    cid = LoadU32(base, player + 0x60);
+    if (cid > 3) cid = 0;
+  }
   float dx = 0, dy = 0;
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) {
     KeyTest(*kbm, dt);
@@ -2872,10 +2891,10 @@ extern "C" void sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base) {
     kbm->TakeEnterEvents(enter);
     menu_pointer::Tick(ctx, base, *kbm, vp, dt, enter);
     quit_option::TakeEnter(base, enter);
-    for (const bool down : enter) InputKey(ctx, base, vp, 0, kKeyEnter, down ? 0 : 1, 1.0f, false);
+    for (const bool down : enter) InputKey(ctx, base, vp, cid, kKeyEnter, down ? 0 : 1, 1.0f, false);
   }
-  if (dx) InputAxis(ctx, base, vp, 0, kKeyMouseX, dx, dt, false);
-  if (dy) InputAxis(ctx, base, vp, 0, kKeyMouseY, dy, dt, false);
+  if (dx) InputAxis(ctx, base, vp, cid, kKeyMouseX, dx, dt, false);
+  if (dy) InputAxis(ctx, base, vp, cid, kKeyMouseY, dy, dt, false);
   feel::Apply(base, dt);
   if (!test.on) return;
   if (test.dx) InputAxis(ctx, base, vp, test.cid, kKeyMouseX, test.dx, dt, false);
