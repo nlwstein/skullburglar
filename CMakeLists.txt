@@ -48,6 +48,7 @@ set(BOTS_SOURCES
     src/aim_assist.cpp
     src/mnk_input.cpp
     src/motion_blur.cpp
+    src/screen_shake.cpp
     src/hybrid.cpp
     src/instr.cpp
     src/idle_backoff.cpp

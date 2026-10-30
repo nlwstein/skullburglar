@@ -45,6 +45,7 @@ checks:
     - python3 tools/leak_scan.py tree
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/input_math_test.cpp -o $d/t && $d/t
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/fps_math_test.cpp -o $d/t && $d/t
+    - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/shake_math_test.cpp -o $d/t && $d/t
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/update_test.cpp src/setup/update_logic.cpp src/setup/ed25519.cpp -o $d/t && $d/t
     - python3 tests/ed25519_vectors.py
     - python3 tests/update_signing_test.py
