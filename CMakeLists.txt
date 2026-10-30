@@ -51,6 +51,7 @@ set(BOTS_SOURCES
     src/screen_shake.cpp
     src/hybrid.cpp
     src/instr.cpp
+    src/test_range.cpp
     src/idle_backoff.cpp
     src/scene_feed.cpp
     src/slow_frame.cpp
