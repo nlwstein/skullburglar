@@ -19,6 +19,9 @@ pub struct Globals {
     pub tune3: [f32; 4],
 }
 
+/// B-205: default scale on the light environment key's specular (calibrated against the port's pass; see b205-rim.md).
+pub const ENV_SPEC_GAIN: f32 = 0.5;
+
 /// Sun, ambient, fog and tuning. Defaults are N8's mission 6 values (used until a feed frame arrives).
 #[derive(Clone, Debug)]
 pub struct Env {
@@ -32,6 +35,8 @@ pub struct Env {
     pub fog: Option<([f32; 3], f32, f32, f32, f32)>,
     pub lm_gain: f32,
     pub spec_gain: f32,
+    /// B-205: scale on a light environment's key specular only (`BOTS_N1_ENVP=envspec=1` restores the unscaled Phong).
+    pub env_spec_gain: f32,
     pub vl_gain: f32,
     /// B-189: exponent applied to vertex-lightmap samples before their scales (the port's 2.2; 1 = the old raw use).
     pub vl_gamma: f32,
@@ -59,6 +64,7 @@ impl Default for Env {
             fog: Some(([0.612, 0.737, 0.983], 4e-6, 6443.0, 4000.0, 1e8)),
             lm_gain: 1.0,
             spec_gain: 1.0,
+            env_spec_gain: ENV_SPEC_GAIN,
             vl_gain: 1.0,
             vl_gamma: 2.2,
             vcol_map: 0,
@@ -116,6 +122,7 @@ impl Env {
             match k {
                 "lm" => self.lm_gain = f,
                 "spec" => self.spec_gain = f,
+                "envspec" => self.env_spec_gain = f,
                 "vl" => self.vl_gain = f,
                 "vlgamma" => self.vl_gamma = f,
                 "vcol" => self.vcol_map = f as u32,
@@ -160,7 +167,7 @@ impl Env {
             view_proj,
             cam_pos: [eye[0], eye[1], eye[2], time],
             sun_dir: [self.sun_dir[0], self.sun_dir[1], self.sun_dir[2], self.sun_enabled as u32 as f32],
-            sun_col: [self.sun_col[0], self.sun_col[1], self.sun_col[2], 0.0],
+            sun_col: [self.sun_col[0], self.sun_col[1], self.sun_col[2], self.env_spec_gain],
             amb_up: [self.amb_up[0], self.amb_up[1], self.amb_up[2], 0.0],
             amb_dn: [self.amb_dn[0], self.amb_dn[1], self.amb_dn[2], 0.0],
             fog_col: f.map(|f| [f.0[0], f.0[1], f.0[2], 1.0]).unwrap_or([0.0; 4]),
@@ -698,5 +705,19 @@ mod gradeprobe {
             let g = db.material_params(m).map(|(b, s, v)| (lightfeed::post::Grade::from_params(&b, &s, &v), b));
             println!("{lvl}: {g:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod b205_tests {
+    use super::*;
+
+    #[test]
+    fn env_spec_gain_defaults_and_overrides() {
+        let mut e = Env::default();
+        assert_eq!(e.env_spec_gain, ENV_SPEC_GAIN);
+        assert_eq!(e.globals([0.0; 16], [0.0; 3], 0.0).sun_col[3], ENV_SPEC_GAIN);
+        e.apply("envspec=1");
+        assert_eq!(e.globals([0.0; 16], [0.0; 3], 0.0).sun_col[3], 1.0);
     }
 }

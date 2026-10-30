@@ -5,7 +5,7 @@ struct Globals {
     view_proj: mat4x4<f32>,
     cam_pos: vec4<f32>,   // xyz world (Y-up), w = time in seconds
     sun_dir: vec4<f32>,   // xyz = direction TO the sun, w = 1 if present
-    sun_col: vec4<f32>,   // rgb = colour * brightness
+    sun_col: vec4<f32>,   // rgb = colour * brightness, w = B-205 scale on the env key's specular
     amb_up: vec4<f32>,    // w: B-244 dynamic-light flags (bit 0 after the modulated shadows, bit 1 per-light LightVector, bit 2 specular); B-245 bit 3: env key specular as the port's
     amb_dn: vec4<f32>,
     fog_col: vec4<f32>,   // rgb, w = enabled
@@ -341,7 +341,7 @@ fn fs(i: VOut, @builtin(front_facing) ff: bool) -> @location(0) vec4<f32> {
         // Phong, pow(max(saturate(R.L), 1e-4), power) with R the view vector reflected about the shading normal, and
         // no N.L. Blinn N.H at the same power is a far wider lobe: a blue-grey sheen over the characters' skin.
         if (key_env && (u32(g.amb_up.w) & 8u) != 0u) {
-            sp = pow(max(clamp(dot(reflect(-V, Nw), key_dir), 0.0, 1.0), 1e-4), max(m.spec_power, 1.0));
+            sp = pow(max(clamp(dot(reflect(-V, Nw), key_dir), 0.0, 1.0), 1e-4), max(m.spec_power, 1.0)) * g.sun_col.w;
         }
         col = col + m.specular * key_col * sp * sun_vis * g.tune.y * shm;
     } else if (UNLIT) {

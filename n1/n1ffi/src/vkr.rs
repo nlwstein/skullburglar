@@ -2044,6 +2044,10 @@ impl Renderer {
             eye_y,
             self.time(),
         );
+        // B-205 debug A/B: bit 14 (16384) puts the light environment key's specular back to the unscaled Phong.
+        if self.debug_bits & 16384 != 0 {
+            globals.sun_col[3] = 1.0;
+        }
         let post_on = self.knobs.post;
         let pp = &self.lighting.post;
         let grade_on = post_on && pp.grade.is_some();
