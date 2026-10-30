@@ -421,6 +421,8 @@ class Run:
             optional = op == "try"
             text = line.split(None, 1)[1] if optional else line
             r = self.send(text)
+            if op in ("objs", "enemies", "inspect", "elems", "trace"):  # queries: keep the answer in the run log
+                self.log("  reply " + json.dumps(r)[:2000])
             if not r.get("ok", True) and not optional:
                 raise RuntimeError(f"{text}: {r.get('error')} (phase {get(r, 'status.phase')})")
             if text.startswith("wait"):
