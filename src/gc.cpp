@@ -926,7 +926,8 @@ void Tick() {
     const double ms = now - g_frame_start;
     if (ms > SlowMs()) {
       ++g_slow_frames;
-      if (g_gc_in_frame > 0) ++g_slow_gc_frames;
+      // The per-frame incremental purge call adds microseconds to every frame (issue #29: "with GC" counted them all).
+      if (g_gc_in_frame >= 1.0) ++g_slow_gc_frames;
       if (LogOn())
         REXLOG_INFO("gc: slow frame at {:.3f} s: {:.1f} ms, GC {:.1f} ms in it (slow frames {}, with GC {})",
                     now / 1000.0, ms, g_gc_in_frame, g_slow_frames, g_slow_gc_frames);

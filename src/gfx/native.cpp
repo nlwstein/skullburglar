@@ -7,13 +7,16 @@
 #include "../path_utf8.h"
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iterator>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <SDL3/SDL_messagebox.h>
@@ -102,6 +105,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
  public:
   NativeCommandProcessor(rg::GraphicsSystem* graphics_system, rex::system::KernelState* kernel_state)
       : CommandProcessor(graphics_system, kernel_state) {}
+  ~NativeCommandProcessor() override { StopHostReports(); }
 
   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width, uint32_t frontbuffer_height) override {
     if (!renderer_) return;
@@ -202,7 +206,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
                     frames_ - last_.frames, st.texture_loads - last_.texture_loads,
                     st.texture_loads_evicted - last_.texture_loads_evicted, st.texture_reloads - last_.texture_reloads,
                     st.texture_evictions - last_.texture_evictions);
-        ReportHost(now);
+        RequestHostReport(now);
       }
       REXLOG_INFO("gfx native: memory: {}", renderer_->TakeMemoryReport());
       last_idle_us_ = idle_us_, last_query_idle_us_ = query_idle_us_;
@@ -302,6 +306,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   }
 
   void ShutdownContext() override {
+    StopHostReports();
     if (renderer_) renderer_->SetMemoryTracker(nullptr);
     sync_.reset();
     renderer_.reset();
@@ -513,8 +518,50 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     hitch_lines_ = 0, hitches_unlogged_ = 0;
   }
 
+  // The host report runs on its own thread: on one player's PC (issue #29) it took ~230 ms every time, a dropped frame
+  // every 600 when it ran here. A report still running when the next is due skips that one.
+  void RequestHostReport(std::chrono::steady_clock::time_point now) {
+    std::lock_guard lock(host_mutex_);
+    if (host_quit_) return;
+    if (host_pending_) {
+      ++host_skipped_;
+      return;
+    }
+    if (!host_thread_.joinable()) host_thread_ = std::thread([this] { HostReportLoop(); });
+    host_now_ = now, host_pending_ = true;
+    host_cv_.notify_one();
+  }
+
+  void HostReportLoop() {
+    std::unique_lock lock(host_mutex_);
+    for (;;) {
+      host_cv_.wait(lock, [this] { return host_quit_ || host_pending_; });
+      if (host_quit_) return;
+      const auto now = host_now_;
+      lock.unlock();
+      ReportHost(now);
+      lock.lock();
+      host_pending_ = false;
+    }
+  }
+
+  void StopHostReports() {
+    {
+      std::lock_guard lock(host_mutex_);
+      host_quit_ = true;
+    }
+    host_cv_.notify_one();
+    if (host_thread_.joinable()) host_thread_.join();
+    std::lock_guard lock(host_mutex_);  // a later SetupContext starts a fresh thread
+    host_quit_ = false, host_pending_ = false;
+  }
+
   // CPU time of the whole process (all threads, in % of one core), clocks, a fixed-work probe, power, overlays.
+  // Host report thread only.
   void ReportHost(std::chrono::steady_clock::time_point now) {
+    auto ms_since = [](std::chrono::steady_clock::time_point t) {
+      return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+    };
     const auto start = std::chrono::steady_clock::now();
     const host::CpuTimes cpu = host::ProcessCpuTimes();
     const host::CpuClock clock = host::CpuClockMhz();
@@ -529,14 +576,27 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
     }
     last_cpu_ = cpu, last_cpu_time_ = now;
     // Overlays once a minute: listing the process's modules is the slow part (/proc/self/maps on Linux).
-    std::string power = host::PowerState(), overlays = host_reports_++ % 6 ? last_overlays_ : host::OverlayModules();
+    const double cpu_ms = ms_since(start);
+    const auto power_start = std::chrono::steady_clock::now();
+    std::string power = host::PowerState();
+    const double power_ms = ms_since(power_start);
+    const auto modules_start = std::chrono::steady_clock::now();
+    std::string overlays = host_reports_++ % 6 ? last_overlays_ : host::OverlayModules();
+    const double modules_ms = ms_since(modules_start);
     if (power != last_power_) REXLOG_INFO("gfx native: host power: {}", power.empty() ? "unknown" : power);
     if (overlays != last_overlays_) {
       REXLOG_INFO("gfx native: overlay modules: {}", overlays.empty() ? "none" : overlays);
     }
     last_power_ = std::move(power), last_overlays_ = std::move(overlays);
-    REXLOG_INFO("gfx native: host report took {:.1f} ms",
-                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+    uint32_t skipped;
+    {
+      std::lock_guard lock(host_mutex_);
+      skipped = std::exchange(host_skipped_, 0);
+    }
+    REXLOG_INFO("gfx native: host report took {:.1f} ms (CPU and memory {:.1f}, power {:.1f}, modules {:.1f}; off the "
+                "render thread){}",
+                ms_since(start), cpu_ms, power_ms, modules_ms,
+                skipped ? fmt::format("; {} reports skipped while this one ran", skipped) : std::string());
   }
 
   void HoldForWarmup() {
@@ -675,6 +735,12 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   std::chrono::steady_clock::time_point last_cpu_time_;
   std::string last_power_ = "-", last_overlays_ = "-";  // "-": not reported yet
   uint32_t host_reports_ = 0;
+  std::thread host_thread_;
+  std::mutex host_mutex_;
+  std::condition_variable host_cv_;
+  std::chrono::steady_clock::time_point host_now_;  // host_mutex_ guards these four
+  bool host_pending_ = false, host_quit_ = false;
+  uint32_t host_skipped_ = 0;
   uint32_t indirect_depth_ = 0;
   bool query_wait_ = false;
   std::chrono::steady_clock::time_point wait_start_;
