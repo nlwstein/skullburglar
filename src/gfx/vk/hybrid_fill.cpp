@@ -469,7 +469,7 @@ void Renderer::HoldN1Preload(void* h, bool may_flush) {
   }
   n1_resumed_ = now;
   // B-287: a long gap is a level change (a menu pause is shorter than a loading screen): release what the levels
-  // before the last one used, before the new level loads (BOTS_N1_EVICT=0 turns it off).
+  // before the last one used, before the new level loads (only with BOTS_N1_EVICT=1).
   if (host->any_scene && std::chrono::duration<double>(now - host->last_scene).count() >= host->evict_gap_s) {
     const auto e0 = std::chrono::steady_clock::now();
     const uint32_t freed = n1_level_boundary(host->r);

@@ -357,7 +357,7 @@ int32_t n1_upload(const N1Renderer* r, VkCommandBuffer cmd, uint64_t serial, uin
 void n1_load_stats(const N1Renderer* r, N1Stats* stats);
 
 /* B-287: the game's level just changed. Releases the meshes, textures, materials and baked lights the last few levels
- * didn't use (BOTS_N1_EVICT=0 turns it off; BOTS_N1_EVICT_KEEP is how many levels stay). Returns how many meshes were
+ * didn't use (off unless BOTS_N1_EVICT=1; BOTS_N1_EVICT_KEEP is how many levels stay). Returns how many meshes were
  * given back. */
 uint32_t n1_level_boundary(const N1Renderer* r);
 

@@ -1326,7 +1326,7 @@ pub unsafe extern "C" fn n1_upload(
 }
 
 /// B-287: the game's level just changed (a new level is about to draw). Gives back what the last few levels didn't use
-/// (`BOTS_N1_EVICT=0` turns this off, `BOTS_N1_EVICT_KEEP` is how many levels stay). Returns how many meshes the sweep
+/// (off unless `BOTS_N1_EVICT=1`, `BOTS_N1_EVICT_KEEP` is how many levels stay). Returns how many meshes the sweep
 /// gave back (0 when nothing ran).
 #[unsafe(no_mangle)]
 pub extern "C" fn n1_level_boundary(r: *const N1Renderer) -> u32 {
