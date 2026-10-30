@@ -284,6 +284,14 @@ pub struct Ctr {
     pub upload_bytes: u64,
     pub textures_added: u64,
     pub meshes_added: u64,
+    /// B-287: what level-change eviction gave back (cumulative): GPU meshes (static and skinned), textures, materials,
+    /// light entries, and the bytes of GPU memory the meshes and textures held.
+    pub meshes_freed: u64,
+    pub skin_meshes_freed: u64,
+    pub textures_freed: u64,
+    pub materials_freed: u64,
+    pub lights_freed: u64,
+    pub bytes_freed: u64,
 }
 
 /// B-264: per-step timers for a slow frame. `BOTS_N1_RECORD_LOG=<ms>` (`1`: 12 ms) logs a one-line breakdown of
@@ -376,6 +384,11 @@ pub struct Renderer {
     free_meshes: Vec<(u64, u32)>,
     free_words: Vec<(u64, u32, u32)>,
     free_lights: Vec<(u64, u32)>,
+    /// B-287: texture and skinned-mesh slots given back by eviction, each with the serial of its last possible use.
+    free_tex: Vec<(u64, u32)>,
+    free_skin: Vec<(u64, u32)>,
+    /// B-287: light-map descriptor sets of evicted lights, reused by `lm_set` once the GPU is done with them.
+    free_lm: Vec<(u64, vk::DescriptorSet)>,
     /// Light-word ranges (word offsets) rewritten in place by a reused vertex-light range, copied by `sync_light`.
     light_patches: Vec<(usize, usize)>,
     /// Newest host submission known complete (from `retire`).
@@ -686,6 +699,9 @@ impl Renderer {
                 free_meshes: Vec::new(),
                 free_words: Vec::new(),
                 free_lights: Vec::new(),
+                free_tex: Vec::new(),
+                free_skin: Vec::new(),
+                free_lm: Vec::new(),
                 light_patches: Vec::new(),
                 completed: 0,
                 miss_logged: HashSet::new(),
@@ -835,9 +851,22 @@ impl Renderer {
             .into_iter()
             .partition(|(s, _)| *s <= completed);
         self.deferred = keep;
-        for (_, g) in done {
+        // B-287: a level change's eviction gives back thousands of buffers and images at once. The destroys are spread
+        // over frames (BOTS_N1_FREE_MS per call, at least 16 each, default 1.5 ms) so no frame pays for all of them.
+        let t0 = std::time::Instant::now();
+        let budget = self.knobs.free_budget;
+        let mut it = done.into_iter();
+        let mut n = 0usize;
+        for (s, g) in it.by_ref() {
             self.free(g);
+            n += 1;
+            if n >= 16 && n % 8 == 0 && t0.elapsed() > budget {
+                let _ = s;
+                break;
+            }
         }
+        // Still queued for the next call (their serial has completed, so they free first then).
+        self.deferred.extend(it);
     }
 
     /// A descriptor set from the shared pools (a new pool when the current one is exhausted).
@@ -1023,19 +1052,27 @@ impl Renderer {
             vk::ImageAspectFlags::COLOR,
             "n1 texture",
         )?;
-        self.textures.push(Tex {
+        let tex = Tex {
             image,
             view,
             alloc: Some(alloc),
             bc5: format == vk::Format::BC5_UNORM_BLOCK,
             gamma: false,
-        });
+        };
         self.pending.push(Upload {
             staging,
             image,
             regions,
             mips: mip_count,
         });
+        // B-287: a slot evicted at a level change, once the GPU is done with its old image.
+        let done = self.completed;
+        if let Some(k) = self.free_tex.iter().position(|&(s, _)| s <= done) {
+            let (_, id) = self.free_tex.swap_remove(k);
+            self.textures[id as usize] = tex;
+            return Ok(id);
+        }
+        self.textures.push(tex);
         Ok(self.textures.len() as u32 - 1)
     }
 
@@ -1076,15 +1113,21 @@ impl Renderer {
     }
 
     fn tex_view(&self, id: u32, fallback: u32) -> vk::ImageView {
+        // A freed slot (B-287) has a null view: the fallback stands in.
         self.textures
             .get(id as usize)
+            .filter(|t| t.view != vk::ImageView::null())
             .or_else(|| self.textures.get(fallback as usize))
             .map(|t| t.view)
             .unwrap()
     }
 
     fn lm_set(&mut self, tex: [u32; 3]) -> Result<vk::DescriptorSet> {
-        let set = self.alloc_set(self.lm_layout)?;
+        let done = self.completed;
+        let set = match self.free_lm.iter().position(|&(s, _)| s <= done) {
+            Some(k) => self.free_lm.swap_remove(k).1,
+            None => self.alloc_set(self.lm_layout)?,
+        };
         let ii: Vec<[vk::DescriptorImageInfo; 1]> = tex
             .iter()
             .map(|&t| {
@@ -2878,17 +2921,80 @@ impl Renderer {
         ibuf.bytes()[..ib.len()].copy_from_slice(ib);
         self.ctr.upload_bytes += (vb.len() + ib.len()) as u64;
         self.ctr.meshes_added += 1;
+        let done = self.completed;
+        if let Some(k) = self.free_skin.iter().position(|&(s, _)| s <= done) {
+            let (_, id) = self.free_skin.swap_remove(k);
+            self.skin_meshes[id as usize] = GpuMesh { vbuf, ibuf };
+            return Ok(id);
+        }
         self.skin_meshes.push(GpuMesh { vbuf, ibuf });
         Ok(self.skin_meshes.len() as u32 - 1)
     }
 
-    /// (meshes, materials, textures, lights, shaders, pipelines)
+    /// B-287: gives back a skinned mesh (`add_skin_mesh`). Its slot is reused once the GPU is done with it.
+    pub fn free_skin_mesh(&mut self, id: u32) {
+        let serial = self.last_serial + 1;
+        if self.free_skin.iter().any(|x| x.1 == id) {
+            return;
+        }
+        if let Some(gm) = self.skin_meshes.get_mut(id as usize) {
+            let old = std::mem::replace(gm, GpuMesh { vbuf: Buf::null(), ibuf: Buf::null() });
+            self.ctr.bytes_freed += old.vbuf.cap + old.ibuf.cap;
+            self.ctr.skin_meshes_freed += 1;
+            self.defer_at(serial, Garbage::Buffer(old.vbuf));
+            self.defer_at(serial, Garbage::Buffer(old.ibuf));
+            self.free_skin.push((serial, id));
+        }
+    }
+
+    /// B-287: gives back a static mesh uploaded by `add_mesh` (the decal path has `free_decal`). The slot draws nothing
+    /// until it is reused, once the newest submission that could have drawn it has completed.
+    pub fn free_mesh(&mut self, id: u32) {
+        let serial = self.last_serial + 1;
+        if self.free_meshes.iter().any(|x| x.1 == id) {
+            return;
+        }
+        if let Some(gm) = self.meshes.get_mut(id as usize) {
+            let old = std::mem::replace(gm, GpuMesh { vbuf: Buf::null(), ibuf: Buf::null() });
+            self.ctr.bytes_freed += old.vbuf.cap + old.ibuf.cap;
+            self.ctr.meshes_freed += 1;
+            self.mesh_info[id as usize].sections.clear();
+            self.defer_at(serial, Garbage::Buffer(old.vbuf));
+            self.defer_at(serial, Garbage::Buffer(old.ibuf));
+            self.free_meshes.push((serial, id));
+        }
+    }
+
+    /// B-287: gives back a texture (`add_texture`) nothing references any more (the caller counts the materials and
+    /// light maps that sample it). False, and nothing done, while its upload copy is still queued. The slot is reused by
+    /// a later upload once the GPU is done with the image.
+    pub fn free_texture(&mut self, id: u32) -> bool {
+        let Some(t) = self.textures.get(id as usize) else { return false };
+        if id < 3 || t.alloc.is_none() || self.pending.iter().any(|u| u.image == t.image) {
+            return false;
+        }
+        let serial = self.last_serial + 1;
+        let old = std::mem::replace(
+            &mut self.textures[id as usize],
+            Tex { image: vk::Image::null(), view: vk::ImageView::null(), alloc: None, bc5: false, gamma: false },
+        );
+        if let Some(a) = old.alloc {
+            self.ctr.bytes_freed += a.size();
+            self.defer_at(serial, Garbage::Image(old.image, old.view, a));
+        }
+        self.ctr.textures_freed += 1;
+        self.free_tex.push((serial, id));
+        true
+    }
+
+    /// (meshes, materials, textures, lights, shaders, pipelines): the ones in use (B-287: slots given back by eviction
+    /// or a released variant don't count).
     pub fn counts(&self) -> (usize, usize, usize, usize, usize, usize) {
         (
-            self.mesh_info.len(),
-            self.materials.len(),
-            self.textures.len() - 3,
-            self.lights.len(),
+            self.mesh_info.len() - self.free_meshes.len(),
+            self.materials.len() - self.free_mats.len(),
+            self.textures.len() - 3 - self.free_tex.len(),
+            self.lights.len() - self.free_lights.len(),
             self.store.counts().0,
             self.store.counts().1,
         )
@@ -2946,7 +3052,8 @@ impl Renderer {
     }
 
     fn try_add_mesh(&mut self, m: &MeshDesc) -> Result<u32> {
-        self.try_add_mesh_at(m, false)
+        // B-287: a static mesh evicted at a level change leaves a slot, reused once the GPU is done with it.
+        self.try_add_mesh_at(m, true)
     }
 
     fn try_add_mesh_at(&mut self, m: &MeshDesc, reuse: bool) -> Result<u32> {
@@ -3060,8 +3167,15 @@ impl Renderer {
     /// B-228: a vertex light for a decal mesh (three words per vertex), in a reused range when one fits.
     pub fn add_decal_light(&mut self, words: &[u32], sc: [[f32; 4]; 3]) -> u32 {
         let count = (words.len() / 3) as u32;
+        let base = self.alloc_words(words);
+        self.alloc_light(LightInfo::Words { base, count, sc })
+    }
+
+    /// Light words into a freed range when one fits (`free_decal`, `free_light`), else appended.
+    fn alloc_words(&mut self, words: &[u32]) -> u32 {
+        let count = (words.len() / 3) as u32;
         let done = self.completed;
-        let base = match self.free_words.iter().position(|&(s, _, n)| s <= done && n >= count) {
+        match self.free_words.iter().position(|&(s, _, n)| s <= done && n >= count) {
             Some(k) => {
                 let (s, base, n) = self.free_words.swap_remove(k);
                 if n > count {
@@ -3073,8 +3187,12 @@ impl Renderer {
                 base
             }
             None => self.push_words(words),
-        };
-        let info = LightInfo::Words { base, count, sc };
+        }
+    }
+
+    /// A light entry in a freed slot when one is free, else a new one.
+    fn alloc_light(&mut self, info: LightInfo) -> u32 {
+        let done = self.completed;
         if let Some(k) = self.free_lights.iter().position(|&(s, _)| s <= done) {
             let (_, id) = self.free_lights.swap_remove(k);
             self.lights[id as usize] = info;
@@ -3082,6 +3200,29 @@ impl Renderer {
         }
         self.lights.push(info);
         self.lights.len() as u32 - 1
+    }
+
+    /// B-287: gives back a component's baked light (`add_component_light`): its vertex-light words, or its light-map
+    /// entry (the caller frees the textures). Slot and words are reused once the GPU is done with them.
+    pub fn free_light(&mut self, id: u32) {
+        if id as usize >= self.lights.len() || self.free_lights.iter().any(|x| x.1 == id) {
+            return;
+        }
+        let serial = self.last_serial + 1;
+        let old = std::mem::replace(
+            &mut self.lights[id as usize],
+            LightInfo::Words { base: 0, count: u32::MAX, sc: [[0.0; 4]; 3] },
+        );
+        match old {
+            LightInfo::Words { base, count, .. } if count != u32::MAX => {
+                self.ctr.bytes_freed += count as u64 * 12;
+                self.free_words.push((serial, base, count));
+            }
+            LightInfo::Map { set, .. } => self.free_lm.push((serial, set)),
+            _ => {}
+        }
+        self.ctr.lights_freed += 1;
+        self.free_lights.push((serial, id));
     }
 
     /// A flat grey material for primitives whose own material isn't known (yet).
@@ -3155,10 +3296,20 @@ impl Backend for Renderer {
             }
         }
     }
+    fn free_mesh(&mut self, id: u32) {
+        Renderer::free_mesh(self, id)
+    }
+    fn free_texture(&mut self, id: u32) -> bool {
+        Renderer::free_texture(self, id)
+    }
+    fn free_light(&mut self, id: u32) {
+        Renderer::free_light(self, id)
+    }
     fn remove_material(&mut self, id: u32) {
         // Reused once the newest submission that could have drawn it has completed (the resolver only releases
         // materials no instance named for many frames, so that is long past by then).
         if (id as usize) < self.materials.len() && id != self.grey_mat && !self.free_mats.iter().any(|x| x.1 == id) {
+            self.ctr.materials_freed += 1;
             self.free_mats.push((self.last_serial + 1, id));
         }
     }
@@ -3192,25 +3343,23 @@ impl Backend for Renderer {
                 [w, w, w]
             })
             .collect();
-        let base = self.push_words(&words);
-        self.lights.push(LightInfo::Words {
+        let base = self.alloc_words(&words);
+        self.alloc_light(LightInfo::Words {
             base,
             count: colors.len() as u32,
             sc: [[4.0, 4.0, 4.0, 0.0]; 3],
-        });
-        self.lights.len() as u32 - 1
+        })
     }
     fn add_component_light(&mut self, l: &ComponentLight, lightmaps: [u32; 3]) -> u32 {
         match l {
             ComponentLight::Legacy(c) => self.add_light(c),
             ComponentLight::Dir { words, scale } => {
-                let base = self.push_words(&words[..words.len() / 3 * 3]);
-                self.lights.push(LightInfo::Words {
+                let base = self.alloc_words(&words[..words.len() / 3 * 3]);
+                self.alloc_light(LightInfo::Words {
                     base,
                     count: (words.len() / 3) as u32,
                     sc: sc4(*scale),
-                });
-                self.lights.len() as u32 - 1
+                })
             }
             ComponentLight::Map {
                 scale,
@@ -3223,14 +3372,11 @@ impl Backend for Renderer {
                 }
                 let t = lightmaps.map(|x| if x == NONE { TEX_BLACK } else { x });
                 match self.lm_set(t) {
-                    Ok(set) => {
-                        self.lights.push(LightInfo::Map {
-                            set,
-                            sc: sc4(*scale),
-                            xf: [coord_scale[0], coord_scale[1], coord_bias[0], coord_bias[1]],
-                        });
-                        self.lights.len() as u32 - 1
-                    }
+                    Ok(set) => self.alloc_light(LightInfo::Map {
+                        set,
+                        sc: sc4(*scale),
+                        xf: [coord_scale[0], coord_scale[1], coord_bias[0], coord_bias[1]],
+                    }),
                     Err(e) => {
                         eprintln!("n1ffi: lightmap set failed: {e:#}");
                         NONE

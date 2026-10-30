@@ -59,6 +59,12 @@ pub struct Skins {
     pub late: u64,
     pub preloads: u64,
     preloaded: Vec<bool>,
+    /// B-287: `build` calls so far, the clock `used` and `boundaries` are on; the clock at each level change.
+    clock: u64,
+    used: Vec<u64>,
+    boundaries: Vec<u64>,
+    /// B-287: skinned meshes given back to the renderer, cumulative.
+    pub evicted: u64,
 }
 
 impl Skins {
@@ -88,6 +94,10 @@ impl Skins {
             late: 0,
             preloads: 0,
             preloaded: Vec::new(),
+            clock: 0,
+            used: Vec::new(),
+            boundaries: Vec::new(),
+            evicted: 0,
         }
     }
 
@@ -100,6 +110,7 @@ impl Skins {
         self.paths.push(path.to_string());
         self.states.push(State::Pending { requested: false });
         self.preloaded.push(false);
+        self.used.push(0);
         h
     }
 
@@ -116,6 +127,28 @@ impl Skins {
             }
         }
         false
+    }
+
+    /// B-287: a level change: gives back the skinned meshes nothing named since `keep` levels ago (the handle stays
+    /// valid and reloads when named again). `Resolver::level_boundary` is the same rule for static meshes.
+    pub fn level_boundary(&mut self, r: &mut Renderer, db: &AssetDb, keep: usize) {
+        self.clock += 1;
+        self.boundaries.push(self.clock);
+        let Some(cutoff) = scenekit::eviction_cutoff(&self.boundaries, keep) else {
+            return;
+        };
+        for (h, state) in self.states.iter_mut().enumerate() {
+            if !matches!(state, State::Ready { .. }) || self.used[h] >= cutoff {
+                continue;
+            }
+            if let State::Ready { gpu, .. } = state {
+                r.free_skin_mesh(*gpu);
+            }
+            db.forget_skeletal(&self.paths[h]);
+            *state = State::Pending { requested: false };
+            self.preloaded[h] = false;
+            self.evicted += 1;
+        }
     }
 
     /// Preloaded meshes not loaded yet.
@@ -161,6 +194,7 @@ impl Skins {
             let Ok((h, asset)) = self.rx.try_recv() else {
                 break;
             };
+            self.used[h as usize] = self.clock;
             self.states[h as usize] = match asset {
                 Some(a) => match r.add_skin_mesh(&a.verts, &a.indices) {
                     Ok(gpu) => {
@@ -206,6 +240,7 @@ impl Skins {
             let Some(state) = self.states.get_mut(inst.mesh as usize) else {
                 continue;
             };
+            self.used[inst.mesh as usize] = self.clock;
             if let State::Pending { requested } = state {
                 if *requested {
                     self.late += self.preloaded[inst.mesh as usize] as u64;
