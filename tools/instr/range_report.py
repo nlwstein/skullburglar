@@ -51,7 +51,41 @@ def summarise(trials):
     return rows
 
 
+def victims(trials):
+    """Per victim over the whole trial (real encounters): hits, hits to the kill, head hits."""
+    rows = collections.OrderedDict()
+    for t in trials:
+        for h in t["hits"]:
+            v = rows.setdefault(h["victim"], {"cls": h["cls"], "hp": h["hp0"], "hits": 0, "head": 0, "dead": False, "dmg": 0, "age": [], "lod": collections.Counter()})
+            if v["dead"]:
+                continue
+            v["hits"] += 1
+            v["head"] += h["head"]
+            v["dmg"] += h["dmg"]
+            v["dead"] = bool(h["dead"])
+            v["age"].append(h["now"] - h["lrt"])
+            v["lod"][int(h["lod"])] += 1
+    return rows
+
+
+def show_victims(name, trials):
+    rows = victims([t for t in trials if t["weapon"] == "real"])
+    if not rows:
+        return
+    kills = [v for v in rows.values() if v["dead"]]
+    print(f"== {name}: {len(rows)} victims hit, {len(kills)} killed; hits per kill {sum(v['hits'] for v in kills) / max(1, len(kills)):.2f}; "
+          f"head hits {sum(v['head'] for v in rows.values())} of {sum(v['hits'] for v in rows.values())}; "
+          f"one-hit kills {sum(1 for v in kills if v['hits'] == 1)}")
+    print(f"{'victim':28}{'class':26}{'hp':>5}{'hits':>6}{'head':>6}{'dead':>6}{'dmg':>7}  lod")
+    for n, v in rows.items():
+        print(f"{n:28}{v['cls']:26}{v['hp']:5.0f}{v['hits']:6}{v['head']:6}{int(v['dead']):6}{v['dmg']:7.0f}  {dict(v['lod'])}")
+    print()
+
+
 def show(name, trials):
+    show_victims(name, trials)
+    if all(t["weapon"] == "real" for t in trials):
+        return
     print(f"== {name}: {len(trials)} trials, {sum(len(t['hits']) for t in trials)} hits")
     print(f"{'weapon':18}{'aim':7}{'dist':6}{'n':>3}{'hits':>6}{'kills':>6}{'hits/kill':>10}{'head%':>7}{'avg dmg':>9}  bones  |  lod  |  render age s")
     for (w, a, d), r in summarise(trials).items():
@@ -71,7 +105,8 @@ if __name__ == "__main__":
     for path in sys.argv[1:]:
         trials = load(path)
         show(path.rsplit("/", 1)[-1], trials)
-        groups.setdefault("".join(c for c in path.rsplit("/", 1)[-1].split(".")[0] if not c.isdigit()), []).extend(trials)
-    if len(groups) > 1 or len(sys.argv) > 2:
+        stem = path.rsplit("/", 1)[-1].split(".")[0]
+        groups.setdefault(stem.rstrip("abcdefgh") if stem[-1] in "abcdefgh" else stem, []).extend(trials)  # n1a, n1b -> n1
+    if len(sys.argv) > 2:
         for g, trials in groups.items():
             show(f"all {g}", trials)

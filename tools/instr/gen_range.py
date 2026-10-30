@@ -21,6 +21,7 @@ DZ = 0                       # target height relative to the player (the pawn se
 # the damage log: aim 152 -> Spine1, aim 198 -> the head about half the time; the shot spread is +-12 uu).
 AIMS = {"torso": 30, "head": 76}
 SHOULDER = 18
+SHOTS = os.environ.get("RANGE_SHOTS") == "1"
 REPS = int(os.environ.get("RANGE_REPS", "3"))  # RANGE_DISTS / RANGE_REPS shorten a run for a quick check
 
 fwd = (math.cos(YAW * 2 * math.pi / 65536), math.sin(YAW * 2 * math.pi / 65536))
@@ -63,7 +64,11 @@ exec range mark trial {w} {aim} {dist} {rep}
 macro aim_at {ax:.0f} {ay:.0f} {FLOOR_Z + up} 12000
 trigger L 1.0 12000
 sleep 2""")
-                for _ in range(taps):
+                if SHOTS:  # RANGE_SHOTS=1: a screenshot before and during the burst (evidence for a merge request)
+                    print(f"shot {w}-{aim}-{dist}-aimed")
+                for i in range(taps):
                     print("macro fire 150\nsleep 0.45")
+                    if SHOTS and i == 1:
+                        print(f"shot {w}-{aim}-{dist}-firing")
                 print("sleep 1\nexec range mark end\nmacro stop\ntrigger L 0 100\nsleep 1.5")
 print("\nexec Kill enemies\nexec range mark done")
