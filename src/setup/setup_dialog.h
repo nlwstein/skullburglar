@@ -149,7 +149,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       state->info = FetchUpdateInfo();
       if (IsNewerVersion(state->info.latest, AppVersion())) {
         state->kind = CurrentInstallKind();
-        state->needs_move = state->kind == InstallKind::kNone && MacAppNeedsMove(SelfExeFolder().string());
+        state->needs_move = state->kind == InstallKind::kNone && MacAppNeedsMove(PathToUtf8(SelfExeFolder()));
         // Only a signed listing gets the button (an unsigned one, or a build without the key, keeps "Download it").
         const Asset* a = PickAsset(state->info, state->kind);
         if (a && !a->signed_ok) {

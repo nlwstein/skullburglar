@@ -34,6 +34,7 @@ int main(int argc, char** argv) {
       std::this_thread::sleep_for(std::chrono::seconds(60));
       return 0;
     }
+    // clean: what the launcher does on every start, run on its own: remove update leftovers from the temp folder.
     if (!std::strcmp(argv[i], "clean")) {
       CleanUpOldUpdates();
       std::printf("cleaned\n");
@@ -55,7 +56,7 @@ int main(int argc, char** argv) {
     }
   }
   if (const char* marker = std::getenv("PROBE_MARKER"); marker && *marker && !update) {
-    std::ofstream(marker, std::ios::app) << "started " << AppVersion() << " ran as " << argv[0] << ", install at " << SelfExeFolder().string() << " (install kind "
+    std::ofstream(marker, std::ios::app) << "started " << AppVersion() << " ran as " << argv[0] << ", install at " << PathToUtf8(SelfExeFolder()) << " (install kind "
                                          << int(CurrentInstallKind()) << ")\n";
     return 0;
   }

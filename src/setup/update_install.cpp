@@ -57,6 +57,20 @@ namespace bots::setup {
 
 namespace fs = std::filesystem;
 
+std::string PathToUtf8(const fs::path& p) {
+#if defined(_WIN32)
+  // path::string() converts through the ANSI code page and throws for a name it can't hold (any Cyrillic or CJK name).
+  const std::wstring w = p.wstring();
+  if (w.empty()) return {};
+  int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), int(w.size()), nullptr, 0, nullptr, nullptr);
+  std::string out(n > 0 ? n : 0, '\0');
+  if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.data(), int(w.size()), out.data(), n, nullptr, nullptr);
+  return out;
+#else
+  return p.string();
+#endif
+}
+
 namespace {
 
 #if defined(_WIN32)
@@ -112,12 +126,12 @@ fs::path MakeUniqueDir(const fs::path& base, const std::string& prefix, std::str
     if (CreateDirectoryW(dir.c_str(), nullptr)) return dir;  // fails when it exists: nothing is ever reused
     if (GetLastError() != ERROR_ALREADY_EXISTS) break;
   }
-  error = "can't create a folder in " + base.string();
+  error = "can't create a folder in " + PathToUtf8(base);
   return {};
 #else
   std::string tmpl = (base / (prefix + "XXXXXX")).string();
   if (!mkdtemp(tmpl.data())) {
-    error = "can't create a folder in " + base.string() + ": " + std::strerror(errno);
+    error = "can't create a folder in " + PathToUtf8(base) + ": " + std::strerror(errno);
     return {};
   }
   struct stat st {};
@@ -344,7 +358,7 @@ std::string Download(const Asset& asset, const fs::path& dest, InstallProgress& 
     error = "the download failed (HTTP " + std::to_string(status) + ")";
   } else {
     std::ofstream out(dest, std::ios::binary);
-    if (!out) error = "can't write " + dest.string();
+    if (!out) error = "can't write " + PathToUtf8(dest);
     std::vector<char> buf(1 << 16);
     DWORD got = 0;
     while (error.empty()) {
@@ -365,7 +379,7 @@ std::string Download(const Asset& asset, const fs::path& dest, InstallProgress& 
       }
     }
     out.close();
-    if (error.empty() && !out) error = "can't write " + dest.string();
+    if (error.empty() && !out) error = "can't write " + PathToUtf8(dest);
   }
   if (request) WinHttpCloseHandle(request);
   if (connect) WinHttpCloseHandle(connect);
@@ -871,7 +885,7 @@ bool UpdateSwapInProgress() { return g_swap_in_progress.load(); }
 
 InstallKind CurrentInstallKind() {
   fs::path exe = SelfExe();
-  const std::string dir = exe.empty() ? std::string() : exe.parent_path().string();
+  const std::string dir = exe.empty() ? std::string() : PathToUtf8(exe.parent_path());
   bool setup_install = false, tarball = false;
 #if defined(_WIN32)
   setup_install = WindowsIsSetupInstall(exe.parent_path());
@@ -908,7 +922,7 @@ std::string SelfUpdateBlockerAt(InstallKind kind, const fs::path& target) {
   }
 #endif
   fs::path folder = (kind == InstallKind::kMacBundle || kind == InstallKind::kLinuxAppImage) ? target.parent_path() : target;
-  if (!Writable(folder)) return folder.string() + " isn't writable";
+  if (!Writable(folder)) return PathToUtf8(folder) + " isn't writable";
   if (kind == InstallKind::kLinuxAppImage && !fs::is_regular_file(target, ec)) return "the AppImage file is missing";
   return {};
 }
@@ -1025,7 +1039,7 @@ void CleanUpOldUpdates() {
   fs::path base = fs::temp_directory_path(ec);
   if (ec) return;
   for (const auto& e : fs::directory_iterator(base, ec)) {
-    const std::string name = e.path().filename().string();
+    const std::string name = PathToUtf8(e.path().filename());
     if (!name.starts_with(kStagePrefix)) continue;
 #if !defined(_WIN32)
     struct stat st {};
