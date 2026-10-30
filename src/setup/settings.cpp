@@ -130,6 +130,11 @@ std::vector<Setting> Catalog() {
                {}});
   s.back().slider_min = 0.1, s.back().slider_max = 4;
   s.push_back({"kbm_invert_y", "", "Invert mouse up/down", "", {}});
+  s.push_back({"kbm_noise_gate", "", "Mouse noise gate (pixels)",
+               "0 = off. If the camera drifts slowly while your mouse or gyro is still, try 1 or 2: motion shorter "
+               "than this is held back until it adds up. Ctrl-click to type a value.",
+               {}});
+  s.back().slider_min = 0, s.back().slider_max = 4;
   s.push_back({"kbm_prompts", "", "Keyboard and mouse button prompts",
                "Show keys instead of controller buttons in prompts while you play with keyboard and mouse.", {}});
   static const struct {

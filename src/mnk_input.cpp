@@ -1,5 +1,6 @@
 // Keyboard and mouse driver (backlog B-104); see mnk_input.h.
 #include "mnk_input.h"
+#include "input_math.h"
 
 #include "prompt_state.h"
 #include "widescreen.h"
@@ -16,6 +17,10 @@ REXCVAR_DEFINE_DOUBLE(kbm_aim_sensitivity, 1.0, "bots/Input",
                       "Mouse look sensitivity while the Aim key (kbm_left_trigger) is held; the game also scales look "
                       "speed by the field of view, so zooming in already slows it")
     .range(0.05, 10.0);
+REXCVAR_DEFINE_DOUBLE(kbm_noise_gate, 0.0, "bots/Input",
+                      "Mouse noise gate in pixels (0 = off): motion shorter than this is held back until it adds up, so a "
+                      "jittery sensor or gyro dead-zone leak stops drifting the camera. BOTS_MOUSE_GATE=<px> overrides.")
+    .range(0.0, 8.0);
 REXCVAR_DEFINE_BOOL(kbm_invert_y, false, "bots/Input", "Invert mouse look up/down");
 REXCVAR_DEFINE_BOOL(kbm_prompts, true, "bots/Input",
                     "Show keyboard/mouse button prompts while keyboard/mouse is the last device used");
@@ -325,11 +330,21 @@ void MouseKeyboardDriver::TakeMouseDelta(float& dx, float& dy) {
   std::lock_guard lock(mutex_);
   const bool aiming = !driving_.load(std::memory_order_relaxed) && Pressed(REXCVAR_GET(kbm_left_trigger));
   const float s = float(aiming ? REXCVAR_GET(kbm_aim_sensitivity) : REXCVAR_GET(kbm_sensitivity));
-  dx = mouse_dx_ * s;
-  // Window y grows downward; the engine's MouseY is positive for "look up".
-  dy = (REXCVAR_GET(kbm_invert_y) ? mouse_dy_ : -mouse_dy_) * s;
-  diag_taken_ += std::abs(mouse_dx_) + std::abs(mouse_dy_);
-  mouse_dx_ = mouse_dy_ = 0;
+  static const double env_gate = [] {
+    const char* v = std::getenv("BOTS_MOUSE_GATE");
+    return v && *v ? std::atof(v) : -1.0;
+  }();
+  const double gate = env_gate >= 0 ? env_gate : REXCVAR_GET(kbm_noise_gate);
+  const bool hold = bots::input::MouseGateHolds(mouse_dx_, mouse_dy_, gate);
+  if (hold) {  // keep the fractions and the sub-gate remainder for the next frame
+    dx = dy = 0;
+  } else {
+    dx = mouse_dx_ * s;
+    // Window y grows downward; the engine's MouseY is positive for "look up".
+    dy = (REXCVAR_GET(kbm_invert_y) ? mouse_dy_ : -mouse_dy_) * s;
+    diag_taken_ += std::abs(mouse_dx_) + std::abs(mouse_dy_);
+    mouse_dx_ = mouse_dy_ = 0;
+  }
   // BOTS_MOUSE_LOG=1: once a second while the mouse moved, what reached the game (B-268 diagnostics).
   static const bool log = [] { const char* v = std::getenv("BOTS_MOUSE_LOG"); return v && *v == '1'; }();
   const int64_t now = Now();
