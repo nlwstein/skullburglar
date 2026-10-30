@@ -66,6 +66,11 @@ std::vector<Setting> Catalog() {
   s.push_back({"motion_blur", "", "Motion blur",
                "The smear when the camera turns or things move fast. Off keeps every other effect.",
                {}});
+  s.push_back({"screen_shake", "", "Screen shake",
+               "How much the camera shakes from explosions, gunfire and hits, as a share of the game's own. 100% is "
+               "as shipped; 0% turns it off.",
+               {}});
+  s.back().slider_min = 0, s.back().slider_max = 100, s.back().slider_linear = true, s.back().slider_format = "%.0f%%";
   s.push_back({"framerate_limit", "", "Frame rate limit", "",
                {{"30", "30 fps"}, {"60", "60 fps (recommended)"}, {"0", "Unlimited"}}});
   s.push_back({"present_vsync", "", "VSync", "Off has the lowest latency but can tear.", {}});
