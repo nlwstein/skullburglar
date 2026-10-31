@@ -103,7 +103,6 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     if (ImGui::Begin("50 Cent - Blood on the Sand##bots_setup", nullptr,
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                          ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
-      DrawUpdate();
       DrawGameFiles();
       ImGui::Spacing();
       ImGui::Separator();
@@ -270,6 +269,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     ImGui::Unindent();
   }
 
+  // The update offer, and a note when the check failed. Drawn in the Play row (DrawButtons), not at the top of the long
+  // page, so it is in view whenever Play is (B-294).
   void DrawUpdate() {
     if (!update_ || !update_->done.load()) return;
     const UpdateInfo& info = update_->info;
@@ -282,6 +283,10 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.4f, 1.0f));
       ImGui::TextWrapped("%s", update_->failed_note.c_str());
       ImGui::PopStyleColor();
+    }
+    if (!info.error.empty()) {
+      ImGui::TextDisabled("Couldn't check for updates.");
+      return;
     }
     if (info.latest.empty() || !IsNewerVersion(info.latest, AppVersion())) return;
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
@@ -336,8 +341,6 @@ class SetupDialog : public rex::ui::ImGuiDialog {
         ImGui::TextDisabled("Can't update in place: %s.", u.blocker.c_str());
       }
     }
-    ImGui::Spacing();
-    ImGui::Separator();
     ImGui::Spacing();
   }
 
@@ -645,6 +648,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   }
 
   void DrawButtons() {
+    DrawUpdate();
     const bool pad = pad_ && pad_->Connected();
     const bool ps = pad && pad_->PlayStation();
     char play[48];
