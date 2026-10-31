@@ -106,6 +106,23 @@ pub fn xenos_tiled_offset(x: usize, y: usize, width: usize, log_bpb: u32) -> usi
 
 /// Untile + byte-swap one mip. Returns None if the data doesn't fit an aligned tile (UEViewer drops those too).
 pub fn untile(fmt: Fmt, src: &[u8], w: usize, h: usize) -> Option<Vec<u8>> {
+    untile_at(fmt, src, w, h, (0, 0))
+}
+
+/// Mip 0 of a texture with mips and a side of at most 16 texels sits inside a packed tile (Xenia's GetPackedTileOffset).
+/// BOTS_N1_PACKED_MIP0=0 decodes it from the tile corner as before (A/B).
+pub fn packed_mip0_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BOTS_N1_PACKED_MIP0").map_or(true, |v| v != "0"))
+}
+
+/// True for a texture size whose mips pack into one 32x32 tile (the smaller side is at most 16 texels).
+pub fn packs_mips(w: usize, h: usize) -> bool {
+    std::cmp::min(w.next_power_of_two(), h.next_power_of_two()) <= 16
+}
+
+/// `untile` for an image whose top-left block sits at block `origin` inside its tile (a packed mip tail's first mip).
+pub fn untile_at(fmt: Fmt, src: &[u8], w: usize, h: usize, origin: (usize, usize)) -> Option<Vec<u8>> {
     let (bw, bh, bpb, ax, ay) = fmt.info();
     let aw = w.div_ceil(ax) * ax;
     let ah = h.div_ceil(ay) * ay;
@@ -120,7 +137,7 @@ pub fn untile(fmt: Fmt, src: &[u8], w: usize, h: usize) -> Option<Vec<u8>> {
     let mut dst = vec![0u8; obw * obh * bpb];
     for dy in 0..obh {
         for dx in 0..obw {
-            let a = xenos_tiled_offset(dx, dy, tbw, log_bpb);
+            let a = xenos_tiled_offset(dx + origin.0, dy + origin.1, tbw, log_bpb);
             let (sy, sx) = (a / tbw, a % tbw);
             let s = (sy * tbw + sx) * bpb;
             let d = (dy * obw + dx) * bpb;
@@ -253,7 +270,14 @@ pub fn read_texture(pkg: &Package, idx: i32, tfc: &TfcCache) -> Result<Texture> 
         if w < bw || h < bh {
             break;
         }
-        match untile(fmt, d, w, h) {
+        // A texture with mips and a side of at most 16 texels keeps its mips packed into one 32x32 tile (Xenia's
+        // GetPackedTileOffset): mip 0 sits 16 texels down (wider than tall) or across (otherwise), not at the corner.
+        let origin = if level == 0 && raw_mips.len() > 1 && packed_mip0_on() && packs_mips(w, h) {
+            if w.next_power_of_two() > h.next_power_of_two() { (0, 16 / bh) } else { (16 / bw, 0) }
+        } else {
+            (0, 0)
+        };
+        match untile_at(fmt, d, w, h, origin) {
             Some(lin) => t.mips.push((w, h, lin)),
             None => {
                 t.notes.push(format!("mip {level} {w}x{h}: {} bytes don't fill an aligned tile", d.len()));
@@ -337,3 +361,29 @@ pub fn write_dds(t: &Texture, path: &Path) -> Result<()> {
 
 /// Read a level's inline lightmap textures etc. share this path; helper to read a fixed `Reader` slice.
 pub fn _unused(_r: &Reader) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_mip_origin_shifts_the_decode() {
+        // A full 32x32 tile with a distinct value per byte; decode it whole, then decode a 1x1 image whose top-left
+        // block sits at (3, 4) inside the same tile: it must be the whole decode's pixel (3, 4), not the corner.
+        let src: Vec<u8> = (0..32 * 32 * 4).map(|i| (i * 7 % 251) as u8).collect();
+        let full = untile_at(Fmt::Rgba8, &src, 32, 32, (0, 0)).unwrap();
+        let one = untile_at(Fmt::Rgba8, &src, 1, 1, (3, 4)).unwrap();
+        assert_eq!(one, full[(4 * 32 + 3) * 4..(4 * 32 + 3) * 4 + 4]);
+        assert_ne!(one, untile_at(Fmt::Rgba8, &src, 1, 1, (0, 0)).unwrap());
+        assert_eq!(untile(Fmt::Rgba8, &src, 32, 32).unwrap(), full);
+    }
+
+    #[test]
+    fn packs_mips_needs_a_side_of_16_or_less() {
+        assert!(packs_mips(256, 4));
+        assert!(packs_mips(16, 16));
+        assert!(packs_mips(8, 64));
+        assert!(!packs_mips(32, 32));
+        assert!(!packs_mips(256, 128));
+    }
+}

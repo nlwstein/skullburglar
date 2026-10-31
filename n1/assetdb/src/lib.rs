@@ -1274,6 +1274,7 @@ impl<'a> R<'a> {
 
 const MESH_MAGIC: u32 = 0x4853_4D32; // "2MSH": + tangents, colours, uv1
 const TEX_MAGIC: u32 = 0x5845_5432; // + normal, unpack
+const TEX_MAGIC2: u32 = 0x5845_5433; // same layout; small packed-mip textures decoded from the right place (B-292)
 const LIGHT_MAGIC: u32 = 0x5447_4C31;
 const TREELIGHT_MAGIC: u32 = 0x5447_4C33;
 
@@ -1499,7 +1500,7 @@ fn decode_mesh(name: &str, b: &[u8]) -> Result<MeshAsset> {
 
 fn encode_texture(t: &TextureAsset) -> Vec<u8> {
     let mut w = W(Vec::new());
-    w.u32(TEX_MAGIC);
+    w.u32(TEX_MAGIC2);
     w.u32(t.fmt as u32);
     w.u32(t.srgb as u32);
     w.u32(t.width);
@@ -1517,7 +1518,8 @@ fn encode_texture(t: &TextureAsset) -> Vec<u8> {
 
 fn decode_texture(name: &str, b: &[u8]) -> Result<TextureAsset> {
     let mut r = R(b, 0);
-    if r.u32()? != TEX_MAGIC {
+    let magic = r.u32()?;
+    if magic != TEX_MAGIC && magic != TEX_MAGIC2 {
         bail!("magic");
     }
     let fmt = match r.u32()? {
@@ -1531,6 +1533,10 @@ fn decode_texture(name: &str, b: &[u8]) -> Result<TextureAsset> {
     };
     let srgb = r.u32()? != 0;
     let (width, height) = (r.u32()?, r.u32()?);
+    // A file from before the packed-mip fix holds the wrong picture for a texture that packs its mips: convert again.
+    if magic == TEX_MAGIC && ue3::texture::packed_mip0_on() && ue3::texture::packs_mips(width as usize, height as usize) {
+        bail!("stale packed-mip decode");
+    }
     let n = r.u32()? as usize;
     let mips = (0..n)
         .map(|_| Ok(r.bytes()?.to_vec()))

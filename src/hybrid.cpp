@@ -150,26 +150,6 @@ constexpr uint32_t kOverlayColor = 0xE0, kColorScale = 0xF0;
 constexpr uint32_t kViewRect = 0x24, kViewMatrix = 0x50, kProjMatrix = 0x90, kViewProjMatrix = 0x110,
                    kInvViewProjMatrix = 0x190, kViewOrigin = 0x1D0;
 
-// B-292: a view whose render target is small (<= 256 texels each way) is a scene capture into a render texture, not a
-// player's view: the HUD's damage-indicator capture (128x64). FSceneView +0x3C/+0x40 are RenderTargetSizeX/Y.
-bool SmallTargetView(uint8_t* base, uint32_t view) {
-  if (!Readable(view)) return false;
-  const int32_t sx = int32_t(U32(base, view + 0x3C)), sy = int32_t(U32(base, view + 0x40));
-  return sx > 0 && sy > 0 && sx <= 256 && sy <= 256;
-}
-// The same for an FSceneRenderer (r3 of Render / RenderViewFamily_RenderThread): its family copy at +0x04 holds Views.
-bool SmallTargetRenderer(uint8_t* base, uint32_t renderer) {
-  if (!Readable(renderer)) return false;
-  const uint32_t views = U32(base, renderer + 4), count = U32(base, renderer + 8);
-  return count && Readable(views) && SmallTargetView(base, U32(base, views));
-}
-// BOTS_N1_DAMAGE_TEX=0: no damage-capture pass-through (n1 then draws the critical-health fade only).
-bool DamageTexOn() {
-  static const bool on = EnvInt("BOTS_N1_DAMAGE_TEX", 1) != 0;
-  return on;
-}
-std::atomic<uint64_t> g_small_captures{0};
-
 void ReadMatrix(uint8_t* base, uint32_t at, float* m) {
   for (int i = 0; i < 16; ++i) m[i] = F32(base, at + 4 * i);
 }
@@ -540,14 +520,7 @@ extern "C" void sub_82BB3230(PPCContext& __restrict ctx, uint8_t* base) {
       static bool dumped = false;
       if (!dumped && scene) dumped = true, DumpView(base, family, view);
       if (g_dump_view.exchange(false)) DumpView(base, family, view);
-      if (scene && DamageTexOn() && SmallTargetView(base, view)) {
-        static int logged = 0;
-        if (logged < 3) {
-          ++logged;
-          REXLOG_INFO("hybrid: scene capture into a {}x{} target is not a player view (no camera published)",
-                      U32(base, view + 0x3C), U32(base, view + 0x40));
-        }
-      } else if (scene) {
+      if (scene) {
         const uint32_t seq = g_state.published.load(std::memory_order_relaxed) + 1;
         HybridCamera& cam = g_state.cameras[seq % HybridState::kCameras];
         if (ReadCamera(base, family, view, cam)) {
@@ -573,9 +546,7 @@ extern "C" void sub_82BB3230(PPCContext& __restrict ctx, uint8_t* base) {
 
 // RenderViewFamily_RenderThread(FSceneRenderer* r3), render thread (or the game thread without one).
 extern "C" void sub_82BB3128(PPCContext& __restrict ctx, uint8_t* base) {
-  if (DamageTexOn() && SmallTargetRenderer(base, ctx.r3.u32)) {
-    t_render_seq = 0;  // a scene capture has no camera in the queue
-  } else {
+  {
     std::lock_guard lock(g_fifo_mutex);
     t_render_seq = g_fifo.empty() ? 0 : g_fifo.front();
     if (!g_fifo.empty()) g_fifo.pop_front();
@@ -604,16 +575,6 @@ extern "C" void sub_82D3E358(PPCContext& __restrict ctx, uint8_t* base) {
 
 // FSceneRenderer::Render(), render thread.
 extern "C" void sub_82BB1E78(PPCContext& __restrict ctx, uint8_t* base) {
-  // B-292: a scene capture into a small render texture (the HUD's damage indicators) always renders for real, even
-  // while n1 owns the player's view: the game's draws are the only source of that picture. The renderer reads the
-  // target back at the marker that follows (kHybridDamageEnd) and gives n1 the picture.
-  if (DamageTexOn() && SmallTargetRenderer(base, ctx.r3.u32)) {
-    __imp__sub_82BB1E78(ctx, base);
-    const uint64_t n = g_small_captures.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (g_state.fill.load(std::memory_order_relaxed) == 4) EmitMarker(ctx, base, bots::kHybridDamageEnd);
-    if (n <= 2) REXLOG_INFO("hybrid: scene capture {} rendered by the game (marker for the damage picture)", n);
-    return;
-  }
   // Leaving mode 2: its InitViews calls took queries for primitives that no drawing then issued, so the first real
   // frames' InitViews would wait on them forever too. Answer queries for two real frames, until fresh ones exist.
   static int last_suppress = 0, answer_frames = 0;

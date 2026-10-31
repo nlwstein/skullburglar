@@ -641,10 +641,6 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
         if (renderer_) renderer_->BeginCaptureFrame();
         return;
       }
-      if (value == bots::kHybridDamageEnd) {  // B-292: the HUD's damage capture is done; read its target back
-        if (renderer_) renderer_->CaptureDamageTarget();
-        return;
-      }
       if (bots::HybridState* state = bots::FindHybridState()) {
         state->markers_seen.fetch_add(1, std::memory_order_relaxed);
         if (renderer_) renderer_->QueueSceneFill(value);
