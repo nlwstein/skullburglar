@@ -63,6 +63,11 @@ REXCVAR_DEFINE_BOOL(stick_acceleration, true, "bots/Input",
 REXCVAR_DEFINE_STRING(stick_response, "original", "bots/Input",
                       "Stick response curve for turning left and right: original (squared, small movements turn "
                       "slowly) or linear");
+REXCVAR_DEFINE_DOUBLE(stick_look_speed, 1.0, "bots/Input",
+                      "Right stick look speed, as a multiple of the game's own (its Controller Sensitivity option "
+                      "still applies on top). 1 is as shipped; 3 turns three times as fast at every stick position. "
+                      "BOTS_STICK_LOOK_SPEED=<x> overrides.")
+    .range(1.0, 3.0);
 REXCVAR_DEFINE_BOOL(vibration, true, "bots/Input", "Controller vibration (rumble)");
 
 extern "C" void __imp__sub_82E1AC28(PPCContext& __restrict ctx, uint8_t* base);
@@ -315,6 +320,16 @@ void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std:
     uint32_t addr = static_cast<uint32_t>(std::strtoul(cmd.c_str() + 5, &end, 16)) & ~3u;
     int count = std::max(1, std::min(64, static_cast<int>(std::strtol(end, nullptr, 10))));
     for (int i = 0; i < count; ++i, addr += 4) REXLOG_INFO("BOTS_EXEC peek {:08X} = {:08X}", addr, LoadU32(base, addr));
+    return;
+  }
+  // "setflag <name> <value>": set a launcher setting (a rex cvar) while the game runs, so one launch can measure
+  // several values (B-303: stick_look_speed; B-269: kbm_noise_gate). Test aid, reachable through BOTS_EXEC or the
+  // instrumentation channel's exec command.
+  if (cmd.rfind("setflag ", 0) == 0) {
+    const size_t sp = cmd.find(' ', 8);
+    const std::string name = cmd.substr(8, sp == std::string::npos ? std::string::npos : sp - 8);
+    const std::string value = sp == std::string::npos ? "" : cmd.substr(sp + 1);
+    REXLOG_INFO("BOTS_EXEC setflag {} = {} -> {}", name, value, rex::cvar::SetFlagByName(name, value) ? "ok" : "failed");
     return;
   }
   if (split_screen::Command(cmd) || debug::Command(base, cmd) || bots::scenefeed::Command(base, cmd)) return;
@@ -2762,10 +2777,16 @@ extern "C" void sub_82445450(PPCContext& __restrict ctx, uint8_t* base) {
 //   - Stick acceleration off: MaxPowerTurn 0 (no PowerTurn: 2.6x at full tilt) and a huge LagAmount (no easing; see
 //     input_math.h for why not 0 or 1).
 //   - Stick response linear: TurnPower 1 (yaw is squared as shipped; pitch is already linear).
+//   - Stick look speed (B-303): TurnSpeed, PitchSpeed, MaxPowerTurn and PowerTurnAcceleration (so the full-tilt ramp
+//     takes as long as before) times the setting. The script computes
+//     aTurn = (stick^TurnPower * TurnSpeed * sensitivity + PowerTurn) through a linear lag filter, so scaling those
+//     scales aTurn and aLookUp by exactly the setting at every stick position. The mouse is added after
+//     PreProcessInput and is not touched.
 namespace {
 namespace feel {
 struct Fields {
   uint32_t smooth_off = 0, smooth_mask = 0, turn_power = 0, max_power_turn = 0, lag_amount = 0;
+  uint32_t turn_speed = 0, pitch_speed = 0, power_accel = 0;
   bool found = false;
 };
 
@@ -2777,9 +2798,15 @@ void Apply(uint8_t* base, float dt) {
   static Fields f;
   static bool have_original = false;
   static float original_turn_power = 0, original_max_power_turn = 0, original_lag_amount = 0;
+  static float original_turn_speed = 0, original_pitch_speed = 0, original_power_accel = 0;
   static uint32_t logged_pin[4] = {};
   const bool accel = REXCVAR_GET(stick_acceleration);
   const bool linear = REXCVAR_GET(stick_response) == "linear";
+  static const double env_look = [] {
+    const char* v = std::getenv("BOTS_STICK_LOOK_SPEED");
+    return v && *v ? std::atof(v) : -1.0;
+  }();
+  const double look = bots::input::ClampLookSpeed(env_look > 0 ? env_look : REXCVAR_GET(stick_look_speed));
   for (uint32_t i = 0, n = std::min<uint32_t>(split_screen::PlayerCount(base), 4); i < n; ++i) {
     const uint32_t player = split_screen::Player(base, i);
     const uint32_t pc = debug::Readable(player) ? LoadU32(base, player + 0x40) : 0;
@@ -2793,11 +2820,17 @@ void Apply(uint8_t* base, float dt) {
       const uint32_t tp = split_screen::Prop(base, pin, "TurnPower");
       const uint32_t mp = split_screen::Prop(base, pin, "MaxPowerTurn");
       const uint32_t la = split_screen::Prop(base, pin, "LagAmount");
-      if (!sm || tp == 0xFFFFFFFF || mp == 0xFFFFFFFF || la == 0xFFFFFFFF) continue;  // not a C1PlayerInput (yet)
+      const uint32_t ts = split_screen::Prop(base, pin, "TurnSpeed");
+      const uint32_t ps = split_screen::Prop(base, pin, "PitchSpeed");
+      const uint32_t pa = split_screen::Prop(base, pin, "PowerTurnAcceleration");
+      if (!sm || tp == 0xFFFFFFFF || mp == 0xFFFFFFFF || la == 0xFFFFFFFF || ts == 0xFFFFFFFF || ps == 0xFFFFFFFF ||
+          pa == 0xFFFFFFFF)
+        continue;  // not a C1PlayerInput (yet)
       // +0x64 UProperty Offset, +0x84 UBoolProperty BitMask.
-      f = {LoadU32(base, sm + 0x64), LoadU32(base, sm + 0x84), tp, mp, la, true};
+      f = {LoadU32(base, sm + 0x64), LoadU32(base, sm + 0x84), tp, mp, la, ts, ps, pa, true};
       REXLOG_INFO("controller feel: PlayerInput fields found (smoothing +{:X} mask {:08X}, TurnPower +{:X}, "
-                  "MaxPowerTurn +{:X}, LagAmount +{:X})", f.smooth_off, f.smooth_mask, tp, mp, la);
+                  "MaxPowerTurn +{:X}, LagAmount +{:X}, TurnSpeed +{:X}, PitchSpeed +{:X}, PowerTurnAcceleration +{:X})",
+                  f.smooth_off, f.smooth_mask, tp, mp, la, ts, ps, pa);
     }
     // The shipped values are the ini's, the same for every instance: remember them before the first write so a
     // setting changed back to the original can be restored.
@@ -2805,22 +2838,34 @@ void Apply(uint8_t* base, float dt) {
       original_turn_power = F(base, pin + f.turn_power);
       original_max_power_turn = F(base, pin + f.max_power_turn);
       original_lag_amount = F(base, pin + f.lag_amount);
+      original_turn_speed = F(base, pin + f.turn_speed);
+      original_pitch_speed = F(base, pin + f.pitch_speed);
+      original_power_accel = F(base, pin + f.power_accel);
       have_original = true;
-      REXLOG_INFO("controller feel: shipped TurnPower {}, MaxPowerTurn {}, LagAmount {}", original_turn_power,
-                  original_max_power_turn, original_lag_amount);
+      REXLOG_INFO("controller feel: shipped TurnPower {}, MaxPowerTurn {}, LagAmount {}, TurnSpeed {}, PitchSpeed {}, "
+                  "PowerTurnAcceleration {}", original_turn_power, original_max_power_turn, original_lag_amount,
+                  original_turn_speed, original_pitch_speed, original_power_accel);
     }
     if (const uint32_t word = LoadU32(base, pin + f.smooth_off); word & f.smooth_mask)
       StoreU32(base, pin + f.smooth_off, word & ~f.smooth_mask);
     const float want_power = linear ? 1.0f : original_turn_power;
-    const float want_max = accel ? original_max_power_turn : 0.0f;
+    const float want_max = (accel ? original_max_power_turn : 0.0f) * float(look);
+    const float want_turn_speed = original_turn_speed * float(look);
+    const float want_pitch_speed = original_pitch_speed * float(look);
+    const float want_power_accel = original_power_accel * float(look);
     const float want_lag = accel ? original_lag_amount : bots::input::kNoLagAmount;
     if (F(base, pin + f.turn_power) != want_power) SetF(base, pin + f.turn_power, want_power);
     if (F(base, pin + f.max_power_turn) != want_max) SetF(base, pin + f.max_power_turn, want_max);
     if (F(base, pin + f.lag_amount) != want_lag) SetF(base, pin + f.lag_amount, want_lag);
+    if (F(base, pin + f.turn_speed) != want_turn_speed) SetF(base, pin + f.turn_speed, want_turn_speed);
+    if (F(base, pin + f.pitch_speed) != want_pitch_speed) SetF(base, pin + f.pitch_speed, want_pitch_speed);
+    if (F(base, pin + f.power_accel) != want_power_accel) SetF(base, pin + f.power_accel, want_power_accel);
     if (trace && i == 0) {
-      // Per frame: dt, yaw (PlayerController.Rotation.Yaw), then the stick as the script sees it and what it makes.
+      // Per frame: dt, yaw and pitch (PlayerController.Rotation, 65536 per turn), then the stick as the script sees
+      // it and what it makes.
       const uint32_t ro = split_screen::Prop(base, pc, "Rotation");
       const int32_t yaw = ro != 0xFFFFFFFF ? int32_t(LoadU32(base, pc + ro + 4)) : 0;
+      const int32_t pitch = ro != 0xFFFFFFFF ? int32_t(LoadU32(base, pc + ro)) : 0;
       auto prop = [&](const char* name) {
         const uint32_t o = split_screen::Prop(base, pin, name);
         return o != 0xFFFFFFFF ? F(base, pin + o) : -999.f;
@@ -2829,8 +2874,8 @@ void Apply(uint8_t* base, float dt) {
       // them, and the left stick's raw forward axis: B-268 measures a pad-held-down session against a mouse feed.
       const uint32_t ug = split_screen::FindFunction(base, pin, "bUsingGamepad");
       const int using_pad = ug ? int((LoadU32(base, pin + LoadU32(base, ug + 0x64)) & LoadU32(base, ug + 0x84)) != 0) : -1;
-      REXLOG_INFO("FEELLOG dt={:.6f} yaw={} raw={:.4f} aTurn={:.4f} powerturn={:.4f} lagprop={:.4f} smooth={} "
-                  "mx={:.4f} my={:.4f} up={:.4f} usingpad={} cid={}", dt, yaw, prop("RawJoyLookRight"),
+      REXLOG_INFO("FEELLOG look={:.2f} dt={:.6f} yaw={} pitch={} raw={:.4f} aTurn={:.4f} powerturn={:.4f} lagprop={:.4f} smooth={} "
+                  "mx={:.4f} my={:.4f} up={:.4f} usingpad={} cid={}", look, dt, yaw, pitch, prop("RawJoyLookRight"),
                   prop("aTurn"), prop("PowerTurn"), prop("LagProportion"),
                   (LoadU32(base, pin + f.smooth_off) & f.smooth_mask) != 0, prop("aMouseX"), prop("aMouseY"),
                   prop("RawJoyUp"), using_pad, int32_t(LoadU32(base, player + 0x60)));  // LocalPlayer.ControllerId
@@ -2838,7 +2883,7 @@ void Apply(uint8_t* base, float dt) {
     if (logged_pin[i] != pin) {
       logged_pin[i] = pin;
       REXLOG_INFO("controller feel: player {} PlayerInput {:08X}: mouse smoothing off, stick acceleration {}, stick "
-                  "response {}", i, pin, accel ? "on" : "off", linear ? "linear" : "original");
+                  "response {}, look speed {}x", i, pin, accel ? "on" : "off", linear ? "linear" : "original", look);
     }
   }
 }

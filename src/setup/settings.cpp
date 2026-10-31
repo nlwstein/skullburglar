@@ -106,6 +106,13 @@ std::vector<Setting> Catalog() {
                "Linear turns in proportion to the stick, so small movements are faster. Up and down is always "
                "linear. The game's own Controller Sensitivity option still applies.",
                {{"original", "Original curve"}, {"linear", "Linear"}}});
+  s.push_back({"stick_look_speed", "", "Stick look speed",
+               "How fast the right stick turns the camera, as a multiple of the game's own speed. 1x is as shipped; "
+               "up to 3x, past the game's highest Controller Sensitivity, for a pad that turns as fast as a mouse. "
+               "It scales turning left, right, up and down at every stick position, and the game's own Controller "
+               "Sensitivity option still applies on top. Ctrl-click to type a value.",
+               {}});
+  s.back().slider_min = 1, s.back().slider_max = 3, s.back().slider_linear = true, s.back().slider_format = "%.2fx";
   s.push_back({"vibration", "", "Vibration", "Turn off to stop the controller rumbling.", {}});
   s.push_back({"user_signin_live", "", "LAN co-op",
                "Play the story with another computer on your network. One player starts a story; the other picks "
