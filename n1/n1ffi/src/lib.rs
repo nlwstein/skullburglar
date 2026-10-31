@@ -1091,7 +1091,7 @@ pub extern "C" fn n1_set_ambient(r: *const N1Renderer, ambient: f32) {
 /// `pow(LightColor / 255, 2.2) * Brightness` (what `BOTS_N1_LIGHT_GAMMA=0` does for a whole run). Bit 8 (256, B-245):
 /// light environments in the other colour mode (`BOTS_N1_ENV_GAMMA`). Bit 9 (512, B-245): light-environment key
 /// specular back to Blinn (`BOTS_N1_ENV_SPEC=0`). Bit 11 (2048, B-249): the level's sun, fill and sky light colours in the
-/// other colour mode (`BOTS_N1_SKY_GAMMA`). Bit 12 (4096, B-261): world-space ReflectionVector (`BOTS_N1_REFL_TS=0`). 0: none.
+/// other colour mode (`BOTS_N1_SKY_GAMMA`). Bit 12 (4096, B-261): world-space ReflectionVector (`BOTS_N1_REFL_TS=0`). Bit 14 (16384, B-205): the light-environment key specular unscaled (`BOTS_N1_ENVP=envspec=1`). 0: none.
 #[unsafe(no_mangle)]
 pub extern "C" fn n1_set_debug_bits(r: *const N1Renderer, bits: u32) {
     with(r, (), |i| i.renderer.debug_bits = bits);
