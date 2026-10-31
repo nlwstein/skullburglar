@@ -86,7 +86,11 @@ impl PGpu {
                 b(1, vk::DescriptorType::SAMPLED_IMAGE, fr),
                 b(2, vk::DescriptorType::SAMPLED_IMAGE, fr),
                 b(3, vk::DescriptorType::SAMPLED_IMAGE, fr),
-                b(4, vk::DescriptorType::SAMPLER, fr),
+                b(4, vk::DescriptorType::SAMPLED_IMAGE, fr),
+                b(5, vk::DescriptorType::SAMPLED_IMAGE, fr),
+                b(6, vk::DescriptorType::SAMPLED_IMAGE, fr),
+                b(7, vk::DescriptorType::SAMPLED_IMAGE, fr),
+                b(8, vk::DescriptorType::SAMPLER, fr),
             ];
             let m_layout = device.create_descriptor_set_layout(
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&m),
@@ -141,8 +145,8 @@ impl Renderer {
                 .store
                 .module_from_spv(spv_key(&m.mesh_spv), &m.mesh_spv, Origin::Live)
                 .ok_or_else(|| anyhow!("particle mesh shader {}", m.name))?;
-            let mut ids = [TEX_GREY; 4];
-            for (k, t) in m.textures.iter().take(4).enumerate() {
+            let mut ids = [TEX_GREY; scenefmt::particles::matprog::MAX_PARTICLE_TEX];
+            for (k, t) in m.textures.iter().take(ids.len()).enumerate() {
                 let Some(t) = t else { continue };
                 if let Some(&id) = self.pg.tex_ids.get(&t.name) {
                     ids[k] = id;
@@ -183,7 +187,7 @@ impl Renderer {
             writes.push(
                 vk::WriteDescriptorSet::default()
                     .dst_set(set)
-                    .dst_binding(4)
+                    .dst_binding(8)
                     .descriptor_type(vk::DescriptorType::SAMPLER)
                     .image_info(&smp),
             );
