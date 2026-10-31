@@ -75,11 +75,52 @@ inline double LagProportion(double lag_amount, double dt, double lag_time_scale)
   return 1.0 - std::pow(lag_amount, -dt * lag_time_scale * 100.0);
 }
 
-// Mouse noise gate (B-269): motion accumulated since the last frame is held back, not dropped, while its length is
-// below `gate` pixels, so a sensor that jitters by a pixel back and forth cancels out and steady slow motion still
-// gets through once it adds up. gate <= 0 (the default) never holds anything.
+// Mouse noise gate, 1.4.0 (B-269): motion accumulated since the last frame is held back, not dropped, while its
+// length is below `gate` pixels, and all of it is released once it adds up. Steady slow motion passes in bursts and
+// a sensor that creeps one count at a time in one direction gets through anyway, which is what a gyro that drifts
+// does (measured in tests/mouse_gate_sim.cpp). Kept for that comparison; the game uses MouseGate below.
 inline bool MouseGateHolds(double acc_x, double acc_y, double gate) {
   return gate > 0 && std::hypot(acc_x, acc_y) < gate;
 }
+
+// Mouse drift gate (B-269). A gyro-as-mouse that lies still still reports the odd count, mostly the same direction at
+// a slow, steady rate (drift) or +1/-1 around zero (noise). Deliberate motion, even a slow nudge, comes at a higher
+// rate. So the gate watches how fast counts arrive: a leaky sum of the counts, `level`, that loses its value with time
+// constant kTau (a steady rate of r counts per second settles at r * kTau).
+//   - Idle: counts are held and not released, they only add to `level`. When level reaches `gate` pixels the motion is
+//     deliberate: the gate opens and releases the level (nearly all the counts of this move).
+//   - Open: every count passes at once. The gate closes again when level falls under kClose * gate, so a pause of
+//     about half a second shuts it, and the level starts again from zero.
+// A drift slower than gate / kTau counts per second never reaches the gate and is dropped; +1/-1 noise cancels in
+// the level. gate <= 0 passes everything, always.
+struct MouseGate {
+  static constexpr double kTau = 0.4;    // seconds
+  static constexpr double kClose = 0.5;  // close below this share of the gate
+  double close = kClose;                 // (a member so the simulation can try other values)
+  double x = 0, y = 0;                   // leaky sum of counts, pixels
+  bool open = false;
+
+  // One frame: `dt` seconds since the last one, (dx, dy) the counts that arrived meanwhile. Returns what passes.
+  struct Out {
+    double x = 0, y = 0;
+  };
+  Out Step(double dx, double dy, double dt, double gate, double tau = kTau) {
+    if (!(gate > 0)) {
+      x = y = 0, open = false;
+      return {dx, dy};
+    }
+    const double keep = tau > 0 && dt > 0 ? std::exp(-dt / tau) : 0.0;
+    x = x * keep + dx, y = y * keep + dy;
+    const double level = std::hypot(x, y);
+    if (open) {
+      // The level now holds counts that already passed: forget them when the gate shuts, so they are not released again.
+      if (level < close * gate) open = false, x = y = 0;
+      return {dx, dy};
+    }
+    if (level < gate) return {};
+    open = true;
+    return {x, y};
+  }
+};
 
 }  // namespace bots::input

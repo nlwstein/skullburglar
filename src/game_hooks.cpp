@@ -309,12 +309,28 @@ void RunPlayerCommand(PPCContext& ctx, uint8_t* base, ExecState& st, uint32_t pl
 
 void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std::string& cmd) {
   bots::instr::NoteCommand(cmd);
+  // "mousefeed <spec>" (B-269): synthetic mouse motion through the driver's path, see mouse_pattern.h; "mousefeed off".
+  if (cmd.rfind("mousefeed ", 0) == 0) {
+    const std::string spec = cmd.substr(10);
+    if (auto* kbm = bots::MouseKeyboardDriver::instance()) kbm->SetFeed(spec == "off" ? "" : spec);
+    return;
+  }
   // "peek <hex addr> [count]": log guest words (pointers the game fills in at runtime).
   if (cmd.rfind("peek ", 0) == 0) {
     char* end = nullptr;
     uint32_t addr = static_cast<uint32_t>(std::strtoul(cmd.c_str() + 5, &end, 16)) & ~3u;
     int count = std::max(1, std::min(64, static_cast<int>(std::strtol(end, nullptr, 10))));
     for (int i = 0; i < count; ++i, addr += 4) REXLOG_INFO("BOTS_EXEC peek {:08X} = {:08X}", addr, LoadU32(base, addr));
+    return;
+  }
+  // "setflag <name> <value>": set a launcher setting (a rex cvar) while the game runs, so one launch can measure
+  // several values (B-303: stick_look_speed; B-269: kbm_noise_gate). Test aid, reachable through BOTS_EXEC or the
+  // instrumentation channel's exec command.
+  if (cmd.rfind("setflag ", 0) == 0) {
+    const size_t sp = cmd.find(' ', 8);
+    const std::string name = cmd.substr(8, sp == std::string::npos ? std::string::npos : sp - 8);
+    const std::string value = sp == std::string::npos ? "" : cmd.substr(sp + 1);
+    REXLOG_INFO("BOTS_EXEC setflag {} = {} -> {}", name, value, rex::cvar::SetFlagByName(name, value) ? "ok" : "failed");
     return;
   }
   if (split_screen::Command(cmd) || debug::Command(base, cmd) || bots::scenefeed::Command(base, cmd)) return;

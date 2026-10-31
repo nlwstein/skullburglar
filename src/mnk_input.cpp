@@ -18,8 +18,10 @@ REXCVAR_DEFINE_DOUBLE(kbm_aim_sensitivity, 1.0, "bots/Input",
                       "speed by the field of view, so zooming in already slows it")
     .range(0.05, 10.0);
 REXCVAR_DEFINE_DOUBLE(kbm_noise_gate, 0.0, "bots/Input",
-                      "Mouse noise gate in pixels (0 = off): motion shorter than this is held back until it adds up, so a "
-                      "jittery sensor or gyro dead-zone leak stops drifting the camera. BOTS_MOUSE_GATE=<px> overrides.")
+                      "Mouse drift gate in pixels (0 = off): a sensor that creeps (gyro drift) is ignored. Motion has to "
+                      "add up to this many pixels within about half a second before it counts as deliberate; slower "
+                      "creep is dropped, and +1/-1 jitter cancels. BOTS_MOUSE_GATE=<px> overrides, BOTS_MOUSE_TRACE=1 "
+                      "logs what it sees and passes.")
     .range(0.0, 8.0);
 REXCVAR_DEFINE_BOOL(kbm_invert_y, false, "bots/Input", "Invert mouse look up/down");
 REXCVAR_DEFINE_BOOL(kbm_prompts, true, "bots/Input",
@@ -263,6 +265,8 @@ void MouseKeyboardDriver::OnMouseMove(rex::ui::MouseEvent& e) {
     }
     mouse_dx_ += dx;
     mouse_dy_ += dy;
+    static const bool trace = [] { const char* v = std::getenv("BOTS_MOUSE_TRACE"); return v && *v == '1'; }();
+    if (trace && (dx != 0 || dy != 0)) REXLOG_INFO("MOUSEEVT t={} d={:g},{:g}", Now(), dx, dy);
     if (std::abs(dx) + std::abs(dy) >= 3) human_events_.fetch_add(1, std::memory_order_relaxed);
     moved_ += std::abs(dx) + std::abs(dy);
   }
@@ -322,8 +326,16 @@ void MouseKeyboardDriver::OnLostFocus(rex::ui::UISetupEvent&) {
     for (uint16_t vk = 0; vk < kKeyCount; ++vk) PushEnter(vk, false);
     click_is_enter_ = false;
     mouse_dx_ = mouse_dy_ = 0;
+    gate_ = {};
   }
   if (window_) ReleaseCaptureOnUIThread(window_);
+}
+
+bool MouseKeyboardDriver::SetFeed(const std::string& spec) {
+  std::lock_guard lock(mutex_);
+  feeding_ = !spec.empty() && feed_.Parse(spec);
+  if (!spec.empty()) REXLOG_INFO("mouse feed: '{}' {}", spec, feeding_ ? "on" : "not understood, off");
+  return feeding_ || spec.empty();
 }
 
 void MouseKeyboardDriver::TakeMouseDelta(float& dx, float& dy) {
@@ -334,17 +346,41 @@ void MouseKeyboardDriver::TakeMouseDelta(float& dx, float& dy) {
     const char* v = std::getenv("BOTS_MOUSE_GATE");
     return v && *v ? std::atof(v) : -1.0;
   }();
+  static const double env_tau = [] {  // experiments only
+    const char* v = std::getenv("BOTS_MOUSE_GATE_TAU");
+    return v && *v ? std::atof(v) : bots::input::MouseGate::kTau;
+  }();
+  static const bool trace = [] { const char* v = std::getenv("BOTS_MOUSE_TRACE"); return v && *v == '1'; }();
+  static const bool env_feed = [this] {
+    const char* v = std::getenv("BOTS_MOUSE_FEED");
+    if (!v || !*v) return false;
+    feeding_ = feed_.Parse(v);
+    REXLOG_INFO("mouse feed: '{}' {}", v, feeding_ ? "on" : "not understood, off");
+    return feeding_;
+  }();
+  (void)env_feed;
   const double gate = env_gate >= 0 ? env_gate : REXCVAR_GET(kbm_noise_gate);
-  const bool hold = bots::input::MouseGateHolds(mouse_dx_, mouse_dy_, gate);
-  if (hold) {  // keep the fractions and the sub-gate remainder for the next frame
-    dx = dy = 0;
-  } else {
-    dx = mouse_dx_ * s;
-    // Window y grows downward; the engine's MouseY is positive for "look up".
-    dy = (REXCVAR_GET(kbm_invert_y) ? mouse_dy_ : -mouse_dy_) * s;
-    diag_taken_ += std::abs(mouse_dx_) + std::abs(mouse_dy_);
-    mouse_dx_ = mouse_dy_ = 0;
+  // Seconds of wall time since the last frame: motion arrives in wall time, whatever the game's clock does.
+  const auto now_tp = std::chrono::steady_clock::now();
+  const double dt = gate_last_ == std::chrono::steady_clock::time_point{}
+                        ? 1.0 / 60
+                        : std::clamp(std::chrono::duration<double>(now_tp - gate_last_).count(), 0.0, 0.25);
+  gate_last_ = now_tp;
+  if (feeding_) {
+    const auto c = feed_.Next(dt);
+    mouse_dx_ += float(c.x), mouse_dy_ += float(c.y);
   }
+  const double in_x = mouse_dx_, in_y = mouse_dy_;
+  // Counts that arrived since the last frame go through the drift gate (a pass-through when it is off).
+  const auto pass = gate_.Step(in_x, in_y, dt, gate, env_tau);
+  mouse_dx_ = mouse_dy_ = 0;
+  dx = float(pass.x * s);
+  // Window y grows downward; the engine's MouseY is positive for "look up".
+  dy = float((REXCVAR_GET(kbm_invert_y) ? pass.y : -pass.y) * s);
+  diag_taken_ += std::abs(pass.x) + std::abs(pass.y);
+  if (trace && (in_x != 0 || in_y != 0 || pass.x != 0 || pass.y != 0))
+    REXLOG_INFO("MOUSETRACE t={} dt={:.4f} in={:g},{:g} out={:g},{:g} gate={:g} level={:.2f} open={}", Now(), dt, in_x,
+                in_y, pass.x, pass.y, gate, std::hypot(gate_.x, gate_.y), int(gate_.open));
   // BOTS_MOUSE_LOG=1: once a second while the mouse moved, what reached the game (B-268 diagnostics).
   static const bool log = [] { const char* v = std::getenv("BOTS_MOUSE_LOG"); return v && *v == '1'; }();
   const int64_t now = Now();
@@ -530,6 +566,7 @@ void MouseKeyboardDriver::ApplyCaptureOnUIThread() {
   if (!relative_) REXLOG_WARN("keyboard/mouse: no pointer lock, recentering the cursor instead");
   std::lock_guard lock(mutex_);
   mouse_dx_ = mouse_dy_ = 0;  // no jump on capture
+  gate_ = {};
 }
 
 void MouseKeyboardDriver::ReleaseCaptureOnUIThread(rex::ui::Window* window) {
