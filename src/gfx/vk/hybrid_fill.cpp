@@ -31,6 +31,10 @@
 #include <unordered_set>
 #include <vector>
 
+#ifdef __linux__
+#include <malloc.h>
+#endif
+
 #include <rex/logging.h>
 
 #include <glslang/Public/ShaderLang.h>
@@ -455,6 +459,21 @@ void Renderer::PrepareSceneN1() {
   HoldN1Preload(host, true);
 }
 
+// Returns freed heap pages to the OS (glibc only; a no-op elsewhere).
+static void TrimHostHeap() {
+#ifdef __linux__
+  static const bool on = [] {
+    const char* v = std::getenv("BOTS_MALLOC_TRIM");
+    return !(v && v[0] == '0');
+  }();
+  if (!on) return;
+  const auto t0 = std::chrono::steady_clock::now();
+  const int released = malloc_trim(0);
+  REXLOG_INFO("hybrid n1: malloc_trim {} in {:.0f} ms", released ? "released memory" : "found nothing",
+              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+#endif
+}
+
 // B-199: the first scene after a gap (level start, end of a loading screen) waits, up to BOTS_N1_PRELOAD_HOLD_S, for
 // the level preload: loads applied 8 ms at a time with a submit between (bounds staging memory). The guest waits
 // with it, as for the pipeline warm-up. Streamed sublevels never hold: they load while the level plays.
@@ -514,6 +533,10 @@ void Renderer::HoldN1Preload(void* h, bool may_flush) {
               "{} still pending",
               held, passes, host->packages, st.preload_requests, st.applied, double(st.upload_bytes) / 1048576.0,
               st.textures_added, st.meshes_added, lazy0, st.preload_pending);
+  // The hold has just freed a level's worth of assets: glibc keeps that memory in its per-thread arenas, so a Deck
+  // sees about 0.8 GB more resident than the live data needs. Give it back here, where a pause is already expected.
+  // BOTS_MALLOC_TRIM=0 turns this off.
+  TrimHostHeap();
   if (passes) BeginCommands(kGpuDraw);
   // From the end of the hold: from its start, the next scene saw the hold as a gap and "resumed" again.
   host->any_scene = true, host->last_scene = end;
