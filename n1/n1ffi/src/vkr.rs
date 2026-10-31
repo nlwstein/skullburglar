@@ -404,6 +404,10 @@ pub struct Renderer {
     post_pipes: HashMap<(&'static str, i32), vk::Pipeline>,
     /// B-266: post-material textures by path: (texture id, takes Xenos's gamma curve in the shader).
     post_tex: HashMap<String, (u32, bool)>,
+    /// B-292: the damage render target's picture (the host reads the game's `DamageEffectTexture` back): texture id,
+    /// plus slots given up that the GPU may still read (freed when their upload is done).
+    damage_tex: Option<u32>,
+    damage_old: Vec<u32>,
     /// B-266: the entry points recorded last frame (logged when the set changes).
     post_mats_last: Vec<&'static str>,
     /// B-267: a wall clock for post materials that animate while the game is paused (the death screen).
@@ -724,6 +728,8 @@ impl Renderer {
                 post_module,
                 post_pipes: HashMap::new(),
                 post_tex: HashMap::new(),
+                damage_tex: None,
+                damage_old: Vec::new(),
                 post_mats_last: Vec::new(),
                 post_real0: std::time::Instant::now(),
                 pipe_pending: 0,
@@ -1105,6 +1111,32 @@ impl Renderer {
         Ok(())
     }
 
+    /// B-292: the picture of the game's `DamageEffectTexture` (hit-direction marks), BGRA8 in the guest's channel order,
+    /// `w` x `h`. `None` clears it (no hit showing). The old image is given back once the GPU is done with it.
+    pub fn damage_tex_set(&mut self, picture: Option<(u32, u32, &[u8])>) {
+        if let Some(id) = self.damage_tex.take() {
+            self.damage_old.push(id);
+        }
+        if let Some((w, h, bgra)) = picture {
+            let mips = [bgra];
+            let desc = scenekit::TextureDesc {
+                format: scenekit::TexFormat::Bgra8,
+                srgb: false,
+                width: w,
+                height: h,
+                mips: &mips,
+                normal: false,
+                gamma: false,
+            };
+            match self.try_add_texture(&desc) {
+                Ok(id) => self.damage_tex = Some(id),
+                Err(e) => eprintln!("n1ffi: damage texture {w}x{h}: {e:#}"),
+            }
+        }
+        let old = std::mem::take(&mut self.damage_old);
+        self.damage_old = old.into_iter().filter(|&id| !self.free_texture(id)).collect();
+    }
+
     /// B-266: the frame's post-material passes whose textures are loaded: (entry point, params, textures, pwl flags).
     fn post_mat_passes(&self) -> Vec<(&'static str, [f32; 4], [u32; 2], [bool; 2])> {
         let mut v = Vec::new();
@@ -1119,6 +1151,16 @@ impl Renderer {
                 match self.post_tex.get(*t) {
                     Some(&(id, g)) => (ids[k], pwl[k]) = (id, g),
                     None => ready = false,
+                }
+            }
+            if e.kind == crate::postmat::Kind::Damage {
+                // The hit picture is the second texture (an sRGB render target: the shader decodes Xenos's curve).
+                if let Some(id) = self.damage_tex {
+                    (ids[1], pwl[1]) = (id, true);
+                } else if e.params[0] <= 0.0 {
+                    continue; // no critical-health fade and no hit showing: nothing to draw
+                } else {
+                    ready = true; // the fade alone needs no ramp
                 }
             }
             if ready && v.len() < POST_MATS {

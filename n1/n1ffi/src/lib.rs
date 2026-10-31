@@ -1121,6 +1121,22 @@ pub unsafe extern "C" fn n1_set_fade(r: *const N1Renderer, scale: *const f32, ov
     with(r, (), |i| i.renderer.fade = fade);
 }
 
+/// B-292: the picture of the game's `DamageEffectTexture` render target (the hit-direction marks), `w` x `h` texels of
+/// 4 bytes in B, G, R, A order holding the guest's channels as drawn (the host reads the target back). It stays until
+/// the next call; null `bgra` (or a zero size) clears it.
+///
+/// # Safety
+/// `bgra` null or valid for `w * h * 4` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn n1_set_damage_tex(r: *const N1Renderer, bgra: *const u8, w: u32, h: u32) {
+    let picture = if bgra.is_null() || w == 0 || h == 0 || w > 4096 || h > 4096 {
+        None
+    } else {
+        Some((w, h, unsafe { std::slice::from_raw_parts(bgra, w as usize * h as usize * 4) }))
+    };
+    with(r, (), |i| i.renderer.damage_tex_set(picture));
+}
+
 /// The frame's lights, fog and post chain as the scene feed's JSON (`{"lights":[..],"fog":[..],"post":{..}}`, the
 /// format `lightfeed` parses). Sun, sky, fog, post and dynamic lights follow it until the next call. Returns 0, or -1
 /// with `n1_last_error` set.

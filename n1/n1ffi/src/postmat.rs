@@ -24,8 +24,9 @@ pub enum Kind {
     Death,
     /// Critical-health damage (`FX_Damage.DamageEffectMaterial_MIC`, B-292): scalar `CriticalHealthFadeParameter`
     /// (0..1, driven by the HUD from the player's health) fades the scene toward 75% desaturation. The material also
-    /// reads the `DamageEffectTexture` render target (hit arrows); with no hit it is black, which leaves exactly this
-    /// term (`DamageRamp` alpha is 0 at its start). The hit arrows themselves are not drawn.
+    /// reads the `DamageEffectTexture` render target (hit arrows; its blue channel indexes `DamageRamp`, whose alpha
+    /// brightens and whose colour overlays the scene). With no hit the target is black, which leaves exactly the fade
+    /// term. The host reads the target back and hands n1 its picture (`n1_set_damage_tex`).
     Damage,
     /// Sniper scope (`C1HUD.SniperScope_MIC`, an instance of `SniperScope_V02_MAT`, B-295): in the player's chain only
     /// while scoped. The scene through a lens mask (blue channel of `SniperScope_v02_EFCT`, sampled along its diagonal at
@@ -61,7 +62,7 @@ impl Kind {
         match self {
             Kind::Gangsta => ["FX_GangsterFire.streak", "FX_GangsterFire.EyeMask"],
             Kind::Death => ["UI_DeathEffect.DeathScreenBackground_Alphas", "UI_DeathEffect.HeatVisionClouds_Alpha"],
-            Kind::Damage => ["", ""],
+            Kind::Damage => ["FX_Damage.DamageRamp", ""],
             Kind::Scope => ["C1HUD.SniperScope_v02_EFCT", ""],
         }
     }
@@ -157,12 +158,11 @@ pub fn effects(p: &PostFeed) -> Vec<Effect> {
                 }
             }
             Kind::Damage => {
+                // Kept with a zero fade too: the hit-direction picture (B-292) may be showing; the renderer drops the
+                // pass when neither the fade nor a picture is there.
                 let a = p.param(m, "CriticalHealthFadeParameter").unwrap_or(0.0);
-                if a.is_finite() && a > 0.0 {
-                    Some(Effect { kind, params: [a.min(1.0), 0.0, 0.0, 0.0] })
-                } else {
-                    None
-                }
+                let a = if a.is_finite() { a.clamp(0.0, 1.0) } else { 0.0 };
+                Some(Effect { kind, params: [a, 0.0, 0.0, 0.0] })
             }
             Kind::Scope => {
                 // Its only scalar parameter, whatever its name (the game sets it from the screen's aspect ratio).
@@ -231,9 +231,11 @@ mod tests {
         let m = "FX_Damage.DamageEffectMaterial_MIC";
         let e = effects(&feed(&["GEN_PostProcess.AmbushPP_MAT01", m], &[(m, "CriticalHealthFadeParameter", 0.65)]));
         assert_eq!(e, [Effect { kind: Kind::Damage, params: [0.65, 0.0, 0.0, 0.0] }]);
-        // Off at zero and without the parameter; clamped at one.
-        assert!(effects(&feed(&[m], &[(m, "CriticalHealthFadeParameter", 0.0)])).is_empty());
-        assert!(effects(&feed(&[m], &[])).is_empty());
+        // In the chain with a zero fade (or without the parameter) it stays, for the hit picture (the renderer drops the
+        // pass when no picture is showing); clamped at one.
+        assert_eq!(effects(&feed(&[m], &[(m, "CriticalHealthFadeParameter", 0.0)]))[0].params[0], 0.0);
+        assert_eq!(effects(&feed(&[m], &[]))[0].params[0], 0.0);
+        assert!(effects(&feed(&["a.b"], &[])).is_empty());
         assert_eq!(effects(&feed(&[m], &[(m, "CriticalHealthFadeParameter", 2.0)]))[0].params[0], 1.0);
     }
 

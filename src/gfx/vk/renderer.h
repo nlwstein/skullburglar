@@ -79,6 +79,9 @@ class Renderer : public Pm4Sink {
   // B-220: the game is about to draw its own scene for a tree-capture frame (kHybridCaptureBegin). Until the scene's
   // marker (QueueSceneFill) its draws only feed the tree capture and its resolves are dropped (CaptureFrameDraw).
   void BeginCaptureFrame() { capture_frame_ = true; }
+  // B-292: the game just rendered its damage-indicator scene capture (kHybridDamageEnd): copy the last resolve's image
+  // (the capture's render texture) toward the CPU; DrawSceneN1 hands the finished picture to n1.
+  void CaptureDamageTarget();
 
   // Submits everything recorded so far and waits for it.
   // Submits what's recorded without waiting (up to kSubmissions in flight). Finish also waits for the GPU:
@@ -532,6 +535,19 @@ class Renderer : public Pm4Sink {
   void* burst_ = nullptr;
   // Fill 4 bookkeeping for the burst sidecar: frames n1 drew, the last marker's camera, the camera n1 drew with and
   // the scene it drew.
+  // B-292 (hybrid_fill.cpp): readbacks of the damage render texture in flight, and the picture n1 holds.
+  struct DamageRead {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VmaAllocation alloc = nullptr;
+    void* map = nullptr;
+    uint64_t serial = 0;
+    uint32_t w = 0, h = 0;
+    bool swapped = false;
+  };
+  std::vector<DamageRead> damage_reads_;
+  std::vector<uint8_t> damage_held_;  // BGRA picture n1 holds (empty: none)
+  uint64_t damage_captures_ = 0, damage_shown_ = 0;
+  void PumpDamage(void* n1_host, uint64_t completed);
   uint64_t n1_drawn_ = 0, n1_scene_frame_ = 0;
   uint32_t n1_marker_seq_ = 0, n1_view_seq_ = 0, n1_scene_cam_ = 0;
   size_t n1_warm_total_ = 0, n1_warm_done_ = 0;

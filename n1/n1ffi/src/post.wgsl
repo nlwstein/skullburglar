@@ -258,9 +258,18 @@ fn fs_gangsta(i: VOut) -> @location(0) vec4<f32> {
 // toward a 75% desaturated copy. The material's hit-arrow render target is not drawn (it is black without a hit).
 @fragment
 fn fs_damage(i: VOut) -> @location(0) vec4<f32> {
+    let w = vec3<f32>(0.3, 0.59, 0.11);
     let s = textureSample(src, smp, i.uv).rgb;
-    let d = desat(s, 0.75, vec3<f32>(0.3, 0.59, 0.11));
-    return mat_out(mix(s, d, clamp(p.g0.x, 0.0, 1.0)), i.pos);
+    let s5 = mix(s, desat(s, 0.75, w), clamp(p.g0.x, 0.0, 1.0));
+    // tex1 = the host's picture of DamageEffectTexture (hit marks; black = none), its blue channel indexes the ramp
+    // (tex0, DamageRamp): alpha brightens the scene, colour overlays it (decoded from the material graph, B-292).
+    let b = mat_tex1(i.uv).b;
+    let ramp = mat_tex0(vec2<f32>(b, 0.5));
+    let m = s5 * (1.0 + 3.0 * ramp.a);
+    let o = mix(vec3<f32>(0.5), ramp.rgb, b);
+    let hi = o * m * 2.0;
+    let lo = vec3<f32>(1.0) - 2.0 * (vec3<f32>(1.0) - o) * (vec3<f32>(1.0) - m);
+    return mat_out(select(lo, hi, dot(m, w) > 0.5), i.pos);
 }
 
 // C1HUD.SniperScope_V02_MAT (SniperScope_MIC, B-295), g0.x = its scalar parameter (0 = the 16:9 mapping). tex0

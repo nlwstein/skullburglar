@@ -276,6 +276,10 @@ inline constexpr uint32_t kHybridMarkerRegister = 0x0030;
 // loaded its textures for frames nobody saw. Scene markers carry a camera seq, which never has this bit.
 // BOTS_HYBRID_CAPTURE_SKIP=0 draws the capture frames' scene as before.
 inline constexpr uint32_t kHybridCaptureBegin = 0x80000000u;
+// B-292: the marker value written right after the game rendered a scene capture into a small render target (the HUD's
+// `DamageEffectTexture`, 128x64: the hit-direction marks). The renderer reads that target's last resolve back and hands
+// n1 the picture (n1_set_damage_tex), since n1 draws the post chain's damage material but not the game's capture.
+inline constexpr uint32_t kHybridDamageEnd = 0x80000001u;
 
 inline constexpr const char* kHybridStateEnv = "BOTS_HYBRID_STATE";
 
