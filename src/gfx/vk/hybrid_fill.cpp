@@ -31,7 +31,7 @@
 #include <unordered_set>
 #include <vector>
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)  // Android's bionic has no malloc_trim
 #include <malloc.h>
 #endif
 
@@ -461,7 +461,7 @@ void Renderer::PrepareSceneN1() {
 
 // Returns freed heap pages to the OS (glibc only; a no-op elsewhere).
 static void TrimHostHeap() {
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
   static const bool on = [] {
     const char* v = std::getenv("BOTS_MALLOC_TRIM");
     return !(v && v[0] == '0');
