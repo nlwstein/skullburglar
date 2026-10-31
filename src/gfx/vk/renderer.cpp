@@ -1233,7 +1233,12 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
       dest->written = ++write_clock_;
       last_resolve_address_ = dest_address;
       // B-292: the HUD's damage-indicator capture resolves a 128x64 render texture. Remember where; n1's frame reads it.
-      if (dest_pitch.copy_dest_pitch == 128 && dest_pitch.copy_dest_height == 64) {
+      // BOTS_N1_DAMAGE_TEX=0 turns the picture off (the damage post material then shows no hit marks).
+      static const bool damage_tex_on = [] {
+        const char* v = std::getenv("BOTS_N1_DAMAGE_TEX");
+        return !(v && *v == '0');
+      }();
+      if (damage_tex_on && dest_pitch.copy_dest_pitch == 128 && dest_pitch.copy_dest_height == 64) {
         static int logged = 0;
         if (damage_address_ != dest_address && logged < 30) {
           ++logged;
