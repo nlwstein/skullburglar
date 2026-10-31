@@ -1154,9 +1154,9 @@ impl Renderer {
                 }
             }
             if e.kind == crate::postmat::Kind::Damage {
-                // The hit picture is the second texture (an sRGB render target: the shader decodes Xenos's curve).
+                // The hit picture is the second texture. The game's fetch has no gamma flag, so the stored bytes are read as they are.
                 if let Some(id) = self.damage_tex {
-                    (ids[1], pwl[1]) = (id, true);
+                    (ids[1], pwl[1]) = (id, false);
                 } else if e.params[0] <= 0.0 {
                     continue; // no critical-health fade and no hit showing: nothing to draw
                 } else {

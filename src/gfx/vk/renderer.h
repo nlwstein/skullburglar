@@ -542,8 +542,9 @@ class Renderer : public Pm4Sink {
     void* map = nullptr;
     uint64_t serial = 0;
     uint32_t w = 0, h = 0;
-    bool swapped = false;
+    uint32_t swizzle = 0;  // the host swizzle the damage material's fetch applies (3 bits per output channel)
   };
+  uint32_t damage_swizzle_ = 0;  // seen at the last draw that sampled the damage render texture (0: none yet)
   std::vector<DamageRead> damage_reads_;
   std::vector<uint8_t> damage_held_;  // BGRA picture n1 holds (empty: none)
   uint64_t damage_captures_ = 0, damage_shown_ = 0;
@@ -637,6 +638,9 @@ class Renderer : public Pm4Sink {
   // Resolve destinations are pitch wide; a fetch of a narrower (or shorter) texture samples a copy of its corner.
   std::map<std::tuple<const Image*, uint32_t, uint32_t>, std::unique_ptr<Image>> crops_;
   uint32_t last_resolve_address_ = 0;
+  uint32_t damage_address_ = 0;  // B-292: destination of the last 128x64 resolve (the damage capture)
+  bool damage_logged_ = false;
+  bool damage_dirty_ = false;   // a new one resolved since n1 last read it
   Stats stats_;
 
   // Drawing.

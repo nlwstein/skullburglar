@@ -808,6 +808,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   host->cam_seq = view_cam->seq;
   {
     // B-292: the finished damage-texture readbacks go to n1 before its frame is recorded.
+    if (damage_dirty_) damage_dirty_ = false, CaptureDamageTarget();
     uint64_t done = stats_.flushes;
     for (const Submission& sub : submissions_)
       if (sub.pending) done = std::min(done, sub.serial - 1);
@@ -1284,17 +1285,18 @@ bool Renderer::DrawSceneDual(Image& target, const HybridCamera& cam, const VkRec
 void Renderer::CaptureDamageTarget() {
   if (!ok_) return;
   ++damage_captures_;
-  const auto it = texture_at_.find(last_resolve_address_);
+  const auto it = texture_at_.find(damage_address_);
   Image* image = it == texture_at_.end() ? nullptr : it->second;
   if (damage_captures_ <= 3 || (!image && damage_captures_ % 600 == 0)) {
-    REXLOG_INFO("hybrid n1: damage capture {}: last resolve {:08X} -> {} ({}x{} format {} swapped {})", damage_captures_,
-                last_resolve_address_, image ? "image" : "none", image ? image->width : 0, image ? image->height : 0,
-                image ? int(image->format) : 0, image ? int(image->swapped) : 0);
+    REXLOG_INFO("hybrid n1: damage capture {}: resolve {:08X} -> {} ({}x{} format {} swapped {} fetch swizzle {:o})", damage_captures_,
+                damage_address_, image ? "image" : "none", image ? image->width : 0, image ? image->height : 0,
+                image ? int(image->format) : 0, image ? int(image->swapped) : 0, damage_swizzle_);
   }
   if (!image || image->format != VK_FORMAT_R8G8B8A8_UNORM || image->width > 1536 || image->height > 1536) return;
   if (damage_reads_.size() >= 3) return;  // the GPU is behind; the next capture comes soon
   DamageRead r;
-  r.w = image->width, r.h = image->height, r.swapped = image->swapped;
+  r.w = image->width, r.h = image->height;
+  r.swizzle = damage_swizzle_ ? damage_swizzle_ : image->swapped ? (2u | (1u << 3) | (0u << 6) | (3u << 9)) : 0x688u;
   VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   info.size = VkDeviceSize(r.w) * r.h * 4;
   info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -1335,8 +1337,13 @@ void Renderer::PumpDamage(void* n1_host, uint64_t completed) {
     blue_max = 0;
     for (size_t i = 0; i < n; ++i) {
       const uint8_t* p = src + 4 * i;
-      const uint8_t guest_r = r.swapped ? p[2] : p[0], guest_b = r.swapped ? p[0] : p[2];
-      bgra[4 * i + 0] = guest_b, bgra[4 * i + 1] = p[1], bgra[4 * i + 2] = guest_r, bgra[4 * i + 3] = p[3];
+      // Channel k of the picture the damage material's fetch sees: the host channel its swizzle names (4: zero, 5: one).
+      auto ch = [&](int k) -> uint8_t {
+        const uint32_t c = (r.swizzle >> (3 * k)) & 7;
+        return c < 4 ? p[c] : c == 4 ? 0 : 255;
+      };
+      const uint8_t guest_r = ch(0), guest_g = ch(1), guest_b = ch(2), guest_a = ch(3);
+      bgra[4 * i + 0] = guest_b, bgra[4 * i + 1] = guest_g, bgra[4 * i + 2] = guest_r, bgra[4 * i + 3] = guest_a;
       blue_max = std::max<uint32_t>(blue_max, guest_b);
     }
     w = r.w, h = r.h;
@@ -1350,7 +1357,7 @@ void Renderer::PumpDamage(void* n1_host, uint64_t completed) {
     if (damage_held_ != bgra) {
       n1_set_damage_tex(host->r, bgra.data(), w, h);
       if (damage_held_.empty() && ++damage_shown_ <= 20)
-        REXLOG_INFO("hybrid n1: damage picture {}x{} on (blue max {})", w, h, blue_max);
+        REXLOG_INFO("hybrid n1: damage picture {}x{} on (blue max {}, swizzle {:o})", w, h, blue_max, damage_swizzle_);
       damage_held_ = std::move(bgra);
     }
   } else if (!damage_held_.empty()) {

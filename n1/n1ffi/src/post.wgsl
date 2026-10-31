@@ -264,7 +264,7 @@ fn fs_damage(i: VOut) -> @location(0) vec4<f32> {
     // tex1 = the host's picture of DamageEffectTexture (hit marks; black = none), its blue channel indexes the ramp
     // (tex0, DamageRamp): alpha brightens the scene, colour overlays it (decoded from the material graph, B-292).
     let b = mat_tex1(i.uv).b;
-    let ramp = mat_tex0(vec2<f32>(b, 0.5));
+    let ramp = mat_tex0_clamp(vec2<f32>(b, 0.5));   // clamped: b = 0 must not blend in the ramp's far end
     let m = s5 * (1.0 + 3.0 * ramp.a);
     let o = mix(vec3<f32>(0.5), ramp.rgb, b);
     let hi = o * m * 2.0;
