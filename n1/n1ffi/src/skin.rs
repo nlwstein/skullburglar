@@ -138,6 +138,17 @@ impl Skins {
         false
     }
 
+    /// B-287: the skinned meshes this visit (since the last `level_boundary`) used and still holds.
+    pub fn visit_set(&self) -> Vec<String> {
+        let since = self.boundaries.last().copied().unwrap_or(0);
+        self.states
+            .iter()
+            .enumerate()
+            .filter(|(h, s)| matches!(s, State::Ready { .. }) && self.used[*h] >= since)
+            .map(|(h, _)| self.paths[h].clone())
+            .collect()
+    }
+
     /// B-287: a level change: gives back the skinned meshes nothing named since `keep` levels ago (the handle stays
     /// valid and reloads when named again). `Resolver::level_boundary` is the same rule for static meshes.
     pub fn level_boundary(&mut self, r: &mut Renderer, db: &AssetDb, keep: usize) {

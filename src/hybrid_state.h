@@ -262,6 +262,10 @@ struct HybridState {
   std::mutex package_mutex;
   std::vector<std::string> packages;
   std::atomic<uint32_t> opened{0};
+  // B-287: the map package the game is loading or playing (level_stream.cpp sets it when LoadMap asks for the map); the
+  // renderer tells n1 at a level start, which loads again what the last visit to that map used.
+  std::mutex map_mutex;
+  std::string map_name;
   // Builds with no launcher (iOS, tvOS, Android): the game sets this to a function that saves the explicit pick of the
   // pre-1.0 renderer (renderer = "pre1" in bots.toml), and the renderer's start-failure box offers it as a button.
   std::atomic<void (*)()> pick_pre1{nullptr};

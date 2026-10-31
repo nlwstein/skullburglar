@@ -157,6 +157,9 @@ typedef struct N1Stats {
       lights_freed, bytes_freed, textures_kept;
   uint32_t forgets_pending;
   float evict_last_ms, evict_max_ms;
+  /* B-287: level starts that loaded a past visit's assets again (or a reopened package's list), and the requests that
+   * made for visits. */
+  uint64_t repreload_levels, repreload_requests;
 } N1Stats;
 
 /* NULL on failure; see n1_last_error. */
@@ -358,9 +361,14 @@ int32_t n1_upload(const N1Renderer* r, VkCommandBuffer cmd, uint64_t serial, uin
 void n1_load_stats(const N1Renderer* r, N1Stats* stats);
 
 /* B-287: the game's level just changed. Releases the meshes, textures, materials and baked lights the last few levels
- * didn't use (off unless BOTS_N1_EVICT=1; BOTS_N1_EVICT_KEEP is how many levels stay). Returns how many meshes were
+ * didn't use (on unless BOTS_N1_EVICT=0; BOTS_N1_EVICT_KEEP is how many levels stay). Returns how many meshes were
  * given back. */
 uint32_t n1_level_boundary(const N1Renderer* r);
+
+/* B-287: a level is starting; `name` is its map package. With eviction on, requests what the last visit to that level
+ * used and was given back since (BOTS_N1_REPRELOAD=0: off), so it loads in the preload hold. Call after
+ * n1_level_boundary at the level's first scene. Returns the loads requested. */
+uint32_t n1_level_start(const N1Renderer* r, const char* name);
 
 int32_t n1_record(N1Renderer* r, VkCommandBuffer cmd, const N1Target* target, const N1Camera* camera,
                   const N1Instance* instances, uint32_t count, const uint32_t* materials, uint32_t material_count,

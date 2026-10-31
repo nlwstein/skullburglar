@@ -469,12 +469,27 @@ void Renderer::HoldN1Preload(void* h, bool may_flush) {
   }
   n1_resumed_ = now;
   // B-287: a long gap is a level change (a menu pause is shorter than a loading screen): release what the levels
-  // before the last one used, before the new level loads (only with BOTS_N1_EVICT=1).
-  if (host->any_scene && std::chrono::duration<double>(now - host->last_scene).count() >= host->evict_gap_s) {
+  // before the last one used, before the new level loads (not with BOTS_N1_EVICT=0).
+  const bool level_change =
+      host->any_scene && std::chrono::duration<double>(now - host->last_scene).count() >= host->evict_gap_s;
+  if (level_change) {
     const auto e0 = std::chrono::steady_clock::now();
     const uint32_t freed = n1_level_boundary(host->r);
     REXLOG_INFO("hybrid n1: level change: {} meshes released in {:.1f} ms", freed,
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - e0).count());
+  }
+  // B-287: the level that starts now (the first one, or after a level change) loads again what its last visit used and
+  // eviction gave back, in the preload hold below.
+  if (level_change || !host->any_scene) {
+    std::string map;
+    if (HybridState* hs = FindHybridState()) {
+      std::lock_guard lock(hs->map_mutex);
+      map = hs->map_name;
+    }
+    if (!map.empty()) {
+      const uint32_t q = n1_level_start(host->r, map.c_str());
+      if (q) REXLOG_INFO("hybrid n1: level start {}: {} assets of its last visit requested again", map, q);
+    }
   }
   N1Stats st{};
   n1_load_stats(host->r, &st);
@@ -948,6 +963,9 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
                   "CPU copies queued)", st.evict_boundaries, st.evict_sweeps, st.evict_last_ms, st.evict_max_ms,
                   st.meshes_freed, st.skin_meshes_freed, st.textures_freed, st.materials_freed, st.lights_freed,
                   double(st.bytes_freed) / 1048576.0, st.textures_kept, st.forgets_pending);
+    if (st.repreload_levels)
+      REXLOG_INFO("hybrid n1 repreload: {} level starts and reopened packages loaded given-back assets again, {} visit "
+                  "requests", st.repreload_levels, st.repreload_requests);
     REXLOG_INFO("hybrid n1 compile: t={:.1f} s: built {}+{} shaders and {}+{} pipelines (startup+play), {} late "
                 "shaders and {} late pipelines, {} failed; {:.1f} s in the driver (worst {:.0f} ms), spirv cache "
                 "{}/{}; render thread: {} draws skipped, {} on the stand-in, {} partial frames, backlog {}; n1_record "
