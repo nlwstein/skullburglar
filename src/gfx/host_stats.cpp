@@ -130,8 +130,8 @@ CpuClock CpuClockMhz() {
 }
 
 double CpuProbeMicros() {
-  // A dependent chain of multiplies and shifts the compiler can't fold: ~1 ms on a Steam Deck (kept short: it runs on
-  // the GPU thread, inside a frame).
+  // A dependent chain of multiplies and shifts the compiler can't fold: ~1 ms on a Steam Deck (kept short: it shares a
+  // core with the game).
   const auto start = std::chrono::steady_clock::now();
   volatile uint64_t sink = 0;
   uint64_t x = 0x9E3779B97F4A7C15ull;
