@@ -28,6 +28,8 @@
 
 #include <imgui.h>
 
+#include <rex/cvar.h>
+#include <rex/filesystem.h>
 #include <rex/logging.h>
 #include <rex/ui/imgui_dialog.h>
 
@@ -493,9 +495,22 @@ class SetupDialog : public rex::ui::ImGuiDialog {
         ImGui::SetTooltip("%s", s.help.c_str());
       }
       if (s.cvar == "user_signin_live" && s.value == "true") DrawFirewall();
+      if (s.cvar == "diagnostic_logging") {
+        ImGui::Indent();
+        ImGui::TextDisabled("Logs are in %s", bots::PlainPathUtf8(LogFolder()).c_str());
+        ImGui::Unindent();
+      }
       ImGui::PopID();
     }
     DrawBindings();
+  }
+
+  // Where this run's log goes: next to --log_file when one is set (the Linux AppImage's launcher script and the macOS
+  // app set it: ~/.local/state/bots-recomp/logs, ~/Library/Logs/Skullburglar), else the logs folder next to the program.
+  static std::filesystem::path LogFolder() {
+    const std::string file = rex::cvar::Query<std::string>("log_file");
+    if (!file.empty()) return bots::PathFromUtf8(file).parent_path();
+    return rex::filesystem::GetExecutableFolder() / "logs";
   }
 
   std::string Value(const std::string& cvar) const {

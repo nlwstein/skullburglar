@@ -281,6 +281,7 @@ class BotsApp : public rex::ReXApp {
             rex::cvar::SetFlagByName("cl", intro ? "" : "-nostartupmovies");
           }
           ApplyVsync();  // the game's swapchain doesn't exist yet
+          ApplyDiagnosticLogging();  // switched on or off in the launcher
           bots::ApplyCoopDefaults();  // co-op may have been switched on in the launcher
           rex::PathConfig paths = defaults;
           paths.game_data_root = dir;
@@ -449,6 +450,25 @@ class BotsApp : public rex::ReXApp {
     REXLOG_INFO("vsync {}", on ? "on (FIFO)" : "off (immediate)");
   }
 
+  // The launcher's "Diagnostic logging" setting (B-301) becomes BOTS_DIAG=1 for this process, which src/diag.h reads when
+  // the game starts. A BOTS_DIAG already in the environment is the player's own and stays as it is.
+  static void ApplyDiagnosticLogging() {
+    static bool set_here = false;
+    if (rex::cvar::Query<bool>("diagnostic_logging")) {
+      if (!std::getenv("BOTS_DIAG")) {
+        SetEnvDefault("BOTS_DIAG", "1");
+        set_here = true;
+      }
+    } else if (set_here) {
+#if defined(_WIN32)
+      _putenv_s("BOTS_DIAG", "");  // removes it
+#else
+      unsetenv("BOTS_DIAG");
+#endif
+      set_here = false;
+    }
+  }
+
   // setenv(name, value, 0): set only if not already set.
   static void SetEnvDefault(const char* name, const char* value) {
     if (std::getenv(name)) return;
@@ -523,6 +543,7 @@ class BotsApp : public rex::ReXApp {
     // SDK cvar, registered before this hook, so it is set directly rather than through REX_* like the ones above.
     SetCoreCvarDefault("user_signin_live", "true");
     ApplyVsync();
+    ApplyDiagnosticLogging();
     // D3D12 (Windows): the ROV render-target path does exact 24-bit float depth in the shader, the
     // D3D12 counterpart of the float24 fix above. The default host-RTV path renders characters black
     // like B-035. RTX 3090: locked 60 fps either way (2026-10-01).

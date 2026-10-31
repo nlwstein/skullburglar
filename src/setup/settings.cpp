@@ -26,6 +26,9 @@ REXCVAR_DEFINE_BOOL(launcher, true, "bots",
                     "Show the launcher before starting the game (default: unless --game_data_root is given)");
 REXCVAR_DEFINE_BOOL(check_updates, true, "bots",
                     "Release builds: the launcher checks online for a newer version and offers its download page");
+REXCVAR_DEFINE_BOOL(diagnostic_logging, false, "bots",
+                    "Start the game with BOTS_DIAG=1: a fuller log (frame hitches, periodic host reports, GPU timing "
+                    "spans) for bug reports. Off by default");
 REXCVAR_DEFINE_STRING(renderer, bots::kDefaultRenderer, "bots",
                       "Which renderer draws the game: new (the default; on tvOS pre1 is) or pre1, the pre-1.0 renderer "
                       "(deprecated). Only pre1 selects the old one; any other value is the new renderer");
@@ -81,6 +84,11 @@ std::vector<Setting> Catalog() {
                {}});
   s.push_back({"check_updates", "", "Check for new versions",
                "When the launcher opens, look online for a newer Skullburglar and offer its download page.", {}});
+  s.push_back({"diagnostic_logging", "", "Diagnostic logging",
+               "A fuller log for bug reports: slow frames, a system report every few seconds and GPU timings. Costs a "
+               "little speed and makes the log bigger. The normal log always has the essentials. Takes effect the next "
+               "time the game starts.",
+               {}});
   s.push_back({"pad_prompts", "", "Controller button prompts",
                "Which buttons the game shows. Automatic matches the controller you used last.",
                {{"auto", "Automatic"}, {"xbox", "Xbox"}, {"ps4", "PlayStation 4"}, {"ps5", "PlayStation 5"}}});
