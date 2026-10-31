@@ -826,6 +826,7 @@ impl Store {
                     attr(2, vk::Format::R32G32_SFLOAT, 24),
                     attr(3, vk::Format::R8G8B8A8_UINT, 32),
                     attr(4, vk::Format::R8G8B8A8_UNORM, 36),
+                    attr(5, vk::Format::R32G32B32A32_SFLOAT, 40),
                 ]
             } else {
                 vec![
