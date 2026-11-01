@@ -4,6 +4,7 @@
 //   update_probe           open: records its version in $PROBE_MARKER (the "game started" sign) and exits
 //   update_probe update    check the releases file, install a newer version if there is one, print what happened
 //   update_probe clean     run the start-up clean-up (leftovers of an update that was killed), as the launcher does
+//   update_probe /UPDATE ... (Windows) stand-in for the setup program, see below
 //   update_probe checklist <names file> <verbose file>   run the tarball member check on two `tar -t` listings
 // Built with the same defines as a release (BOTS_VERSION, BOTS_UPDATE_URL, BOTS_UPDATE_PUBKEY), plus
 // BOTS_ALLOW_HTTP_UPDATE_URL for the local test server (tools/update_probe_test.sh makes a throwaway key):
@@ -23,9 +24,47 @@
 #include "setup/update_check.h"
 #include "setup/update_install.h"
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 using namespace bots::setup;
 
+#if defined(_WIN32)
+// A stand-in for the setup program, for a test on a machine whose real install and registry must stay alone: the update
+// downloads this very program as its "setup" and runs it as `<setup> /S /UPDATE /D=<folder>`. Like the real one it waits
+// for the running copy to quit, puts itself over <folder>\bots.exe, deletes the pending marker, and starts the program.
+static int FakeSetup(int argc, char** argv) {
+  std::string dir;
+  for (int i = 1; i < argc; ++i)
+    if (!std::strncmp(argv[i], "/D=", 3)) dir = argv[i] + 3;
+  wchar_t self[32768];
+  GetModuleFileNameW(nullptr, self, 32768);
+  const std::wstring exe = std::wstring(dir.begin(), dir.end()) + L"\\bots.exe";
+  bool copied = false;
+  for (int i = 0; i < 100 && !copied; ++i) {
+    copied = CopyFileW(self, exe.c_str(), FALSE) != 0;
+    if (!copied) Sleep(300);
+  }
+  if (!copied) return 1;
+  if (const char* la = std::getenv("LOCALAPPDATA")) DeleteFileA((std::string(la) + "\\bots-recomp\\update-pending.txt").c_str());
+  std::wstring cmd = L"\"" + exe + L"\"";
+  STARTUPINFOW si{sizeof(si)};
+  PROCESS_INFORMATION pi{};
+  const std::wstring wdir(dir.begin(), dir.end());  // like the real setup, which ends up with the install folder as its working folder
+  if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, DETACHED_PROCESS, nullptr, wdir.c_str(), &si, &pi)) {
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+  }
+  return 0;
+}
+#endif
+
 int main(int argc, char** argv) {
+#if defined(_WIN32)
+  for (int i = 1; i < argc; ++i)
+    if (!std::strcmp(argv[i], "/UPDATE")) return FakeSetup(argc, argv);
+#endif
   bool update = false;  // an AppImage's AppRun adds its own arguments, so look at all of them
   for (int i = 1; i < argc; ++i) {
     update = update || !std::strcmp(argv[i], "update");
@@ -56,6 +95,11 @@ int main(int argc, char** argv) {
     }
   }
   if (const char* marker = std::getenv("PROBE_MARKER"); marker && *marker && !update) {
+    // PROBE_CLEAN_ON_START=1: do what the launcher does as it starts, before it checks for updates.
+    if (const char* c = std::getenv("PROBE_CLEAN_ON_START"); c && *c == '1') {
+      CleanUpOldUpdates();
+      TakeFailedUpdateNote();
+    }
     std::ofstream(marker, std::ios::app) << "started " << AppVersion() << " ran as " << argv[0] << ", install at " << PathToUtf8(SelfExeFolder()) << " (install kind "
                                          << int(CurrentInstallKind()) << ")\n";
     return 0;
@@ -78,10 +122,19 @@ int main(int argc, char** argv) {
     return 0;
   }
   InstallKind kind = CurrentInstallKind();
+  // PROBE_WIN_TARGET=<folder> (Windows): treat that folder as a setup-made install without the registry entry the real
+  // setup writes, so a test never has to touch the machine's registry.
+  std::string win_target;
+#if defined(_WIN32)
+  if (const char* t = std::getenv("PROBE_WIN_TARGET"); t && *t) {
+    kind = InstallKind::kWindowsSetup;
+    win_target = t;
+  }
+#endif
   const Asset* asset = PickAsset(info, kind);
   std::printf("install kind %d, package %s\n", int(kind), asset ? asset->file.c_str() : "(none)");
   if (!asset) return 1;
-  std::string blocker = SelfUpdateBlocker(kind);
+  std::string blocker = win_target.empty() ? SelfUpdateBlocker(kind) : SelfUpdateBlockerAt(kind, win_target);
   if (!blocker.empty()) {
     std::printf("blocked: %s\n", blocker.c_str());
     return 1;
@@ -91,7 +144,8 @@ int main(int argc, char** argv) {
   bool ok = false;
   std::atomic<bool> done{false};
   std::thread worker([&] {
-    ok = InstallUpdate(kind, *asset, progress, error);
+    ok = win_target.empty() ? InstallUpdate(kind, *asset, progress, error)
+                            : InstallUpdateAt(kind, win_target, *asset, progress, error, AppVersion());
     done = true;
   });
   int last = -1;
