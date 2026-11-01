@@ -88,6 +88,7 @@ extern "C" void __imp__sub_82445388(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82445450(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82E2EB38(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82E2EBB8(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void __imp__sub_82474588(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_828291E0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_82853F50(PPCContext& __restrict ctx, uint8_t* base);
@@ -1640,6 +1641,26 @@ extern "C" void sub_82E2EBB8(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_82E2EBB8(ctx, base);
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) kbm->SetPaused(false);
   bots::instr::SetPaused(false);
+}
+
+// appRequestExit(bForce): the game's own exit request, reached by the UE3 console commands `quit` / `exit` (BOTS_EXEC=<s>:quit,
+// the exit scripted tests used). Run as is it sets GIsRequestingExit and the engine tears itself down while the other
+// guest threads keep running: the Audio Worker then submits a frame to a driver the game just unregistered, and render
+// and game threads read objects the shutdown freed (B-302: a crash within a second, every run). The menus' Quit item never
+// takes that path; it asks the app to close, which stops the guest threads and exits (app_quit.h). Make the request do
+// the same. BOTS_GUEST_EXIT=0 restores the game's own shutdown. A forced request (r3 != 0) is the game's fatal-error
+// trap and stays as it was.
+extern "C" void sub_82474588(PPCContext& __restrict ctx, uint8_t* base) {
+  static const bool app_quit = [] { const char* v = std::getenv("BOTS_GUEST_EXIT"); return !(v && *v == '0'); }();
+  if (!app_quit || ctx.r3.u32 != 0) {
+    __imp__sub_82474588(ctx, base);
+    return;
+  }
+  static std::atomic<bool> requested{false};
+  if (!requested.exchange(true)) {
+    REXLOG_INFO("game requested exit (appRequestExit, from {:08X}): quitting like the main menu's Quit", uint32_t(ctx.lr));
+    bots::RequestQuit();
+  }
 }
 
 // Whether the local player is driving: GEngine +0x2D8 GamePlayers[0] (LocalPlayer) +0x40 Actor (C1PlayerController)
