@@ -1805,12 +1805,13 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   if (trace) {
     std::fprintf(stderr,
                  "draw %llu: prim %u %s count %u mode %u rt0 %08X %ux%u%s ps %s blend %08X mask %X%s | depth %08X "
-                 "dc %08X pitch %u\n",
+                 "dc %08X pitch %u scm %08X sref %08X\n",
                  (unsigned long long)stats_.draws, uint32_t(prim), dma ? "dma" : "auto", count, uint32_t(mode),
                  regs.values[rg::XE_GPU_REG_RB_COLOR_INFO], width, height, attachments.depth ? " +depth" : "",
                  pshader ? "yes" : "no", key.blend[0], color_mask, trace_textures.c_str(),
                  regs.values[rg::XE_GPU_REG_RB_DEPTH_INFO], regs.values[rg::XE_GPU_REG_RB_DEPTHCONTROL],
-                 uint32_t(surface_info.surface_pitch));
+                 uint32_t(surface_info.surface_pitch), regs.values[rg::XE_GPU_REG_PA_SU_SC_MODE_CNTL],
+                 regs.values[rg::XE_GPU_REG_RB_STENCILREFMASK]);
   }
 }
 

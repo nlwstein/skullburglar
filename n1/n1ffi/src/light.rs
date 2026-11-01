@@ -27,16 +27,34 @@ pub const MAX_FOG_VOLUMES: usize = 8;
 /// f32s per fog volume in `Lighting::fog_vols` (the layout `Globals::vols` packs three vec4 from).
 pub const FOG_VOL_F32: usize = 12;
 
-/// B-310: analytic fog volumes (`BOTS_N1_FOGVOL`, default off until it matches the port).
+/// B-310: analytic fog volumes (`BOTS_N1_FOGVOL=0` turns them off).
 pub fn fog_volumes_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("BOTS_N1_FOGVOL").is_ok_and(|v| v != "0"))
+    *ON.get_or_init(|| std::env::var("BOTS_N1_FOGVOL").map_or(true, |v| v != "0"))
 }
 
-/// Debug: multiplier on every fog volume's density (`BOTS_N1_FOGVOL_SCALE`, default 1).
+/// Multiplier on every fog volume's density. The port's apply shader multiplies the integrated density by a
+/// texture-modulated factor; 0.22 is the value that matched the port's mean brightness and error in chapter 33250
+/// (`BOTS_N1_FOGVOL_SCALE` overrides it).
 fn fog_volume_scale() -> f32 {
     static S: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *S.get_or_init(|| std::env::var("BOTS_N1_FOGVOL_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0))
+    *S.get_or_init(|| std::env::var("BOTS_N1_FOGVOL_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.22))
+}
+
+/// The colour the port's volume apply shader emits, measured from a capture (`BOTS_N1_FOGVOL_COL=r,g,b` overrides it);
+/// the game's own `ApproxFogLightColor` is not what is drawn.
+fn fog_volume_color() -> Option<[f32; 3]> {
+    static C: std::sync::OnceLock<Option<[f32; 3]>> = std::sync::OnceLock::new();
+    *C.get_or_init(|| {
+        let d = [0.6, 0.35, 0.4];
+        match std::env::var("BOTS_N1_FOGVOL_COL") {
+            Ok(v) => {
+                let p: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if p.len() == 3 { Some([p[0], p[1], p[2]]) } else { Some(d) }
+            }
+            Err(_) => Some(d),
+        }
+    })
 }
 
 impl Globals {
@@ -50,6 +68,9 @@ impl Globals {
                 self.vols[3 * k + j] = [q[4 * j], q[4 * j + 1], q[4 * j + 2], q[4 * j + 3]];
             }
             self.vols[3 * k + 1][3] *= fog_volume_scale();
+            if let Some(c) = fog_volume_color() {
+                self.vols[3 * k + 2] = [c[0], c[1], c[2], 0.0];
+            }
         }
     }
 }

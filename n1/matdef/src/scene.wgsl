@@ -368,7 +368,10 @@ fn fs(i: VOut, @builtin(front_facing) ff: bool) -> @location(0) vec4<f32> {
     if (FOG_ON) {
         let ro = g.cam_pos.xyz;
         let rd = i.wpos - ro;
-        let rl = length(rd);
+        // The port's volume pass (B-310, decoded from the capture) integrates density over PLANAR view depth between the
+        // volume's near and far faces, clamped to the scene: tau = density * dz_view, so the ray length is scaled by
+        // the fragment's view depth (not its Euclidean distance).
+        let rl = max((g.view_proj * vec4<f32>(i.wpos, 1.0)).w, 0.0);
         let nv = u32(g.vol_n.x);
         for (var k = 0u; k < nv; k = k + 1u) {
             let a = g.vols[3u * k];

@@ -44,7 +44,10 @@ pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 pub const HDR_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 const ALIGN: u64 = 256;
 const GLOBALS_AT: u64 = 0;
-const POST_AT: u64 = 256; // post uniform blocks, 256 bytes apart
+// Post uniform blocks, 256 bytes apart, after the globals (B-310: the globals grew past 256 bytes when the fog volumes
+// joined them, and the post blocks written after them overwrote the volumes).
+const POST_AT: u64 = 768;
+const _: () = assert!(std::mem::size_of::<Globals>() as u64 <= POST_AT);
 // grade, down, blur A h, blur A v, blur B, composite, copy, then (B-266) the linear composite and up to
 // `POST_MATS` post-material passes
 const POST_MATS: usize = 3;

@@ -1940,7 +1940,7 @@ std::vector<uint32_t> FogVolumePrims(uint32_t f) {
 bool FogVolumesOn() {
   static const bool on = [] {
     const char* v = std::getenv("BOTS_N1_FOGVOL");
-    return v && v[0] && v[0] != '0';
+    return !(v && v[0] == '0');
   }();
   return on;
 }
