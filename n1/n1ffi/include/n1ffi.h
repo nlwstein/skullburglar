@@ -186,6 +186,9 @@ void n1_set_ambient(N1Renderer* r, float ambient); /* no-op since N12: ambient c
 /* Debug A/B switches, next frame on (no new feed needed). Bit 0 (B-230): level dynamic lights in the plain
    LightColor / 255 * Brightness colour, not UE3's pow(LightColor / 255, 2.2) * Brightness. 0: none. */
 void n1_set_debug_bits(N1Renderer* r, uint32_t bits);
+/* B-310: fog volumes, `count` records of 12 floats (center xyz, kind 0 box / 1 sphere; half extents xyz or radius in x,
+ * density; colour rgb, 0), Y-up world. Replaces the previous set. BOTS_N1_FOGVOL=0 turns them off. Returns 0 or -1. */
+int32_t n1_set_fog_volumes(N1Renderer* r, const float* data, uint32_t count);
 
 /* N12 lighting. n1_env: handle for a DynamicLightEnvironmentComponent by full path (stable, no I/O).
  * n1_set_feed: the frame's lights/fog/post as the scene feed's JSON ({"lights":[..],"fog":[..],"post":{..}});

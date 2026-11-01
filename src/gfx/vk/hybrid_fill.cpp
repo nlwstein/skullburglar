@@ -643,6 +643,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     fb.path_count = uint32_t(paths.size());
     fb.paths = paths.data();
     if (n1_set_feed_bin(host->r, &fb) != 0) REXLOG_WARN("hybrid n1: n1_set_feed_bin failed: {}", n1_last_error());
+    if (l.has_fog_post) n1_set_fog_volumes(host->r, l.fogvols.data(), uint32_t(l.fogvols.size() / 12));
     if (!host->scene.lighting.empty()) {  // BOTS_N1_FEED_VERIFY=1
       const int diffs = n1_check_feed(host->scene.lighting.data(), uint32_t(host->scene.lighting.size()), &fb);
       ++host->verified;

@@ -13,6 +13,8 @@ struct Globals {
     tune: vec4<f32>,      // x lightmap gain, y spec gain, z vertex-light gain, w debug mode
     tune2: vec4<f32>,     // x vertex colour channel map, y sun-visibility luma, z normal-map strength, w unused
     tune3: vec4<f32>,     // N10: x light-environment gain, y ambient kept under an environment, z dynamic light gain, w vertex-lightmap gamma (B-189)
+    vol_n: vec4<f32>,     // B-310: x = fog volume count
+    vols: array<vec4<f32>, 24>,  // per volume: (center, kind), (half extents or radius, density), (colour, 0)
 };
 
 struct Instance {
@@ -359,6 +361,50 @@ fn fs(i: VOut, @builtin(front_facing) ff: bool) -> @location(0) vec4<f32> {
             var t = exp(-g.fog_par.x * dist);
             if (g.fog_par.w > 0.0 && dist >= g.fog_par.w) { t = 0.0; }
             col = mix(FOG_TARGET, col, t);
+        }
+    }
+    // B-310: fog volumes, analytic along the camera ray clipped to each volume: tau = density * length inside,
+    // composited as scene * exp(-tau) + colour * (1 - exp(-tau)).
+    if (FOG_ON) {
+        let ro = g.cam_pos.xyz;
+        let rd = i.wpos - ro;
+        // The port's volume pass (B-310, decoded from the capture) integrates density over PLANAR view depth between the
+        // volume's near and far faces, clamped to the scene: tau = density * dz_view, so the ray length is scaled by
+        // the fragment's view depth (not its Euclidean distance).
+        let rl = max((g.view_proj * vec4<f32>(i.wpos, 1.0)).w, 0.0);
+        let nv = u32(g.vol_n.x);
+        for (var k = 0u; k < nv; k = k + 1u) {
+            let a = g.vols[3u * k];
+            let b = g.vols[3u * k + 1u];
+            let vc = g.vols[3u * k + 2u].rgb;
+            var t0 = 0.0;
+            var t1 = 1.0;
+            if (a.w < 0.5) {
+                let inv = vec3<f32>(1.0) / select(rd, vec3<f32>(1.0e-6), abs(rd) < vec3<f32>(1.0e-6));
+                let ta = (a.xyz - b.xyz - ro) * inv;
+                let tb = (a.xyz + b.xyz - ro) * inv;
+                let lo = min(ta, tb);
+                let hi = max(ta, tb);
+                t0 = max(0.0, max(lo.x, max(lo.y, lo.z)));
+                t1 = min(1.0, min(hi.x, min(hi.y, hi.z)));
+            } else {
+                let oc = ro - a.xyz;
+                let qa = dot(rd, rd);
+                let qb = dot(oc, rd);
+                let qc = dot(oc, oc) - b.x * b.x;
+                let disc = qb * qb - qa * qc;
+                if (disc > 0.0) {
+                    let sq = sqrt(disc);
+                    t0 = max(0.0, (-qb - sq) / qa);
+                    t1 = min(1.0, (-qb + sq) / qa);
+                } else {
+                    t1 = -1.0;
+                }
+            }
+            if (t1 > t0) {
+                let tr = exp(-b.w * (t1 - t0) * rl);
+                col = mix(VOL_TARGET, col, tr);
+            }
         }
     }
     return vec4<f32>(col, OPACITY_EXPR);
