@@ -1461,6 +1461,7 @@ struct LiveState {
   HybridPost last_post = {};
   std::vector<const char*> last_materials;
   std::vector<HybridPostParam> last_params;
+  std::vector<float> last_fogvols;
   uint64_t post_quick = 0;  // B-266: PostQuick() after the last post read
   bool have_fog_post = false;
   uint32_t feed_every = [] {
@@ -1836,6 +1837,29 @@ void LightsBin(HybridLighting& out, uint32_t stamp) {
   }
 }
 
+// B-310: the primitive components owned by <actor> (outer == actor), as a debug dump: class, path, bounds, transform.
+void LogActorPrimitives(uint32_t actor) {
+  REXLOG_INFO("scenefeed fogvol actor {:08X} {} object {} table {} bounds {} l2w {}", actor, Path(actor), IsObject(actor),
+              FindObjectTable(), g_off.bounds.ok(), g_off.local_to_world.ok());
+  if (!IsObject(actor) || !FindObjectTable() || !g_off.bounds.ok() || !g_off.local_to_world.ok()) return;
+  const uint32_t data = U32(g_objects), count = U32(g_objects + 4);
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint32_t o = U32(data + 4 * i);
+    if (!o || U32(o + 0x28) != actor) continue;
+    const uint32_t cls = U32(o + 0x34);
+    if (Classify(cls).kind == Kind::kNone) continue;
+    const uint32_t b = o + g_off.bounds.offset;
+    const uint32_t m = o + g_off.local_to_world.offset;
+    std::string mesh;
+    if (g_off.static_mesh_ref.ok()) mesh = Path(U32(o + g_off.static_mesh_ref.offset));
+    REXLOG_INFO("scenefeed fogvol prim {} {}: mesh {} bounds origin ({:.1f} {:.1f} {:.1f}) extent ({:.1f} {:.1f} {:.1f}) r {:.1f} "
+                "l2w rows [{:.3f} {:.3f} {:.3f}] [{:.3f} {:.3f} {:.3f}] [{:.3f} {:.3f} {:.3f}] t ({:.1f} {:.1f} {:.1f})",
+                ClassName(o), Path(o), mesh, F32(b), F32(b + 4), F32(b + 8), F32(b + 12), F32(b + 16), F32(b + 20), F32(b + 24),
+                F32(m), F32(m + 4), F32(m + 8), F32(m + 16), F32(m + 20), F32(m + 24), F32(m + 32), F32(m + 36), F32(m + 40),
+                F32(m + 48), F32(m + 52), F32(m + 56));
+  }
+}
+
 void FogBin(HybridFog& fog) {
   std::memset(&fog, 0, sizeof(fog));
   for (uint32_t f : g_extras.fog) {
@@ -1880,6 +1904,90 @@ void Triple(uint32_t base, const FieldEx& prop, float out[3]) {
     const char* m[3] = {vec ? "X" : "R", vec ? "Y" : "G", vec ? "Z" : "B"};
     for (int i = 0; i < 3; ++i)
       if (const FieldEx f = FindEx(prop.sub, m[i]); f.ok()) out[i] = F32(at + f.offset);
+  }
+}
+
+// B-310: the primitives bounding fog volume <f>: the static meshes owned by the actors in its FogVolumeActors list. The
+// owner scan walks every object, so a result is kept per component (an empty one is retried a few times: the actors
+// may stream in after the volume).
+std::vector<uint32_t> FogVolumePrims(uint32_t f) {
+  static std::unordered_map<uint32_t, std::pair<std::vector<uint32_t>, int>> cache;
+  auto& [prims, tries] = cache[f];
+  if (!prims.empty() || tries >= 8) return prims;
+  ++tries;
+  std::vector<uint32_t> actors;
+  if (const uint32_t arr = PropRecord(f, "FogVolumeActors")) {
+    const uint32_t at = f + U32(arr + 0x64);
+    const uint32_t d = U32(at), cnt = U32(at + 4);
+    for (uint32_t k = 0; Readable(d) && k < cnt && k < 16; ++k)
+      if (IsObject(U32(d + 4 * k))) actors.push_back(U32(d + 4 * k));
+  }
+  if (actors.empty() || !FindObjectTable()) return prims;
+  const uint32_t data = U32(g_objects), count = U32(g_objects + 4);
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint32_t o = U32(data + 4 * i);
+    if (!o || std::find(actors.begin(), actors.end(), U32(o + 0x28)) == actors.end()) continue;
+    if (Classify(U32(o + 0x34)).kind == Kind::kNone || !g_off.bounds.ok()) continue;
+    const uint32_t b = o + g_off.bounds.offset;
+    if (F32(b + 12) > 0.f) prims.push_back(o);
+  }
+  return prims;
+}
+
+// B-310: fog volumes as n1 reads them (HybridLighting::fogvols, 12 floats each: center xyz, kind; half extents or radius,
+// density; colour, 0; Y-up world = UE (x, z, y)). Constant-density volumes only, bounded by the primitive the game
+// added them with (its world bounds: a box, or a sphere for the sphere mesh). Volumes without a primitive are skipped.
+bool FogVolumesOn() {
+  static const bool on = [] {
+    const char* v = std::getenv("BOTS_N1_FOGVOL");
+    return v && v[0] && v[0] != '0';
+  }();
+  return on;
+}
+void FogVolumesBin(std::vector<float>& out) {
+  out.clear();
+  if (!FogVolumesOn() || !g_off.bounds.ok()) return;
+  for (uint32_t f : g_extras.fog) {
+    if (out.size() >= 8 * 12) break;
+    if (!IsObject(f) || std::strcmp(ClassName(f), "FogVolumeConstantDensityComponent")) continue;
+    const uint32_t cls = U32(f + 0x34);
+    static std::unordered_map<uint32_t, std::array<FieldEx, 4>> layouts;
+    auto [it, fresh] = layouts.try_emplace(cls);
+    auto& L = it->second;
+    if (fresh) {
+      const char* names[4] = {"bEnabled", "Density", "ApproxFogLightColor", "StartDistance"};
+      for (int i = 0; i < 4; ++i) L[i] = FindEx(cls, names[i]);
+    }
+    if (!FieldB(f, L[0])) continue;
+    float col[3];
+    Triple(f, L[2], col);
+    const float density = FieldF(f, L[1], 0.f);
+    if (!(density > 0.f) || std::isnan(col[0])) continue;
+    const std::vector<uint32_t> prims = FogVolumePrims(f);
+    for (uint32_t o : prims) {
+      if (out.size() >= 8 * 12) break;
+      if (!IsObject(o)) continue;
+      const uint32_t b = o + g_off.bounds.offset;
+      const float ox = F32(b), oy = F32(b + 4), oz = F32(b + 8), ex = F32(b + 12), ey = F32(b + 16), ez = F32(b + 20),
+                  r = F32(b + 24);
+      if (!(ex > 0.f && ey > 0.f && ez > 0.f)) continue;
+      std::string mesh;
+      if (g_off.static_mesh_ref.ok()) mesh = Path(U32(o + g_off.static_mesh_ref.offset));
+      const bool sphere = mesh.find("Sphere") != std::string::npos;
+      const float v[12] = {ox, oz, oy, sphere ? 1.f : 0.f, sphere ? r : ex, ez, ey, density, col[0], col[1], col[2], 0.f};
+      out.insert(out.end(), v, v + 12);
+    }
+  }
+  if (std::getenv("BOTS_N1_FOGLOG")) {
+    static std::vector<float> last;
+    if (last != out) {
+      last = out;
+      REXLOG_INFO("scenefeed fogvol feed: {} volumes", out.size() / 12);
+      for (size_t k = 0; k + 12 <= out.size(); k += 12)
+        REXLOG_INFO("scenefeed fogvol feed: kind {} c ({:.0f} {:.0f} {:.0f}) e ({:.0f} {:.0f} {:.0f}) d {} col ({} {} {})",
+                    out[k + 3], out[k], out[k + 1], out[k + 2], out[k + 4], out[k + 5], out[k + 6], out[k + 7], out[k + 8],
+                    out[k + 9], out[k + 10]);
+    }
   }
 }
 
@@ -2940,19 +3048,30 @@ void Live(uint8_t* base) {
               std::string js;
               ObjectJson(js, f, "ActorComponent");
               REXLOG_INFO("scenefeed fog component {:08X} {}: {}", f, Path(f), js);
+              static std::unordered_set<uint32_t> seen_fog;
+              if (seen_fog.insert(f).second) {  // once per volume: the owner actor and the actors the volume lists
+                LogActorPrimitives(U32(f + 0x28));
+                const uint32_t arr = PropRecord(f, "FogVolumeActors");
+                if (arr) {
+                  const uint32_t at = f + U32(arr + 0x64);
+                  const uint32_t d = U32(at), cnt = U32(at + 4);
+                  for (uint32_t k = 0; Readable(d) && k < cnt && k < 16; ++k) LogActorPrimitives(U32(d + 4 * k));
+                }
+              }
             }
         }
         FogBin(nl.fog);
+        FogVolumesBin(nl.fogvols);
         PostBin(nl);
         if (PostMatsOn()) st.post_quick = PostQuick();
-        post_changed = st.verify_feed || !st.have_fog_post || std::memcmp(&nl.fog, &st.last_fog, sizeof(HybridFog)) ||
+        post_changed = st.verify_feed || !st.have_fog_post || std::memcmp(&nl.fog, &st.last_fog, sizeof(HybridFog)) || nl.fogvols != st.last_fogvols ||
                        std::memcmp(&nl.post, &st.last_post, sizeof(HybridPost)) || nl.post_materials != st.last_materials ||
                        nl.post_params != st.last_params;
       }
       if (st.verify_feed || !SameLights(nl, st.last_light) || post_changed) {
         nl.has_fog_post = post_changed;
         if (post_changed)
-          st.last_fog = nl.fog, st.last_post = nl.post, st.last_materials = nl.post_materials, st.last_params = nl.post_params;
+          st.last_fogvols = nl.fogvols, st.last_fog = nl.fog, st.last_post = nl.post, st.last_materials = nl.post_materials, st.last_params = nl.post_params;
         st.have_fog_post |= post_changed;
         st.last_light.lights = nl.lights, st.last_light.sh = nl.sh, st.last_light.paths = nl.paths;
         out.light = nl;
@@ -2979,6 +3098,7 @@ void Live(uint8_t* base) {
       out.light.fog = hs->scene.light.fog, out.light.post = hs->scene.light.post;
       out.light.post_materials = hs->scene.light.post_materials;
       out.light.post_params = hs->scene.light.post_params;
+      out.light.fogvols = hs->scene.light.fogvols;
     }
   }
   std::swap(hs->scene, out);

@@ -1177,6 +1177,24 @@ pub unsafe extern "C" fn n1_set_feed(r: *const N1Renderer, json: *const c_char, 
 
 pub type N1FeedBin = lightfeed::bin::FeedBin;
 
+/// B-310: the frame's fog volumes, `count` records of 12 floats (center xyz, kind 0 box / 1 sphere; half extents xyz or
+/// radius in x, density; colour rgb, 0), Y-up world. They replace the previous set; `count` 0 clears. Returns 0.
+///
+/// # Safety
+/// `data` points at `count * 12` floats valid for the call (or is null with `count` 0).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn n1_set_fog_volumes(r: *const N1Renderer, data: *const f32, count: u32) -> i32 {
+    let v: Vec<f32> = if data.is_null() || count == 0 {
+        vec![]
+    } else {
+        unsafe { std::slice::from_raw_parts(data, count as usize * light::FOG_VOL_F32) }.to_vec()
+    };
+    with(r, -1, |i| {
+        i.renderer.lighting.fog_vols = v;
+        0
+    })
+}
+
 /// B-188: the frame's lights, fog and post as fixed-layout binary records (`N1FeedBin` in n1ffi.h, no JSON). Same
 /// effect as `n1_set_feed`: sun, sky, fog, post and dynamic lights follow it until the next call; a feed without
 /// `N1_FEED_FOG_POST` keeps the last fog and post. Returns 0, or -1 with `n1_last_error` set.

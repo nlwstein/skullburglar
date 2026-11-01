@@ -104,6 +104,7 @@ struct HybridLighting {
   std::vector<float> sh;
   std::vector<const char*> paths;  // interned, stable
   HybridFog fog = {};
+  std::vector<float> fogvols;  // B-310: 12 floats per fog volume, sent with the fog (see n1_set_fog_volumes)
   HybridPost post = {};
   // The post chain's shown MaterialEffect materials in chain order (interned), not in `paths`. The level's grade is
   // usually the first; inserted chains (fire damage, scenario modes) add theirs (B-227).

@@ -17,6 +17,41 @@ pub struct Globals {
     pub tune: [f32; 4],
     pub tune2: [f32; 4],
     pub tune3: [f32; 4],
+    /// B-310: x = number of fog volumes in `vols` (0..=MAX_FOG_VOLUMES).
+    pub vol_n: [f32; 4],
+    /// Three vec4 per volume: (center xyz, kind 0 box / 1 sphere), (half extents xyz or radius, density), (colour rgb, 0).
+    pub vols: [[f32; 4]; 3 * MAX_FOG_VOLUMES],
+}
+
+pub const MAX_FOG_VOLUMES: usize = 8;
+/// f32s per fog volume in `Lighting::fog_vols` (the layout `Globals::vols` packs three vec4 from).
+pub const FOG_VOL_F32: usize = 12;
+
+/// B-310: analytic fog volumes (`BOTS_N1_FOGVOL`, default off until it matches the port).
+pub fn fog_volumes_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BOTS_N1_FOGVOL").is_ok_and(|v| v != "0"))
+}
+
+/// Debug: multiplier on every fog volume's density (`BOTS_N1_FOGVOL_SCALE`, default 1).
+fn fog_volume_scale() -> f32 {
+    static S: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *S.get_or_init(|| std::env::var("BOTS_N1_FOGVOL_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0))
+}
+
+impl Globals {
+    /// Packs up to `MAX_FOG_VOLUMES` volumes (`FOG_VOL_F32` floats each).
+    pub fn set_fog_volumes(&mut self, v: &[f32]) {
+        let n = (v.len() / FOG_VOL_F32).min(MAX_FOG_VOLUMES);
+        self.vol_n = [n as f32, 0.0, 0.0, 0.0];
+        for k in 0..n {
+            let q = &v[k * FOG_VOL_F32..(k + 1) * FOG_VOL_F32];
+            for j in 0..3 {
+                self.vols[3 * k + j] = [q[4 * j], q[4 * j + 1], q[4 * j + 2], q[4 * j + 3]];
+            }
+            self.vols[3 * k + 1][3] *= fog_volume_scale();
+        }
+    }
 }
 
 /// Sun, ambient, fog and tuning. Defaults are N8's mission 6 values (used until a feed frame arrives).
@@ -168,6 +203,8 @@ impl Env {
             tune: [self.lm_gain, self.spec_gain, self.vl_gain, self.dbg],
             tune2: [self.vcol_map as f32, self.sun_luma, self.nmap_strength, 0.0],
             tune3: [self.env_gain, self.env_ambient, self.dyn_gain, self.vl_gamma],
+            vol_n: [0.0; 4],
+            vols: [[0.0; 4]; 3 * MAX_FOG_VOLUMES],
         }
     }
 }
@@ -490,6 +527,8 @@ pub struct Lighting {
     pub envs_alt: Vec<[f32; lightfeed::pack::ENV_F32]>,
     /// Environment component path -> index into `dyn_frame.envs`.
     pub env_index: std::collections::HashMap<String, usize>,
+    /// B-310: fog volumes from the feed, `FOG_VOL_F32` floats each (Y-up world).
+    pub fog_vols: Vec<f32>,
     pub frames: u64,
 }
 
@@ -513,6 +552,7 @@ impl Lighting {
             dyn_lights_alt: vec![],
             envs_alt: vec![],
             env_index: Default::default(),
+            fog_vols: vec![],
             frames: 0,
         }
     }

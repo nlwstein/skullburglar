@@ -2152,6 +2152,9 @@ impl Renderer {
             eye_y,
             self.time(),
         );
+        if crate::light::fog_volumes_on() {
+            globals.set_fog_volumes(&self.lighting.fog_vols);
+        }
         let post_on = self.knobs.post;
         let pp = &self.lighting.post;
         let grade_on = post_on && pp.grade.is_some();
