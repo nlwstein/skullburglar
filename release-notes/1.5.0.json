@@ -1,5 +1,6 @@
 [
  "Fixed the crash at the end of mission 7 on the Steam Deck: the new renderer now lets go of levels you've left, and loads them again behind the loading screen when you return. In our Deck test of missions 1 to 7, peak memory dropped from about 5.2 GB to 3.2 GB.",
+ "Fixed a rare freeze on a loading screen, seen on the Steam Deck after many level loads in one session: the game now carries on after a pause of a few seconds.",
  "The new renderer uses about 1.6 GB less memory the first time you visit a level, which helps 16 GB devices such as the Steam Deck. On Linux, memory freed during level loads is also given back to the system.",
  "Fixed grenade and SAW explosion smoke drawing as hard-edged gray polygons in the new renderer.",
  "Fog and haze are back in the new renderer: mission 3 is no longer darker and bluer than the original, and the large flat beige shape there is gone.",
