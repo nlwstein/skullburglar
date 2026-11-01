@@ -187,6 +187,10 @@ pub struct PostParams {
     pub dof: bool,
     /// B-266 / B-267: the active hand-ported post materials (`postmat.rs`), in chain order.
     pub mats: Vec<crate::postmat::Effect>,
+    /// B-307: SfGodRaysEffect (the level's sun rays), when the chain has it enabled and `BOTS_N1_GODRAYS` isn't 0.
+    pub god: Option<lightfeed::post::GodRays>,
+    /// `BOTS_N1_GODRAYS` (default on).
+    pub god_on: bool,
 }
 
 impl Default for PostParams {
@@ -211,6 +215,8 @@ impl Default for PostParams {
             bloom_mix: 0.15,
             dof: env_flag("BOTS_N1_DOF", true),
             mats: Vec::new(),
+            god: None,
+            god_on: env_flag("BOTS_N1_GODRAYS", true),
         }
     }
 }
@@ -254,7 +260,16 @@ impl PostParams {
         }
         self.grade = p.grade.clone().filter(|g| !g.is_identity());
         self.mats = crate::postmat::effects(p);
+        self.god = p.god_rays.clone().filter(|g| g.magnitude > 0.0 && g.exposure > 0.0);
         self
+    }
+
+    /// B-307: the god-rays pass's block fields (g0: light point xy, magnitude, decay per step; g1: ray colour
+    /// (ModulateRayColour ^ 2.2, as the port's constant), exposure), or None when the effect is off this frame.
+    pub fn god_fields(&self) -> Option<([f32; 4], [f32; 4])> {
+        let g = self.god.as_ref().filter(|_| self.god_on)?;
+        let c = g.color.map(|v| v.max(0.0).powf(2.2));
+        Some(([g.screen[0], g.screen[1], g.magnitude, g.decay], [c[0], c[1], c[2], g.exposure]))
     }
 
     /// True when the DOF / bloom passes change the picture.
@@ -685,6 +700,46 @@ mod post_tests {
         }
         let w: Vec<f32> = kernel_taps(1.0, 1.0).iter().map(|t| t.1).collect();
         assert!((w[0] - 0.893).abs() < 2e-3 && (w[1] - 0.107).abs() < 2e-3, "{w:?}");
+    }
+}
+
+#[cfg(test)]
+mod godrays {
+    use super::*;
+
+    fn feed() -> lightfeed::PostFeed {
+        lightfeed::PostFeed {
+            present: true,
+            god_rays: Some(lightfeed::post::GodRays {
+                exposure: 0.5,
+                decay: 0.025,
+                magnitude: 0.025,
+                color: [1.0, 0.5, 0.0],
+                screen: [0.93, 0.87],
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// B-307: the ray colour is ModulateRayColour ^ 2.2 (the port's constant), the other fields pass through.
+    #[test]
+    fn god_fields_from_feed() {
+        let mut pp = PostParams::default().with_feed(&feed());
+        pp.god_on = true;
+        let (g0, g1) = pp.god_fields().expect("god rays on");
+        assert_eq!(g0, [0.93, 0.87, 0.025, 0.025]);
+        assert!((g1[1] - 0.5f32.powf(2.2)).abs() < 1e-6 && g1[0] == 1.0 && g1[2] == 0.0 && g1[3] == 0.5);
+        pp.god_on = false;
+        assert!(pp.god_fields().is_none());
+    }
+
+    #[test]
+    fn god_off_without_effect() {
+        let mut f = feed();
+        f.god_rays = None;
+        let mut pp = PostParams::default().with_feed(&f);
+        pp.god_on = true;
+        assert!(pp.god_fields().is_none());
     }
 }
 

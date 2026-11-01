@@ -2038,6 +2038,11 @@ void PostBin(HybridLighting& out) {
             if (PostMatsOn()) PostParams(out, mat, uint32_t(out.post_materials.size() - 1));
           }
       } else if (name == "SfGodRaysEffect") {
+        if (dbg)
+          REXLOG_INFO("  god rays enabled {} exposure {} magnitude {} decay {} light {} {}", FieldB(e, FindEx(cls, "Enabled")),
+                      FieldF(e, FindEx(cls, "Exposure"), nan), FieldF(e, FindEx(cls, "RayMagnitude"), nan),
+                      FieldF(e, FindEx(cls, "DecayPerSample"), nan), FieldF(e, FindEx(cls, "vTextureSpaceLightPointX"), nan),
+                      FieldF(e, FindEx(cls, "vTextureSpaceLightPointY"), nan));
         if (!FieldB(e, FindEx(cls, "Enabled"))) continue;
         p.flags |= kPfGod;
         p.god[0] = FieldF(e, FindEx(cls, "Exposure"), nan);

@@ -37,6 +37,7 @@ struct P {
 @group(0) @binding(5) var depth: texture_depth_2d;
 @group(0) @binding(6) var wrap: sampler;   // repeat addressing, for post-material textures
 @group(0) @binding(7) var omask: texture_2d<f32>;   // B-277(e): enemy outline mask (R8), read when taps[5].w > 0
+@group(0) @binding(8) var gods: texture_2d<f32>;    // B-307: god-rays texture (quarter res), read when taps[4].w > 0
 
 struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
@@ -167,6 +168,45 @@ fn gamma_out(c0: vec3<f32>, frag: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(g, 1.0);
 }
 
+// B-307: the port's god-rays composite adds the mean of 8 jittered taps of the ray texture (stored /4) to the scene,
+// after the DOF/bloom mix and before the multiplier and gamma (draw 174's c252-c255).
+const GOD_TAPS = array<vec2<f32>, 8>(
+    vec2<f32>(0.02255, -0.00457), vec2<f32>(0.01217, 0.01798),
+    vec2<f32>(-0.00765, -0.00951), vec2<f32>(-0.00477, 0.01455),
+    vec2<f32>(-0.01969, -0.00172), vec2<f32>(-0.01631, 0.01071),
+    vec2<f32>(0.00435, -0.02093), vec2<f32>(0.01110, -0.01125));
+
+// B-307: the port's ray pass (128x128 target, 128-step loop). From each pixel march toward the light point g0.xy in
+// steps of 1/128 of the direction normalized by its larger axis; a decay weight starts at 1 and falls by g0.w per step
+// (floored at 0); add it for every step that lands on sky (the port's mask: alpha cleared to 1, geometry writes 0).
+// Out = sat(sum * magnitude * (1 - |uv - L|^2) * colour) * exposure.
+@fragment
+fn fs_god(i: VOut) -> @location(0) vec4<f32> {
+    let l = p.g0.xy;
+    let d = l - i.uv;
+    let m = max(max(abs(d.x), abs(d.y)), 1e-5);
+    let stp = d / (m * 128.0);
+    let dims = vec2<i32>(textureDimensions(depth));
+    var uv = i.uv;
+    var w = 1.0;
+    var acc = 0.0;
+    for (var k = 0; k < 128; k++) {
+        let px = clamp(vec2<i32>(uv * vec2<f32>(dims)), vec2<i32>(0), dims - vec2<i32>(1));
+        if (textureLoad(depth, px, 0) == 0.0) {
+            acc += w;
+        }
+        w = max(w - p.g0.w, 0.0);
+        if (w <= 0.0) {
+            break;
+        }
+        uv += stp;
+    }
+    let r = i.uv - l;
+    let fall = max(1.0 - dot(r, r), 0.0);
+    let v = clamp(vec3<f32>(acc * p.g0.z * fall) * p.g1.rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * p.g1.w;
+    return vec4<f32>(v, 1.0);
+}
+
 fn composite(px: vec2<i32>, uv: vec2<f32>) -> vec3<f32> {
     var c = textureLoad(src, px, 0).rgb;
     if (p.comp.z > 0.5) {
@@ -174,6 +214,13 @@ fn composite(px: vec2<i32>, uv: vec2<f32>) -> vec3<f32> {
         let a = textureSample(bloom, smp, uv);
         c = (c * (1.0 - u) + a.rgb) / max(a.a + (1.0 - u), 1e-4);
         c = mix(c, textureSample(bloom2, smp, uv).rgb, p.comp.x);
+    }
+    if (p.taps[4].w > 0.5) {
+        var g = vec3<f32>(0.0);
+        for (var k = 0; k < 8; k++) {
+            g += textureSample(gods, smp, uv + GOD_TAPS[k]).rgb;
+        }
+        c += g * 0.5;
     }
     return c * p.inv_hi.rgb;
 }
