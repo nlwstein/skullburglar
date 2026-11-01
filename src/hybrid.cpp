@@ -54,6 +54,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include <time.h>
 
@@ -560,6 +561,81 @@ extern "C" void sub_82BB3128(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_82BB3128(ctx, base);
 }
 
+// B-308: UE3's GetQueryResult(q, out, bWait = 1) is `do r = GetData(q, out, 4, 1); while (r == S_FALSE || r < 0)`, with no
+// timeout. A query nothing will complete (never issued to the GPU stream, or ended but never resolved) freezes the render
+// thread there, and with it the load that waits for it (seen twice in ~60 level loads on a Deck, with the host idle).
+// Run the same loop here, and after BOTS_QUERY_WAIT_MS (default 3000; 0 = the game's unbounded loop) answer "visible",
+// as the suppressed path does. Once a query has timed out, the next ones get 20 ms for two seconds, so a frame of stale
+// queries costs milliseconds, not seconds. Nothing is logged unless a query times out.
+extern "C" void sub_8232BF00(PPCContext& __restrict ctx, uint8_t* base);  // D3D query GetData(q, out, size, flush)
+
+namespace {
+int64_t QueryWaitMs() {
+  static const int64_t ms = EnvInt("BOTS_QUERY_WAIT_MS", 3000);
+  return ms;
+}
+
+void LogStuckQuery(uint8_t* base, uint32_t query, uint32_t result, int64_t waited_ms) {
+  static std::atomic<int> lines{0};
+  if (lines.fetch_add(1, std::memory_order_relaxed) >= 8) return;
+  std::string q;
+  if (Readable(query)) {
+    char t[32];
+    for (uint32_t o : {0x04u, 0x14u, 0x18u, 0x1Cu, 0x94u}) {
+      std::snprintf(t, sizeof(t), " +%02X=%08X", o, U32(base, query + o));
+      q += t;
+    }
+    // The first tile's sample-count block, found the way GetData finds it.
+    const uint32_t w = U32(base, query + 0x1C);
+    const uint32_t block = (((w >> 20) + 0x200) & 0x1000) + (w & 0x1FFFFFFF) + 0xC0000000u;
+    if (Readable(block) && Readable(block + 0x3C)) {
+      q += " block";
+      for (uint32_t o = 0; o < 0x40; o += 4) {
+        std::snprintf(t, sizeof(t), " %08X", U32(base, block + o));
+        q += t;
+      }
+    }
+  }
+  REXLOG_WARN("hybrid: a query result never arrived (B-308): query {:08X} GetData {:08X} after {} ms; answering visible; "
+              "suppress {} capture_frames {} n1_ready {};{}",
+              query, result, waited_ms, g_suppress.load(), g_state.capture_frames.load(), g_state.n1_ready.load(), q);
+}
+
+void BoundedQueryWait(PPCContext& ctx, uint8_t* base, int64_t limit_ms) {
+  using Clock = std::chrono::steady_clock;
+  static std::atomic<int64_t> short_until_ms{0};  // steady-clock ms until which the limit is 20 ms
+  auto now_ms = [] {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+  };
+  const PPCContext saved = ctx;
+  const uint32_t query = saved.r3.u32, out = saved.r4.u32;
+  const auto start = Clock::now();
+  if (now_ms() < short_until_ms.load(std::memory_order_relaxed)) limit_ms = std::min<int64_t>(limit_ms, 20);
+  for (uint32_t spins = 0;; ++spins) {
+    ctx = saved;
+    ctx.r3.u64 = query, ctx.r4.u64 = out, ctx.r5.u64 = 4, ctx.r6.u64 = 1;
+    sub_8232BF00(ctx, base);
+    const uint32_t result = ctx.r3.u32;
+    if (result != 1 && int32_t(result) >= 0) {  // S_OK: the result is in *out
+      ctx = saved;
+      ctx.r3.u64 = 1;
+      return;
+    }
+    const int64_t waited = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count();
+    if (waited >= limit_ms) {
+      LogStuckQuery(base, query, result, waited);
+      short_until_ms.store(now_ms() + 2000, std::memory_order_relaxed);
+      ctx = saved;
+      if (Readable(out)) Store(base, out, 4096);
+      ctx.r3.u64 = 1;
+      return;
+    }
+    if (spins < 2000) std::this_thread::yield();
+    else std::this_thread::sleep_for(std::chrono::microseconds(100));
+  }
+}
+}  // namespace
+
 // UE3 GetQueryResult(q, out, bWait): InitViews reads the occlusion queries the previous frame's drawing issued. With the
 // drawing suppressed nothing issues them, so bWait = 1 waits forever (mode 2 hung on the first level load). Inside a
 // suppressed InitViews, answer "visible" at once; the host renderer will own occlusion.
@@ -570,7 +646,12 @@ extern "C" void sub_82D3E358(PPCContext& __restrict ctx, uint8_t* base) {
     ctx.r3.u64 = 1;
     return;
   }
-  __imp__sub_82D3E358(ctx, base);
+  const int64_t limit_ms = QueryWaitMs();
+  if (ctx.r5.u32 == 0 || limit_ms <= 0) {  // a poll, or BOTS_QUERY_WAIT_MS=0: the game's own loop
+    __imp__sub_82D3E358(ctx, base);
+    return;
+  }
+  BoundedQueryWait(ctx, base, limit_ms);
 }
 
 // FSceneRenderer::Render(), render thread.
