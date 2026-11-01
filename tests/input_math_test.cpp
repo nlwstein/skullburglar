@@ -74,6 +74,18 @@ int main() {
     for (int i = 0; i < 100; ++i) { ax += (i % 2) ? -1 : 1; CHECK(MouseGateHolds(ax, 0, 2)); }
   }
 
+  // Stick look speed (B-303): clamped to 1..3, and it scales the whole steady turn (curve x speed + full-tilt bonus).
+  CHECK(ClampLookSpeed(1.0) == 1.0 && ClampLookSpeed(2.5) == 2.5 && ClampLookSpeed(3.0) == 3.0);
+  CHECK(ClampLookSpeed(0.2) == 1.0 && ClampLookSpeed(9.0) == 3.0 && ClampLookSpeed(-1.0) == 1.0);
+  CHECK(ClampLookSpeed(std::nan("")) == 1.0);
+  for (double stick : {0.2, 0.5, 1.0}) {
+    for (double bonus : {0.0, 1.6}) {
+      const double base = SteadyTurn(stick, 2.0, 1.0, 1.5, bonus, 1.0);
+      for (double look : {1.0, 2.0, 3.0}) CHECK(Near(SteadyTurn(stick, 2.0, 1.0, 1.5, bonus, look), base * look, 1e-12));
+    }
+  }
+  CHECK(Near(SteadyTurn(1.0, 2.0, 1.0, 1.0, 1.6, 1.0), 2.6, 1e-12));  // the shipped full-tilt 2.6x
+
   if (failures) return 1;
   std::puts("input_math: all passed");
   return 0;

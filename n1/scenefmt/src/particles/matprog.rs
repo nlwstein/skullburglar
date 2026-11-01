@@ -84,6 +84,15 @@ fn nodes_on() -> bool {
     *ON.get_or_init(|| std::env::var("BOTS_N1_PARTICLE_NODES").map_or(true, |v| v != "0"))
 }
 
+/// Texture slots a particle material may bind (`MAX_PARTICLE_TEX`). Materials with more textures used to alias every
+/// extra one onto slot 3 (GrenadeBurstSmoke_MAT sampled its opacity masks from the fake-lit ramp: hard-edged grey
+/// polygons, B-304/B-305). `BOTS_N1_PARTICLE_TEX8=0` restores the old limit of 4 for A/B.
+pub const MAX_PARTICLE_TEX: usize = 8;
+pub fn max_tex() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| if std::env::var("BOTS_N1_PARTICLE_TEX8").is_ok_and(|v| v == "0") { 4 } else { MAX_PARTICLE_TEX })
+}
+
 /// DestColor needs the scene copy; `BOTS_N1_DEST_COLOR=0` leaves it on the unknown-expression fallback.
 pub fn dest_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -133,11 +142,12 @@ impl<'a> Cg<'a> {
         if let Some(i) = self.textures.iter().position(|t| t == tex) {
             return i;
         }
-        if self.textures.len() < 4 {
+        let cap = max_tex();
+        if self.textures.len() < cap {
             self.textures.push(tex.to_string());
             self.textures.len() - 1
         } else {
-            3
+            cap - 1
         }
     }
     /// An input struct ({Expression:{obj}, Mask...}) -> (register, width), or None if unconnected.
@@ -482,6 +492,31 @@ pub fn compile_all(materials: &BTreeMap<String, Value>) -> BTreeMap<String, Comp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn six_textures_get_six_slots() {
+        // B-304/B-305: GrenadeBurstSmoke_MAT binds six textures; slots past 3 used to alias onto tex3.
+        // Assumes BOTS_N1_PARTICLE_TEX8 is unset.
+        let mut ex = serde_json::Map::new();
+        for k in 0..6 {
+            ex.insert((k + 1).to_string(), serde_json::json!({"class": "MaterialExpressionTextureSample", "props": {"Texture": {"path": format!("Pkg.T{k}")}}}));
+        }
+        let mut prev = 1;
+        for k in 2..=6 {
+            let id = 10 + k;
+            ex.insert(id.to_string(), serde_json::json!({"class": "MaterialExpressionAdd", "props": {"A": {"Expression": {"obj": prev}}, "B": {"Expression": {"obj": k}}}}));
+            prev = id;
+        }
+        let mat = serde_json::json!({
+            "props": {"BlendMode": "BLEND_Translucent", "EmissiveColor": {"Expression": {"obj": prev}}},
+            "expressions": ex
+        });
+        let c = compile(&mat);
+        assert_eq!(c.textures.len(), 6, "{:?}", c.textures);
+        for k in 0..6 {
+            assert!(c.wgsl.contains(&format!("textureSample(tex{k},")), "tex{k} missing: {}", c.wgsl);
+        }
+    }
 
     #[test]
     fn texture_unpack_range() {

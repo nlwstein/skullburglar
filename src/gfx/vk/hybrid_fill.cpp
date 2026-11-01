@@ -31,6 +31,10 @@
 #include <unordered_set>
 #include <vector>
 
+#if defined(__linux__) && !defined(__ANDROID__)  // Android's bionic has no malloc_trim
+#include <malloc.h>
+#endif
+
 #include <rex/logging.h>
 
 #include <glslang/Public/ShaderLang.h>
@@ -455,6 +459,21 @@ void Renderer::PrepareSceneN1() {
   HoldN1Preload(host, true);
 }
 
+// Returns freed heap pages to the OS (glibc only; a no-op elsewhere).
+static void TrimHostHeap() {
+#if defined(__linux__) && !defined(__ANDROID__)
+  static const bool on = [] {
+    const char* v = std::getenv("BOTS_MALLOC_TRIM");
+    return !(v && v[0] == '0');
+  }();
+  if (!on) return;
+  const auto t0 = std::chrono::steady_clock::now();
+  const int released = malloc_trim(0);
+  REXLOG_INFO("hybrid n1: malloc_trim {} in {:.0f} ms", released ? "released memory" : "found nothing",
+              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+#endif
+}
+
 // B-199: the first scene after a gap (level start, end of a loading screen) waits, up to BOTS_N1_PRELOAD_HOLD_S, for
 // the level preload: loads applied 8 ms at a time with a submit between (bounds staging memory). The guest waits
 // with it, as for the pipeline warm-up. Streamed sublevels never hold: they load while the level plays.
@@ -469,12 +488,27 @@ void Renderer::HoldN1Preload(void* h, bool may_flush) {
   }
   n1_resumed_ = now;
   // B-287: a long gap is a level change (a menu pause is shorter than a loading screen): release what the levels
-  // before the last one used, before the new level loads (only with BOTS_N1_EVICT=1).
-  if (host->any_scene && std::chrono::duration<double>(now - host->last_scene).count() >= host->evict_gap_s) {
+  // before the last one used, before the new level loads (not with BOTS_N1_EVICT=0).
+  const bool level_change =
+      host->any_scene && std::chrono::duration<double>(now - host->last_scene).count() >= host->evict_gap_s;
+  if (level_change) {
     const auto e0 = std::chrono::steady_clock::now();
     const uint32_t freed = n1_level_boundary(host->r);
     REXLOG_INFO("hybrid n1: level change: {} meshes released in {:.1f} ms", freed,
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - e0).count());
+  }
+  // B-287: the level that starts now (the first one, or after a level change) loads again what its last visit used and
+  // eviction gave back, in the preload hold below.
+  if (level_change || !host->any_scene) {
+    std::string map;
+    if (HybridState* hs = FindHybridState()) {
+      std::lock_guard lock(hs->map_mutex);
+      map = hs->map_name;
+    }
+    if (!map.empty()) {
+      const uint32_t q = n1_level_start(host->r, map.c_str());
+      if (q) REXLOG_INFO("hybrid n1: level start {}: {} assets of its last visit requested again", map, q);
+    }
   }
   N1Stats st{};
   n1_load_stats(host->r, &st);
@@ -514,6 +548,10 @@ void Renderer::HoldN1Preload(void* h, bool may_flush) {
               "{} still pending",
               held, passes, host->packages, st.preload_requests, st.applied, double(st.upload_bytes) / 1048576.0,
               st.textures_added, st.meshes_added, lazy0, st.preload_pending);
+  // The hold has just freed a level's worth of assets: glibc keeps that memory in its per-thread arenas, so a Deck
+  // sees about 0.8 GB more resident than the live data needs. Give it back here, where a pause is already expected.
+  // BOTS_MALLOC_TRIM=0 turns this off.
+  TrimHostHeap();
   if (passes) BeginCommands(kGpuDraw);
   // From the end of the hold: from its start, the next scene saw the hold as a gap and "resumed" again.
   host->any_scene = true, host->last_scene = end;
@@ -605,6 +643,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     fb.path_count = uint32_t(paths.size());
     fb.paths = paths.data();
     if (n1_set_feed_bin(host->r, &fb) != 0) REXLOG_WARN("hybrid n1: n1_set_feed_bin failed: {}", n1_last_error());
+    if (l.has_fog_post) n1_set_fog_volumes(host->r, l.fogvols.data(), uint32_t(l.fogvols.size() / 12));
     if (!host->scene.lighting.empty()) {  // BOTS_N1_FEED_VERIFY=1
       const int diffs = n1_check_feed(host->scene.lighting.data(), uint32_t(host->scene.lighting.size()), &fb);
       ++host->verified;
@@ -948,6 +987,9 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
                   "CPU copies queued)", st.evict_boundaries, st.evict_sweeps, st.evict_last_ms, st.evict_max_ms,
                   st.meshes_freed, st.skin_meshes_freed, st.textures_freed, st.materials_freed, st.lights_freed,
                   double(st.bytes_freed) / 1048576.0, st.textures_kept, st.forgets_pending);
+    if (st.repreload_levels)
+      REXLOG_INFO("hybrid n1 repreload: {} level starts and reopened packages loaded given-back assets again, {} visit "
+                  "requests", st.repreload_levels, st.repreload_requests);
     REXLOG_INFO("hybrid n1 compile: t={:.1f} s: built {}+{} shaders and {}+{} pipelines (startup+play), {} late "
                 "shaders and {} late pipelines, {} failed; {:.1f} s in the driver (worst {:.0f} ms), spirv cache "
                 "{}/{}; render thread: {} draws skipped, {} on the stand-in, {} partial frames, backlog {}; n1_record "

@@ -17,7 +17,66 @@ pub struct Globals {
     pub tune: [f32; 4],
     pub tune2: [f32; 4],
     pub tune3: [f32; 4],
+    /// B-310: x = number of fog volumes in `vols` (0..=MAX_FOG_VOLUMES).
+    pub vol_n: [f32; 4],
+    /// Three vec4 per volume: (center xyz, kind 0 box / 1 sphere), (half extents xyz or radius, density), (colour rgb, 0).
+    pub vols: [[f32; 4]; 3 * MAX_FOG_VOLUMES],
 }
+
+pub const MAX_FOG_VOLUMES: usize = 8;
+/// f32s per fog volume in `Lighting::fog_vols` (the layout `Globals::vols` packs three vec4 from).
+pub const FOG_VOL_F32: usize = 12;
+
+/// B-310: analytic fog volumes (`BOTS_N1_FOGVOL=0` turns them off).
+pub fn fog_volumes_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BOTS_N1_FOGVOL").map_or(true, |v| v != "0"))
+}
+
+/// Multiplier on every fog volume's density. The port's apply shader multiplies the integrated density by a
+/// texture-modulated factor; 0.22 is the value that matched the port's mean brightness and error in chapter 33250
+/// (`BOTS_N1_FOGVOL_SCALE` overrides it).
+fn fog_volume_scale() -> f32 {
+    static S: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *S.get_or_init(|| std::env::var("BOTS_N1_FOGVOL_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.22))
+}
+
+/// The colour the port's volume apply shader emits, measured from a capture (`BOTS_N1_FOGVOL_COL=r,g,b` overrides it);
+/// the game's own `ApproxFogLightColor` is not what is drawn.
+fn fog_volume_color() -> Option<[f32; 3]> {
+    static C: std::sync::OnceLock<Option<[f32; 3]>> = std::sync::OnceLock::new();
+    *C.get_or_init(|| {
+        let d = [0.6, 0.35, 0.4];
+        match std::env::var("BOTS_N1_FOGVOL_COL") {
+            Ok(v) => {
+                let p: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if p.len() == 3 { Some([p[0], p[1], p[2]]) } else { Some(d) }
+            }
+            Err(_) => Some(d),
+        }
+    })
+}
+
+impl Globals {
+    /// Packs up to `MAX_FOG_VOLUMES` volumes (`FOG_VOL_F32` floats each).
+    pub fn set_fog_volumes(&mut self, v: &[f32]) {
+        let n = (v.len() / FOG_VOL_F32).min(MAX_FOG_VOLUMES);
+        self.vol_n = [n as f32, 0.0, 0.0, 0.0];
+        for k in 0..n {
+            let q = &v[k * FOG_VOL_F32..(k + 1) * FOG_VOL_F32];
+            for j in 0..3 {
+                self.vols[3 * k + j] = [q[4 * j], q[4 * j + 1], q[4 * j + 2], q[4 * j + 3]];
+            }
+            self.vols[3 * k + 1][3] *= fog_volume_scale();
+            if let Some(c) = fog_volume_color() {
+                self.vols[3 * k + 2] = [c[0], c[1], c[2], 0.0];
+            }
+        }
+    }
+}
+
+/// B-205: default scale on the light environment key's specular (calibrated against the port's pass; see b205-rim.md).
+pub const ENV_SPEC_GAIN: f32 = 0.5;
 
 /// Sun, ambient, fog and tuning. Defaults are N8's mission 6 values (used until a feed frame arrives).
 #[derive(Clone, Debug)]
@@ -32,6 +91,8 @@ pub struct Env {
     pub fog: Option<([f32; 3], f32, f32, f32, f32)>,
     pub lm_gain: f32,
     pub spec_gain: f32,
+    /// B-205: scale on a light environment's key specular only (`BOTS_N1_ENVP=envspec=1` restores the unscaled Phong).
+    pub env_spec_gain: f32,
     pub vl_gain: f32,
     /// B-189: exponent applied to vertex-lightmap samples before their scales (the port's 2.2; 1 = the old raw use).
     pub vl_gamma: f32,
@@ -59,6 +120,7 @@ impl Default for Env {
             fog: Some(([0.612, 0.737, 0.983], 4e-6, 6443.0, 4000.0, 1e8)),
             lm_gain: 1.0,
             spec_gain: 1.0,
+            env_spec_gain: ENV_SPEC_GAIN,
             vl_gain: 1.0,
             vl_gamma: 2.2,
             vcol_map: 0,
@@ -116,6 +178,7 @@ impl Env {
             match k {
                 "lm" => self.lm_gain = f,
                 "spec" => self.spec_gain = f,
+                "envspec" => self.env_spec_gain = f,
                 "vl" => self.vl_gain = f,
                 "vlgamma" => self.vl_gamma = f,
                 "vcol" => self.vcol_map = f as u32,
@@ -160,7 +223,7 @@ impl Env {
             view_proj,
             cam_pos: [eye[0], eye[1], eye[2], time],
             sun_dir: [self.sun_dir[0], self.sun_dir[1], self.sun_dir[2], self.sun_enabled as u32 as f32],
-            sun_col: [self.sun_col[0], self.sun_col[1], self.sun_col[2], 0.0],
+            sun_col: [self.sun_col[0], self.sun_col[1], self.sun_col[2], self.env_spec_gain],
             amb_up: [self.amb_up[0], self.amb_up[1], self.amb_up[2], 0.0],
             amb_dn: [self.amb_dn[0], self.amb_dn[1], self.amb_dn[2], 0.0],
             fog_col: f.map(|f| [f.0[0], f.0[1], f.0[2], 1.0]).unwrap_or([0.0; 4]),
@@ -168,6 +231,8 @@ impl Env {
             tune: [self.lm_gain, self.spec_gain, self.vl_gain, self.dbg],
             tune2: [self.vcol_map as f32, self.sun_luma, self.nmap_strength, 0.0],
             tune3: [self.env_gain, self.env_ambient, self.dyn_gain, self.vl_gamma],
+            vol_n: [0.0; 4],
+            vols: [[0.0; 4]; 3 * MAX_FOG_VOLUMES],
         }
     }
 }
@@ -409,9 +474,12 @@ pub struct Knobs {
     /// B-277(e): the red outline around enemies with bSpecialHighlight. 0 off, 1 on (default), 2 shows the raw mask.
     pub outline: u32,
     /// B-287: at a level change, release the meshes, textures, materials and baked lights the last `evict_keep` levels
-    /// didn't name (off by default: everything stays resident unless `BOTS_N1_EVICT=1`; `BOTS_N1_EVICT_KEEP=<levels>`, default 2).
+    /// didn't name (on by default; `BOTS_N1_EVICT=0` keeps everything resident; `BOTS_N1_EVICT_KEEP=<levels>`, default 2).
     pub evict: bool,
     pub evict_keep: u32,
+    /// B-287: with eviction on, a level start loads again what the last visit to that level used (and a reopened package
+    /// its list), behind the loading screen (`BOTS_N1_REPRELOAD=0`: off, assets given back return one draw at a time).
+    pub repreload: bool,
     /// B-287: render-thread time one frame spends on eviction work (`BOTS_N1_EVICT_MS`, default 1.0) and on destroying
     /// the GPU objects it gave back (`BOTS_N1_FREE_MS`, default 1.5).
     pub evict_budget: std::time::Duration,
@@ -467,8 +535,9 @@ impl Knobs {
             light_grow: env_flag("BOTS_N1_LIGHT_GROW", true),
             lod_bones: env_flag("BOTS_N1_LOD_BONES", true),
             outline: env_num("BOTS_N1_OUTLINE", 1u32),
-            evict: env_flag("BOTS_N1_EVICT", false),
+            evict: env_flag("BOTS_N1_EVICT", true),
             evict_keep: env_num("BOTS_N1_EVICT_KEEP", 2u32).max(1),
+            repreload: env_flag("BOTS_N1_REPRELOAD", true),
             evict_budget: std::time::Duration::from_micros((env_num("BOTS_N1_EVICT_MS", 1.0f64).max(0.05) * 1000.0) as u64),
             free_budget: std::time::Duration::from_micros((env_num("BOTS_N1_FREE_MS", 1.5f64).max(0.05) * 1000.0) as u64),
         }
@@ -490,6 +559,8 @@ pub struct Lighting {
     pub envs_alt: Vec<[f32; lightfeed::pack::ENV_F32]>,
     /// Environment component path -> index into `dyn_frame.envs`.
     pub env_index: std::collections::HashMap<String, usize>,
+    /// B-310: fog volumes from the feed, `FOG_VOL_F32` floats each (Y-up world).
+    pub fog_vols: Vec<f32>,
     pub frames: u64,
 }
 
@@ -513,6 +584,7 @@ impl Lighting {
             dyn_lights_alt: vec![],
             envs_alt: vec![],
             env_index: Default::default(),
+            fog_vols: vec![],
             frames: 0,
         }
     }
@@ -713,5 +785,19 @@ mod gradeprobe {
             let g = db.material_params(m).map(|(b, s, v)| (lightfeed::post::Grade::from_params(&b, &s, &v), b));
             println!("{lvl}: {g:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod b205_tests {
+    use super::*;
+
+    #[test]
+    fn env_spec_gain_defaults_and_overrides() {
+        let mut e = Env::default();
+        assert_eq!(e.env_spec_gain, ENV_SPEC_GAIN);
+        assert_eq!(e.globals([0.0; 16], [0.0; 3], 0.0).sun_col[3], ENV_SPEC_GAIN);
+        e.apply("envspec=1");
+        assert_eq!(e.globals([0.0; 16], [0.0; 3], 0.0).sun_col[3], 1.0);
     }
 }

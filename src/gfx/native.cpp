@@ -4,6 +4,7 @@
 // WAIT_REG_MEM, coherency, gamma-ramp registers, occlusion-query events); draws, resolves and presents go to the
 // native renderer instead of the emulated EDRAM backend. A plugin rather than part of the game so its SDK sources
 // and their cvars live in their own module, as the xenos plugin's do.
+#include "../diag.h"
 #include "../path_utf8.h"
 #include <algorithm>
 #include <chrono>
@@ -192,7 +193,9 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
             gpu += fmt::format(" {} {:.2f},", vk::Renderer::kGpuCatNames[i], t);
           }
           REXLOG_INFO("gfx native: GPU ms per frame: {:.2f} total:{}", total, gpu);
-          REXLOG_INFO("gfx native: top GPU spans per frame:{}", renderer_->TakeGpuLabelReport(n, 25));
+          // Taken either way so the label table stays small; only logged with diagnostic logging on (BOTS_DIAG=1).
+          const std::string spans = renderer_->TakeGpuLabelReport(n, 25);
+          if (bots::DiagLogging()) REXLOG_INFO("gfx native: top GPU spans per frame:{}", spans);
         }
         REXLOG_INFO("gfx native: CP idle {:.2f} ms per frame, {:.2f} ms of it after submitting queries",
                     double(idle_us_ - last_idle_us_) / 1000.0 / n,
@@ -397,10 +400,8 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   }
 
   void TrackFrame() {
-    static const double hitch_ms = [] {
-      const char* v = std::getenv("BOTS_HITCH_MS");
-      return v && *v ? std::atof(v) : 25.0;
-    }();
+    // Off unless diagnostic logging is on (BOTS_DIAG=1); BOTS_HITCH_MS still sets it by itself.
+    static const double hitch_ms = bots::DiagThreshold(std::getenv("BOTS_HITCH_MS"), bots::HitchLinesDefault(), 25.0);
     FrameMark now = MarkFrame();
     const std::string load_max_what = renderer_->texture_load_max_what();  // before the take: read with it
     const uint64_t load_max_us = renderer_->TakeTextureLoadMaxUs();
@@ -434,10 +435,8 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   // after a gap (level start, end of a loading screen), with its likely cause. No relative test: at a level start
   // every slow frame counts. At most 2000 lines.
   void LogN1Hitch(double ms, const FrameMark& now, const vk::Renderer::N1FrameNote& n1) {
-    static const double limit = [] {
-      const char* v = std::getenv("BOTS_N1_HITCH_MS");
-      return v && *v ? std::atof(v) : 33.4;
-    }();
+    // Off unless diagnostic logging is on (BOTS_DIAG=1); BOTS_N1_HITCH_MS still sets it by itself.
+    static const double limit = bots::DiagThreshold(std::getenv("BOTS_N1_HITCH_MS"), bots::HitchLinesDefault(), 33.4);
     static const double window = [] {
       const char* v = std::getenv("BOTS_N1_HITCH_WINDOW_S");
       return v && *v ? std::atof(v) : 60.0;
@@ -520,12 +519,9 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
 
   // The host report runs on its own thread: on one player's PC (issue #29) it took ~230 ms every time, a dropped frame
   // every 600 when it ran here. A report still running when the next is due skips that one.
-  // Once per session unless diagnostic logging is on (BOTS_DIAG=1; the launcher's setting, 1.5.0).
+  // Once per session unless diagnostic logging is on (BOTS_DIAG=1; the launcher's "Diagnostic logging" setting).
   void RequestHostReport(std::chrono::steady_clock::time_point now) {
-    static const bool periodic = [] {
-      const char* v = std::getenv("BOTS_DIAG");
-      return v && *v && std::strcmp(v, "0") != 0;
-    }();
+    static const bool periodic = bots::DiagLogging();
     std::lock_guard lock(host_mutex_);
     if (host_requested_ && !periodic) return;
     host_requested_ = true;

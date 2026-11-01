@@ -20,7 +20,8 @@ const SKIN_WGSL: &str = r#"
 
 @vertex
 fn vs_skin(@location(0) pos: vec3<f32>, @location(1) nrm: vec3<f32>, @location(2) uv: vec2<f32>,
-           @location(3) bi: vec4<u32>, @location(4) bw: vec4<f32>, @builtin(instance_index) ii: u32) -> VOut {
+           @location(3) bi: vec4<u32>, @location(4) bw: vec4<f32>, @location(5) tn: vec4<f32>,
+           @builtin(instance_index) ii: u32) -> VOut {
     let inst = instances[ii];
     let base = inst.p1;
     let m = bones[base + bi.x] * bw.x + bones[base + bi.y] * bw.y + bones[base + bi.z] * bw.z + bones[base + bi.w] * bw.w;
@@ -31,8 +32,11 @@ fn vs_skin(@location(0) pos: vec3<f32>, @location(1) nrm: vec3<f32>, @location(2
     o.pos = g.view_proj * vec4<f32>(o.wpos, 1.0);
     let n = normalize(vec3<f32>(nu.x, nu.z, nu.y) + vec3<f32>(0.0, 1e-6, 0.0));
     o.nrm = n;
+    // B-293: the mesh's own tangent, skinned like the normal. `BOTS_N1_SKIN_TANGENT=1` uses this; the default is still the invented one
+    // (a fixed axis crossed with the normal).
+    let tu = (m * vec4<f32>(tn.xyz, 0.0)).xyz;
     let a = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(n.x) > 0.9);
-    o.tan = vec4<f32>(normalize(cross(a, n)), 1.0);
+    o.tan = SKIN_TANGENT;
     o.uv = vec4<f32>(uv, uv);
     o.vcol = vec4<f32>(1.0);
     o.l0 = vec3<f32>(0.0); o.l1 = vec3<f32>(0.0); o.l2 = vec3<f32>(0.0);
@@ -142,12 +146,18 @@ fn vs_skin(@location(0) pos: vec3<f32>, @location(3) bi: vec4<u32>, @location(4)
 "#;
 
 pub fn scene_source(c: &Compiled, f: ShaderFlags) -> String {
+    // Opt-in (B-293): no visible difference was measured on a desktop GPU, so the invented tangent stays the default.
+    let skin_tan = if std::env::var("BOTS_N1_SKIN_TANGENT").is_ok_and(|v| v == "1") {
+        "vec4<f32>(normalize(vec3<f32>(tu.x, tu.z, tu.y) + vec3<f32>(0.0, 1e-6, 0.0)), tn.w)"
+    } else {
+        "vec4<f32>(normalize(cross(a, n)), 1.0)"
+    };
     let mut s = assemble(c, f)
         .replace(matdef::shader::SHADOW_STUB, SHADOW_WGSL)
         .replace("@group(1)", "@group(9)")
         .replace("@group(2)", "@group(1)")
         .replace("@group(9)", "@group(2)");
-    s.push_str(SKIN_WGSL);
+    s.push_str(&SKIN_WGSL.replace("SKIN_TANGENT", skin_tan));
     s
 }
 

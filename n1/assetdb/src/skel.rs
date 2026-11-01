@@ -6,7 +6,7 @@ use crate::AssetDb;
 use anyhow::{Result, bail};
 use std::sync::Arc;
 
-/// One skinned vertex as the GPU takes it: 40 bytes.
+/// One skinned vertex as the GPU takes it: 56 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SkinVertex {
@@ -17,6 +17,8 @@ pub struct SkinVertex {
     pub bones: [u8; 4],
     /// Weights, summing to 255.
     pub weights: [u8; 4],
+    /// Bind-pose tangent (xyz) and bitangent sign (w), skinned with the bones like the normal (B-293).
+    pub tangent: [f32; 4],
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +89,7 @@ impl AssetDb {
                 uv: v.uv,
                 bones: [0; 4],
                 weights: v.bone_w,
+                tangent: v.tangent,
             })
             .collect();
         for c in &l.chunks {

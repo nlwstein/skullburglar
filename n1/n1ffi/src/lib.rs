@@ -216,10 +216,13 @@ pub struct N1Stats {
     pub forgets_pending: u32,
     pub evict_last_ms: f32,
     pub evict_max_ms: f32,
+    /// B-287: level starts that loaded a past visit's assets again, and the requests that made.
+    pub repreload_levels: u64,
+    pub repreload_requests: u64,
 }
 
 /// B-199: one package's worth of things to load, found on a scan thread.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct PreloadList {
     package: String,
     meshes: Vec<String>,
@@ -275,8 +278,18 @@ fn scan_package(db: &AssetDb, pkg: &str, particles: bool, trees: bool) -> Preloa
 /// Preload bookkeeping kept in `Inner`.
 struct Preload {
     seen: std::collections::HashSet<String>,
-    tx: std::sync::mpsc::Sender<PreloadList>,
-    rx: std::sync::mpsc::Receiver<PreloadList>,
+    tx: std::sync::mpsc::Sender<Arc<PreloadList>>,
+    rx: std::sync::mpsc::Receiver<Arc<PreloadList>>,
+    /// B-287: each scanned package's list, and the sweep count when it was last queued: a package the game opens again
+    /// after a sweep queues its list again (what the sweep gave back loads behind the loading screen).
+    lists: std::collections::HashMap<String, (Arc<PreloadList>, u64)>,
+    /// B-287: the level now playing (the map's package), and what the last visit to each level used, oldest first.
+    level: Option<String>,
+    visits: std::collections::HashMap<String, (scenekit::VisitSet, Vec<String>)>,
+    visit_order: std::collections::VecDeque<String>,
+    /// B-287: level starts that loaded a past visit's assets again, requests made (visit replays and reopened lists).
+    repreload_levels: u64,
+    repreload_requests: u64,
     scanning: Arc<std::sync::atomic::AtomicU32>,
     log: bool,
     /// Render-thread time budget per frame for applying loads in play (`BOTS_N1_UPLOAD_MS`, 0: count only).
@@ -288,6 +301,8 @@ impl Inner {
     fn take_preloads(&mut self) {
         self.resolver.drain_forgets(self.renderer.knobs.evict_budget);
         while let Ok(l) = self.preload.rx.try_recv() {
+            let sweeps = self.resolver.evict.sweeps;
+            self.preload.lists.insert(l.package.to_ascii_lowercase(), (l.clone(), sweeps));
             let mut q = 0usize;
             // Its copies win over other packages' for paths in several (cooked levels carry their own copies).
             self.db.prefer_packages([l.package.clone()]);
@@ -391,6 +406,8 @@ impl Inner {
         out.forgets_pending = e.forgets_pending;
         out.evict_last_ms = e.last_ms;
         out.evict_max_ms = e.max_ms;
+        out.repreload_levels = self.preload.repreload_levels;
+        out.repreload_requests = self.preload.repreload_requests;
     }
 }
 
@@ -634,6 +651,12 @@ pub unsafe extern "C" fn n1_create(init: *const N1Init) -> *mut N1Renderer {
                     let ms: f32 = std::env::var("BOTS_N1_UPLOAD_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0);
                     Preload {
                         seen: Default::default(),
+                        lists: Default::default(),
+                        level: None,
+                        visits: Default::default(),
+                        visit_order: Default::default(),
+                        repreload_levels: 0,
+                        repreload_requests: 0,
                         tx,
                         rx,
                         scanning: Default::default(),
@@ -1068,7 +1091,7 @@ pub extern "C" fn n1_set_ambient(r: *const N1Renderer, ambient: f32) {
 /// `pow(LightColor / 255, 2.2) * Brightness` (what `BOTS_N1_LIGHT_GAMMA=0` does for a whole run). Bit 8 (256, B-245):
 /// light environments in the other colour mode (`BOTS_N1_ENV_GAMMA`). Bit 9 (512, B-245): light-environment key
 /// specular back to Blinn (`BOTS_N1_ENV_SPEC=0`). Bit 11 (2048, B-249): the level's sun, fill and sky light colours in the
-/// other colour mode (`BOTS_N1_SKY_GAMMA`). Bit 12 (4096, B-261): world-space ReflectionVector (`BOTS_N1_REFL_TS=0`). 0: none.
+/// other colour mode (`BOTS_N1_SKY_GAMMA`). Bit 12 (4096, B-261): world-space ReflectionVector (`BOTS_N1_REFL_TS=0`). Bit 14 (16384, B-205): the light-environment key specular unscaled (`BOTS_N1_ENVP=envspec=1`). 0: none.
 #[unsafe(no_mangle)]
 pub extern "C" fn n1_set_debug_bits(r: *const N1Renderer, bits: u32) {
     with(r, (), |i| i.renderer.debug_bits = bits);
@@ -1177,6 +1200,24 @@ pub unsafe extern "C" fn n1_set_feed(r: *const N1Renderer, json: *const c_char, 
 
 pub type N1FeedBin = lightfeed::bin::FeedBin;
 
+/// B-310: the frame's fog volumes, `count` records of 12 floats (center xyz, kind 0 box / 1 sphere; half extents xyz or
+/// radius in x, density; colour rgb, 0), Y-up world. They replace the previous set; `count` 0 clears. Returns 0.
+///
+/// # Safety
+/// `data` points at `count * 12` floats valid for the call (or is null with `count` 0).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn n1_set_fog_volumes(r: *const N1Renderer, data: *const f32, count: u32) -> i32 {
+    let v: Vec<f32> = if data.is_null() || count == 0 {
+        vec![]
+    } else {
+        unsafe { std::slice::from_raw_parts(data, count as usize * light::FOG_VOL_F32) }.to_vec()
+    };
+    with(r, -1, |i| {
+        i.renderer.lighting.fog_vols = v;
+        0
+    })
+}
+
 /// B-188: the frame's lights, fog and post as fixed-layout binary records (`N1FeedBin` in n1ffi.h, no JSON). Same
 /// effect as `n1_set_feed`: sun, sky, fog, post and dynamic lights follow it until the next call; a feed without
 /// `N1_FEED_FOG_POST` keeps the last fog and post. Returns 0, or -1 with `n1_last_error` set.
@@ -1268,7 +1309,22 @@ pub extern "C" fn n1_preload_package(r: *const N1Renderer, name: *const c_char) 
     let pkg = name.rsplit(['/', '\\']).next().unwrap_or(name);
     let pkg = pkg.strip_suffix(".xxx").or_else(|| pkg.strip_suffix(".XXX")).unwrap_or(pkg).to_string();
     with(r, 0, |i| {
-        if !i.db.has_package(&pkg) || !i.preload.seen.insert(pkg.to_ascii_lowercase()) {
+        if !i.db.has_package(&pkg) {
+            return 0;
+        }
+        let key = pkg.to_ascii_lowercase();
+        if !i.preload.seen.insert(key.clone()) {
+            // B-287: opened again after a sweep gave back some of what it holds: queue its list again.
+            let sweeps = i.resolver.evict.sweeps;
+            if i.renderer.knobs.repreload {
+                if let Some((l, at)) = i.preload.lists.get_mut(&key) {
+                    if *at < sweeps {
+                        *at = sweeps;
+                        let _ = i.preload.tx.send(l.clone());
+                        i.preload.repreload_levels += 1;
+                    }
+                }
+            }
             return 0;
         }
         let db = i.db.clone();
@@ -1279,7 +1335,7 @@ pub extern "C" fn n1_preload_package(r: *const N1Renderer, name: *const c_char) 
         let spawned = std::thread::Builder::new().name("n1-preload-scan".into()).spawn(move || {
             let l = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scan_package(&db, &pkg, particles, trees)));
             if let Ok(l) = l {
-                let _ = tx.send(l);
+                let _ = tx.send(Arc::new(l));
             }
             scanning.fetch_sub(1, Relaxed);
         });
@@ -1326,7 +1382,7 @@ pub unsafe extern "C" fn n1_upload(
 }
 
 /// B-287: the game's level just changed (a new level is about to draw). Gives back what the last few levels didn't use
-/// (off unless `BOTS_N1_EVICT=1`, `BOTS_N1_EVICT_KEEP` is how many levels stay). Returns how many meshes the sweep
+/// (on unless `BOTS_N1_EVICT=0`, `BOTS_N1_EVICT_KEEP` is how many levels stay). Returns how many meshes the sweep
 /// gave back (0 when nothing ran).
 #[unsafe(no_mangle)]
 pub extern "C" fn n1_level_boundary(r: *const N1Renderer) -> u32 {
@@ -1337,10 +1393,67 @@ pub extern "C" fn n1_level_boundary(r: *const N1Renderer) -> u32 {
         }
         let before = i.renderer.ctr.meshes_freed + i.renderer.ctr.skin_meshes_freed;
         let keep = k.evict_keep as usize;
+        // What the level that is ending used, for its next visit (before the sweep changes what is resident).
+        if k.repreload {
+            if let Some(name) = i.preload.level.clone() {
+                let set = (i.resolver.visit_set(), i.skins.visit_set());
+                if i.preload.log {
+                    eprintln!("n1ffi: visit of {name}: {} meshes, {} materials, {} lights, {} skinned", set.0.meshes.len(), set.0.materials.len(), set.0.lights.len(), set.1.len());
+                }
+                if let Some(old) = i.preload.visits.get_mut(&name) {
+                    old.0.merge(&set.0);
+                    for p in set.1 {
+                        if !old.1.contains(&p) {
+                            old.1.push(p);
+                        }
+                    }
+                } else {
+                    i.preload.visits.insert(name.clone(), set);
+                    i.preload.visit_order.push_back(name);
+                    while i.preload.visit_order.len() > 64 {
+                        if let Some(old) = i.preload.visit_order.pop_front() {
+                            i.preload.visits.remove(&old);
+                        }
+                    }
+                }
+            }
+        }
         i.resolver.level_boundary(&mut i.renderer, keep);
         let db = i.db.clone();
         i.skins.level_boundary(&mut i.renderer, &db, keep);
         (i.renderer.ctr.meshes_freed + i.renderer.ctr.skin_meshes_freed - before) as u32
+    })
+}
+
+/// B-287: a level is starting (`name`: its map package). With eviction on, requests what the last visit to this level
+/// used and has since been given back, so it loads behind the loading screen instead of one draw at a time. Call it
+/// after `n1_level_boundary` at the first scene of the level. Returns the loads requested (0 when the level is new).
+#[unsafe(no_mangle)]
+pub extern "C" fn n1_level_start(r: *const N1Renderer, name: *const c_char) -> u32 {
+    let Some(name) = cstr(name) else {
+        return 0;
+    };
+    with(r, 0, |i| {
+        let k = i.renderer.knobs;
+        if !k.evict || !k.repreload {
+            return 0;
+        }
+        i.preload.level = Some(name.to_string());
+        let Some((rs, ss)) = i.preload.visits.get(name).cloned() else {
+            return 0;
+        };
+        let mut q = i.resolver.preload_visit(&rs);
+        for p in &ss {
+            q += i.skins.preload(p) as usize;
+        }
+        if i.preload.log {
+            eprintln!("n1ffi: level start {name}: visit had {} meshes, {} materials, {} lights, {} skinned; {q} new requests", rs.meshes.len(), rs.materials.len(), rs.lights.len(), ss.len());
+        }
+        if q > 0 {
+            i.preload.repreload_levels += 1;
+            i.preload.repreload_requests += q as u64;
+        }
+        q as u32
     })
 }
 

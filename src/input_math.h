@@ -65,6 +65,20 @@ inline double YawResponse(double stick, double turn_power) {
   return stick < 0 ? -m : m;
 }
 
+// "Stick look speed" (B-303): a multiple of the game's own stick look speed, 1 (as shipped) to 3. The game's
+// C1PlayerInput scales TurnSpeed and PitchSpeed by its Controller Sensitivity option (0.5 / 1 / 1.5); the setting
+// multiplies the fields behind those (and MaxPowerTurn, the full-tilt bonus that is added after TurnSpeed, so the whole
+// turn scales). Anything outside the range, or not a number, is pulled back into it.
+inline constexpr double kMaxLookSpeed = 3.0;
+inline double ClampLookSpeed(double v) { return std::isfinite(v) ? std::clamp(v, 1.0, kMaxLookSpeed) : 1.0; }
+
+// aTurn the script produces in steady state for a stick position (after the game's dead zone), for tests:
+// stick^TurnPower * TurnSpeed * sensitivity + PowerTurn, where the look speed multiplies TurnSpeed and MaxPowerTurn.
+inline double SteadyTurn(double stick, double turn_power, double turn_speed, double sensitivity, double power_turn,
+                         double look) {
+  return YawResponse(stick, turn_power) * turn_speed * look * sensitivity + power_turn * look;
+}
+
 // The value written to C1PlayerInput.LagAmount for "Stick acceleration off". It is NOT 0 or 1:
 // LagProportion = 1 - LagAmount^(-dt * LagTimeScale * 100), so LagAmount 1 gives a proportion of 0 and the camera
 // would never turn. A huge value gives a proportion of 1: the camera follows the stick at once.

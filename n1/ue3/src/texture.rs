@@ -60,24 +60,111 @@ pub struct Texture {
     pub notes: Vec<String>,
 }
 
+/// The texture file caches (`Textures.tfc`, `CharTextures.tfc`). A file is opened once and a texture's mip is read from
+/// its offset when asked for: `Textures.tfc` is 1.6 GB, and reading it whole made every first-time texture decode (a
+/// cold n1 cache, which is every player's first visit to a level) hold 1.6 GB of host memory for the rest of the run
+/// (B-296: the Steam Deck's 1.5 GB jump in one step). `BOTS_N1_TFC_SLURP=1` brings the old whole-file read back.
 pub struct TfcCache {
     dir: PathBuf,
-    files: Mutex<HashMap<String, std::sync::Arc<Vec<u8>>>>,
+    files: Mutex<HashMap<String, std::sync::Arc<TfcFile>>>,
+    slurp: bool,
+}
+
+enum TfcFile {
+    /// The whole file in memory (`BOTS_N1_TFC_SLURP=1`).
+    Whole(Vec<u8>),
+    File(std::fs::File, u64),
+}
+
+impl TfcFile {
+    fn len(&self) -> u64 {
+        match self {
+            TfcFile::Whole(v) => v.len() as u64,
+            TfcFile::File(_, n) => *n,
+        }
+    }
+
+    /// `len` bytes at `off`; an error past the end of the file.
+    fn read(&self, off: usize, len: usize) -> Result<Vec<u8>> {
+        ensure!(off as u64 + len as u64 <= self.len(), "tfc range");
+        match self {
+            TfcFile::Whole(v) => Ok(v[off..off + len].to_vec()),
+            TfcFile::File(f, _) => {
+                let mut buf = vec![0u8; len];
+                read_exact_at(f, &mut buf, off as u64).context("tfc read")?;
+                Ok(buf)
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn read_exact_at(f: &std::fs::File, buf: &mut [u8], off: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(f, buf, off)
+}
+
+#[cfg(windows)]
+fn read_exact_at(f: &std::fs::File, mut buf: &mut [u8], mut off: u64) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        let n = std::os::windows::fs::FileExt::seek_read(f, buf, off)?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        buf = &mut buf[n..];
+        off += n as u64;
+    }
+    Ok(())
 }
 
 impl TfcCache {
     pub fn new(dir: &Path) -> Self {
-        Self { dir: dir.to_path_buf(), files: Mutex::new(HashMap::new()) }
+        let slurp = std::env::var("BOTS_N1_TFC_SLURP").is_ok_and(|v| !v.is_empty() && v != "0");
+        Self { dir: dir.to_path_buf(), files: Mutex::new(HashMap::new()), slurp }
     }
-    fn get(&self, name: &str) -> Result<std::sync::Arc<Vec<u8>>> {
+    /// BOTS_MEMLOG: files open and the bytes of them held in memory.
+    pub fn mem(&self) -> (usize, u64) {
+        let m = self.files.lock().unwrap();
+        (m.len(), m.values().map(|f| if let TfcFile::Whole(v) = &**f { v.len() as u64 } else { 0 }).sum())
+    }
+    fn get(&self, name: &str) -> Result<std::sync::Arc<TfcFile>> {
         let mut m = self.files.lock().unwrap();
         if let Some(f) = m.get(name) {
             return Ok(f.clone());
         }
         let p = self.dir.join(format!("{name}.tfc"));
-        let d = std::sync::Arc::new(std::fs::read(&p).with_context(|| format!("read {}", p.display()))?);
-        m.insert(name.to_string(), d.clone());
-        Ok(d)
+        let f = if self.slurp {
+            TfcFile::Whole(std::fs::read(&p).with_context(|| format!("read {}", p.display()))?)
+        } else {
+            let f = std::fs::File::open(&p).with_context(|| format!("open {}", p.display()))?;
+            let n = f.metadata().with_context(|| format!("stat {}", p.display()))?.len();
+            TfcFile::File(f, n)
+        };
+        let f = std::sync::Arc::new(f);
+        m.insert(name.to_string(), f.clone());
+        Ok(f)
+    }
+    /// `len` bytes of file `name` at `off`.
+    fn read(&self, name: &str, off: usize, len: usize) -> Result<Vec<u8>> {
+        self.get(name)?.read(off, len)
+    }
+    /// The bytes of the LZO chunk at `off` (header, block table, blocks), for `decompress_chunk` at offset 0.
+    fn chunk(&self, name: &str, off: usize) -> Result<Vec<u8>> {
+        let f = self.get(name)?;
+        let head = f.read(off, 16)?;
+        let mut r = Reader::new(&head, 4);
+        let block = (r.u32()? as usize).max(1);
+        let _ctotal = r.i32()?;
+        let total = r.i32()?.max(0) as usize;
+        let n = total.div_ceil(block);
+        let mut out = f.read(off, 16 + 8 * n)?;
+        let mut t = Reader::new(&out, 16);
+        let mut comp = 0usize;
+        for _ in 0..n {
+            comp += t.i32()?.max(0) as usize;
+            let _ = t.i32()?;
+        }
+        out.extend_from_slice(&f.read(off + 16 + 8 * n, comp)?);
+        Ok(out)
     }
 }
 
@@ -202,15 +289,14 @@ pub fn read_texture(pkg: &Package, idx: i32, tfc: &TfcCache) -> Result<Texture> 
         let mut data: Option<Vec<u8>> = None;
         if flags & 0x20 == 0 && count > 0 {
             if flags & 0x01 != 0 {
-                let f = tfc.get(&tfc_name)?;
                 let off = off as usize;
                 if flags & 0x10 != 0 {
                     let mut out = vec![0u8; count as usize];
-                    decompress_chunk(&f, off, &mut out).context("tfc lzo")?;
+                    let chunk = tfc.chunk(&tfc_name, off).context("tfc lzo")?;
+                    decompress_chunk(&chunk, 0, &mut out).context("tfc lzo")?;
                     data = Some(out);
                 } else {
-                    ensure!(off + count as usize <= f.len(), "tfc range");
-                    data = Some(f[off..off + count as usize].to_vec());
+                    data = Some(tfc.read(&tfc_name, off, count as usize)?);
                 }
             } else {
                 // inline
@@ -337,3 +423,54 @@ pub fn write_dds(t: &Texture, path: &Path) -> Result<()> {
 
 /// Read a level's inline lightmap textures etc. share this path; helper to read a fixed `Reader` slice.
 pub fn _unused(_r: &Reader) {}
+
+#[cfg(test)]
+mod tfc_tests {
+    use super::*;
+    use crate::package::PACKAGE_TAG;
+
+    /// A tfc with a raw run at 100 and a two-block LZO chunk at 200, then trailing bytes the chunk reader must not need.
+    fn sample() -> (PathBuf, Vec<u8>, Vec<u8>) {
+        let dir = std::env::temp_dir().join(format!("tfc-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw: Vec<u8> = (0..50u8).collect();
+        let plain: Vec<u8> = (0..100u32).map(|i| (i * 7 % 13) as u8).collect();
+        let (a, b) = plain.split_at(64);
+        let ca = lzokay_native::compress(a).unwrap();
+        let cb = lzokay_native::compress(b).unwrap();
+        let mut f = vec![0xEE; 100];
+        f.extend_from_slice(&raw);
+        f.resize(200, 0xDD);
+        f.extend_from_slice(&PACKAGE_TAG.to_be_bytes());
+        f.extend_from_slice(&64u32.to_be_bytes());
+        f.extend_from_slice(&((ca.len() + cb.len()) as i32).to_be_bytes());
+        f.extend_from_slice(&(plain.len() as i32).to_be_bytes());
+        for (c, u) in [(ca.len(), 64usize), (cb.len(), 36)] {
+            f.extend_from_slice(&(c as i32).to_be_bytes());
+            f.extend_from_slice(&(u as i32).to_be_bytes());
+        }
+        f.extend_from_slice(&ca);
+        f.extend_from_slice(&cb);
+        f.extend_from_slice(&[0xCC; 40]);
+        std::fs::write(dir.join("T.tfc"), &f).unwrap();
+        (dir, raw, plain)
+    }
+
+    #[test]
+    fn reads_by_offset_match_the_whole_file() {
+        let (dir, raw, plain) = sample();
+        for slurp in [false, true] {
+            let c = TfcCache { dir: dir.clone(), files: Mutex::new(HashMap::new()), slurp };
+            assert_eq!(c.read("T", 100, 50).unwrap(), raw, "raw run, slurp {slurp}");
+            let chunk = c.chunk("T", 200).unwrap();
+            let mut out = vec![0u8; plain.len()];
+            decompress_chunk(&chunk, 0, &mut out).unwrap();
+            assert_eq!(out, plain, "lzo chunk, slurp {slurp}");
+            assert!(c.read("T", 1_000_000, 4).is_err(), "past the end, slurp {slurp}");
+            let (files, held) = c.mem();
+            assert_eq!(files, 1);
+            assert_eq!(held > 0, slurp, "only the old mode keeps the file in memory");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

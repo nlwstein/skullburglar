@@ -102,6 +102,36 @@ pub struct EvictCounters {
     pub forgets_pending: u32,
 }
 
+/// B-287: the static meshes, materials and baked lights one visit to a level used (named or loaded since its start),
+/// kept so the next visit can load them again at the start.
+#[derive(Default, Clone, Debug, PartialEq)]
+pub struct VisitSet {
+    pub meshes: Vec<String>,
+    pub materials: Vec<String>,
+    pub lights: Vec<String>,
+}
+
+impl VisitSet {
+    /// Adds what `other` holds (once each): a level visited again keeps what any visit used, since what a visit names
+    /// depends on how far it got (streamed sublevels, how long the player stayed).
+    pub fn merge(&mut self, other: &VisitSet) {
+        fn add(into: &mut Vec<String>, from: &[String]) {
+            let have: HashSet<String> = into.iter().cloned().collect();
+            into.extend(from.iter().filter(|p| !have.contains(*p)).cloned());
+        }
+        add(&mut self.meshes, &other.meshes);
+        add(&mut self.materials, &other.materials);
+        add(&mut self.lights, &other.lights);
+    }
+
+    pub fn len(&self) -> usize {
+        self.meshes.len() + self.materials.len() + self.lights.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// B-287: the clock value eviction goes by: what was last named before it is dead. `keep` levels stay resident.
 pub fn eviction_cutoff(boundaries: &[u64], keep: usize) -> Option<u64> {
     let keep = keep.max(1);
@@ -689,6 +719,24 @@ impl Resolver {
         };
         slot.last_used = frame;
         let pending = if is_variant(&slot.path) { SKIP } else { NONE };
+        // Debug: BOTS_N1_SKIP_MATS=a,b leaves out every draw whose material path contains one of the words.
+        {
+            static SKIP_MATS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+            let words = SKIP_MATS.get_or_init(|| {
+                // B-310: the port draws a fog volume's mesh only as the volume's apply pass (it fades the scene by the
+                // volume's thickness); it is never a visible shell. n1 does the fade analytically, so the dust shell's
+                // mesh is left out unless fog volumes are off (`BOTS_N1_FOGVOL=0`).
+                let volumes_on = std::env::var("BOTS_N1_FOGVOL").map_or(true, |v| v != "0");
+                let mut w: Vec<String> = if volumes_on { vec!["FogVolumeDust".to_string()] } else { vec![] };
+                if let Ok(v) = std::env::var("BOTS_N1_SKIP_MATS") {
+                    w.extend(v.split(',').filter(|x| !x.is_empty()).map(str::to_string));
+                }
+                w
+            });
+            if words.iter().any(|w| slot.path.contains(w.as_str())) {
+                return SKIP;
+            }
+        }
         match slot.state {
             SlotState::Ready(id) => return id,
             SlotState::Missing => return NONE,
@@ -735,6 +783,34 @@ impl Resolver {
             slot.state = SlotState::Pending;
             slot.requested = false;
             n += 1;
+        }
+        n
+    }
+
+    /// B-287: what this visit (since the last `level_boundary`) used and still holds. Call it before `level_boundary`.
+    pub fn visit_set(&self) -> VisitSet {
+        let since = self.boundaries.last().copied().unwrap_or(0);
+        let pick = |slots: &[Slot]| -> Vec<String> {
+            slots
+                .iter()
+                .filter(|s| s.last_used >= since && matches!(s.state, SlotState::Ready(_)) && !s.path.contains('?'))
+                .map(|s| s.path.clone())
+                .collect()
+        };
+        VisitSet { meshes: pick(&self.meshes), materials: pick(&self.materials), lights: pick(&self.lights) }
+    }
+
+    /// B-287: requests what a past visit used; the ones still resident are left alone. Returns the new requests.
+    pub fn preload_visit(&mut self, v: &VisitSet) -> usize {
+        let mut n = 0;
+        for p in &v.materials {
+            n += self.preload(PreloadKind::Material, p) as usize;
+        }
+        for p in &v.meshes {
+            n += self.preload(PreloadKind::Mesh, p) as usize;
+        }
+        for p in &v.lights {
+            n += self.preload(PreloadKind::Light, p) as usize;
         }
         n
     }
@@ -1012,6 +1088,19 @@ impl FeedFrame {
 #[cfg(test)]
 mod evict_tests {
     use super::*;
+
+    #[test]
+    fn visit_merge_keeps_each_path_once() {
+        let mut a = VisitSet { meshes: vec!["m1".into(), "m2".into()], materials: vec![], lights: vec!["l1".into()] };
+        let b = VisitSet { meshes: vec!["m2".into(), "m3".into()], materials: vec!["x".into()], lights: vec!["l1".into(), "l2".into()] };
+        a.merge(&b);
+        assert_eq!(a.meshes, vec!["m1", "m2", "m3"]);
+        assert_eq!(a.materials, vec!["x"]);
+        assert_eq!(a.lights, vec!["l1", "l2"]);
+        assert_eq!(a.len(), 6);
+        a.merge(&b);
+        assert_eq!(a.len(), 6);
+    }
 
     #[test]
     fn cutoff_waits_for_keep_levels() {

@@ -11,7 +11,11 @@ struct Globals { vp: mat4x4<f32>, right: vec4<f32>, up: vec4<f32>, fwd: vec4<f32
 @group(1) @binding(1) var tex1: texture_2d<f32>;
 @group(1) @binding(2) var tex2: texture_2d<f32>;
 @group(1) @binding(3) var tex3: texture_2d<f32>;
-@group(1) @binding(4) var samp: sampler;
+@group(1) @binding(4) var tex4: texture_2d<f32>;
+@group(1) @binding(5) var tex5: texture_2d<f32>;
+@group(1) @binding(6) var tex6: texture_2d<f32>;
+@group(1) @binding(7) var tex7: texture_2d<f32>;
+@group(1) @binding(8) var samp: sampler;
 
 struct MatIn { uv: vec2<f32>, uv2: vec2<f32>, interp: f32, vcol: vec4<f32>, pixel_w: f32, scene_w: f32, screen: vec2<f32>, ndv: f32, wpos: vec3<f32>, nrm: vec3<f32> };
 

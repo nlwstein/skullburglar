@@ -26,6 +26,9 @@ REXCVAR_DEFINE_BOOL(launcher, true, "bots",
                     "Show the launcher before starting the game (default: unless --game_data_root is given)");
 REXCVAR_DEFINE_BOOL(check_updates, true, "bots",
                     "Release builds: the launcher checks online for a newer version and offers its download page");
+REXCVAR_DEFINE_BOOL(diagnostic_logging, false, "bots",
+                    "Start the game with BOTS_DIAG=1: a fuller log (frame hitches, periodic host reports, GPU timing "
+                    "spans) for bug reports. Off by default");
 REXCVAR_DEFINE_STRING(renderer, bots::kDefaultRenderer, "bots",
                       "Which renderer draws the game: new (the default; on tvOS pre1 is) or pre1, the pre-1.0 renderer "
                       "(deprecated). Only pre1 selects the old one; any other value is the new renderer");
@@ -81,6 +84,11 @@ std::vector<Setting> Catalog() {
                {}});
   s.push_back({"check_updates", "", "Check for new versions",
                "When the launcher opens, look online for a newer Skullburglar and offer its download page.", {}});
+  s.push_back({"diagnostic_logging", "", "Diagnostic logging",
+               "A fuller log for bug reports: slow frames, a system report every few seconds and GPU timings. Costs a "
+               "little speed and makes the log bigger. The normal log always has the essentials. Takes effect the next "
+               "time the game starts.",
+               {}});
   s.push_back({"pad_prompts", "", "Controller button prompts",
                "Which buttons the game shows. Automatic matches the controller you used last.",
                {{"auto", "Automatic"}, {"xbox", "Xbox"}, {"ps4", "PlayStation 4"}, {"ps5", "PlayStation 5"}}});
@@ -106,6 +114,13 @@ std::vector<Setting> Catalog() {
                "Linear turns in proportion to the stick, so small movements are faster. Up and down is always "
                "linear. The game's own Controller Sensitivity option still applies.",
                {{"original", "Original curve"}, {"linear", "Linear"}}});
+  s.push_back({"stick_look_speed", "", "Stick look speed",
+               "How fast the right stick turns the camera, as a multiple of the game's own speed. 1x is as shipped; "
+               "up to 3x, past the game's highest Controller Sensitivity, for a pad that turns as fast as a mouse. "
+               "It scales turning left, right, up and down at every stick position, and the game's own Controller "
+               "Sensitivity option still applies on top. Ctrl-click to type a value.",
+               {}});
+  s.back().slider_min = 1, s.back().slider_max = 3, s.back().slider_linear = true, s.back().slider_format = "%.2fx";
   s.push_back({"vibration", "", "Vibration", "Turn off to stop the controller rumbling.", {}});
   s.push_back({"user_signin_live", "", "LAN co-op",
                "Play the story with another computer on your network. One player starts a story; the other picks "

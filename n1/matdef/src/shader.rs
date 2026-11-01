@@ -59,6 +59,7 @@ pub fn assemble(c: &Compiled, f: ShaderFlags) -> String {
         .replace("DYN_ON", if f.dynl { "true" } else { "false" })
         .replace("USES_LIGHTVEC", if body.contains("fi.light_ts") { "true" } else { "false" })
         .replace("FOG_TARGET", match f.fog_mode { 1 => "vec3<f32>(0.0)", 2 => "vec3<f32>(1.0)", _ => "g.fog_col.rgb" })
+        .replace("VOL_TARGET", match f.fog_mode { 1 => "vec3<f32>(0.0)", 2 => "vec3<f32>(1.0)", _ => "vc" })
         .replace("FOG_ON", if f.fog { "true" } else { "false" })
         .replace("MASKED", if f.masked { "true" } else { "false" })
         .replace("UNLIT", if f.unlit { "true" } else { "false" })

@@ -44,7 +44,10 @@ pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 pub const HDR_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 const ALIGN: u64 = 256;
 const GLOBALS_AT: u64 = 0;
-const POST_AT: u64 = 256; // post uniform blocks, 256 bytes apart
+// Post uniform blocks, 256 bytes apart, after the globals (B-310: the globals grew past 256 bytes when the fog volumes
+// joined them, and the post blocks written after them overwrote the volumes).
+const POST_AT: u64 = 768;
+const _: () = assert!(std::mem::size_of::<Globals>() as u64 <= POST_AT);
 // grade, down, blur A h, blur A v, blur B, composite, copy, then (B-266) the linear composite and up to
 // `POST_MATS` post-material passes
 const POST_MATS: usize = 3;
@@ -1988,6 +1991,46 @@ impl Renderer {
                 }
             })
         });
+        self.log_draws();
+    }
+
+    /// `BOTS_N1_DRAWLOG=<N>`: every Nth frame, one line per draw in draw order (material id, blend, sides,
+    /// mesh, shader built or not, bounds sphere in feed coordinates) plus the opaque count, for finding which
+    /// material a see-through volume or haze is drawn with (B-297). Material ids map to paths with
+    /// `BOTS_N1_COMPILE_LOG=1` ("material #N is PATH").
+    fn log_draws(&self) {
+        static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        static FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let every = *EVERY.get_or_init(|| {
+            std::env::var("BOTS_N1_DRAWLOG").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+        });
+        if every == 0 {
+            return;
+        }
+        let f = FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if f % every != 0 {
+            return;
+        }
+        let opaque = self.draws.iter().filter(|d| !blended(d.key.blend)).count();
+        eprintln!("n1ffi: drawlog frame {f}: {} draws, {opaque} opaque/masked", self.draws.len());
+        for (i, d) in self.draws.iter().enumerate() {
+            let sp = self.spheres.get(d.instance as usize).copied().unwrap_or(([0.0; 3], 0.0));
+            eprintln!(
+                "n1ffi: drawlog   #{i} mat {} blend {} two_sided {} skin {} mesh {} idx {} shader {} depth {:.0} sphere ({:.0} {:.0} {:.0}) r {:.0}",
+                d.mat,
+                d.key.blend,
+                d.key.two_sided,
+                d.key.skin,
+                d.mesh,
+                d.index_count,
+                if d.key.shader == NO_SHADER { "pending".to_string() } else { d.key.shader.to_string() },
+                d.depth,
+                sp.0[0],
+                sp.0[1],
+                sp.0[2],
+                sp.1
+            );
+        }
     }
 
     /// Records the frame into `cmd`, which must be outside any render pass / dynamic rendering. `serial` is the
@@ -2112,6 +2155,13 @@ impl Renderer {
             eye_y,
             self.time(),
         );
+        // B-205 debug A/B: bit 14 (16384) puts the light environment key's specular back to the unscaled Phong.
+        if self.debug_bits & 16384 != 0 {
+            globals.sun_col[3] = 1.0;
+        }
+        if crate::light::fog_volumes_on() {
+            globals.set_fog_volumes(&self.lighting.fog_vols);
+        }
         let post_on = self.knobs.post;
         let pp = &self.lighting.post;
         let grade_on = post_on && pp.grade.is_some();
