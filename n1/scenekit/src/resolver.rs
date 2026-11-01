@@ -693,7 +693,15 @@ impl Resolver {
         {
             static SKIP_MATS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
             let words = SKIP_MATS.get_or_init(|| {
-                std::env::var("BOTS_N1_SKIP_MATS").map(|v| v.split(',').filter(|w| !w.is_empty()).map(str::to_string).collect()).unwrap_or_default()
+                // B-310: the port draws a fog volume's mesh only as the volume's apply pass (it fades the scene by the
+                // volume's thickness); it is never a visible shell. n1 does the fade analytically, so the dust shell's
+                // mesh is left out unless fog volumes are off (`BOTS_N1_FOGVOL=0`).
+                let volumes_on = std::env::var("BOTS_N1_FOGVOL").map_or(true, |v| v != "0");
+                let mut w: Vec<String> = if volumes_on { vec!["FogVolumeDust".to_string()] } else { vec![] };
+                if let Ok(v) = std::env::var("BOTS_N1_SKIP_MATS") {
+                    w.extend(v.split(',').filter(|x| !x.is_empty()).map(str::to_string));
+                }
+                w
             });
             if words.iter().any(|w| slot.path.contains(w.as_str())) {
                 return SKIP;
