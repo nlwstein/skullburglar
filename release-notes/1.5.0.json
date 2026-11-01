@@ -2,6 +2,8 @@
  "Fixed the crash at the end of mission 7 on the Steam Deck: the new renderer now lets go of levels you've left, and loads them again behind the loading screen when you return. In our Deck test of missions 1 to 7, peak memory dropped from about 5.2 GB to 3.2 GB.",
  "The new renderer uses about 1.6 GB less memory the first time you visit a level, which helps 16 GB devices such as the Steam Deck. On Linux, memory freed during level loads is also given back to the system.",
  "Fixed grenade and SAW explosion smoke drawing as hard-edged gray polygons in the new renderer.",
+ "Fog and haze are back in the new renderer: mission 3 is no longer darker and bluer than the original, and the flat beige shape in the sky there is gone.",
+ "Fixed a crash on exit when the game closes itself (for example with the console quit command): it now exits the same way as Quit in the main menu.",
  "New \"Stick look speed\" setting (Controller section): turn the camera with the right stick up to three times faster than the game's highest sensitivity. The default is the original speed.",
  "New \"Diagnostic logging\" option in the launcher (off by default) writes a fuller log for bug reports and shows where the log folder is.",
  "The launcher now shows the \"new version available\" notice right above the Play button, and tells you when it couldn't check for updates.",
