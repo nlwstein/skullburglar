@@ -689,6 +689,16 @@ impl Resolver {
         };
         slot.last_used = frame;
         let pending = if is_variant(&slot.path) { SKIP } else { NONE };
+        // Debug: BOTS_N1_SKIP_MATS=a,b leaves out every draw whose material path contains one of the words.
+        {
+            static SKIP_MATS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+            let words = SKIP_MATS.get_or_init(|| {
+                std::env::var("BOTS_N1_SKIP_MATS").map(|v| v.split(',').filter(|w| !w.is_empty()).map(str::to_string).collect()).unwrap_or_default()
+            });
+            if words.iter().any(|w| slot.path.contains(w.as_str())) {
+                return SKIP;
+            }
+        }
         match slot.state {
             SlotState::Ready(id) => return id,
             SlotState::Missing => return NONE,

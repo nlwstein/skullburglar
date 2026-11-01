@@ -2932,6 +2932,16 @@ void Live(uint8_t* base) {
       LightsBin(nl, ++st.env_stamp);
       bool post_changed = false;
       if (fp) {
+        if (std::getenv("BOTS_N1_FOGLOG")) {  // B-297: every attached fog component and its properties, as JSON
+          static uint32_t n = 0;
+          if (n++ % 4 == 0)
+            for (uint32_t f : g_extras.fog) {
+              if (!IsObject(f)) continue;
+              std::string js;
+              ObjectJson(js, f, "ActorComponent");
+              REXLOG_INFO("scenefeed fog component {:08X} {}: {}", f, Path(f), js);
+            }
+        }
         FogBin(nl.fog);
         PostBin(nl);
         if (PostMatsOn()) st.post_quick = PostQuick();

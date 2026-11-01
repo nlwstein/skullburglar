@@ -1988,6 +1988,46 @@ impl Renderer {
                 }
             })
         });
+        self.log_draws();
+    }
+
+    /// `BOTS_N1_DRAWLOG=<N>`: every Nth frame, one line per draw in draw order (material id, blend, sides,
+    /// mesh, shader built or not, bounds sphere in feed coordinates) plus the opaque count, for finding which
+    /// material a see-through volume or haze is drawn with (B-297). Material ids map to paths with
+    /// `BOTS_N1_COMPILE_LOG=1` ("material #N is PATH").
+    fn log_draws(&self) {
+        static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        static FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let every = *EVERY.get_or_init(|| {
+            std::env::var("BOTS_N1_DRAWLOG").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+        });
+        if every == 0 {
+            return;
+        }
+        let f = FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if f % every != 0 {
+            return;
+        }
+        let opaque = self.draws.iter().filter(|d| !blended(d.key.blend)).count();
+        eprintln!("n1ffi: drawlog frame {f}: {} draws, {opaque} opaque/masked", self.draws.len());
+        for (i, d) in self.draws.iter().enumerate() {
+            let sp = self.spheres.get(d.instance as usize).copied().unwrap_or(([0.0; 3], 0.0));
+            eprintln!(
+                "n1ffi: drawlog   #{i} mat {} blend {} two_sided {} skin {} mesh {} idx {} shader {} depth {:.0} sphere ({:.0} {:.0} {:.0}) r {:.0}",
+                d.mat,
+                d.key.blend,
+                d.key.two_sided,
+                d.key.skin,
+                d.mesh,
+                d.index_count,
+                if d.key.shader == NO_SHADER { "pending".to_string() } else { d.key.shader.to_string() },
+                d.depth,
+                sp.0[0],
+                sp.0[1],
+                sp.0[2],
+                sp.1
+            );
+        }
     }
 
     /// Records the frame into `cmd`, which must be outside any render pass / dynamic rendering. `serial` is the
