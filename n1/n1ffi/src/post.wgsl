@@ -236,9 +236,12 @@ fn composite(px: vec2<i32>, uv: vec2<f32>) -> vec3<f32> {
         for (var k = 0; k < 8; k++) {
             g += textureSample(gods, smp, uv + GOD_TAPS[k]).rgb;
         }
-        c += g * 0.5;
+        // B-313: the mean of the 8 taps. The port stores its rays / 4 in an 8888 target and the composite's x4 undoes
+        // that; fs_god writes them unscaled into a float target, so a x4 here made them 4 times too strong (a sweep
+        // against the port at the 73575 sun views: x1, x1/2, x1/3, x1/4 gave mean abs. difference 9.9, 7.6, 6.7, 6.2).
+        c += g * 0.125;
         if (p.taps[4].w > 1.5) {
-            // B-313 diagnostics: the god-rays texture alone (x4, as the composite adds it).
+            // B-313 diagnostics: the god-rays texture alone (x4, to see it).
             c = textureSample(gods, smp, uv).rgb * 4.0;
         }
     }

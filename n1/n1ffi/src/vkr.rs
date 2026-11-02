@@ -2316,8 +2316,6 @@ impl Renderer {
                 // from the table for a sweep in one session (7: only where nothing was drawn, as before).
                 const SKY: [f32; 8] = [GOD_SKY_DIST, 1.0e4, 2.0e4, 5.0e4, 1.0e5, 2.0e5, 5.0e5, f32::INFINITY];
                 o[4][0] = SKY[((self.debug_bits >> 21) & 7) as usize];
-                // Debug bits 24-25 scale the rays (1, 1/2, 1/3, 1/4) for a strength sweep against the port.
-                o[6][3] *= [1.0, 0.5, 1.0 / 3.0, 0.25][((self.debug_bits >> 24) & 3) as usize];
                 let on = if dbg > 0.0 { 2.0 } else { 1.0 };
                 blocks[5][14][3] = on;
                 blocks[7][14][3] = on;
