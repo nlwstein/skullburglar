@@ -978,6 +978,13 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
         // Render-to-texture: a resolve destination is sampled straight from its host image.
         uint32_t swizzle = xe::XE_GPU_TEXTURE_SWIZZLE_RGBA;
         view = ResolvedTextureView(*resolved, fetch, binding.is_signed, swizzle);
+        if (damage_address_ && (uint32_t(fetch.base_address) << 12) == damage_address_) {  // B-292
+          if (damage_swizzle_ != swizzle || !damage_logged_) {
+            damage_logged_ = true;
+            REXLOG_INFO("hybrid n1: damage texture fetch swizzle {:o} (guest swapped {}, fetch swizzle {:o}, format {}, exp_adjust {}, signs {:X})", swizzle, int(resolved->swapped), uint32_t(fetch.swizzle), uint32_t(fetch.format), int(fetch.exp_adjust), rg::texture_util::SwizzleSigns(fetch));
+          }
+          damage_swizzle_ = swizzle;
+        }
         draw_reads_.push_back(resolved);
         texture_swizzles[binding.fetch_constant] = swizzle;
         texture_signs[binding.fetch_constant] = rg::texture_util::SwizzleSigns(fetch);

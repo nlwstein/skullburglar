@@ -51,7 +51,11 @@ const _: () = assert!(std::mem::size_of::<Globals>() as u64 <= POST_AT);
 // grade, down, blur A h, blur A v, blur B, composite, copy, then (B-266) the linear composite and up to
 // `POST_MATS` post-material passes
 const POST_MATS: usize = 3;
-const POST_PASSES: usize = 9 + POST_MATS; // the last set is the god-rays pass (B-307)
+// Sets: 0-7 the fixed passes above, from 8 the post materials, then (B-292) the damage pre-pass when it runs before
+// the bloom (it is one of the `POST_MATS` taken out of the material list, so it never needs a set of its own beyond
+// them), padding, and the last set is the god-rays pass (B-307).
+const POST_PASSES: usize = 9 + POST_MATS;
+const _: () = assert!(8 + POST_MATS < POST_PASSES, "the god-rays set must not overlap a material or the damage set");
 const DYN_AT: u64 = POST_AT + 256 * POST_PASSES as u64;
 
 /// Texture ids of the built-in 1x1 textures.
@@ -407,6 +411,10 @@ pub struct Renderer {
     post_pipes: HashMap<(&'static str, i32), vk::Pipeline>,
     /// B-266: post-material textures by path: (texture id, takes Xenos's gamma curve in the shader).
     post_tex: HashMap<String, (u32, bool)>,
+    /// B-292: the damage render target's picture (the host reads the game's `DamageEffectTexture` back): texture id,
+    /// plus slots given up that the GPU may still read (freed when their upload is done).
+    damage_tex: Option<u32>,
+    damage_old: Vec<u32>,
     /// B-266: the entry points recorded last frame (logged when the set changes).
     post_mats_last: Vec<&'static str>,
     /// B-267: a wall clock for post materials that animate while the game is paused (the death screen).
@@ -728,6 +736,8 @@ impl Renderer {
                 post_module,
                 post_pipes: HashMap::new(),
                 post_tex: HashMap::new(),
+                damage_tex: None,
+                damage_old: Vec::new(),
                 post_mats_last: Vec::new(),
                 post_real0: std::time::Instant::now(),
                 pipe_pending: 0,
@@ -1110,6 +1120,32 @@ impl Renderer {
         Ok(())
     }
 
+    /// B-292: the picture of the game's `DamageEffectTexture` (hit-direction marks), BGRA8 in the guest's channel order,
+    /// `w` x `h`. `None` clears it (no hit showing). The old image is given back once the GPU is done with it.
+    pub fn damage_tex_set(&mut self, picture: Option<(u32, u32, &[u8])>) {
+        if let Some(id) = self.damage_tex.take() {
+            self.damage_old.push(id);
+        }
+        if let Some((w, h, bgra)) = picture {
+            let mips = [bgra];
+            let desc = scenekit::TextureDesc {
+                format: scenekit::TexFormat::Bgra8,
+                srgb: false,
+                width: w,
+                height: h,
+                mips: &mips,
+                normal: false,
+                gamma: false,
+            };
+            match self.try_add_texture(&desc) {
+                Ok(id) => self.damage_tex = Some(id),
+                Err(e) => eprintln!("n1ffi: damage texture {w}x{h}: {e:#}"),
+            }
+        }
+        let old = std::mem::take(&mut self.damage_old);
+        self.damage_old = old.into_iter().filter(|&id| !self.free_texture(id)).collect();
+    }
+
     /// B-266: the frame's post-material passes whose textures are loaded: (entry point, params, textures, pwl flags).
     fn post_mat_passes(&self) -> Vec<(&'static str, [f32; 4], [u32; 2], [bool; 2])> {
         let mut v = Vec::new();
@@ -1124,6 +1160,16 @@ impl Renderer {
                 match self.post_tex.get(*t) {
                     Some(&(id, g)) => (ids[k], pwl[k]) = (id, g),
                     None => ready = false,
+                }
+            }
+            if e.kind == crate::postmat::Kind::Damage {
+                // The hit picture is the second texture. The game's fetch has no gamma flag, so the stored bytes are read as they are.
+                if let Some(id) = self.damage_tex {
+                    (ids[1], pwl[1]) = (id, false);
+                } else if e.params[0] <= 0.0 {
+                    continue; // no critical-health fade and no hit showing: nothing to draw
+                } else {
+                    ready = true; // the fade alone needs no ramp
                 }
             }
             if ready && v.len() < POST_MATS {
@@ -2188,8 +2234,20 @@ impl Renderer {
             })
         };
         // B-266: post materials after the composite (which then writes linear into a full-res target).
-        let mats = if post_on { self.post_mat_passes() } else { vec![] };
-        let names: Vec<&'static str> = mats.iter().map(|m| m.0).collect();
+        let mut mats = if post_on { self.post_mat_passes() } else { vec![] };
+        // B-292: the port runs the damage effect on the scene before the bloom and the composite (draws 425, then 428
+        // to 432 read its result), so the glow and the 15% blur see the marks. `debug_bits` 65536 (`hybrid n1debug`) puts it
+        // back after the composite with the other materials (16384 is B-205's specular switch); 32768 drops the 5% pinch.
+        let damage_pre = if self.debug_bits & 65536 == 0 {
+            mats.iter().position(|m| m.0 == "fs_damage").map(|k| {
+                let mut m = mats.remove(k);
+                m.1[1] = if self.debug_bits & 32768 == 0 { 0.05 } else { 0.0 };
+                m
+            })
+        } else {
+            None
+        };
+        let names: Vec<&'static str> = damage_pre.iter().chain(mats.iter()).map(|m| m.0).collect();
         if names != self.post_mats_last {
             eprintln!(
                 "n1ffi: post mats {:?} (params {:?}, time {:.2})",
@@ -2220,6 +2278,15 @@ impl Renderer {
             o[6] = [time, pwl[0] as u32 as f32, pwl[1] as u32 as f32, real];
             blocks.push(o);
         }
+        if let Some((_, params, _, pwl)) = &damage_pre {
+            let mut o = blk(ft, [0.0, 0.0], &[], [0.0, 0.0]);
+            o[4][3] = 0.0;
+            o[5] = *params;
+            let real = (self.post_real0.elapsed().as_secs_f64() % 3600.0) as f32;
+            o[6] = [time, pwl[0] as u32 as f32, pwl[1] as u32 as f32, real];
+            blocks.push(o);
+        }
+        debug_assert!(blocks.len() < POST_PASSES, "post passes: {} blocks before the god-rays set", blocks.len());
         // B-307: the god-rays pass is the last set; the composites read its texture when it ran.
         let god = if post_on { pp.god_fields() } else { None };
         let god_on = god.is_some();
@@ -2370,7 +2437,12 @@ impl Renderer {
         // Post sets: (uniform block, source, bloom, bloom2) per pass; binding 5 is the depth buffer.
         {
             let hdr = self.hdr.as_ref().unwrap().view;
-            let scene = if grade_on { self.graded.as_ref().unwrap().view } else { hdr };
+            let graded_v = self.graded.as_ref().unwrap().view;
+            let scene_orig = if grade_on { graded_v } else { hdr };
+            // The scene the bloom and composite read: the damage pass's output when it runs first (it writes the full-res
+            // target the grade no longer needs, or the spare one).
+            let pre_dst = if grade_on { hdr } else { graded_v };
+            let scene = if damage_pre.is_some() { pre_dst } else { scene_orig };
             let dv = self.depth.as_ref().unwrap().view;
             let [q0, q1, q2] = self.bloom.as_ref().map(|x| [x[0].view, x[1].view, x[2].view]).unwrap();
             let mut srcs = vec![
@@ -2385,13 +2457,21 @@ impl Renderer {
             if !mats.is_empty() {
                 // B-266: the linear composite reads the scene and writes the other full-res target; the material
                 // passes ping-pong between the two, the last writing the output.
-                let other = if grade_on { hdr } else { self.graded.as_ref().unwrap().view };
+                let other = if damage_pre.is_some() { scene_orig } else { pre_dst };
                 srcs.push((scene, q0, q2));
                 let mut cur = other;
                 for (_, _, ids, _) in &mats {
                     srcs.push((cur, self.tex_view(ids[0], TEX_BLACK), self.tex_view(ids[1], TEX_BLACK)));
                     cur = if cur == other { scene } else { other };
                 }
+            }
+            if mats.is_empty() {
+                // Only the pre-pass (if any) follows set 6: its block sits at index 8, and set 7 is unused.
+                // The god-rays set (B-307) stays the last one, after the padding below.
+                srcs.push((scene, q0, q2));
+            }
+            if let Some((_, _, ids, _)) = &damage_pre {
+                srcs.push((scene_orig, self.tex_view(ids[0], TEX_BLACK), self.tex_view(ids[1], TEX_BLACK)));
             }
             // B-307: the god-rays set is last; it reads depth only (bloom[0] stands in for the texture it writes).
             while srcs.len() < POST_PASSES - 1 {
@@ -2507,6 +2587,10 @@ impl Renderer {
             self.post_pipe("fs_comp", self.color_format)?,
             self.post_pipe("fs_copy", self.color_format)?,
         );
+        let p_pre = match &damage_pre {
+            Some(m) => Some(self.post_pipe(m.0, HDR_FORMAT)?),
+            None => None,
+        };
         let mut p_mats = Vec::with_capacity(mats.len());
         if !mats.is_empty() {
             p_mats.push(self.post_pipe("fs_comp_lin", HDR_FORMAT)?);
@@ -2946,6 +3030,19 @@ impl Renderer {
                     pass(graded.view, catt_layout, full(rw, rh), p_grade, ps[0]);
                     barrier(cao, frag, &[to_read(graded.image)]);
                 }
+                // The scene the bloom and the composite read, and the target the other passes ping-pong with.
+                let (scene_rt, other_rt) = match (grade_on, p_pre.is_some()) {
+                    (true, false) => (graded, hdr),
+                    (false, false) => (hdr, graded),
+                    (true, true) => (hdr, graded),
+                    (false, true) => (graded, hdr),
+                };
+                if let Some(pipe) = p_pre {
+                    // B-292: damage first, from the scene before the bloom (the grade's output, or the raw scene).
+                    barrier(frag, cao, &[to_att(scene_rt.image)]);
+                    pass(scene_rt.view, catt_layout, full(rw, rh), pipe, ps[8 + mats.len()]);
+                    barrier(cao, frag, &[to_read(scene_rt.image)]);
+                }
                 if blur_on {
                     barrier(frag, cao, &[to_att(bloom[0].image)]);
                     pass(bloom[0].view, catt_layout, bq, p_down, ps[1]);
@@ -2986,7 +3083,6 @@ impl Renderer {
                 } else {
                     // B-266: linear composite into the full-res target the composite doesn't read, then each post
                     // material, ping-ponging; the last writes the output with the gamma and screen fade.
-                    let (scene_rt, other_rt) = if grade_on { (graded, hdr) } else { (hdr, graded) };
                     barrier(frag, cao, &[to_att(other_rt.image)]);
                     pass(other_rt.view, catt_layout, full(rw, rh), p_mats[0], ps[7]);
                     barrier(cao, frag, &[to_read(other_rt.image)]);

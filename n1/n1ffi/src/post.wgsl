@@ -301,13 +301,30 @@ fn fs_gangsta(i: VOut) -> @location(0) vec4<f32> {
     return mat_out(mix(vec3<f32>(1.0), vec3<f32>(1.0) + streak, a) * col, i.pos);
 }
 
+const DAMAGE_GAMMA: f32 = 1.12;
+
 // FX_Damage.DamageEffectMaterial (DamageEffectMaterial_MIC, B-292), g0.x = CriticalHealthFadeParameter. The scene fades
 // toward a 75% desaturated copy. The material's hit-arrow render target is not drawn (it is black without a hit).
 @fragment
 fn fs_damage(i: VOut) -> @location(0) vec4<f32> {
-    let s = textureSample(src, smp, i.uv).rgb;
-    let d = desat(s, 0.75, vec3<f32>(0.3, 0.59, 0.11));
-    return mat_out(mix(s, d, clamp(p.g0.x, 0.0, 1.0)), i.pos);
+    let w = vec3<f32>(0.3, 0.59, 0.11);
+    // The port reads the scene pinched toward the centre by 1 - g0.y * (hit picture's blue) (5% at full strength),
+    // the picture itself at the plain uv (decoded from draw 425, B-292).
+    let b = mat_tex1(i.uv).b;
+    let s = textureSample(src, smp, (i.uv - vec2<f32>(0.5)) * (1.0 - p.g0.y * b) + vec2<f32>(0.5)).rgb;
+    let s5 = mix(s, desat(s, 0.75, w), clamp(p.g0.x, 0.0, 1.0));
+    // tex1 = the host's picture of DamageEffectTexture (hit marks; black = none), its blue channel indexes the ramp
+    // (tex0, DamageRamp): alpha brightens the scene, colour overlays it (decoded from the material graph, B-292).
+    let ramp = mat_tex0_clamp(vec2<f32>(b, 0.5));   // clamped: b = 0 must not blend in the ramp's far end
+    // The blend runs on the scene in a gamma-encoded space (exponent 1.12, fitted on the port's own marker shots at
+    // 30/60/90 damage: n1/port green ratio 0.99/1.00/0.99; linear blending left 0.98/0.88/0.83, B-292).
+    let s5e = pow(max(s5, vec3<f32>(0.0)), vec3<f32>(1.0 / DAMAGE_GAMMA));
+    let m = s5e * (1.0 + 3.0 * ramp.a);
+    let o = mix(vec3<f32>(0.5), ramp.rgb, b);
+    let hi = o * m * 2.0;
+    let lo = vec3<f32>(1.0) - 2.0 * (vec3<f32>(1.0) - o) * (vec3<f32>(1.0) - m);
+    let r = select(lo, hi, dot(m, w) > 0.5);
+    return mat_out(pow(max(r, vec3<f32>(0.0)), vec3<f32>(DAMAGE_GAMMA)), i.pos);
 }
 
 // C1HUD.SniperScope_V02_MAT (SniperScope_MIC, B-295), g0.x = its scalar parameter (0 = the 16:9 mapping). tex0
