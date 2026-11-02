@@ -51,6 +51,15 @@ UpdateInfo ParseReleases(const std::string& body, const std::string& base_url, c
 // packages (sorted). tools/ci/publish_downloads.py builds the same text.
 std::string SigningMessage(const std::string& version, std::vector<std::string> package_lines);
 
+// Windows: the setup program an update downloads runs from a stage folder in the temp folder, and the launcher keeps a
+// small note naming it (and the version it installs). Once the new version is running, that folder is deleted.
+// IsStageFolderName: whether `name` is exactly one of our own stage folder names ("skullburglar-update-" and then plain
+// letters and digits, nothing else: no separators, no dots), the only kind of folder the clean-up may touch.
+bool IsStageFolderName(const std::string& name);
+std::string FormatStageNote(const std::string& version, const std::string& folder_name);
+// False unless `text` is a note FormatStageNote wrote with a plain version and a valid stage folder name.
+bool ParseStageNote(const std::string& text, std::string& version, std::string& folder_name);
+
 // What kind of install this program runs from; decides which package replaces it.
 enum class InstallKind {
   kNone,          // a build run from a source tree, a disk image, a read-only place, a phone: no self-update

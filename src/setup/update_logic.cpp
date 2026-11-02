@@ -256,6 +256,32 @@ bool SignatureValid(const std::string& version, const std::vector<std::string>& 
 
 }  // namespace
 
+bool IsStageFolderName(const std::string& name) {
+  static const std::string kPrefix = "skullburglar-update-";
+  if (name.size() <= kPrefix.size() || name.size() > 64 || name.compare(0, kPrefix.size(), kPrefix) != 0) return false;
+  return std::all_of(name.begin() + kPrefix.size(), name.end(), [](char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+  });
+}
+
+std::string FormatStageNote(const std::string& version, const std::string& folder_name) {
+  return version + "\n" + folder_name + "\n";
+}
+
+bool ParseStageNote(const std::string& text, std::string& version, std::string& folder_name) {
+  const size_t a = text.find('\n');
+  if (a == std::string::npos) return false;
+  size_t b = text.find('\n', a + 1);
+  if (b == std::string::npos) b = text.size();
+  std::string v = text.substr(0, a), n = text.substr(a + 1, b - a - 1);
+  if (!n.empty() && n.back() == '\r') n.pop_back();
+  if (!v.empty() && v.back() == '\r') v.pop_back();
+  if (!PlainVersion(v) || !IsStageFolderName(n)) return false;
+  version = v;
+  folder_name = n;
+  return true;
+}
+
 bool HasVersionNumber(const std::string& v) { return !VersionNumbers(v).empty(); }
 
 bool IsNewerVersion(const std::string& a, const std::string& b) {
