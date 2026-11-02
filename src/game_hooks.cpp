@@ -316,6 +316,12 @@ void RunPlayerCommand(PPCContext& ctx, uint8_t* base, ExecState& st, uint32_t pl
 
 void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std::string& cmd) {
   bots::instr::NoteCommand(cmd);
+  // "mousefeed <spec>" (B-269): synthetic mouse motion through the driver's path, see mouse_pattern.h; "mousefeed off".
+  if (cmd.rfind("mousefeed ", 0) == 0) {
+    const std::string spec = cmd.substr(10);
+    if (auto* kbm = bots::MouseKeyboardDriver::instance()) kbm->SetFeed(spec == "off" ? "" : spec);
+    return;
+  }
   // "peek <hex addr> [count]": log guest words (pointers the game fills in at runtime).
   if (cmd.rfind("peek ", 0) == 0) {
     char* end = nullptr;
