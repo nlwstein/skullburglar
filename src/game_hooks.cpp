@@ -43,6 +43,7 @@
 #include "widescreen.h"
 #include "gfx/capture.h"
 #include "instr.h"
+#include "test_range.h"
 #include "input_math.h"
 #include "mnk_input.h"
 #include "prompt_state.h"
@@ -332,6 +333,13 @@ void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std:
     const std::string value = sp == std::string::npos ? "" : cmd.substr(sp + 1);
     REXLOG_INFO("BOTS_EXEC setflag {} = {} -> {}", name, value, rex::cvar::SetFlagByName(name, value) ? "ok" : "failed");
     return;
+  }
+  if (cmd.rfind("range ", 0) == 0) {
+    std::vector<std::string> expand;
+    if (bots::testrange::Command(base, cmd, expand)) {
+      for (const auto& c : expand) RunConsoleCommand(ctx, base, st, c);
+      return;
+    }
   }
   if (split_screen::Command(cmd) || debug::Command(base, cmd) || bots::scenefeed::Command(base, cmd)) return;
   if (!st.buffer) st.buffer = rex::system::kernel_memory()->SystemHeapAlloc(0x400);

@@ -1,0 +1,351 @@
+# Real-encounter check for the test range (B-299): the chapter's own enemies (with AI) against a god-mode player who
+# aims at the nearest foe and fires, for a fixed time. Logs every hit (BOTS_RANGE_DIR). Same file on the port and n1.
+#   botsctl.py run scenarios/range_real.txt --out DIR --set LOG=real_port1 --set CH=11010
+default CH=11010
+default LOG=real
+default WEAPON=BasicRifle
+wait -t 1800 phase==front_end || phase==movie || phase==dialog || phase==menu
+press_until "game.scenes~=MainMenu" START every=1000 timeout=120
+dismiss
+wait -t 1800 precompile.done==1
+exec LoadChapter ${CH}
+until "game.chapter==${CH} && phase==in_play && phase_s>=5" timeout=600
+sleep 5
+exec EnableCheats
+exec God
+sleep 1
+exec range log ${LOG}
+exec GiveWeapon C1GameNonNative.FcWeapon_${WEAPON}
+sleep 4
+exec AllAmmo
+exec range mark chapter ${CH}
+exec range mark trial real nearest 0 1
+macro aim_nearest 80000
+trigger L 1.0 80000
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+exec AllAmmo
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+exec AllAmmo
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+exec AllAmmo
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+macro fire 300
+sleep 0.5
+exec AllAmmo
+exec range mark end
+macro stop
+trigger L 0 100
