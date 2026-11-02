@@ -187,6 +187,12 @@ fn fs_god(i: VOut) -> @location(0) vec4<f32> {
     let m = max(max(abs(d.x), abs(d.y)), 1e-5);
     let stp = d / (m * 128.0);
     let dims = vec2<i32>(textureDimensions(depth));
+    // B-313 diagnostics (debug bits 18-19, in comp.w): 2 = the sky mask at this pixel, 3 = depth x 1000.
+    if (p.comp.w > 1.5) {
+        let d0 = textureLoad(depth, clamp(vec2<i32>(i.uv * vec2<f32>(dims)), vec2<i32>(0), dims - vec2<i32>(1)), 0);
+        let m0 = select(vec3<f32>(d0 * 1000.0), vec3<f32>(select(0.0, 1.0, d0 == 0.0)), p.comp.w < 2.5);
+        return vec4<f32>(m0 * 0.25, 1.0);
+    }
     var uv = i.uv;
     var w = 1.0;
     var acc = 0.0;
@@ -221,6 +227,10 @@ fn composite(px: vec2<i32>, uv: vec2<f32>) -> vec3<f32> {
             g += textureSample(gods, smp, uv + GOD_TAPS[k]).rgb;
         }
         c += g * 0.5;
+        if (p.taps[4].w > 1.5) {
+            // B-313 diagnostics: the god-rays texture alone (x4, as the composite adds it).
+            c = textureSample(gods, smp, uv).rgb * 4.0;
+        }
     }
     return c * p.inv_hi.rgb;
 }

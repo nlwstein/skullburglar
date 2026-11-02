@@ -2288,7 +2288,8 @@ impl Renderer {
         }
         debug_assert!(blocks.len() < POST_PASSES, "post passes: {} blocks before the god-rays set", blocks.len());
         // B-307: the god-rays pass is the last set; the composites read its texture when it ran.
-        let god = if post_on { pp.god_fields() } else { None };
+        // Debug bit 17 (131072) turns the pass off for an A/B in one session (B-313).
+        let god = if post_on && self.debug_bits & 131072 == 0 { pp.god_fields() } else { None };
         let god_on = god.is_some();
         if std::env::var("BOTS_N1_POST_LOG").is_ok_and(|v| v != "0") {
             thread_local!(static LAST: std::cell::Cell<Option<([f32; 4], [f32; 4])>> = const { std::cell::Cell::new(None) });
@@ -2304,8 +2305,13 @@ impl Renderer {
             if let Some((g0, g1)) = god {
                 o[5] = g0;
                 o[6] = g1;
-                blocks[5][14][3] = 1.0;
-                blocks[7][14][3] = 1.0;
+                // B-313 diagnostics, debug bits 18-19 (`hybrid n1debug`): 1 shows the ray texture alone, 2 the sky
+                // mask, 3 depth x 1000.
+                let dbg = ((self.debug_bits >> 18) & 3) as f32;
+                o[4][3] = dbg;
+                let on = if dbg > 0.0 { 2.0 } else { 1.0 };
+                blocks[5][14][3] = on;
+                blocks[7][14][3] = on;
             }
             blocks.push(o);
         }
