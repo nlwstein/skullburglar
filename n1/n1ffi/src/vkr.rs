@@ -51,7 +51,7 @@ const _: () = assert!(std::mem::size_of::<Globals>() as u64 <= POST_AT);
 // grade, down, blur A h, blur A v, blur B, composite, copy, then (B-266) the linear composite and up to
 // `POST_MATS` post-material passes
 const POST_MATS: usize = 3;
-const POST_PASSES: usize = 8 + POST_MATS;
+const POST_PASSES: usize = 9 + POST_MATS; // the last set is the god-rays pass (B-307)
 const DYN_AT: u64 = POST_AT + 256 * POST_PASSES as u64;
 
 /// Texture ids of the built-in 1x1 textures.
@@ -644,6 +644,7 @@ impl Renderer {
                 b(5, vk::DescriptorType::SAMPLED_IMAGE, fr),
                 b(6, vk::DescriptorType::SAMPLER, fr),
                 b(7, vk::DescriptorType::SAMPLED_IMAGE, fr),
+                b(8, vk::DescriptorType::SAMPLED_IMAGE, fr),
             ];
             let post_layout = device.create_descriptor_set_layout(
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&post),
@@ -798,6 +799,7 @@ impl Renderer {
             r.post_pipe("fs_blur", HDR_FORMAT)?;
             r.post_pipe("fs_comp", color_format)?;
             r.post_pipe("fs_copy", color_format)?;
+            r.post_pipe("fs_god", HDR_FORMAT)?;
             Ok(r)
         }
     }
@@ -911,7 +913,7 @@ impl Renderer {
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::SAMPLED_IMAGE,
-                    descriptor_count: POOL_SETS * 6,
+                    descriptor_count: POOL_SETS * 8,
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::UNIFORM_BUFFER,
@@ -2218,6 +2220,28 @@ impl Renderer {
             o[6] = [time, pwl[0] as u32 as f32, pwl[1] as u32 as f32, real];
             blocks.push(o);
         }
+        // B-307: the god-rays pass is the last set; the composites read its texture when it ran.
+        let god = if post_on { pp.god_fields() } else { None };
+        let god_on = god.is_some();
+        if std::env::var("BOTS_N1_POST_LOG").is_ok_and(|v| v != "0") {
+            thread_local!(static LAST: std::cell::Cell<Option<([f32; 4], [f32; 4])>> = const { std::cell::Cell::new(None) });
+            if LAST.with(|l| l.replace(god)) != god {
+                eprintln!("n1ffi: god rays {god:?} (light x y, magnitude, decay | colour^2.2, exposure)");
+            }
+        }
+        while blocks.len() < POST_PASSES - 1 {
+            blocks.push(blk(ft, [0.0, 0.0], &[], [0.0, 0.0]));
+        }
+        {
+            let mut o = blk(qt, [0.0, 0.0], &[], [0.0, 0.0]);
+            if let Some((g0, g1)) = god {
+                o[5] = g0;
+                o[6] = g1;
+                blocks[5][14][3] = 1.0;
+                blocks[7][14][3] = 1.0;
+            }
+            blocks.push(o);
+        }
         // B-277(e): the passes that write the output (composite, copy, the last post material) add the outline from the
         // mask when this frame drew one: taps[5].w = 1 (2: show the mask).
         let outline_on = self.outline_active();
@@ -2226,8 +2250,7 @@ impl Renderer {
             blocks[5][15][3] = mode;
             blocks[6][15][3] = mode;
             if !mats.is_empty() {
-                let n = blocks.len();
-                blocks[n - 1][15][3] = mode;
+                blocks[8 + mats.len() - 1][15][3] = mode;
             }
         }
         {
@@ -2370,6 +2393,11 @@ impl Renderer {
                     cur = if cur == other { scene } else { other };
                 }
             }
+            // B-307: the god-rays set is last; it reads depth only (bloom[0] stands in for the texture it writes).
+            while srcs.len() < POST_PASSES - 1 {
+                srcs.push((q0, q0, q0));
+            }
+            srcs.push((scene, q0, q0));
             let s = &self.slots[si];
             for (k, (src, bl, bl2)) in srcs.iter().enumerate() {
                 let ub = [vk::DescriptorBufferInfo {
@@ -2402,7 +2430,13 @@ impl Renderer {
                 }];
                 let set = s.post_sets[k];
                 let i5 = img(self.outline_mask.as_ref().map_or(*src, |m| m.view));
+                let i6 = img(if k == POST_PASSES - 1 { q0 } else { q1 });
                 let writes = [
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(8)
+                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .image_info(&i6),
                     vk::WriteDescriptorSet::default()
                         .dst_set(set)
                         .dst_binding(7)
@@ -2465,6 +2499,7 @@ impl Renderer {
         self.pg_resolve(&pf);
         self.tg_pipelines(&tf);
         self.laps.lap("pg_tg_pipes");
+        let p_god = self.post_pipe("fs_god", HDR_FORMAT)?;
         let (p_grade, p_down, p_blur, p_comp, p_copy) = (
             self.post_pipe("fs_grade", HDR_FORMAT)?,
             self.post_pipe("fs_down", HDR_FORMAT)?,
@@ -2935,7 +2970,13 @@ impl Renderer {
                             vk::AccessFlags::SHADER_READ,
                         )
                     };
-                    barrier(frag, frag, &[ro(bloom[0].image), ro(bloom[2].image)]);
+                    barrier(frag, frag, &[ro(bloom[0].image), ro(bloom[2].image), ro(bloom[1].image)]);
+                }
+                if god_on {
+                    // B-307: rays into bloom[1] (free by now), read by the composite.
+                    barrier(frag, cao, &[to_att(bloom[1].image)]);
+                    pass(bloom[1].view, catt_layout, bq, p_god, ps[POST_PASSES - 1]);
+                    barrier(cao, frag, &[to_read(bloom[1].image)]);
                 }
                 if mats.is_empty() {
                     pass(target.view, target.layout, target.rect, p_comp, ps[5]);
