@@ -180,6 +180,14 @@ const GOD_TAPS = array<vec2<f32>, 8>(
 // steps of 1/128 of the direction normalized by its larger axis; a decay weight starts at 1 and falls by g0.w per step
 // (floored at 0); add it for every step that lands on sky (the port's mask: alpha cleared to 1, geometry writes 0).
 // Out = sat(sum * magnitude * (1 - |uv - L|^2) * colour) * exposure.
+// B-313: the port draws its mask without the sky dome, so its sky is everything past the level geometry. n1's depth
+// has the dome in it (a level's sky is a mesh, not the cleared background), so sky is a view distance of at least
+// comp.x (UE units), or nothing drawn.
+fn god_sky(px: vec2<i32>) -> bool {
+    let d = textureLoad(depth, px, 0);
+    return d <= 0.0 || p.dof2.z / d >= p.comp.x;
+}
+
 @fragment
 fn fs_god(i: VOut) -> @location(0) vec4<f32> {
     let l = p.g0.xy;
@@ -187,18 +195,20 @@ fn fs_god(i: VOut) -> @location(0) vec4<f32> {
     let m = max(max(abs(d.x), abs(d.y)), 1e-5);
     let stp = d / (m * 128.0);
     let dims = vec2<i32>(textureDimensions(depth));
-    // B-313 diagnostics (debug bits 18-19, in comp.w): 2 = the sky mask at this pixel, 3 = depth x 1000.
+    // B-313 diagnostics (debug bits 18-19, in comp.w): 2 = the sky mask at this pixel, 3 = log10(view distance) / 7.
     if (p.comp.w > 1.5) {
-        let d0 = textureLoad(depth, clamp(vec2<i32>(i.uv * vec2<f32>(dims)), vec2<i32>(0), dims - vec2<i32>(1)), 0);
-        let m0 = select(vec3<f32>(d0 * 1000.0), vec3<f32>(select(0.0, 1.0, d0 == 0.0)), p.comp.w < 2.5);
-        return vec4<f32>(m0 * 0.25, 1.0);
+        let px0 = clamp(vec2<i32>(i.uv * vec2<f32>(dims)), vec2<i32>(0), dims - vec2<i32>(1));
+        let d0 = textureLoad(depth, px0, 0);
+        let z = select(1.0e7, p.dof2.z / d0, d0 > 0.0);
+        let m0 = select(log(z) / log(10.0) / 7.0, select(0.0, 1.0, god_sky(px0)), p.comp.w < 2.5);
+        return vec4<f32>(vec3<f32>(m0 * 0.25), 1.0);
     }
     var uv = i.uv;
     var w = 1.0;
     var acc = 0.0;
     for (var k = 0; k < 128; k++) {
         let px = clamp(vec2<i32>(uv * vec2<f32>(dims)), vec2<i32>(0), dims - vec2<i32>(1));
-        if (textureLoad(depth, px, 0) == 0.0) {
+        if (god_sky(px)) {
             acc += w;
         }
         w = max(w - p.g0.w, 0.0);

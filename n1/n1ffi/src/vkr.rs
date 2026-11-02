@@ -56,6 +56,9 @@ const POST_MATS: usize = 3;
 // them), padding, and the last set is the god-rays pass (B-307).
 const POST_PASSES: usize = 9 + POST_MATS;
 const _: () = assert!(8 + POST_MATS < POST_PASSES, "the god-rays set must not overlap a material or the damage set");
+/// B-313: view distance (UE units) from which the god-rays mask counts a pixel as sky. The port's mask pass leaves
+/// out the sky dome; n1's depth has it, so the dome (and nothing nearer) must fall past this.
+const GOD_SKY_DIST: f32 = 5.0e4;
 const DYN_AT: u64 = POST_AT + 256 * POST_PASSES as u64;
 
 /// Texture ids of the built-in 1x1 textures.
@@ -2309,6 +2312,10 @@ impl Renderer {
                 // mask, 3 depth x 1000.
                 let dbg = ((self.debug_bits >> 18) & 3) as f32;
                 o[4][3] = dbg;
+                // B-313: the sky mask's distance (UE units): past it counts as sky. Debug bits 21-23 pick another
+                // from the table for a sweep in one session (7: only where nothing was drawn, as before).
+                const SKY: [f32; 8] = [GOD_SKY_DIST, 1.0e4, 2.0e4, 5.0e4, 1.0e5, 2.0e5, 5.0e5, f32::INFINITY];
+                o[4][0] = SKY[((self.debug_bits >> 21) & 7) as usize];
                 let on = if dbg > 0.0 { 2.0 } else { 1.0 };
                 blocks[5][14][3] = on;
                 blocks[7][14][3] = on;
