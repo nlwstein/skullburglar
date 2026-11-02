@@ -2316,6 +2316,8 @@ impl Renderer {
                 // from the table for a sweep in one session (7: only where nothing was drawn, as before).
                 const SKY: [f32; 8] = [GOD_SKY_DIST, 1.0e4, 2.0e4, 5.0e4, 1.0e5, 2.0e5, 5.0e5, f32::INFINITY];
                 o[4][0] = SKY[((self.debug_bits >> 21) & 7) as usize];
+                // Debug bits 24-25 scale the rays (1, 1/2, 1/3, 1/4) for a strength sweep against the port.
+                o[6][3] *= [1.0, 0.5, 1.0 / 3.0, 0.25][((self.debug_bits >> 24) & 3) as usize];
                 let on = if dbg > 0.0 { 2.0 } else { 1.0 };
                 blocks[5][14][3] = on;
                 blocks[7][14][3] = on;
@@ -2697,10 +2699,10 @@ impl Renderer {
                         | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
                 )],
             );
-            // B-313: the post chain samples depth (the grade's sky clamp, DOF, the god-rays sky mask), so the scene pass
-            // must store it whenever the post chain runs. With DONT_CARE its contents are undefined afterwards: AMD
-            // happened to keep them, the RTX 3090 did not, and the god rays found no sky. Debug bit 20 (1048576) puts
-            // back the old rule (stored only for the sprite pass or the outline) for an A/B.
+            // The post chain samples depth (the grade's sky clamp, DOF, the god-rays sky mask), so the scene pass stores
+            // it whenever the post chain runs; with DONT_CARE its contents afterwards are undefined (B-313 found the
+            // RTX 3090 keeping them anyway). Debug bit 20 (1048576) puts back the old rule (stored only for the sprite
+            // pass or the outline) for an A/B.
             let depth_kept = pg_sprites || outline_on || (post_on && self.debug_bits & 1048576 == 0);
             let cc = target.clear.unwrap_or([0.0, 0.0, 0.0, 1.0]);
             let clear = [
