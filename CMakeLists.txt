@@ -56,6 +56,7 @@ set(BOTS_SOURCES
     src/slow_frame.cpp
     src/level_stream.cpp
     src/gc.cpp
+    src/deferred_queue.cpp
     src/widescreen.cpp
     src/gfx/d3d_hooks.cpp
     src/gfx/capture.cpp
