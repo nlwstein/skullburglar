@@ -259,11 +259,13 @@ fn fs_gangsta(i: VOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_damage(i: VOut) -> @location(0) vec4<f32> {
     let w = vec3<f32>(0.3, 0.59, 0.11);
-    let s = textureSample(src, smp, i.uv).rgb;
+    // The port reads the scene pinched toward the centre by 1 - g0.y * (hit picture's blue) (5% at full strength),
+    // the picture itself at the plain uv (decoded from draw 425, B-292).
+    let b = mat_tex1(i.uv).b;
+    let s = textureSample(src, smp, (i.uv - vec2<f32>(0.5)) * (1.0 - p.g0.y * b) + vec2<f32>(0.5)).rgb;
     let s5 = mix(s, desat(s, 0.75, w), clamp(p.g0.x, 0.0, 1.0));
     // tex1 = the host's picture of DamageEffectTexture (hit marks; black = none), its blue channel indexes the ramp
     // (tex0, DamageRamp): alpha brightens the scene, colour overlays it (decoded from the material graph, B-292).
-    let b = mat_tex1(i.uv).b;
     let ramp = mat_tex0_clamp(vec2<f32>(b, 0.5));   // clamped: b = 0 must not blend in the ramp's far end
     let m = s5 * (1.0 + 3.0 * ramp.a);
     let o = mix(vec3<f32>(0.5), ramp.rgb, b);
