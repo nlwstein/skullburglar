@@ -2147,13 +2147,20 @@ void PostBin(HybridLighting& out) {
           }
       } else if (name == "SfGodRaysEffect") {
         if (dbg)
-          REXLOG_INFO("  god rays enabled {} exposure {} magnitude {} decay {} light {} {}", FieldB(e, FindEx(cls, "Enabled")),
-                      FieldF(e, FindEx(cls, "Exposure"), nan), FieldF(e, FindEx(cls, "RayMagnitude"), nan),
+          REXLOG_INFO("  god rays enabled {} exposure {} eased {} magnitude {} decay {} light {} {}", FieldB(e, FindEx(cls, "Enabled")),
+                      FieldF(e, FindEx(cls, "Exposure"), nan), FieldF(e, FindEx(cls, "fExposureInterpolator"), nan),
+                      FieldF(e, FindEx(cls, "RayMagnitude"), nan),
                       FieldF(e, FindEx(cls, "DecayPerSample"), nan), FieldF(e, FindEx(cls, "vTextureSpaceLightPointX"), nan),
                       FieldF(e, FindEx(cls, "vTextureSpaceLightPointY"), nan));
         if (!FieldB(e, FindEx(cls, "Enabled"))) continue;
         p.flags |= kPfGod;
-        p.god[0] = FieldF(e, FindEx(cls, "Exposure"), nan);
+        // B-313: the port renders with the eased exposure, not Exposure. SfGodRaysEffect's per-view update
+        // (vtable +0x128) projects the nearest SfGodLight actor to texture space (vTextureSpaceLightPoint), sets
+        // fExposureTarget = Exposure with the point on screen, Exposure / 2 within [-0.5, 1.5], else 0, and moves
+        // fExposureInterpolator toward it at ExposureSpeed per second; the scene proxy takes the interpolator as
+        // its exposure and the pass is skipped at <= 0.
+        const float eased = FieldF(e, FindEx(cls, "fExposureInterpolator"), nan);
+        p.god[0] = std::isnan(eased) ? FieldF(e, FindEx(cls, "Exposure"), nan) : std::max(eased, 0.f);
         p.god[1] = FieldF(e, FindEx(cls, "DecayPerSample"), nan);
         p.god[2] = FieldF(e, FindEx(cls, "RayMagnitude"), nan);
         float c[3];
