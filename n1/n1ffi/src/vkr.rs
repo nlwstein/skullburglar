@@ -2690,6 +2690,11 @@ impl Renderer {
                         | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
                 )],
             );
+            // B-313: the post chain samples depth (the grade's sky clamp, DOF, the god-rays sky mask), so the scene pass
+            // must store it whenever the post chain runs. With DONT_CARE its contents are undefined afterwards: AMD
+            // happened to keep them, the RTX 3090 did not, and the god rays found no sky. Debug bit 20 (1048576) puts
+            // back the old rule (stored only for the sprite pass or the outline) for an A/B.
+            let depth_kept = pg_sprites || outline_on || (post_on && self.debug_bits & 1048576 == 0);
             let cc = target.clear.unwrap_or([0.0, 0.0, 0.0, 1.0]);
             let clear = [
                 srgb_to_linear(cc[0]),
@@ -2709,7 +2714,7 @@ impl Renderer {
                 .image_view(depth.view)
                 .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(if pg_sprites || outline_on {
+                .store_op(if depth_kept {
                     vk::AttachmentStoreOp::STORE
                 } else {
                     vk::AttachmentStoreOp::DONT_CARE
