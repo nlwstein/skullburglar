@@ -45,6 +45,13 @@ name = "BotsGuardMissingAiiuComponent"
 registers = ["r3"]
 jump_address_on_true = 0x82E8E280
 
+# B-314: second B-041 site, sub_82E7CF38 repeats the lookup and calls through the null result → skip that call.
+[[midasm_hook]]
+address = 0x82E7CF6C
+name = "BotsGuardMissingAiiuComponent2"
+registers = ["r3"]
+jump_address_on_true = 0x82E7CF7C
+
 # B-059: sub_82FD1D20 reads obj->+96->+36 on an object whose +96 is still null → treat as "no entries".
 [[midasm_hook]]
 address = 0x82FD1D94
