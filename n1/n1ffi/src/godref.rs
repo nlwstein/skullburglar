@@ -17,6 +17,9 @@
 
 /// The side of the ray target and of the mask.
 pub const GRID: usize = 128;
+/// The mask test is "the bilinear value is not 0"; the hardware filters with an 8-bit fraction, so a texel weighing under
+/// half a step contributes nothing (same constant as `GOD_MASK_EPS` in post.wgsl).
+pub const MASK_EPS: f32 = 1.0 / 512.0;
 /// The ray loop's iteration count (loop constant i31 = 0x50).
 pub const STEPS: usize = 80;
 
@@ -74,7 +77,7 @@ pub fn ray(mask: &Mask, uv: [f32; 2], p: &Params) -> [f32; 3] {
     let mut w = 1.0f32;
     let mut acc = 0.0f32;
     for _ in 0..STEPS {
-        if rx >= 0.0 && mask.bilinear(u, v) > 0.0 {
+        if rx >= 0.0 && mask.bilinear(u, v) > MASK_EPS {
             acc += w;
         }
         w = sat(w - p.decay);

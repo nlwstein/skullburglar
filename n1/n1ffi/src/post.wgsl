@@ -184,7 +184,7 @@ const GOD_TAPS = array<vec2<f32>, 8>(
 //   - 80 iterations (loop constant 0x50) from the pixel toward L (uv -= step). The mask fetch is predicated on the
 //     remaining x distance, rx = |uv.x - L.x| - k * |step.x|, being >= 0, so the march stops at L (k <= 128 * max axis).
 //   - The mask is a 128x128 target sampled with the bilinear filter; the shader only keeps whether the value is > 0.
-//     It is alpha: 1 on sky, 0 on geometry. n1 has no mask target: a texel is sky when the depth at its centre says so.
+//     It is alpha: 1 on sky, 0 on geometry (a weight under 1/512 counts as 0, see GOD_MASK_EPS). n1 has no mask target: a texel is sky when the depth at its centre says so.
 //   - acc += step_mask * w; then w = sat(w - decay) (g0.w). Out = sat(acc * magnitude * (1 - |uv - L|^2) * colour)
 //     * exposure. magnitude is g0.z, colour^2.2 and exposure g1.
 // B-313: the port draws its mask without the sky dome, so its sky is everything past the level geometry. n1's depth
@@ -196,6 +196,9 @@ fn god_sky(px: vec2<i32>) -> bool {
 }
 
 const GOD_GRID = 128;
+// The mask test is "the bilinear value is not 0". The hardware filters with an 8-bit fraction, so a texel weighing less than
+// half a step contributes nothing; the same threshold keeps the GPU and godref.rs from disagreeing on rounding noise.
+const GOD_MASK_EPS = 0.001953125;
 
 // One texel of the 128x128 sky mask: the depth at the texel's centre.
 fn god_texel(t: vec2<i32>) -> f32 {
@@ -231,7 +234,7 @@ fn fs_god(i: VOut) -> @location(0) vec4<f32> {
     var w = 1.0;
     var acc = 0.0;
     for (var k = 0; k < 80; k++) {
-        if (rx >= 0.0 && god_mask(uv) > 0.0) {
+        if (rx >= 0.0 && god_mask(uv) > GOD_MASK_EPS) {
             acc += w;
         }
         w = clamp(w - p.g0.w, 0.0, 1.0);
