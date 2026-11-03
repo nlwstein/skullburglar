@@ -252,9 +252,9 @@ pub struct PostParams {
     pub dof: bool,
     /// B-266 / B-267: the active hand-ported post materials (`postmat.rs`), in chain order.
     pub mats: Vec<crate::postmat::Effect>,
-    /// B-307: SfGodRaysEffect (the level's sun rays), when the chain has it enabled and `BOTS_N1_GODRAYS=1`.
+    /// B-307: SfGodRaysEffect (the level's sun rays), when the chain has it enabled (`BOTS_N1_GODRAYS=0` turns it off).
     pub god: Option<lightfeed::post::GodRays>,
-    /// `BOTS_N1_GODRAYS=1` turns it on (default off until it matches the port on sun-facing views, B-313).
+    /// On by default (B-313): the pass runs the game's decoded ray shader; `BOTS_N1_GODRAYS=0` turns it off.
     pub god_on: bool,
 }
 
@@ -281,7 +281,7 @@ impl Default for PostParams {
             dof: env_flag("BOTS_N1_DOF", true),
             mats: Vec::new(),
             god: None,
-            god_on: env_flag("BOTS_N1_GODRAYS", false),
+            god_on: env_flag("BOTS_N1_GODRAYS", true),
         }
     }
 }

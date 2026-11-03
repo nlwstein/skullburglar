@@ -3,6 +3,7 @@
 //! way n1 feeds its own sky mask: depth 0 is sky, depth 1 (view distance = near plane) is geometry. Skips, passing, when
 //! no Vulkan 1.3 device loads (CI runners); N1_TEST_VULKAN=/path/to/libMoltenVK.dylib names the library to load.
 //! Prints the maximum and mean error per case (`cargo test --test godrays_gpu -- --nocapture`).
+#![allow(unsafe_op_in_unsafe_fn)] // a thin Vulkan harness: every call is unsafe, an extra block each adds nothing
 
 use ash::vk;
 use n1ffi::godref::{self, Mask, Params, GRID};
