@@ -1230,10 +1230,11 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
       // B-313: UE3's god-rays occlusion mask is drawn into the alpha channel only (colour mask 8) of an 8888 target and
       // resolved with the swap flag into an 8-bit texture. A red-only resolve left that texture black, so the port drew no
       // rays at all. An 8-bit destination from a swapped 8888 resolve takes the alpha, which is where the mask is.
-      // BOTS_RESOLVE_K8_ALPHA=0 restores the red-only resolve.
+      // Off by default: it changes the emulated renderer's picture and how real hardware resolves is not verified.
+      // BOTS_RESOLVE_K8_ALPHA=1 turns it on (research: the port's ray pass then sees a real mask).
       static const bool k8_alpha = [] {
         const char* v = std::getenv("BOTS_RESOLVE_K8_ALPHA");
-        return !(v && *v == '0');
+        return v && *v == '1';
       }();
       const bool to_alpha = k8_alpha && dest->format == VK_FORMAT_R8_UNORM && dest_info.copy_dest_swap &&
                             source_format == xe::ColorRenderTargetFormat::k_8_8_8_8;
