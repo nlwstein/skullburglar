@@ -171,6 +171,20 @@ bool BotsGuardMissingAiiuComponent(PPCRegister& r3) {
   return true;
 }
 
+// B-314: the second site of B-041. After the guard above skips its call, sub_82E8E148 calls
+// sub_82E7CF38(this), which repeats the same lookup (r3 = sub_8244EE48(this->+0x208)) and then
+// does r3->vtbl[0x158/4](r3) with no null check (guest null read, ~4% of LoadChapter 41270 loads on
+// the Deck). Mid-asm hook at 0x82E7CF6C (the lwz after the lookup, config/default.toml): when
+// r3 == 0 jump to 0x82E7CF7C, past the lwz/lwz/bctrl. What follows only uses r31 (set before the
+// lookup) and the saved registers; the caller overwrites r3 right after the call.
+bool BotsGuardMissingAiiuComponent2(PPCRegister& r3) {
+  if (r3.u32 != 0) return false;
+  static std::atomic<uint64_t> hits{0};
+  uint64_t n = ++hits;
+  if (n == 1 || n == 10 || n == 100) REXLOG_WARN("B-314 guard: null AIIU component at 0x82E7CF6C skipped ({}x)", n);
+  return true;
+}
+
 // B-059: sub_82FD1D20(this) does
 //   obj = 0; this->+292->vtbl[248/4](..., name, &obj)   // look an object up by name
 //   if (obj) for (i < obj->+96->+36) if (obj->+96->+32[i].type == 1) ...   // returns -1 if none
