@@ -14,6 +14,7 @@
 
 pub mod bcdec;
 pub mod decals;
+pub mod godref;
 pub mod light;
 pub mod particles;
 pub mod plan;

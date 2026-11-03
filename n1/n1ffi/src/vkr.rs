@@ -56,6 +56,8 @@ const POST_MATS: usize = 3;
 // them), padding, and the last set is the god-rays pass (B-307).
 const POST_PASSES: usize = 9 + POST_MATS;
 const _: () = assert!(8 + POST_MATS < POST_PASSES, "the god-rays set must not overlap a material or the damage set");
+/// The god-rays target's side: the port's ray pass and its mask are 128x128 (B-313).
+const GOD_GRID: u32 = 128;
 /// B-313: view distance (UE units) from which the god-rays mask counts a pixel as sky. The port's mask pass leaves
 /// out the sky dome; n1's depth has it, so the dome (and nothing nearer) must fall past this.
 const GOD_SKY_DIST: f32 = 5.0e4;
@@ -443,6 +445,8 @@ pub struct Renderer {
     slots: Vec<Slot>,
     hdr: Option<Rt>,
     bloom: Option<[Rt; 3]>,
+    /// B-313: the god-rays texture, 128x128 like the port's (`GOD_GRID` in post.wgsl), whatever the render size.
+    god: Option<Rt>,
     /// W4: the graded scene (full res), when the level's MaterialEffect grade isn't the identity.
     graded: Option<Rt>,
     /// B-273: a copy of the HDR target taken before the sprite pass, for DestColor particle materials (the QTE ring).
@@ -763,6 +767,7 @@ impl Renderer {
                 slots: Vec::new(),
                 hdr: None,
                 bloom: None,
+                god: None,
                 graded: None,
                 destc: None,
                 near: 5.0,
@@ -1526,7 +1531,7 @@ impl Renderer {
         if self.hdr.as_ref().is_some_and(|r| r.width == w && r.height == h) {
             return Ok(());
         }
-        for r in [self.hdr.take(), self.depth.take(), self.graded.take(), self.destc.take()].into_iter().flatten() {
+        for r in [self.hdr.take(), self.depth.take(), self.graded.take(), self.destc.take(), self.god.take()].into_iter().flatten() {
             self.defer(Garbage::Image(r.image, r.view, r.alloc));
         }
         if let Some(b) = self.bloom.take() {
@@ -1541,6 +1546,7 @@ impl Renderer {
         let b = self.rt(HDR_FORMAT, bw, bh, false, "n1 post q1")?;
         let c = self.rt(HDR_FORMAT, bw, bh, false, "n1 post q2")?;
         self.bloom = Some([a, b, c]);
+        self.god = Some(self.rt(HDR_FORMAT, GOD_GRID, GOD_GRID, false, "n1 god rays")?);
         self.graded = Some(self.rt(HDR_FORMAT, w, h, false, "n1 graded")?);
         self.destc = Some(self.rt(HDR_FORMAT, w, h, false, "n1 dest color")?);
         if let Some(m) = self.outline_mask.take() {
@@ -2458,6 +2464,7 @@ impl Renderer {
             let scene = if damage_pre.is_some() { pre_dst } else { scene_orig };
             let dv = self.depth.as_ref().unwrap().view;
             let [q0, q1, q2] = self.bloom.as_ref().map(|x| [x[0].view, x[1].view, x[2].view]).unwrap();
+            let gv = self.god.as_ref().unwrap().view;
             let mut srcs = vec![
                 (hdr, q0, q0),   // grade
                 (scene, q0, q0), // down -> q0
@@ -2487,6 +2494,7 @@ impl Renderer {
                 srcs.push((scene_orig, self.tex_view(ids[0], TEX_BLACK), self.tex_view(ids[1], TEX_BLACK)));
             }
             // B-307: the god-rays set is last; it reads depth only (bloom[0] stands in for the texture it writes).
+            // Every other set's binding 8 is the god-rays texture.
             while srcs.len() < POST_PASSES - 1 {
                 srcs.push((q0, q0, q0));
             }
@@ -2523,7 +2531,7 @@ impl Renderer {
                 }];
                 let set = s.post_sets[k];
                 let i5 = img(self.outline_mask.as_ref().map_or(*src, |m| m.view));
-                let i6 = img(if k == POST_PASSES - 1 { q0 } else { q1 });
+                let i6 = img(if k == POST_PASSES - 1 { q0 } else { gv });
                 let writes = [
                     vk::WriteDescriptorSet::default()
                         .dst_set(set)
@@ -3087,11 +3095,25 @@ impl Renderer {
                     };
                     barrier(frag, frag, &[ro(bloom[0].image), ro(bloom[2].image), ro(bloom[1].image)]);
                 }
-                if god_on {
-                    // B-307: rays into bloom[1] (free by now), read by the composite.
-                    barrier(frag, cao, &[to_att(bloom[1].image)]);
-                    pass(bloom[1].view, catt_layout, bq, p_god, ps[POST_PASSES - 1]);
-                    barrier(cao, frag, &[to_read(bloom[1].image)]);
+                {
+                    // B-307: the rays into their own 128x128 target, read by the composite (binding 8; in the sampled
+                    // layout even when the pass didn't run, as the bloom targets above).
+                    let god_rt = self.god.as_ref().unwrap();
+                    if god_on {
+                        barrier(frag, cao, &[to_att(god_rt.image)]);
+                        pass(god_rt.view, catt_layout, full(GOD_GRID, GOD_GRID), p_god, ps[POST_PASSES - 1]);
+                        barrier(cao, frag, &[to_read(god_rt.image)]);
+                    } else {
+                        let ro = layout_barrier(
+                            god_rt.image,
+                            color,
+                            vk::ImageLayout::UNDEFINED,
+                            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                            vk::AccessFlags::empty(),
+                            vk::AccessFlags::SHADER_READ,
+                        );
+                        barrier(frag, frag, &[ro]);
+                    }
                 }
                 if mats.is_empty() {
                     pass(target.view, target.layout, target.rect, p_comp, ps[5]);
@@ -3690,7 +3712,7 @@ impl Drop for Renderer {
                     self.free(Garbage::Image(t.image, t.view, a));
                 }
             }
-            let mut rts: Vec<Rt> = [self.hdr.take(), self.depth.take(), self.graded.take(), self.destc.take(), self.outline_mask.take()].into_iter().flatten().collect();
+            let mut rts: Vec<Rt> = [self.hdr.take(), self.depth.take(), self.graded.take(), self.destc.take(), self.outline_mask.take(), self.god.take()].into_iter().flatten().collect();
             if let Some(b) = self.bloom.take() {
                 rts.extend(b);
             }
