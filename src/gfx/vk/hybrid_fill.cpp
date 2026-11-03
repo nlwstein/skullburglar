@@ -845,6 +845,14 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     if (sc.seq == host->scene.cam_seq) view_cam = &sc;
   }
   host->cam_seq = view_cam->seq;
+  {
+    // B-292: the finished damage-texture readbacks go to n1 before its frame is recorded.
+    if (damage_dirty_) damage_dirty_ = false, CaptureDamageTarget();
+    uint64_t done = stats_.flushes;
+    for (const Submission& sub : submissions_)
+      if (sub.pending) done = std::min(done, sub.serial - 1);
+    PumpDamage(host, done);
+  }
   n1_set_debug_bits(host->r, state->n1_debug_bits.load(std::memory_order_acquire));  // B-230 debug A/B (0: none)
   n1_set_time(host->r, view_cam->time);  // materials' Time is the game's clock (tracer fades compare with it)
   // B-240: the view's screen fade (level fade-ins, cinematic cuts, death fades). The port applies it in its composite,
@@ -1313,8 +1321,100 @@ bool Renderer::DrawSceneDual(Image& target, const HybridCamera& cam, const VkRec
 }
 #endif
 
+#ifdef BOTS_N1FFI
+// B-292: the game's damage-indicator capture (the HUD's DamageEffectTexture, a small render texture) is read back
+// without waiting: a copy into a host buffer at the marker, collected once its submission has completed.
+void Renderer::CaptureDamageTarget() {
+  if (!ok_) return;
+  ++damage_captures_;
+  const auto it = texture_at_.find(damage_address_);
+  Image* image = it == texture_at_.end() ? nullptr : it->second;
+  if (damage_captures_ <= 3 || (!image && damage_captures_ % 600 == 0)) {
+    REXLOG_INFO("hybrid n1: damage capture {}: resolve {:08X} -> {} ({}x{} format {} swapped {} fetch swizzle {:o})", damage_captures_,
+                damage_address_, image ? "image" : "none", image ? image->width : 0, image ? image->height : 0,
+                image ? int(image->format) : 0, image ? int(image->swapped) : 0, damage_swizzle_);
+  }
+  if (!image || image->format != VK_FORMAT_R8G8B8A8_UNORM || image->width > 1536 || image->height > 1536) return;
+  if (damage_reads_.size() >= 3) return;  // the GPU is behind; the next capture comes soon
+  DamageRead r;
+  r.w = image->width, r.h = image->height;
+  r.swizzle = damage_swizzle_ ? damage_swizzle_ : image->swapped ? (2u | (1u << 3) | (0u << 6) | (3u << 9)) : 0x688u;
+  VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  info.size = VkDeviceSize(r.w) * r.h * 4;
+  info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  VmaAllocationCreateInfo alloc{};
+  alloc.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+  alloc.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+  VmaAllocationInfo mapped{};
+  if (vmaCreateBuffer(allocator_, &info, &alloc, &r.buffer, &r.alloc, &mapped) != VK_SUCCESS) return;
+  r.map = mapped.pMappedData;
+  r.serial = stats_.flushes + 1;
+  BeginCommands(kGpuOther);
+  EndRendering("damage readback");
+  Barrier();  // the capture's resolve has written the image
+  VkBufferImageCopy region{};
+  region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  region.imageExtent = {r.w, r.h, 1};
+  vk_.vkCmdCopyImageToBuffer(cmd_, image->image, VK_IMAGE_LAYOUT_GENERAL, r.buffer, 1, &region);
+  Barrier();
+  damage_reads_.push_back(r);
+}
+
+void Renderer::PumpDamage(void* n1_host, uint64_t completed) {
+  if (damage_reads_.empty()) return;
+  auto* host = static_cast<N1Host*>(n1_host);
+  const DamageRead* newest = nullptr;
+  std::vector<uint8_t> bgra;
+  uint32_t w = 0, h = 0;
+  bool content = false;
+  uint32_t blue_max = 0;
+  std::erase_if(damage_reads_, [&](DamageRead& r) {
+    if (r.serial > completed) return false;
+    vmaInvalidateAllocation(allocator_, r.alloc, 0, VK_WHOLE_SIZE);
+    // Host bytes are R, G, B, A of the host image; after a swapping resolve the guest's red is host blue and the other
+    // way round. n1 wants B, G, R, A in the guest's channels.
+    const auto* src = static_cast<const uint8_t*>(r.map);
+    const size_t n = size_t(r.w) * r.h;
+    bgra.resize(n * 4);
+    blue_max = 0;
+    for (size_t i = 0; i < n; ++i) {
+      const uint8_t* p = src + 4 * i;
+      // Channel k of the picture the damage material's fetch sees: the host channel its swizzle names (4: zero, 5: one).
+      auto ch = [&](int k) -> uint8_t {
+        const uint32_t c = (r.swizzle >> (3 * k)) & 7;
+        return c < 4 ? p[c] : c == 4 ? 0 : 255;
+      };
+      const uint8_t guest_r = ch(0), guest_g = ch(1), guest_b = ch(2), guest_a = ch(3);
+      bgra[4 * i + 0] = guest_b, bgra[4 * i + 1] = guest_g, bgra[4 * i + 2] = guest_r, bgra[4 * i + 3] = guest_a;
+      blue_max = std::max<uint32_t>(blue_max, guest_b);
+    }
+    w = r.w, h = r.h;
+    content = blue_max > 2;
+    newest = &r;
+    vmaDestroyBuffer(allocator_, r.buffer, r.alloc);
+    return true;
+  });
+  if (!newest && !w) return;
+  if (content) {
+    if (damage_held_ != bgra) {
+      n1_set_damage_tex(host->r, bgra.data(), w, h);
+      if (damage_held_.empty() && ++damage_shown_ <= 20)
+        REXLOG_INFO("hybrid n1: damage picture {}x{} on (blue max {}, swizzle {:o})", w, h, blue_max, damage_swizzle_);
+      damage_held_ = std::move(bgra);
+    }
+  } else if (!damage_held_.empty()) {
+    n1_set_damage_tex(host->r, nullptr, 0, 0);
+    damage_held_.clear();
+    if (damage_shown_ <= 20) REXLOG_INFO("hybrid n1: damage picture off");
+  }
+}
+
+#endif
+
 #ifndef BOTS_N1FFI
 void* Renderer::EnsureN1(VkFormat) { return nullptr; }
+void Renderer::CaptureDamageTarget() {}
+void Renderer::PumpDamage(void*, uint64_t) {}
 void Renderer::PumpN1Warmup() {}
 void Renderer::PumpN1Uploads() {}
 void Renderer::PrepareSceneN1() {}

@@ -37,6 +37,7 @@ struct P {
 @group(0) @binding(5) var depth: texture_depth_2d;
 @group(0) @binding(6) var wrap: sampler;   // repeat addressing, for post-material textures
 @group(0) @binding(7) var omask: texture_2d<f32>;   // B-277(e): enemy outline mask (R8), read when taps[5].w > 0
+@group(0) @binding(8) var gods: texture_2d<f32>;    // B-307: god-rays texture (quarter res), read when taps[4].w > 0
 
 struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
@@ -167,6 +168,45 @@ fn gamma_out(c0: vec3<f32>, frag: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(g, 1.0);
 }
 
+// B-307: the port's god-rays composite adds the mean of 8 jittered taps of the ray texture (stored /4) to the scene,
+// after the DOF/bloom mix and before the multiplier and gamma (draw 174's c252-c255).
+const GOD_TAPS = array<vec2<f32>, 8>(
+    vec2<f32>(0.02255, -0.00457), vec2<f32>(0.01217, 0.01798),
+    vec2<f32>(-0.00765, -0.00951), vec2<f32>(-0.00477, 0.01455),
+    vec2<f32>(-0.01969, -0.00172), vec2<f32>(-0.01631, 0.01071),
+    vec2<f32>(0.00435, -0.02093), vec2<f32>(0.01110, -0.01125));
+
+// B-307: the port's ray pass (128x128 target, 128-step loop). From each pixel march toward the light point g0.xy in
+// steps of 1/128 of the direction normalized by its larger axis; a decay weight starts at 1 and falls by g0.w per step
+// (floored at 0); add it for every step that lands on sky (the port's mask: alpha cleared to 1, geometry writes 0).
+// Out = sat(sum * magnitude * (1 - |uv - L|^2) * colour) * exposure.
+@fragment
+fn fs_god(i: VOut) -> @location(0) vec4<f32> {
+    let l = p.g0.xy;
+    let d = l - i.uv;
+    let m = max(max(abs(d.x), abs(d.y)), 1e-5);
+    let stp = d / (m * 128.0);
+    let dims = vec2<i32>(textureDimensions(depth));
+    var uv = i.uv;
+    var w = 1.0;
+    var acc = 0.0;
+    for (var k = 0; k < 128; k++) {
+        let px = clamp(vec2<i32>(uv * vec2<f32>(dims)), vec2<i32>(0), dims - vec2<i32>(1));
+        if (textureLoad(depth, px, 0) == 0.0) {
+            acc += w;
+        }
+        w = max(w - p.g0.w, 0.0);
+        if (w <= 0.0) {
+            break;
+        }
+        uv += stp;
+    }
+    let r = i.uv - l;
+    let fall = max(1.0 - dot(r, r), 0.0);
+    let v = clamp(vec3<f32>(acc * p.g0.z * fall) * p.g1.rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * p.g1.w;
+    return vec4<f32>(v, 1.0);
+}
+
 fn composite(px: vec2<i32>, uv: vec2<f32>) -> vec3<f32> {
     var c = textureLoad(src, px, 0).rgb;
     if (p.comp.z > 0.5) {
@@ -174,6 +214,13 @@ fn composite(px: vec2<i32>, uv: vec2<f32>) -> vec3<f32> {
         let a = textureSample(bloom, smp, uv);
         c = (c * (1.0 - u) + a.rgb) / max(a.a + (1.0 - u), 1e-4);
         c = mix(c, textureSample(bloom2, smp, uv).rgb, p.comp.x);
+    }
+    if (p.taps[4].w > 0.5) {
+        var g = vec3<f32>(0.0);
+        for (var k = 0; k < 8; k++) {
+            g += textureSample(gods, smp, uv + GOD_TAPS[k]).rgb;
+        }
+        c += g * 0.5;
     }
     return c * p.inv_hi.rgb;
 }
@@ -254,13 +301,30 @@ fn fs_gangsta(i: VOut) -> @location(0) vec4<f32> {
     return mat_out(mix(vec3<f32>(1.0), vec3<f32>(1.0) + streak, a) * col, i.pos);
 }
 
+const DAMAGE_GAMMA: f32 = 1.12;
+
 // FX_Damage.DamageEffectMaterial (DamageEffectMaterial_MIC, B-292), g0.x = CriticalHealthFadeParameter. The scene fades
 // toward a 75% desaturated copy. The material's hit-arrow render target is not drawn (it is black without a hit).
 @fragment
 fn fs_damage(i: VOut) -> @location(0) vec4<f32> {
-    let s = textureSample(src, smp, i.uv).rgb;
-    let d = desat(s, 0.75, vec3<f32>(0.3, 0.59, 0.11));
-    return mat_out(mix(s, d, clamp(p.g0.x, 0.0, 1.0)), i.pos);
+    let w = vec3<f32>(0.3, 0.59, 0.11);
+    // The port reads the scene pinched toward the centre by 1 - g0.y * (hit picture's blue) (5% at full strength),
+    // the picture itself at the plain uv (decoded from draw 425, B-292).
+    let b = mat_tex1(i.uv).b;
+    let s = textureSample(src, smp, (i.uv - vec2<f32>(0.5)) * (1.0 - p.g0.y * b) + vec2<f32>(0.5)).rgb;
+    let s5 = mix(s, desat(s, 0.75, w), clamp(p.g0.x, 0.0, 1.0));
+    // tex1 = the host's picture of DamageEffectTexture (hit marks; black = none), its blue channel indexes the ramp
+    // (tex0, DamageRamp): alpha brightens the scene, colour overlays it (decoded from the material graph, B-292).
+    let ramp = mat_tex0_clamp(vec2<f32>(b, 0.5));   // clamped: b = 0 must not blend in the ramp's far end
+    // The blend runs on the scene in a gamma-encoded space (exponent 1.12, fitted on the port's own marker shots at
+    // 30/60/90 damage: n1/port green ratio 0.99/1.00/0.99; linear blending left 0.98/0.88/0.83, B-292).
+    let s5e = pow(max(s5, vec3<f32>(0.0)), vec3<f32>(1.0 / DAMAGE_GAMMA));
+    let m = s5e * (1.0 + 3.0 * ramp.a);
+    let o = mix(vec3<f32>(0.5), ramp.rgb, b);
+    let hi = o * m * 2.0;
+    let lo = vec3<f32>(1.0) - 2.0 * (vec3<f32>(1.0) - o) * (vec3<f32>(1.0) - m);
+    let r = select(lo, hi, dot(m, w) > 0.5);
+    return mat_out(pow(max(r, vec3<f32>(0.0)), vec3<f32>(DAMAGE_GAMMA)), i.pos);
 }
 
 // C1HUD.SniperScope_V02_MAT (SniperScope_MIC, B-295), g0.x = its scalar parameter (0 = the 16:9 mapping). tex0

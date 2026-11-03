@@ -119,12 +119,25 @@ wine 'C:\Games\Skullburglar\bots.exe' note | tee /work/note.out
 grep -q "didn't finish" /work/note.out || fail "no note about the update that didn't finish"
 wine 'C:\Games\Skullburglar\bots.exe' note | tr -d '\r' | grep -q "^note: $" || fail "the note was shown twice"
 echo "ok: a setup that gave up (game locked) started no second copy and left a note (shown once)"
+# B-283: the new version, as it starts, deletes the stage folder this update's setup ran from (the folders earlier tests
+# left, from updates that didn't finish, are not its to delete yet: they are under an hour old).
+TEMPD=$(echo $WINEPREFIX/drive_c/users/*/AppData/Local/Temp | cut -d' ' -f1)
+[ -d "$TEMPD" ] || fail "can't find the temp folder ($TEMPD)"
+ls "$TEMPD" | grep '^skullburglar-update-' | sort > /work/stage.before || true
+export PROBE_CLEAN_ON_START=1
 : > /work/marker
 wine 'C:\Games\Skullburglar\bots.exe' update | sed 's/^/    /'
 for i in $(seq 1 80); do grep -q "started 0.0.2" /work/marker 2>/dev/null && break; sleep 0.5; done
 grep -q "started 0.0.2" /work/marker || fail "0.0.2 didn't start after the update"
 grep -q "readme 0.0.2" $I/README.txt || fail "program files not replaced"
 echo "ok: setup ran silently, replaced the program files and started 0.0.2"
+for i in $(seq 1 40); do
+  ls "$TEMPD" | grep '^skullburglar-update-' | sort > /work/stage.after || true
+  [ -z "$(comm -13 /work/stage.before /work/stage.after)" ] && break; sleep 0.5
+done
+[ -z "$(comm -13 /work/stage.before /work/stage.after)" ] || fail "the update's stage folder is still in the temp folder: $(comm -13 /work/stage.before /work/stage.after)"
+[ ! -e "$LA/bots-recomp/update-staging.txt" ] || fail "the stage note is still there after the folder was deleted"
+echo "ok: the new version deleted the update's stage folder (B-283) and its note"
 [ "$SUM" = "$(cd "$LA/bots-recomp" && find . -type f | sort | xargs sha256sum | sha256sum)" ] || fail "save changed"
 [ "$(cat $I/game/default.xex)" = portable ] && [ -f $I/logs.txt ] || fail "game folder or logs touched"
 echo "ok: save, portable game folder and logs untouched"

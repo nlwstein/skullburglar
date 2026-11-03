@@ -54,6 +54,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <thread>
 
 #include <time.h>
@@ -76,6 +77,7 @@ extern "C" void sub_82BAD738(PPCContext& __restrict ctx, uint8_t* base);  // FSc
 extern "C" void sub_82BB1958(PPCContext& __restrict ctx, uint8_t* base);  // per visible primitive: LastRenderTime
 extern "C" void sub_8231FA50(PPCContext& __restrict ctx, uint8_t* base);  // D3D: make ring space, returns ring ptr
 extern "C" void __imp__sub_82D3E358(PPCContext& __restrict ctx, uint8_t* base);  // GetQueryResult(q, out, bWait)
+extern "C" void __imp__sub_82C6ADB8(PPCContext& __restrict ctx, uint8_t* base);  // InitViews: batch a primitive's occlusion query, returns it
 
 namespace bots::hybrid {
 namespace {
@@ -301,6 +303,16 @@ std::deque<uint32_t> g_fifo;  // seqs of view families with a scene, not yet ren
 thread_local uint32_t t_render_seq = 0;
 thread_local bool t_suppressed_visibility = false;  // answer GetQueryResult at once (mode 2 and just after)
 std::atomic<uint64_t> g_queries_answered{0};
+// B-308: InitViews allocates a primitive's occlusion query and Render issues it later. In a suppressed frame (mode 2)
+// Render is skipped, so those queries are never issued and nothing will ever complete them. The suppressed frames' own
+// reads are answered at once, but a primitive's history entry (and the query in it) outlives that: the next time the
+// primitive is tested can be minutes later, in a real frame, and then GetQueryResult(bWait = 1) waits forever. The set
+// holds the queries allocated in suppressed frames; a read of one of them is answered "visible" at once.
+// BOTS_QUERY_UNISSUED=0 turns this off (the bounded wait below still catches such a query, after its timeout).
+thread_local bool t_render_skipped = false;  // inside InitViews of a suppressed frame
+std::mutex g_unissued_mutex;
+std::unordered_set<uint32_t> g_unissued;
+std::atomic<uint64_t> g_unissued_answered{0};
 
 // B-210 diagnostics (BOTS_HYBRID_TRACE=<n>): log the next n view families and scene renders (what each did).
 int TraceBudget() {
@@ -636,6 +648,18 @@ void BoundedQueryWait(PPCContext& ctx, uint8_t* base, int64_t limit_ms) {
 }
 }  // namespace
 
+// InitViews gives a primitive an occlusion query here (UE3 issues it later, in Render's BeginOcclusionTests, which a
+// suppressed frame skips): note the queries a suppressed frame allocated, see g_unissued.
+extern "C" void sub_82C6ADB8(PPCContext& __restrict ctx, uint8_t* base) {
+  __imp__sub_82C6ADB8(ctx, base);
+  static const bool track = EnvInt("BOTS_QUERY_UNISSUED", 1) != 0;
+  if (track && Readable(ctx.r3.u32)) {
+    std::lock_guard lock(g_unissued_mutex);
+    if (t_render_skipped) g_unissued.insert(ctx.r3.u32);
+    else g_unissued.erase(ctx.r3.u32);  // a pooled query, issued by this frame's drawing
+  }
+}
+
 // UE3 GetQueryResult(q, out, bWait): InitViews reads the occlusion queries the previous frame's drawing issued. With the
 // drawing suppressed nothing issues them, so bWait = 1 waits forever (mode 2 hung on the first level load). Inside a
 // suppressed InitViews, answer "visible" at once; the host renderer will own occlusion.
@@ -645,6 +669,22 @@ extern "C" void sub_82D3E358(PPCContext& __restrict ctx, uint8_t* base) {
     g_queries_answered.fetch_add(1, std::memory_order_relaxed);
     ctx.r3.u64 = 1;
     return;
+  }
+  if (ctx.r5.u32 != 0 && Readable(ctx.r3.u32)) {
+    bool unissued = false;
+    {
+      std::lock_guard lock(g_unissued_mutex);
+      unissued = g_unissued.erase(ctx.r3.u32) != 0;
+    }
+    if (unissued) {
+      if (Readable(ctx.r4.u32)) Store(base, ctx.r4.u32, 4096);
+      const uint64_t n = g_unissued_answered.fetch_add(1, std::memory_order_relaxed) + 1;
+      if ((n & (n - 1)) == 0) {  // 1, 2, 4, 8, ...
+        REXLOG_INFO("hybrid: answered a query InitViews allocated in a suppressed frame at once (B-308): {} so far", n);
+      }
+      ctx.r3.u64 = 1;
+      return;
+    }
   }
   const int64_t limit_ms = QueryWaitMs();
   if (ctx.r5.u32 == 0 || limit_ms <= 0) {  // a poll, or BOTS_QUERY_WAIT_MS=0: the game's own loop
@@ -689,7 +729,9 @@ extern "C" void sub_82BB1E78(PPCContext& __restrict ctx, uint8_t* base) {
       const uint32_t renderer = ctx.r3.u32;
       PPCContext saved = ctx;
       t_suppressed_visibility = true;
+      t_render_skipped = true;
       sub_82BAD738(ctx, base);
+      t_render_skipped = false;
       t_suppressed_visibility = false;
       ctx = saved;
       ctx.r3.u64 = renderer;

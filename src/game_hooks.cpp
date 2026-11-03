@@ -43,6 +43,7 @@
 #include "widescreen.h"
 #include "gfx/capture.h"
 #include "instr.h"
+#include "test_range.h"
 #include "input_math.h"
 #include "mnk_input.h"
 #include "prompt_state.h"
@@ -167,6 +168,20 @@ bool BotsGuardMissingAiiuComponent(PPCRegister& r3) {
   static std::atomic<uint64_t> hits{0};
   uint64_t n = ++hits;
   if (n == 1 || n == 10 || n == 100) REXLOG_WARN("B-041 guard: null AIIU component at 0x82E8E270 skipped ({}x)", n);
+  return true;
+}
+
+// B-314: the second site of B-041. After the guard above skips its call, sub_82E8E148 calls
+// sub_82E7CF38(this), which repeats the same lookup (r3 = sub_8244EE48(this->+0x208)) and then
+// does r3->vtbl[0x158/4](r3) with no null check (guest null read, ~4% of LoadChapter 41270 loads on
+// the Deck). Mid-asm hook at 0x82E7CF6C (the lwz after the lookup, config/default.toml): when
+// r3 == 0 jump to 0x82E7CF7C, past the lwz/lwz/bctrl. What follows only uses r31 (set before the
+// lookup) and the saved registers; the caller overwrites r3 right after the call.
+bool BotsGuardMissingAiiuComponent2(PPCRegister& r3) {
+  if (r3.u32 != 0) return false;
+  static std::atomic<uint64_t> hits{0};
+  uint64_t n = ++hits;
+  if (n == 1 || n == 10 || n == 100) REXLOG_WARN("B-314 guard: null AIIU component at 0x82E7CF6C skipped ({}x)", n);
   return true;
 }
 
@@ -315,6 +330,12 @@ void RunPlayerCommand(PPCContext& ctx, uint8_t* base, ExecState& st, uint32_t pl
 
 void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std::string& cmd) {
   bots::instr::NoteCommand(cmd);
+  // "mousefeed <spec>" (B-269): synthetic mouse motion through the driver's path, see mouse_pattern.h; "mousefeed off".
+  if (cmd.rfind("mousefeed ", 0) == 0) {
+    const std::string spec = cmd.substr(10);
+    if (auto* kbm = bots::MouseKeyboardDriver::instance()) kbm->SetFeed(spec == "off" ? "" : spec);
+    return;
+  }
   // "peek <hex addr> [count]": log guest words (pointers the game fills in at runtime).
   if (cmd.rfind("peek ", 0) == 0) {
     char* end = nullptr;
@@ -332,6 +353,13 @@ void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std:
     const std::string value = sp == std::string::npos ? "" : cmd.substr(sp + 1);
     REXLOG_INFO("BOTS_EXEC setflag {} = {} -> {}", name, value, rex::cvar::SetFlagByName(name, value) ? "ok" : "failed");
     return;
+  }
+  if (cmd.rfind("range ", 0) == 0) {
+    std::vector<std::string> expand;
+    if (bots::testrange::Command(base, cmd, expand)) {
+      for (const auto& c : expand) RunConsoleCommand(ctx, base, st, c);
+      return;
+    }
   }
   if (split_screen::Command(cmd) || debug::Command(base, cmd) || bots::scenefeed::Command(base, cmd)) return;
   if (!st.buffer) st.buffer = rex::system::kernel_memory()->SystemHeapAlloc(0x400);

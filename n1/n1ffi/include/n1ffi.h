@@ -207,6 +207,9 @@ void n1_set_time(N1Renderer* r, float seconds);
  * out = pow(saturate(c * scale), 1 / 2.2) + overlay, where scale = ColorScale * (1 - OverlayColor.a) (the composite's
  * c5.rgb) and overlay = OverlayColor.rgb * OverlayColor.a. Kept until the next call; null pointers reset to no fade. */
 void n1_set_fade(N1Renderer* r, const float* scale, const float* overlay);
+/* B-292: the picture of the game's DamageEffectTexture render target (hit-direction marks): w x h texels, 4 bytes each in
+ * B, G, R, A order (the guest's channels as drawn). Stays until the next call; NULL (or a zero size) clears it. */
+void n1_set_damage_tex(N1Renderer* r, const uint8_t* bgra, uint32_t w, uint32_t h);
 
 /* B-188: the same lighting feed as fixed-layout binary records (no JSON text to build or parse). Layouts match
  * lightfeed::bin (Rust) and HybridLight/HybridFog/HybridPost in the host's hybrid_state.h; sizes are asserted on each

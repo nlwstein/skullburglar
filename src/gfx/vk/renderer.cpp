@@ -1232,6 +1232,22 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
       dest->swapped = dest_info.copy_dest_swap;
       dest->written = ++write_clock_;
       last_resolve_address_ = dest_address;
+      // B-292: the HUD's damage-indicator capture resolves a 128x64 render texture. Remember where; n1's frame reads it.
+      // BOTS_N1_DAMAGE_TEX=0 turns the picture off (the damage post material then shows no hit marks).
+      static const bool damage_tex_on = [] {
+        const char* v = std::getenv("BOTS_N1_DAMAGE_TEX");
+        return !(v && *v == '0');
+      }();
+      if (damage_tex_on && dest_pitch.copy_dest_pitch == 128 && dest_pitch.copy_dest_height == 64) {
+        static int logged = 0;
+        if (damage_address_ != dest_address && logged < 30) {
+          ++logged;
+          REXLOG_INFO("hybrid n1: 128x64 resolve to {:08X} (format {}, host {}x{}, source rect {}x{})", dest_address, format, dest->width,
+                      dest->height, w, h);
+        }
+        damage_address_ = dest_address;
+        damage_dirty_ = true;
+      }
       DumpResolve(*dest, dest_address);
     } else {
       ++stats_.dropped_resolves;

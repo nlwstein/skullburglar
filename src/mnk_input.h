@@ -32,6 +32,8 @@
 #include <rex/ui/window.h>
 #include <rex/ui/window_listener.h>
 
+#include "input_math.h"
+#include "mouse_pattern.h"
 #include "prompt_state.h"
 
 REXCVAR_DECLARE(bool, kbm);
@@ -72,6 +74,9 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   // Mouse motion since the last call, in pixels (+x right, +y up), scaled by kbm_sensitivity (kbm_aim_sensitivity
   // while the Aim key is held) and kbm_invert_y. Zero while the pointer isn't captured.
   void TakeMouseDelta(float& dx, float& dy);
+  // Test aid (B-269): feed synthetic mouse motion (mouse_pattern.h) through the same path real events take, so it meets
+  // the drift gate; an empty or unparsable spec turns it off. BOTS_MOUSE_FEED=<spec> starts one at launch.
+  bool SetFeed(const std::string& spec);
 
   // The merged controller state the game read for user 0 (guest XInputGetState). Input beyond what this driver
   // contributed came from a real controller: prompts switch back to it. While a controller's prompts show, they
@@ -168,6 +173,10 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   std::chrono::steady_clock::time_point wheel_until_[2] = {};
   std::chrono::steady_clock::time_point tap_until_[16] = {};  // TapButtons, per button bit
   float mouse_dx_ = 0, mouse_dy_ = 0;
+  bots::input::MouseGate gate_;                       // the drift gate's state (mutex_)
+  std::chrono::steady_clock::time_point gate_last_{};  // when the gate last ran
+  bots::input::MousePattern feed_;                    // BOTS_MOUSE_FEED, added to the counts each frame
+  bool feeding_ = false;
   rex::input::X_INPUT_STATE last_out_{};  // what GetDeviceState last returned
   uint32_t diag_events_ = 0, diag_dropped_ = 0;  // BOTS_MOUSE_LOG counters (mutex_)
   double diag_taken_ = 0;

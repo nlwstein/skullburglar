@@ -297,6 +297,34 @@ int main() {
     fs::remove_all(dir);
   }
 
+  // The Windows stage folder note: only our own stage folder names pass, so a clean-up can never be pointed elsewhere.
+  {
+    CHECK(IsStageFolderName("skullburglar-update-1a2b3c4d0001"));
+    CHECK(IsStageFolderName("skullburglar-update-AbC123"));  // what mkdtemp makes elsewhere
+    CHECK(!IsStageFolderName("skullburglar-update-"));
+    CHECK(!IsStageFolderName("skullburglar-updates"));
+    CHECK(!IsStageFolderName("Skullburglar-update-1a2b"));
+    CHECK(!IsStageFolderName("skullburglar-update-..\\x"));
+    CHECK(!IsStageFolderName("skullburglar-update-a/b"));
+    CHECK(!IsStageFolderName("skullburglar-update-a.b"));
+    CHECK(!IsStageFolderName("skullburglar-update-a b"));
+    CHECK(!IsStageFolderName("..\\skullburglar-update-1a"));
+    CHECK(!IsStageFolderName("C:\\Users\\x"));
+    CHECK(!IsStageFolderName(std::string("skullburglar-update-ab") + '\0' + "c"));
+    CHECK(!IsStageFolderName("skullburglar-update-" + std::string(80, 'a')));
+    std::string v, n;
+    CHECK(ParseStageNote(FormatStageNote("1.5.0", "skullburglar-update-1a2b3c4d0001"), v, n));
+    CHECK(v == "1.5.0" && n == "skullburglar-update-1a2b3c4d0001");
+    CHECK(ParseStageNote("1.5.0\r\nskullburglar-update-ff\r\n", v, n) && n == "skullburglar-update-ff");
+    CHECK(!ParseStageNote("", v, n));
+    CHECK(!ParseStageNote("1.5.0", v, n));
+    CHECK(!ParseStageNote("1.5.0\n", v, n));
+    CHECK(!ParseStageNote("1.5.0\n..\\..\\Windows\n", v, n));
+    CHECK(!ParseStageNote("1.5.0\nC:\\Windows\n", v, n));
+    CHECK(!ParseStageNote("1.5.0\nskullburglar-update-ab\\..\\..\n", v, n));
+    CHECK(!ParseStageNote("1 5\nskullburglar-update-ab\n", v, n));
+  }
+
   if (failures) std::printf("%d failures\n", failures);
   else std::printf("update_test: all passed\n");
   return failures ? 1 : 0;

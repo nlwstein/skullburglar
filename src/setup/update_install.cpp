@@ -405,6 +405,82 @@ fs::path PendingMarker() {
   return d.empty() ? d : d / "update-pending.txt";
 }
 
+// Names the stage folder the setup program runs from, and the version it installs (FormatStageNote). The setup program
+// deletes the pending marker when it finishes, so this separate note is what the next start reads: if the running
+// version is the one named, the update went through and the folder (about 30 MB of setup program) can go.
+fs::path StageNotePath() {
+  fs::path d = AppDataFolder();
+  return d.empty() ? d : d / "update-staging.txt";
+}
+
+bool IsReparsePoint(DWORD attrs) { return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT); }
+
+// Deletes `dir` and everything in it without ever following a link: a symlink or junction inside is removed as a link
+// (RemoveDirectoryW / DeleteFileW on a link act on the link itself), never entered. `dir` itself must be a real folder.
+// True when it is gone.
+bool RemoveTreeNoFollow(const fs::path& dir, int depth = 0) {
+  const DWORD attrs = GetFileAttributesW(dir.c_str());
+  if (attrs == INVALID_FILE_ATTRIBUTES) return GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND;
+  if (!(attrs & FILE_ATTRIBUTE_DIRECTORY) || IsReparsePoint(attrs) || depth > 16) return false;
+  bool ok = true;
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW((dir / L"*").c_str(), &fd);
+  if (h != INVALID_HANDLE_VALUE) {
+    do {
+      const std::wstring name = fd.cFileName;
+      if (name == L"." || name == L"..") continue;
+      const fs::path p = dir / name;
+      if (IsReparsePoint(fd.dwFileAttributes)) {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ok = RemoveDirectoryW(p.c_str()) && ok;
+        else ok = DeleteFileW(p.c_str()) && ok;
+      } else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        ok = RemoveTreeNoFollow(p, depth + 1) && ok;
+      } else {
+        SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
+        ok = DeleteFileW(p.c_str()) && ok;
+      }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+  }
+  return RemoveDirectoryW(dir.c_str()) && ok;
+}
+
+// `name` under the temp folder, only when it is one of our own stage folder names (IsStageFolderName) and a real folder.
+// True when it is gone afterwards (or never was there).
+bool RemoveStageFolder(const fs::path& temp, const std::string& name) {
+  if (!IsStageFolderName(name)) return false;
+  return RemoveTreeNoFollow(temp / name);
+}
+
+// The new version is running (the note names this version): delete the stage folder the update ran its setup from.
+// The setup program may still be finishing for a moment, so retry briefly; a failure leaves the note for the next start.
+void RemoveConfirmedStage(const fs::path& temp) {
+  const fs::path note = StageNotePath();
+  std::error_code ec;
+  if (note.empty() || !fs::is_regular_file(note, ec)) return;
+  std::string text, version, folder;
+  {
+    std::ifstream in(note, std::ios::binary);
+    text.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  }
+  if (text.size() > 512 || !ParseStageNote(text, version, folder)) {
+    fs::remove(note, ec);  // not ours or garbled: drop it, the age-based sweep still covers the folder
+    return;
+  }
+  if (version != AppVersion()) {
+    // An update that didn't finish (or an older note): leave the folder to the age-based sweep; drop a stale note.
+    if (fs::last_write_time(note, ec) < fs::file_time_type::clock::now() - std::chrono::hours(1) && !ec) fs::remove(note, ec);
+    return;
+  }
+  for (int attempt = 0; attempt < 6; ++attempt) {
+    if (RemoveStageFolder(temp, folder)) {
+      fs::remove(note, ec);
+      return;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  }
+}
+
 // Whether `dir` was made by the setup program: it has uninstall.exe, and the setup's registry entry names this
 // folder. An unzipped copy, or a build run from a source tree, has neither, and the setup must never run over it
 // (it deletes program files first).
@@ -436,6 +512,14 @@ bool InstallWindows(const fs::path& dir, const fs::path& setup, const Asset& ass
     fs::create_directories(marker.parent_path(), ec);
     std::ofstream(marker, std::ios::trunc) << asset.version << "\n";
   }
+  // Which folder the setup runs from, for the next start to delete once this version is confirmed (RemoveConfirmedStage).
+  const fs::path stage_note = StageNotePath();
+  const std::string stage_name = PathToUtf8(setup.parent_path().filename());
+  if (!stage_note.empty() && IsStageFolderName(stage_name)) {
+    std::error_code ec;
+    fs::create_directories(stage_note.parent_path(), ec);
+    std::ofstream(stage_note, std::ios::binary | std::ios::trunc) << FormatStageNote(asset.version, stage_name);
+  }
   std::wstring cmd = L"\"" + setup.wstring() + L"\" /S /UPDATE /D=" + dir.wstring();
   STARTUPINFOW si{sizeof(si)};
   PROCESS_INFORMATION pi{};
@@ -444,6 +528,7 @@ bool InstallWindows(const fs::path& dir, const fs::path& setup, const Asset& ass
     error = "can't start the setup program (error " + std::to_string(GetLastError()) + ")";
     std::error_code ec;
     if (!marker.empty()) fs::remove(marker, ec);
+    if (!stage_note.empty()) fs::remove(stage_note, ec);
     return false;
   }
   CloseHandle(pi.hThread);
@@ -1038,15 +1123,24 @@ void CleanUpOldUpdates() {
   // folders and not recent: another copy of the launcher may be mid-update.
   fs::path base = fs::temp_directory_path(ec);
   if (ec) return;
+#if defined(_WIN32)
+  RemoveConfirmedStage(base);  // the update that just finished: its folder goes now, not an hour from now
+#endif
   for (const auto& e : fs::directory_iterator(base, ec)) {
     const std::string name = PathToUtf8(e.path().filename());
     if (!name.starts_with(kStagePrefix)) continue;
-#if !defined(_WIN32)
+#if defined(_WIN32)
+    // Never follow a link: only a real folder with one of our own names, and not recent.
+    if (!IsStageFolderName(name) || IsReparsePoint(GetFileAttributesW(e.path().c_str()))) continue;
+    std::error_code w;
+    if (fs::last_write_time(e.path(), w) < cutoff && !w) RemoveStageFolder(base, name);
+    continue;
+#else
     struct stat st {};
     if (lstat(e.path().c_str(), &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid()) continue;
-#endif
     std::error_code t;
     if (fs::last_write_time(e.path(), t) < cutoff && !t) fs::remove_all(e.path(), t);
+#endif
   }
 #if !defined(_WIN32)
   // What a swap left next to the running program when something held it open.

@@ -1,0 +1,8 @@
+[
+ "The red hit-direction markers that show where you were shot from now appear in the new renderer, at the same strength as the original.",
+ "Fixed a rare freeze of several seconds while a level loads, seen on the Steam Deck after many level loads in one session.",
+ "Fixed two rare crashes while a level is loading, one of them seen in about 1 in 25 loads of one checkpoint on the Steam Deck.",
+ "The \"Mouse noise gate (pixels)\" setting now ignores slow, steady drift (for example a gyro lying still) instead of letting it through in small jumps; deliberate turns pass at once. It's still off by default; if your aim creeps, try 2.",
+ "Fixed some small textures looking blocky or streaky in the new renderer.",
+ "Updating the game on Windows no longer leaves the downloaded installer behind in your temp folder."
+]
