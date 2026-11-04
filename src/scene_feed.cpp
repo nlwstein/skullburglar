@@ -53,6 +53,7 @@
 #include <bit>
 #include <cctype>
 #include <chrono>
+#include <deque>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -72,7 +73,7 @@
 #include <rex/ppc/context.h>
 
 #include "hybrid_state.h"
-#include "focus_flag.h"
+#include "live_mic.h"
 #include "outline_flag.h"
 
 namespace bots::scenefeed {
@@ -143,20 +144,6 @@ Field FindProp(uint32_t cls, const char* name) {
         return out;
       }
   return {};
-}
-
-// B-318: the owner's ObjectHasFocus (the game targets it: scoring posters, pickups, doors), as the instance flag n1
-// draws the highlight from. The property is looked up once per owner class; classes without it never match.
-// BOTS_N1_FOCUS=0 turns it off.
-uint32_t FocusFlags(uint32_t owner) {
-  static const bool enabled = bots::focus::EnabledBy(std::getenv("BOTS_N1_FOCUS"));
-  if (!enabled) return 0;
-  static std::unordered_map<uint32_t, Field> by_class;
-  const uint32_t cls = U32(owner + 0x34);
-  auto it = by_class.find(cls);
-  if (it == by_class.end()) it = by_class.emplace(cls, FindProp(cls, "ObjectHasFocus")).first;
-  const Field& f = it->second;
-  return f.ok() ? bots::focus::InstFlags(true, U32(owner + f.offset), f.mask) : 0;
 }
 
 bool ClassChainHas(uint32_t cls, const char* name) {
@@ -1387,6 +1374,7 @@ struct LiveComponent {
   bool runtime = false;  // a material was made at run time (MaterialPath): re-read its parameters every frame
   std::vector<const char*> materials;
   std::vector<uint64_t> fingerprints;  // per material, when `runtime` (MaterialFingerprint)
+  std::vector<struct MicWatch*> mics;  // the cooked material instances this component draws with
 };
 // What an emitter's LOD level says about how to draw it, cached per LOD level (the property reads walk class records).
 struct LiveEmitter {
@@ -2041,6 +2029,137 @@ const ScalarLayout& ScalarParamsOf(uint32_t mic) {
     }
   }
   return it->second;
+}
+
+// cooked material instances whose scalar parameters the game changes in place (the focus highlight: `Activated`
+// goes 0 -> 1 on the poster's shared instance, and every object drawn with it lights up). A cooked file holds only the
+// unfocused value, so the feed watches the cooked instances of the meshes it feeds (the mesh's own materials and the
+// component's Materials), remembers their scalar parameters the first time it sees them, and names every instance whose
+// live scalars differ as a material variant (HybridScene::live_materials); n1 draws each section that uses the
+// instance with it, whichever object it belongs to. Per frame it reads only the instances a fed component names, and a
+// parameter array only when its hash changed. BOTS_N1_FOCUS=0: off; BOTS_N1_LIVE_PARAMS=activated|all picks the set.
+struct MicWatch {
+  uint32_t mic = 0, name = 0, cls = 0;  // the object, and its name and class words (a freed one no longer matches)
+  const char* base = nullptr;           // interned cooked path
+  std::vector<bots::livemic::Param> first;  // the parameters when the feed first saw it
+  uint64_t fp = 0;                      // hash of the parameter array words last read
+  uint64_t stamp = 0;                   // last walk that fed a component using it
+  const char* variant = nullptr;        // "<base>?&s:..." while the live values differ from `first`
+  bots::livemic::ChurnGuard churn;
+  bool dead = false, muted = false;
+};
+
+bots::livemic::Mode LiveMicMode() {
+  static const bots::livemic::Mode mode =
+      bots::livemic::ModeFrom(std::getenv("BOTS_N1_FOCUS"), std::getenv("BOTS_N1_LIVE_PARAMS"), bots::livemic::Mode::kAll);
+  return mode;
+}
+bool LiveMicLog() {
+  static const bool on = [] {
+    const char* v = std::getenv("BOTS_N1_LIVEMIC_LOG");
+    return v && *v && *v != '0';
+  }();
+  return on;
+}
+
+// The scalar parameters of a MaterialInstanceConstant's own array and a hash of the words they came from.
+uint64_t ReadScalars(uint32_t mic, std::vector<bots::livemic::Param>* out) {
+  uint64_t h = 1469598103934665603ull;
+  const ScalarLayout& l = ScalarParamsOf(mic);
+  if (!l.ok) return h;
+  const uint32_t data = U32(mic + l.offset), n = std::min<uint32_t>(U32(mic + l.offset + 4), 32);
+  h = bots::livemic::Mix(h, data), h = bots::livemic::Mix(h, n);
+  if (!Readable(data)) return h;
+  for (uint32_t k = 0; k < n; ++k) {
+    const uint32_t e = data + k * l.size, nm = U32(e + l.name), bits = U32(e + l.value);
+    h = bots::livemic::Mix(bots::livemic::Mix(h, nm), bits);
+    if (out) out->push_back({NameText(nm), F32(e + l.value)});
+  }
+  return h;
+}
+
+std::deque<MicWatch> g_mic_watches;
+std::unordered_map<uint32_t, MicWatch*> g_mic_by_object;
+std::vector<MicWatch*> g_mic_active;  // watches a component fed in the current walk
+uint64_t g_mic_walk = 0;
+
+// The watch of material `m` when it is a cooked MaterialInstanceConstant (created on first sight), else null.
+MicWatch* MicWatchFor(uint32_t m) {
+  if (!IsObject(m) || std::strcmp(ClassName(m), "MaterialInstanceConstant")) return nullptr;
+  auto it = g_mic_by_object.find(m);
+  if (it != g_mic_by_object.end()) {
+    MicWatch* w = it->second;
+    if (!w->dead && w->name == U32(m + 0x2C) && w->cls == U32(m + 0x34)) return w;
+    g_mic_by_object.erase(it);  // the address now holds something else (or the instance is gone): look again
+  }
+  const std::string path = Path(m);
+  if (RuntimeObject(path)) return nullptr;  // run-time instances already carry their parameters in the path
+  MicWatch& w = g_mic_watches.emplace_back();
+  w.mic = m, w.name = U32(m + 0x2C), w.cls = U32(m + 0x34), w.base = Intern(path);
+  w.fp = ReadScalars(m, &w.first);
+  g_mic_by_object[m] = &w;
+  return &w;
+}
+
+// The materials of a StaticMesh's first LOD, from the engine's own structures: UStaticMesh +0x3C LODModels (a
+// TIndirectArray: data, num, max) -> FStaticMeshRenderData, whose Elements TArray sits at +0x100, FStaticMeshElement
+// stride 0x40 with the material first. Every step is checked; a mesh that doesn't fit gives nothing (n1 then draws as
+// before). Layout read from a running game (posters, coins); the first mesh that fails is logged.
+void MeshMaterials(uint32_t mesh, std::vector<uint32_t>& out) {
+  static bool failed_logged = false;
+  const uint32_t lods = U32(mesh + 0x3C), nlods = U32(mesh + 0x40), maxlods = U32(mesh + 0x44);
+  bool ok = Readable(lods) && nlods >= 1 && nlods <= 8 && maxlods >= nlods;
+  const uint32_t render = ok ? U32(lods) : 0;
+  const uint32_t elems = Readable(render) ? U32(render + 0x100) : 0;
+  const uint32_t count = Readable(render) ? U32(render + 0x104) : 0, max = Readable(render) ? U32(render + 0x108) : 0;
+  ok = ok && Readable(elems) && count >= 1 && count <= 64 && max >= count;
+  if (!ok) {
+    if (!failed_logged) {
+      failed_logged = true;
+      REXLOG_INFO("scenefeed: live material instances: mesh {} has no readable LOD0 elements (lods {} at {:08X})",
+                  Path(mesh), nlods, lods);
+    }
+    return;
+  }
+  for (uint32_t i = 0; i < count; ++i) out.push_back(U32(elems + 0x40 * i));
+}
+
+// The watches a component draws with, found when its mesh or Materials change.
+void WatchComponentMics(std::vector<MicWatch*>& mics, uint32_t mesh, uint32_t mats, uint32_t mat_count) {
+  mics.clear();
+  if (LiveMicMode() == bots::livemic::Mode::kOff) return;
+  static std::vector<uint32_t> found;
+  found.clear();
+  MeshMaterials(mesh, found);
+  for (uint32_t i = 0; i < mat_count; ++i) found.push_back(U32(mats + 4 * i));
+  for (uint32_t m : found)
+    if (MicWatch* w = MicWatchFor(m); w && std::find(mics.begin(), mics.end(), w) == mics.end()) mics.push_back(w);
+}
+
+// Re-reads a watched instance's parameters when their hash changed and sets its variant.
+void RefreshMicWatch(MicWatch& w) {
+  if (!IsObject(w.mic) || U32(w.mic + 0x2C) != w.name || U32(w.mic + 0x34) != w.cls) {
+    w.dead = true, w.variant = nullptr;
+    return;
+  }
+  if (w.muted) return;
+  const uint64_t fp = ReadScalars(w.mic, nullptr);
+  if (fp == w.fp) return;
+  w.fp = fp;
+  std::vector<bots::livemic::Param> live;
+  ReadScalars(w.mic, &live);
+  const std::string suffix = bots::livemic::Suffix(LiveMicMode(), w.first, live);
+  if (LiveMicLog())
+    REXLOG_INFO("scenefeed: live material {} changed: [{}]", w.base, suffix);
+  if (suffix.empty()) {
+    w.variant = nullptr;
+  } else if (w.churn.Allow(g_mic_walk)) {
+    w.variant = InternMaterial(std::string(w.base) + "?" + suffix);
+  } else {
+    // A parameter the game drives every frame (a fade): n1 would build a variant per frame. Back to the cooked look.
+    w.muted = true, w.variant = nullptr;
+    REXLOG_INFO("scenefeed: live material {} changes too often; drawn as cooked from here on", w.base);
+  }
 }
 
 // The parameter arrays PostBin last read, so a lighting build between its every-16th post reads can tell that the
@@ -2969,6 +3088,8 @@ void Live(uint8_t* base) {
   out.skeletal.clear();
   out.bones.clear();
   out.materials.clear();
+  ++g_mic_walk;
+  g_mic_active.clear();
   size_t walk_at = 0;
   for (Primitive& p : st.prims) {
     if (g_prefetch) {
@@ -3025,6 +3146,7 @@ void Live(uint8_t* base) {
         lc.fingerprints.resize(mat_count);
         for (uint32_t i = 0; i < mat_count; ++i) lc.fingerprints[i] = MaterialFingerprint(U32(mats + 4 * i));
       }
+      if (!skel) WatchComponentMics(lc.mics, mesh, mats, mat_count);  // live material
     } else if (lc.runtime) {  // run-time instances: their parameters (fades, tints) can change every frame
       // Rebuild a material's path only when what it is built from changed (MaterialFingerprint); building it means
       // name lookups and string formatting for every parameter, every frame.
@@ -3048,6 +3170,8 @@ void Live(uint8_t* base) {
         lc.materials[i] = InternMaterial(MaterialPath(U32(mats + 4 * i), true));
       }
     }
+    for (MicWatch* w : lc.mics)  // the cooked instances a fed component draws with are read after the walk
+      if (w->stamp != g_mic_walk && !w->dead) w->stamp = g_mic_walk, g_mic_active.push_back(w);
     // The owner's light environment (characters, movers, pickups): lit by its composite lights in n1.
     const ClassInfo& info = PrimClass(p);
     if (!info.light_env_done) info.light_env_done = true, info.light_env = FindProp(p.cls, "LightEnvironment");
@@ -3089,7 +3213,6 @@ void Live(uint8_t* base) {
     }
     if (st.decals_on) NoteInstance(st, c, uint32_t(out.instances.size()));
     HybridScene::Instance& inst = out.instances.emplace_back();
-    inst.flags = Readable(owner) ? FocusFlags(owner) : 0;
     for (int i = 0; i < 16; ++i) inst.transform[i] = F32(c + g_off.local_to_world.offset + 4 * i);
     inst.mesh = lc.mesh_path;
     inst.light = lc.light_path;
@@ -3099,6 +3222,11 @@ void Live(uint8_t* base) {
     out.materials.insert(out.materials.end(), lc.materials.begin(), lc.materials.end());
   }
   out.walked = uint32_t(st.prims.size());
+  out.live_materials.clear();
+  for (MicWatch* w : g_mic_active) {  // live material
+    RefreshMicWatch(*w);
+    if (w->variant && !w->dead) out.live_materials.push_back({w->base, w->variant});
+  }
   lap(g_prof.loop);
   out.decals.clear();
   out.decal_receivers.clear();

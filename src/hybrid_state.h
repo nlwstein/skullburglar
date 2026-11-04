@@ -125,7 +125,6 @@ struct HybridScene {
     const char* light;    // the component's path (its baked vertex light), or null
     uint32_t mat_offset, mat_count;  // range in `materials` (Materials overrides; null entries keep the mesh's)
     const char* env;      // the owner's DynamicLightEnvironmentComponent path (LightEnvironment), or null
-    uint32_t flags = 0;   // bots::focus::kInstFocus: the owner has focus (B-318)
   };
   struct Skel {
     float transform[16];  // LocalToWorld
@@ -189,6 +188,13 @@ struct HybridScene {
   std::vector<Skel> skeletal;
   std::vector<float> bones;
   std::vector<const char*> materials;
+  // cooked material instances whose live scalar parameters differ from the cooked file (the focus highlight's
+  // `Activated`): n1 draws every section that uses `base` with `variant` ("<base>?&s:Name=v").
+  struct LiveMaterial {
+    const char* base;
+    const char* variant;
+  };
+  std::vector<LiveMaterial> live_materials;
   // The frame's lights, fog and post chain (B-188). `light` is set when the game built a new lighting state that
   // differs from the last one it published (every BOTS_N1_FEED_EVERY frames at most; fog and post only when they
   // changed); the renderer takes it (clears `light_pending`) and the game keeps an unconsumed update across frames.
