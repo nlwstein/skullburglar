@@ -103,6 +103,8 @@ struct Tex {
     bc5: bool,
     /// B-235: uploaded raw for Xenos's gamma curve; materials sampling it wrap the sample in `xe_pwl`.
     gamma: bool,
+    /// B-324: `TextureDesc::clamp`.
+    clamp: u8,
 }
 
 struct GpuMesh {
@@ -1097,6 +1099,7 @@ impl Renderer {
             alloc: Some(alloc),
             bc5: format == vk::Format::BC5_UNORM_BLOCK,
             gamma: false,
+            clamp: 0,
         };
         self.pending.push(Upload {
             staging,
@@ -1144,6 +1147,7 @@ impl Renderer {
                 mips: &mips,
                 normal: false,
                 gamma: false,
+                clamp: 0,
             };
             match self.try_add_texture(&desc) {
                 Ok(id) => self.damage_tex = Some(id),
@@ -1318,7 +1322,11 @@ impl Renderer {
         let gamma: Vec<bool> = (0..def.textures.len())
             .map(|k| textures.get(k).and_then(|&t| self.textures.get(t as usize)).is_some_and(|t| t.gamma))
             .collect();
-        let c = matdef::codegen::compile_gamma(def, &unpack, &recon_z, &gamma);
+        // B-324: textures whose UE3 addressing is clamp (the sampler repeats).
+        let clamp: Vec<u8> = (0..def.textures.len())
+            .map(|k| textures.get(k).and_then(|&t| self.textures.get(t as usize)).map_or(0, |t| t.clamp))
+            .collect();
+        let c = matdef::codegen::compile_addr(def, &unpack, &recon_z, &gamma, &clamp);
         let fl = self.shader_flags(def, m.blend);
         let skey = crate::plan::fnv(format!("{fl:?}|{}", c.key).as_bytes());
         // The shader is built by the startup step or a worker, never here: if it isn't ready the material is drawn
@@ -3265,7 +3273,7 @@ impl Renderer {
         let serial = self.last_serial + 1;
         let old = std::mem::replace(
             &mut self.textures[id as usize],
-            Tex { image: vk::Image::null(), view: vk::ImageView::null(), alloc: None, bc5: false, gamma: false },
+            Tex { image: vk::Image::null(), view: vk::ImageView::null(), alloc: None, bc5: false, gamma: false, clamp: 0 },
         );
         if let Some(a) = old.alloc {
             self.ctr.bytes_freed += a.size();
@@ -3321,6 +3329,7 @@ impl Renderer {
             let mips: Vec<&[u8]> = decoded.iter().map(|v| v.as_slice()).collect();
             let id = self.upload_texture(fmt, t.width, t.height, &mips)?;
             self.textures[id as usize].gamma = t.gamma;
+            self.textures[id as usize].clamp = t.clamp;
             return Ok(id);
         }
         let fmt = vk_format(t.format, t.srgb && t.format != TexFormat::Bc5);
@@ -3333,10 +3342,12 @@ impl Renderer {
             let mips: Vec<&[u8]> = expanded.iter().map(|v| v.as_slice()).collect();
             let id = self.upload_texture(fmt, t.width, t.height, &mips)?;
             self.textures[id as usize].gamma = t.gamma;
+            self.textures[id as usize].clamp = t.clamp;
             return Ok(id);
         }
         let id = self.upload_texture(fmt, t.width, t.height, t.mips)?;
         self.textures[id as usize].gamma = t.gamma;
+        self.textures[id as usize].clamp = t.clamp;
         Ok(id)
     }
 
