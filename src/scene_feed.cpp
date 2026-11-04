@@ -72,6 +72,7 @@
 #include <rex/ppc/context.h>
 
 #include "hybrid_state.h"
+#include "focus_flag.h"
 #include "outline_flag.h"
 
 namespace bots::scenefeed {
@@ -142,6 +143,20 @@ Field FindProp(uint32_t cls, const char* name) {
         return out;
       }
   return {};
+}
+
+// B-318: the owner's ObjectHasFocus (the game targets it: scoring posters, pickups, doors), as the instance flag n1
+// draws the highlight from. The property is looked up once per owner class; classes without it never match.
+// BOTS_N1_FOCUS=0 turns it off.
+uint32_t FocusFlags(uint32_t owner) {
+  static const bool enabled = bots::focus::EnabledBy(std::getenv("BOTS_N1_FOCUS"));
+  if (!enabled) return 0;
+  static std::unordered_map<uint32_t, Field> by_class;
+  const uint32_t cls = U32(owner + 0x34);
+  auto it = by_class.find(cls);
+  if (it == by_class.end()) it = by_class.emplace(cls, FindProp(cls, "ObjectHasFocus")).first;
+  const Field& f = it->second;
+  return f.ok() ? bots::focus::InstFlags(true, U32(owner + f.offset), f.mask) : 0;
 }
 
 bool ClassChainHas(uint32_t cls, const char* name) {
@@ -2962,6 +2977,7 @@ void Live(uint8_t* base) {
     }
     if (st.decals_on) NoteInstance(st, c, uint32_t(out.instances.size()));
     HybridScene::Instance& inst = out.instances.emplace_back();
+    inst.flags = Readable(owner) ? FocusFlags(owner) : 0;
     for (int i = 0; i < 16; ++i) inst.transform[i] = F32(c + g_off.local_to_world.offset + 4 * i);
     inst.mesh = lc.mesh_path;
     inst.light = lc.light_path;

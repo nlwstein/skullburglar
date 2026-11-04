@@ -63,6 +63,7 @@ typedef struct N1Instance {
   uint32_t mat_offset; /* range in the frame's material handle array, one per mesh section */
   uint32_t mat_count;
   uint32_t env;        /* n1_env handle (owner's DynamicLightEnvironmentComponent) or N1_NONE */
+  uint32_t flags;      /* bit 0: the owner has focus, draw with Activated = 1 (B-318) */
 } N1Instance;
 
 typedef struct N1SkelInstance {
