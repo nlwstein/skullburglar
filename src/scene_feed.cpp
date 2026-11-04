@@ -2157,8 +2157,8 @@ GodLive GodUpdate(uint32_t effect, uint32_t cls, float exposure) {
   }
   if (out.have) {
     const bool on = out.x >= 0 && out.x <= 1 && out.y >= 0 && out.y <= 1;
-    const bool near = out.x >= -0.5f && out.x <= 1.5f && out.y >= -0.5f && out.y <= 1.5f;
-    target = on ? exposure : near ? exposure * 0.5f : 0.f;
+    const bool close_by = out.x >= -0.5f && out.x <= 1.5f && out.y >= -0.5f && out.y <= 1.5f;
+    target = on ? exposure : close_by ? exposure * 0.5f : 0.f;
   }
   float speed = FieldF(effect, FindEx(cls, "ExposureSpeed"), 1.f);
   if (!(speed > 0)) speed = 1.f;
