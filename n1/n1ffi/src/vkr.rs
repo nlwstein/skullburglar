@@ -61,6 +61,26 @@ const GOD_GRID: u32 = 128;
 /// B-313: view distance (UE units) from which the god-rays mask counts a pixel as sky. The port's mask pass leaves
 /// out the sky dome; n1's depth has it, so the dome (and nothing nearer) must fall past this.
 const GOD_SKY_DIST: f32 = 5.0e4;
+
+/// B-320: the composites' ray fade as shader constants [near, 1 / (far - near), 0, 0] (see `godref::depth_fade`).
+/// `BOTS_N1_GODFADE=near,far` (UE units) sets it, `BOTS_N1_GODFADE=0` turns it off (the game's own composite).
+fn god_fade() -> [f32; 4] {
+    static F: std::sync::OnceLock<[f32; 4]> = std::sync::OnceLock::new();
+    *F.get_or_init(|| {
+        let v = std::env::var("BOTS_N1_GODFADE").ok();
+        let (near, far) = match v.as_deref() {
+            Some("0") => (0.0, 0.0),
+            Some(s) => {
+                let mut it = s.split(',').filter_map(|x| x.trim().parse::<f32>().ok());
+                (it.next().unwrap_or(GOD_FADE.0), it.next().unwrap_or(GOD_FADE.1))
+            }
+            None => GOD_FADE,
+        };
+        if far > near { [near, 1.0 / (far - near), 0.0, 0.0] } else { [0.0; 4] }
+    })
+}
+/// B-320: view distances (UE units) over which the rays fade in.
+const GOD_FADE: (f32, f32) = (2000.0, 8000.0);
 const DYN_AT: u64 = POST_AT + 256 * POST_PASSES as u64;
 
 /// Texture ids of the built-in 1x1 textures.
@@ -2325,6 +2345,10 @@ impl Renderer {
                 let on = if dbg > 0.0 { 2.0 } else { 1.0 };
                 blocks[5][14][3] = on;
                 blocks[7][14][3] = on;
+                // B-320: the composites fade the rays in with distance (taps[3]).
+                let fade = god_fade();
+                blocks[5][13] = fade;
+                blocks[7][13] = fade;
             }
             blocks.push(o);
         }
