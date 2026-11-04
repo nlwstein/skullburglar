@@ -59,6 +59,7 @@
 #include "script_input.h"
 #include "save_backup.h"
 #include "setup/app_paths.h"
+#include "setup/update_check.h"
 #include "setup/settings.h"
 #include "setup/setup_dialog.h"
 #include "fps_counter.h"
@@ -266,8 +267,9 @@ class BotsApp : public rex::ReXApp {
     return bots::savebackup::NewestLog(rex::filesystem::GetExecutableFolder() / "logs", "bots_");
   }
 
-  // On the desktop, say where a crash will be archived.
+  // The first lines of the log: which build this is (B-125). On the desktop, also say where a crash will be archived.
   void LogBuildInfo() {
+    REXLOG_INFO("Skullburglar {} (commit {})", bots::setup::AppVersion(), bots::setup::AppCommit());
 #if !TARGET_OS_IPHONE && !defined(__ANDROID__)
     try {
       if (user_data_root().empty()) return;

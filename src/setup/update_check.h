@@ -18,6 +18,9 @@ namespace bots::setup {
 // This build's version ("0.4.0"), or "dev".
 const char* AppVersion();
 
+// The git commit this build was made from (short hash), or "unknown". Logged at startup.
+const char* AppCommit();
+
 // True when this build knows where to look (a release build; the address must be https).
 bool UpdateCheckAvailable();
 
