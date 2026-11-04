@@ -71,6 +71,8 @@
 
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
+#include <rex/system/kernel_state.h>
+#include <rex/system/xmemory.h>
 
 #include "hybrid_state.h"
 #include "live_mic.h"
@@ -88,6 +90,17 @@ uint32_t U32(uint32_t address) {
 }
 float F32(uint32_t address) { return std::bit_cast<float>(U32(address)); }
 bool Readable(uint32_t address) { return address >= 0x40000000u && address < 0xA0000000u && !(address & 3); }
+// Whether [address, address + size) is committed guest memory. Readable() only checks the address range; a pointer taken
+// from a structure the engine is freeing (a chapter change) can point at unmapped pages, and reading those kills the
+// process. Used for the pointers the live material path follows (mesh render data, parameter arrays).
+bool Mapped(uint32_t address, uint32_t size) {
+  if (!Readable(address) || uint64_t(address) + size > 0xA0000000ull) return false;
+  auto* heap = rex::system::kernel_memory()->LookupHeap(address);
+  rex::memory::HeapAllocationInfo info{};
+  if (!heap || !heap->QueryRegionInfo(address, &info)) return false;
+  return (info.state & rex::memory::kMemoryAllocationCommit) && info.protect &&
+         uint64_t(address) + size <= uint64_t(info.base_address) + info.region_size;
+}
 
 constexpr uint32_t kNames = 0x837F98A0, kGEngine = 0x8380D380;
 constexpr uint32_t kImageDataFrom = 0x83000000, kImageDataTo = 0x839C0000;
@@ -2046,6 +2059,7 @@ struct MicWatch {
   uint64_t stamp = 0;                   // last walk that fed a component using it
   const char* variant = nullptr;        // "<base>?&s:..." while the live values differ from `first`
   bots::livemic::ChurnGuard churn;
+  uint32_t checked_data = 0, checked_n = 0;  // the parameter array Mapped() last accepted
   bool dead = false, muted = false;
 };
 
@@ -2063,13 +2077,17 @@ bool LiveMicLog() {
 }
 
 // The scalar parameters of a MaterialInstanceConstant's own array and a hash of the words they came from.
-uint64_t ReadScalars(uint32_t mic, std::vector<bots::livemic::Param>* out) {
+uint64_t ReadScalars(uint32_t mic, std::vector<bots::livemic::Param>* out, MicWatch* w = nullptr) {
   uint64_t h = 1469598103934665603ull;
   const ScalarLayout& l = ScalarParamsOf(mic);
   if (!l.ok) return h;
   const uint32_t data = U32(mic + l.offset), n = std::min<uint32_t>(U32(mic + l.offset + 4), 32);
   h = bots::livemic::Mix(h, data), h = bots::livemic::Mix(h, n);
-  if (!Readable(data)) return h;
+  // The array is checked when its address or length changes, not every frame.
+  if (!w || w->checked_data != data || w->checked_n != n) {
+    if (!Mapped(data, n * l.size)) return h;
+    if (w) w->checked_data = data, w->checked_n = n;
+  }
   for (uint32_t k = 0; k < n; ++k) {
     const uint32_t e = data + k * l.size, nm = U32(e + l.name), bits = U32(e + l.value);
     h = bots::livemic::Mix(bots::livemic::Mix(h, nm), bits);
@@ -2088,7 +2106,7 @@ uint64_t g_mic_walk = 0;
 
 // The watch of material `m` when it is a cooked MaterialInstanceConstant (created on first sight), else null.
 MicWatch* MicWatchFor(uint32_t m) {
-  if (!IsObject(m) || std::strcmp(ClassName(m), "MaterialInstanceConstant")) return nullptr;
+  if (!Mapped(m, 0x40) || !IsObject(m) || std::strcmp(ClassName(m), "MaterialInstanceConstant")) return nullptr;
   auto it = g_mic_by_object.find(m);
   if (it != g_mic_by_object.end()) {
     MicWatch* w = it->second;
@@ -2099,7 +2117,7 @@ MicWatch* MicWatchFor(uint32_t m) {
   if (RuntimeObject(path)) return nullptr;  // run-time instances already carry their parameters in the path
   MicWatch& w = g_mic_watches.emplace_back();
   w.mic = m, w.name = U32(m + 0x2C), w.cls = U32(m + 0x34), w.base = Intern(path);
-  w.fp = ReadScalars(m, &w.first);
+  w.fp = ReadScalars(m, &w.first, &w);
   g_mic_by_object[m] = &w;
   if (LiveMicLog())
     for (const auto& q : w.first)
@@ -2124,12 +2142,15 @@ void MeshMaterials(uint32_t mesh, std::vector<uint32_t>& out) {
     if (LiveMicLog())
       REXLOG_INFO("scenefeed: live material mesh layout coverage: {} of {} fed static meshes validate", passed, passed + failed);
   };
-  const uint32_t lods = U32(mesh + 0x3C), nlods = U32(mesh + 0x40), maxlods = U32(mesh + 0x44);
-  bool ok = Readable(lods) && nlods >= 1 && nlods <= 8 && maxlods >= nlods;
+  const bool mesh_ok = Mapped(mesh, 0x48);
+  const uint32_t lods = mesh_ok ? U32(mesh + 0x3C) : 0, nlods = mesh_ok ? U32(mesh + 0x40) : 0,
+                 maxlods = mesh_ok ? U32(mesh + 0x44) : 0;
+  bool ok = mesh_ok && Mapped(lods, 4) && nlods >= 1 && nlods <= 8 && maxlods >= nlods;
   const uint32_t render = ok ? U32(lods) : 0;
-  const uint32_t elems = Readable(render) ? U32(render + 0x100) : 0;
-  const uint32_t count = Readable(render) ? U32(render + 0x104) : 0, max = Readable(render) ? U32(render + 0x108) : 0;
-  ok = ok && Readable(elems) && count >= 1 && count <= 64 && max >= count;
+  const bool render_ok = ok && Mapped(render, 0x10C);
+  const uint32_t elems = render_ok ? U32(render + 0x100) : 0;
+  const uint32_t count = render_ok ? U32(render + 0x104) : 0, max = render_ok ? U32(render + 0x108) : 0;
+  ok = render_ok && count >= 1 && count <= 64 && max >= count && Mapped(elems, 0x40 * count);
   count_mesh(ok);
   if (!ok) {
     if (!failed_logged) {
@@ -2149,23 +2170,24 @@ void WatchComponentMics(std::vector<MicWatch*>& mics, uint32_t mesh, uint32_t ma
   static std::vector<uint32_t> found;
   found.clear();
   MeshMaterials(mesh, found);
-  for (uint32_t i = 0; i < mat_count; ++i) found.push_back(U32(mats + 4 * i));
+  if (mat_count && mat_count <= 64 && Mapped(mats, 4 * mat_count))
+    for (uint32_t i = 0; i < mat_count; ++i) found.push_back(U32(mats + 4 * i));
   for (uint32_t m : found)
     if (MicWatch* w = MicWatchFor(m); w && std::find(mics.begin(), mics.end(), w) == mics.end()) mics.push_back(w);
 }
 
 // Re-reads a watched instance's parameters when their hash changed and sets its variant.
 void RefreshMicWatch(MicWatch& w) {
-  if (!IsObject(w.mic) || U32(w.mic + 0x2C) != w.name || U32(w.mic + 0x34) != w.cls) {
+  if (!Mapped(w.mic, 0x40) || !IsObject(w.mic) || U32(w.mic + 0x2C) != w.name || U32(w.mic + 0x34) != w.cls) {
     w.dead = true, w.variant = nullptr;
     return;
   }
   if (w.muted) return;
-  const uint64_t fp = ReadScalars(w.mic, nullptr);
+  const uint64_t fp = ReadScalars(w.mic, nullptr, &w);
   if (fp == w.fp) return;
   w.fp = fp;
   std::vector<bots::livemic::Param> live;
-  ReadScalars(w.mic, &live);
+  ReadScalars(w.mic, &live, &w);
   const std::string suffix = bots::livemic::Suffix(LiveMicMode(), w.first, live);
   if (LiveMicLog())
     REXLOG_INFO("scenefeed: live material {} changed: [{}]", w.base, suffix);
