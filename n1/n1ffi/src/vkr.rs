@@ -391,7 +391,7 @@ pub struct Renderer {
     free_mats: Vec<(u64, u32)>,
     /// B-228 decal geometry: meshes, vertex-light ranges and light entries given back (`free_decal`), each with the
     /// serial of its last possible use; reused once that serial has completed.
-    free_meshes: Vec<(u64, u32)>,
+    free_meshes: MeshSlots,
     free_words: Vec<(u64, u32, u32)>,
     free_lights: Vec<(u64, u32)>,
     /// B-287: texture and skinned-mesh slots given back by eviction, each with the serial of its last possible use.
@@ -721,7 +721,7 @@ impl Renderer {
                 ready: HashMap::new(),
                 unresolved: Vec::new(),
                 free_mats: Vec::new(),
-                free_meshes: Vec::new(),
+                free_meshes: MeshSlots::default(),
                 free_words: Vec::new(),
                 free_lights: Vec::new(),
                 free_tex: Vec::new(),
@@ -3199,7 +3199,7 @@ impl Renderer {
     /// until it is reused, once the newest submission that could have drawn it has completed.
     pub fn free_mesh(&mut self, id: u32) {
         let serial = self.last_serial + 1;
-        if self.free_meshes.iter().any(|x| x.1 == id) {
+        if self.free_meshes.is_free(id) {
             return;
         }
         if let Some(gm) = self.meshes.get_mut(id as usize) {
@@ -3209,7 +3209,8 @@ impl Renderer {
             self.mesh_info[id as usize].sections.clear();
             self.defer_at(serial, Garbage::Buffer(old.vbuf));
             self.defer_at(serial, Garbage::Buffer(old.ibuf));
-            self.free_meshes.push((serial, id));
+            // B-316: never offered for reuse, see `MeshSlots`.
+            self.free_meshes.release(serial, id, false);
         }
     }
 
@@ -3300,8 +3301,8 @@ impl Renderer {
     }
 
     fn try_add_mesh(&mut self, m: &MeshDesc) -> Result<u32> {
-        // B-287: a static mesh evicted at a level change leaves a slot, reused once the GPU is done with it.
-        self.try_add_mesh_at(m, true)
+        // B-316: a static mesh always gets a new slot (see `MeshSlots`); only decal meshes reuse given-back ones.
+        self.try_add_mesh_at(m, false)
     }
 
     fn try_add_mesh_at(&mut self, m: &MeshDesc, reuse: bool) -> Result<u32> {
@@ -3353,8 +3354,7 @@ impl Renderer {
         // B-228: a decal mesh given back reuses its slot once the GPU is done with it.
         if reuse {
             let done = self.completed;
-            if let Some(k) = self.free_meshes.iter().position(|&(s, _)| s <= done) {
-                let (_, id) = self.free_meshes.swap_remove(k);
+            if let Some(id) = self.free_meshes.take(done) {
                 self.meshes[id as usize] = GpuMesh { vbuf, ibuf };
                 self.mesh_info[id as usize] = info;
                 return Ok(id);
@@ -3385,7 +3385,7 @@ impl Renderer {
             self.mesh_info[mesh as usize].sections.clear();
             self.defer_at(serial, Garbage::Buffer(old.vbuf));
             self.defer_at(serial, Garbage::Buffer(old.ibuf));
-            self.free_meshes.push((serial, mesh));
+            self.free_meshes.release(serial, mesh, true);
         }
         if let Some(LightInfo::Words { base, count, .. }) = self.lights.get(light as usize) {
             let (base, count) = (*base, *count);
@@ -3706,6 +3706,75 @@ impl Drop for Renderer {
             }
             self.allocator.take();
         }
+    }
+}
+
+/// Mesh slots given back (static meshes by B-287 eviction, decal meshes by `free_decal`). A slot is empty (draws
+/// nothing) from `release` on. Only a decal slot may be handed out again (`take`), and only once the serial of its last
+/// possible use has completed.
+///
+/// B-316: a static mesh uploaded into a slot a static mesh of an earlier chapter had used drew about 11% darker than
+/// the same mesh in a fresh process (lit surfaces of a level after other chapters had been played), so evicted static
+/// slots stay empty and the next static mesh appends. The empty slot costs a few bytes of `MeshInfo`; its GPU buffers
+/// are freed all the same.
+#[derive(Default)]
+struct MeshSlots {
+    /// (serial of the slot's last possible use, id, may be reused)
+    free: Vec<(u64, u32, bool)>,
+}
+
+impl MeshSlots {
+    fn release(&mut self, serial: u64, id: u32, reusable: bool) {
+        self.free.push((serial, id, reusable));
+    }
+
+    fn is_free(&self, id: u32) -> bool {
+        self.free.iter().any(|f| f.1 == id)
+    }
+
+    /// A reusable slot whose last use has completed (`done` is the newest completed serial).
+    fn take(&mut self, done: u64) -> Option<u32> {
+        let k = self.free.iter().position(|&(s, _, r)| r && s <= done)?;
+        Some(self.free.swap_remove(k).1)
+    }
+
+    /// Slots currently given back, reusable or not.
+    fn len(&self) -> usize {
+        self.free.len()
+    }
+}
+
+#[cfg(test)]
+mod mesh_slot_tests {
+    use super::MeshSlots;
+
+    #[test]
+    fn static_slots_are_never_handed_out_again() {
+        let mut m = MeshSlots::default();
+        m.release(5, 7, false);
+        assert_eq!(m.take(u64::MAX), None);
+        assert!(m.is_free(7));
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn decal_slot_waits_for_the_gpu() {
+        let mut m = MeshSlots::default();
+        m.release(5, 3, true);
+        assert_eq!(m.take(4), None);
+        assert_eq!(m.take(5), Some(3));
+        assert_eq!(m.take(5), None);
+        assert!(!m.is_free(3));
+    }
+
+    #[test]
+    fn decal_reuse_skips_static_slots() {
+        let mut m = MeshSlots::default();
+        m.release(1, 10, false);
+        m.release(1, 11, true);
+        assert_eq!(m.take(9), Some(11));
+        assert_eq!(m.take(9), None);
+        assert_eq!(m.len(), 1);
     }
 }
 
