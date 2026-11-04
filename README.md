@@ -100,9 +100,10 @@ Each has a GitHub issue: subscribe to it for progress, or comment there rather t
 
 - **Online co-op** ([#6](https://github.com/nlwstein/skullburglar/issues/6)). Co-op over the internet without a VPN,
   not just on a local network.
-- **Frame rates above 60** ([#7](https://github.com/nlwstein/skullburglar/issues/7)). The launcher's "Unlimited" frame
-  rate works, but parts of the game's simulation and its cutscenes assume 60 fps or less; making higher frame rates
-  safe needs per-system fixes.
+- **Frame rates above 60** ([#7](https://github.com/nlwstein/skullburglar/issues/7)). The launcher offers 90, 120, 144
+  and Unlimited as experimental frame rate limits. Almost everything plays the same at those rates, but vehicles
+  drive slower the higher the frame rate, so the game holds 60 fps while you drive; a proper fix for vehicles is still
+  to come.
 
 ## Reporting problems
 
