@@ -1227,9 +1227,21 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
                          source_format == xe::ColorRenderTargetFormat::k_16_16_16_16;
       const VkRect2D rect{{x0, y0}, {uint32_t(std::min(w, dw)), uint32_t(std::min(h, dh))}};
       if (dest->raw_depth_from) MaterializeRawDepth(*dest);  // outside this rect it still holds that depth
-      Transfer(*source, 0, *dest, kTransferResolve, &rect,
+      // B-313: UE3's god-rays occlusion mask is drawn into the alpha channel only (colour mask 8) of an 8888 target and
+      // resolved with the swap flag into an 8-bit texture. A red-only resolve left that texture black, so the port drew no
+      // rays at all. An 8-bit destination from a swapped 8888 resolve takes the alpha, which is where the mask is.
+      // Off by default: it changes the emulated renderer's picture and how real hardware resolves is not verified.
+      // BOTS_RESOLVE_K8_ALPHA=1 turns it on (research: the port's ray pass then sees a real mask).
+      static const bool k8_alpha = [] {
+        const char* v = std::getenv("BOTS_RESOLVE_K8_ALPHA");
+        return v && *v == '1';
+      }();
+      const bool to_alpha = k8_alpha && dest->format == VK_FORMAT_R8_UNORM && dest_info.copy_dest_swap &&
+                            source_format == xe::ColorRenderTargetFormat::k_8_8_8_8;
+      Transfer(*source, 0, *dest, to_alpha ? kTransferResolveAlpha : kTransferResolve, &rect,
                std::ldexp(1.0f, int(dest_info.copy_dest_exp_bias) + (fixed ? 5 : 0)));
       dest->swapped = dest_info.copy_dest_swap;
+      if (dest->width == 128 && dest->height == 128) (dest->format == VK_FORMAT_R8_UNORM ? god_mask_ : god_rays_) = dest;
       dest->written = ++write_clock_;
       last_resolve_address_ = dest_address;
       // B-292: the HUD's damage-indicator capture resolves a 128x64 render texture. Remember where; n1's frame reads it.
@@ -1351,12 +1363,18 @@ void Renderer::DumpResolve(const Image& image, uint32_t address) {
 
 bool Renderer::ReadTexture(uint32_t address, std::vector<uint8_t>& rgb, uint32_t& width, uint32_t& height) {
   const auto it = texture_at_.find(address);
+  if (it == texture_at_.end() && std::getenv("BOTS_REPLAY_READ")) {  // debugging: say what is there
+    for (const auto& [a, img] : texture_at_) std::fprintf(stderr, "  resolved %08X: %ux%u fmt %d\n", a, img->width, img->height, int(img->format));
+  }
   return it != texture_at_.end() && ReadImage(*it->second, rgb, width, height);
 }
 
 bool Renderer::ReadImage(const Image& image, std::vector<uint8_t>& rgb, uint32_t& width, uint32_t& height) {
   uint32_t texel;
   switch (image.format) {
+    case VK_FORMAT_R8_UNORM:
+      texel = 1;
+      break;
     case VK_FORMAT_R32_SFLOAT:
     case VK_FORMAT_R8G8B8A8_UNORM:
     case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
@@ -1400,12 +1418,16 @@ bool Renderer::ReadImage(const Image& image, std::vector<uint8_t>& rgb, uint32_t
   }();
   // BOTS_DUMP_7E3=1 shows 2_10_10_10 textures as 7e3 (UE3 copies HDR scene colour out through them).
   static const bool as_7e3 = std::getenv("BOTS_DUMP_7E3") != nullptr;
+  // BOTS_DUMP_ALPHA=1 shows the alpha channel of 8888 textures as grey (the god-rays mask lives in alpha, B-313).
+  static const bool as_alpha = std::getenv("BOTS_DUMP_ALPHA") != nullptr;
   width = image.width, height = image.height;
   rgb.resize(size_t(width) * height * 3);
   const auto* src = static_cast<const uint8_t*>(mapped.pMappedData);
   for (size_t i = 0; i < size_t(width) * height; ++i) {
     float c[3];
-    if (image.format == VK_FORMAT_R32_SFLOAT) {
+    if (image.format == VK_FORMAT_R8_UNORM) {
+      c[0] = c[1] = c[2] = float(src[i]) / 255.0f;
+    } else if (image.format == VK_FORMAT_R32_SFLOAT) {
       float v;
       std::memcpy(&v, src + i * 4, 4);
       c[0] = c[1] = c[2] = v;
@@ -1429,6 +1451,7 @@ bool Renderer::ReadImage(const Image& image, std::vector<uint8_t>& rgb, uint32_t
       std::memcpy(&p, src + i * 4, 4);
       if (image.format == VK_FORMAT_R8G8B8A8_UNORM) {
         for (int k = 0; k < 3; ++k) c[k] = Unorm(p >> (8 * k), 8);
+        if (as_alpha) c[0] = c[1] = c[2] = Unorm(p >> 24, 8);
       } else if (as_7e3) {
         for (int k = 0; k < 3; ++k) c[k] = rex::graphics::xenos::Float7e3To32((p >> (10 * k)) & 0x3FF);
       } else {

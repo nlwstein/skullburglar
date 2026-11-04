@@ -126,7 +126,7 @@ pub struct FeedPost {
     pub tone_min: f32,
     pub tone_max: f32,
     pub tone_scale: f32,
-    /// SfGodRaysEffect: exposure, decay, magnitude, ModulateRayColour bytes (3), light point (2), pad.
+    /// SfGodRaysEffect: exposure (the eased fExposureInterpolator the port renders with), decay, magnitude, ModulateRayColour bytes (3), light point (2), pad.
     pub god: [f32; 9],
     /// W4, SfUberPostProcessEffect: BloomKernelSize, BlurKernelSize, FalloffExponent, MaxNearBlurAmount,
     /// MaxFarBlurAmount, FocusInnerRadius, FocusDistance.

@@ -484,6 +484,7 @@ class Renderer : public Pm4Sink {
   static constexpr uint32_t kTransferValueDepth = 102;  // Transfer source: a depth-value image, encoded as D24
   static constexpr uint32_t kTransferValueFloatDepth = 103;  // ... and as 20e4
   static constexpr uint32_t kTransferDepthValue = 200;  // Transfer destination: the depth value as R32_SFLOAT
+  static constexpr uint32_t kTransferResolveAlpha = 301;  // ... into an 8-bit texture: the source's alpha (B-313)
   static constexpr uint32_t kTransferResolve = 300;     // Transfer destination: a colour resolve (exponent bias)
   static bool IsTransferable(uint32_t format);
   bool InitTransfers();
@@ -638,6 +639,8 @@ class Renderer : public Pm4Sink {
   // Resolve destinations are pitch wide; a fetch of a narrower (or shorter) texture samples a copy of its corner.
   std::map<std::tuple<const Image*, uint32_t, uint32_t>, std::unique_ptr<Image>> crops_;
   uint32_t last_resolve_address_ = 0;
+  Image* god_mask_ = nullptr;    // B-313: the latest 128x128 resolves, 8-bit (the god-rays mask) and 8888 (the rays); dual shots
+  Image* god_rays_ = nullptr;    // dump them
   uint32_t damage_address_ = 0;  // B-292: destination of the last 128x64 resolve (the damage capture)
   bool damage_logged_ = false;
   bool damage_dirty_ = false;   // a new one resolved since n1 last read it

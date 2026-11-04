@@ -614,6 +614,11 @@ VkSampler Renderer::GetSampler(const rg::xenos::xe_gpu_texture_fetch_t& fetch,
   }
   if (aniso == xe::AnisoFilter::kUseFetchConst) aniso = xe::AnisoFilter::kDisabled;
   aniso = xe::AnisoFilter(std::min(uint32_t(aniso), host_max));
+  if (trace_textures_) {  // B-313: which filter a fetch uses (the ray pass's mask fetch)
+    std::fprintf(stderr, "sampler: %ux%u mag %u min %u mip %u clamp %u,%u\n", uint32_t(fetch.size_2d.width) + 1,
+                 uint32_t(fetch.size_2d.height) + 1, uint32_t(mag), uint32_t(min), uint32_t(mip), uint32_t(fetch.clamp_x),
+                 uint32_t(fetch.clamp_y));
+  }
   const SamplerKey key{uint32_t(mag),           uint32_t(min),          uint32_t(mip),
                        uint32_t(fetch.clamp_x),  uint32_t(fetch.clamp_y), uint32_t(fetch.clamp_z),
                        uint32_t(fetch.border_color), fetch.mip_min_level, fetch.mip_max_level, uint32_t(aniso)};

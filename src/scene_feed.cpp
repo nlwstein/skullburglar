@@ -2087,6 +2087,96 @@ uint64_t PostQuick() {
 }
 
 // The player's post chain and blended settings (LightsPostJson's `post`), as raw numbers.
+// B-313: the hybrid frame skips FSceneRenderer::Render, so SfGodRaysEffect's per-view update never runs and its
+// vTextureSpaceLightPoint / fExposureInterpolator stay at 0. Redo it here: the nearest SfGodLight actor's location
+// projected with the camera (texture space, y down), the exposure target (Exposure on screen, half within [-0.5, 1.5],
+// else 0), and the interpolator eased toward it at ExposureSpeed per second.
+struct GodLive {
+  bool have = false;
+  float x = 0, y = 0, eased = 0;
+};
+GodLive GodUpdate(uint32_t effect, uint32_t cls, float exposure) {
+  static std::vector<uint32_t> lights;
+  static std::unordered_map<uint32_t, bool> is_light;
+  static auto last_scan = std::chrono::steady_clock::time_point{};
+  static auto last_tick = std::chrono::steady_clock::time_point{};
+  static float eased = 0;
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last_scan > std::chrono::seconds(2) && FindObjectTable()) {
+    last_scan = now;
+    lights.clear();
+    const uint32_t data = U32(g_objects), count = U32(g_objects + 4);
+    for (uint32_t i = 0; i < count; ++i) {
+      const uint32_t o = U32(data + 4 * i);
+      if (!o) continue;
+      const uint32_t c = U32(o + 0x34);
+      auto [it, fresh] = is_light.try_emplace(c, false);
+      if (fresh) it->second = Readable(c) && std::string_view(ClassName(o)) == "SfGodLight";
+      if (it->second && Path(o).find("Default__") == std::string::npos) lights.push_back(o);  // not the class default object
+    }
+  }
+  if (std::getenv("BOTS_N1_GODCMP")) {
+    static size_t seen = ~size_t(0);
+    if (seen != lights.size()) {
+      seen = lights.size();
+      static FieldEx l2;
+      for (uint32_t a : lights) {
+        if (!l2.ok()) l2 = FindEx(U32(a + 0x34), "Location");
+        REXLOG_INFO("god light {} at {} {} {}", Path(a), F32(a + l2.offset), F32(a + l2.offset + 4), F32(a + l2.offset + 8));
+      }
+      REXLOG_INFO("god lights: {}", lights.size());
+    }
+  }
+  double dt = last_tick.time_since_epoch().count() ? std::chrono::duration<double>(now - last_tick).count() : 0;
+  last_tick = now;
+  dt = std::min(dt, 0.25);
+  GodLive out;
+  Camera cam;
+  uint32_t wi = 0;
+  float target = 0;
+  if (ReadCamera(cam, wi)) {
+    static FieldEx loc;
+    float best = 1e30f;
+    for (uint32_t a : lights) {
+      if (!IsObject(a)) continue;
+      if (!loc.ok()) loc = FindEx(U32(a + 0x34), "Location");
+      if (!loc.ok()) break;
+      float w[4] = {F32(a + loc.offset), F32(a + loc.offset + 4), F32(a + loc.offset + 8), 1};
+      const float dx = w[0] - cam.location[0], dy = w[1] - cam.location[1], dz = w[2] - cam.location[2];
+      const float d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 >= best) continue;
+      float v[4], c[4];
+      for (int k = 0; k < 4; ++k) v[k] = w[0] * cam.view[k] + w[1] * cam.view[4 + k] + w[2] * cam.view[8 + k] + cam.view[12 + k];
+      for (int k = 0; k < 4; ++k) c[k] = v[0] * cam.proj[k] + v[1] * cam.proj[4 + k] + v[2] * cam.proj[8 + k] + v[3] * cam.proj[12 + k];
+      best = d2;
+      out.have = true;
+      if (std::fabs(c[3]) < 1e-6f) c[3] = 1e-6f;  // the game does not reject points behind the camera: they project mirrored
+      out.x = c[0] / c[3] * 0.5f + 0.5f;
+      out.y = 0.5f - c[1] / c[3] * 0.5f;
+    }
+  }
+  if (out.have) {
+    const bool on = out.x >= 0 && out.x <= 1 && out.y >= 0 && out.y <= 1;
+    const bool near = out.x >= -0.5f && out.x <= 1.5f && out.y >= -0.5f && out.y <= 1.5f;
+    target = on ? exposure : near ? exposure * 0.5f : 0.f;
+  }
+  float speed = FieldF(effect, FindEx(cls, "ExposureSpeed"), 1.f);
+  if (!(speed > 0)) speed = 1.f;
+  const float step = speed * float(dt);
+  eased = eased < target ? std::min(eased + step, target) : std::max(eased - step, target);
+  out.eased = eased;
+  return out;
+}
+
+// BOTS_N1_GODUPDATE=0 keeps the game's own state (right when the game renders the view itself, as in dual mode).
+bool HybridGodUpdate() {
+  static const bool on = [] {
+    const char* v = std::getenv("BOTS_N1_GODUPDATE");
+    return !(v && v[0] == '0');
+  }();
+  return on;
+}
+
 void PostBin(HybridLighting& out) {
   HybridPost& p = out.post;
   std::memset(&p, 0, sizeof(p));
@@ -2147,20 +2237,42 @@ void PostBin(HybridLighting& out) {
           }
       } else if (name == "SfGodRaysEffect") {
         if (dbg)
-          REXLOG_INFO("  god rays enabled {} exposure {} magnitude {} decay {} light {} {}", FieldB(e, FindEx(cls, "Enabled")),
-                      FieldF(e, FindEx(cls, "Exposure"), nan), FieldF(e, FindEx(cls, "RayMagnitude"), nan),
+          REXLOG_INFO("  god rays enabled {} exposure {} eased {} magnitude {} decay {} light {} {}", FieldB(e, FindEx(cls, "Enabled")),
+                      FieldF(e, FindEx(cls, "Exposure"), nan), FieldF(e, FindEx(cls, "fExposureInterpolator"), nan),
+                      FieldF(e, FindEx(cls, "RayMagnitude"), nan),
                       FieldF(e, FindEx(cls, "DecayPerSample"), nan), FieldF(e, FindEx(cls, "vTextureSpaceLightPointX"), nan),
                       FieldF(e, FindEx(cls, "vTextureSpaceLightPointY"), nan));
         if (!FieldB(e, FindEx(cls, "Enabled"))) continue;
         p.flags |= kPfGod;
-        p.god[0] = FieldF(e, FindEx(cls, "Exposure"), nan);
+        // B-313: the port renders with the eased exposure, not Exposure. SfGodRaysEffect's per-view update
+        // (vtable +0x128) projects the nearest SfGodLight actor to texture space (vTextureSpaceLightPoint), sets
+        // fExposureTarget = Exposure with the point on screen, Exposure / 2 within [-0.5, 1.5], else 0, and moves
+        // fExposureInterpolator toward it at ExposureSpeed per second; the scene proxy takes the interpolator as
+        // its exposure and the pass is skipped at <= 0.
+        float eased = FieldF(e, FindEx(cls, "fExposureInterpolator"), nan);
+        float lx = FieldF(e, FindEx(cls, "vTextureSpaceLightPointX"), nan), ly = FieldF(e, FindEx(cls, "vTextureSpaceLightPointY"), nan);
+        if (HybridGodUpdate()) {
+          const GodLive g = GodUpdate(e, cls, FieldF(e, FindEx(cls, "Exposure"), 0.f));
+          if (std::getenv("BOTS_N1_GODCMP"))  // the game's own state next to ours (only meaningful when the game renders the view)
+            REXLOG_INFO("god cmp: game {} {} {} ours {} {} {}", eased, lx, ly, g.eased, g.x, g.y);
+          if (g.have) eased = g.eased, lx = g.x, ly = g.y;
+        }
+        p.god[0] = std::isnan(eased) ? FieldF(e, FindEx(cls, "Exposure"), nan) : std::max(eased, 0.f);
         p.god[1] = FieldF(e, FindEx(cls, "DecayPerSample"), nan);
         p.god[2] = FieldF(e, FindEx(cls, "RayMagnitude"), nan);
         float c[3];
         Triple(e, FindEx(cls, "ModulateRayColour"), c);
         for (int k = 0; k < 3; ++k) p.god[3 + k] = std::isnan(c[k]) ? 255.f : c[k];
-        p.god[6] = FieldF(e, FindEx(cls, "vTextureSpaceLightPointX"), nan);
-        p.god[7] = FieldF(e, FindEx(cls, "vTextureSpaceLightPointY"), nan);
+        p.god[6] = lx;
+        p.god[7] = ly;
+        if (std::getenv("BOTS_N1_POST_LOG")) {  // B-313: the effect's live state, when it moves (a frozen state = no per-view update)
+          static int last[3] = {-99, -99, -99};
+          const int q[3] = {int(p.god[0] * 100.f), int(p.god[6] * 20.f), int(p.god[7] * 20.f)};
+          if (q[0] != last[0] || q[1] != last[1] || q[2] != last[2]) {
+            std::copy(q, q + 3, last);
+            REXLOG_INFO("god feed: exposure {} light {} {}", p.god[0], p.god[6], p.god[7]);
+          }
+        }
       }
     }
   }

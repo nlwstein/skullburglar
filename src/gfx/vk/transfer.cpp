@@ -74,6 +74,9 @@ void main() {
 #elif DST == 300
   result = v * scale;
   return;
+#elif DST == 301
+  result = vec4(v.a * scale);  // an 8-bit destination takes the alpha (see Renderer::Resolve, B-313)
+  return;
 #endif
   uint bits;
 #if SRC == 100

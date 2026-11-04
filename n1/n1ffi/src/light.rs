@@ -252,9 +252,9 @@ pub struct PostParams {
     pub dof: bool,
     /// B-266 / B-267: the active hand-ported post materials (`postmat.rs`), in chain order.
     pub mats: Vec<crate::postmat::Effect>,
-    /// B-307: SfGodRaysEffect (the level's sun rays), when the chain has it enabled and `BOTS_N1_GODRAYS=1`.
+    /// B-307: SfGodRaysEffect (the level's sun rays), when the chain has it enabled (`BOTS_N1_GODRAYS=0` turns it off).
     pub god: Option<lightfeed::post::GodRays>,
-    /// `BOTS_N1_GODRAYS=1` turns it on (default off until it matches the port on sun-facing views, B-313).
+    /// On by default (B-313): the pass runs the game's decoded ray shader; `BOTS_N1_GODRAYS=0` turns it off.
     pub god_on: bool,
 }
 
@@ -281,7 +281,7 @@ impl Default for PostParams {
             dof: env_flag("BOTS_N1_DOF", true),
             mats: Vec::new(),
             god: None,
-            god_on: env_flag("BOTS_N1_GODRAYS", false),
+            god_on: env_flag("BOTS_N1_GODRAYS", true),
         }
     }
 }
@@ -332,7 +332,8 @@ impl PostParams {
     /// B-307: the god-rays pass's block fields (g0: light point xy, magnitude, decay per step; g1: ray colour
     /// (ModulateRayColour ^ 2.2, as the port's constant), exposure), or None when the effect is off this frame.
     pub fn god_fields(&self) -> Option<([f32; 4], [f32; 4])> {
-        let g = self.god.as_ref().filter(|_| self.god_on)?;
+        // The port skips the pass when its eased exposure is 0 (light point off screen, B-313).
+        let g = self.god.as_ref().filter(|g| self.god_on && g.exposure > 0.0)?;
         let c = g.color.map(|v| v.max(0.0).powf(2.2));
         Some(([g.screen[0], g.screen[1], g.magnitude, g.decay], [c[0], c[1], c[2], g.exposure]))
     }
@@ -802,6 +803,16 @@ mod godrays {
         assert_eq!(g0, [0.93, 0.87, 0.025, 0.025]);
         assert!((g1[1] - 0.5f32.powf(2.2)).abs() < 1e-6 && g1[0] == 1.0 && g1[2] == 0.0 && g1[3] == 0.5);
         pp.god_on = false;
+        assert!(pp.god_fields().is_none());
+    }
+
+    /// B-313: the port skips the ray pass while its eased exposure is 0 (light point off screen).
+    #[test]
+    fn god_off_at_zero_exposure() {
+        let mut f = feed();
+        f.god_rays.as_mut().unwrap().exposure = 0.0;
+        let mut pp = PostParams::default().with_feed(&f);
+        pp.god_on = true;
         assert!(pp.god_fields().is_none());
     }
 
