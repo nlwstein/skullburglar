@@ -19,7 +19,7 @@
 namespace bots::livemic {
 
 // BOTS_N1_FOCUS=0 turns the whole feature off. BOTS_N1_LIVE_PARAMS picks which parameters follow the game: "activated"
-// (only the focus parameter) or "all" (any scalar that differs from its first-seen value).
+// (only the focus parameter) or "all" (also any other scalar that differs from its first-seen value).
 enum class Mode : uint8_t { kOff, kActivated, kAll };
 
 constexpr Mode ModeFrom(const char* focus, const char* params, Mode fallback) {
@@ -51,19 +51,30 @@ inline bool Watched(Mode mode, std::string_view name) {
   return mode == Mode::kAll || (mode == Mode::kActivated && SameName(name, "Activated"));
 }
 
+constexpr float kCookedActivated = 0.f;
+
 // "&s:Name=value" for every watched parameter of `live` that is missing from `first` or differs from it; "" when there is
-// none (the instance looks as cooked). The engine adds a parameter to an instance's array the first time it sets it, so
-// a name that `first` lacks counts as changed.
+// none (the instance looks as cooked). `Activated` is compared with its cooked value (kCookedActivated); every other
+// parameter with `first`, the live read when the feed first saw the instance (only used in "all" mode, so an instance first
+// seen already changed keeps that value as its baseline there). The engine adds a parameter to an instance's array the
+// first time it sets it, so a name that `first` lacks counts as changed.
 inline std::string Suffix(Mode mode, const std::vector<Param>& first, const std::vector<Param>& live) {
   std::string out;
   for (const Param& p : live) {
     if (!Watched(mode, p.name)) continue;
     bool same = false;
-    for (const Param& q : first)
-      if (SameName(p.name, q.name)) {
-        same = std::fabs(p.value - q.value) <= 1e-5f * std::fmax(1.0f, std::fabs(q.value));
-        break;
-      }
+    if (SameName(p.name, "Activated")) {
+      // The focus switch is cooked at 0 (unfocused) in every instance that has it, and the engine only writes 0 or 1. Compare
+      // with that, not with the first live read: an instance first seen while focused (a load or checkpoint next to a
+      // poster) would otherwise take 1 as its baseline and never draw the highlight.
+      same = std::fabs(p.value - kCookedActivated) <= 1e-5f;
+    } else {
+      for (const Param& q : first)
+        if (SameName(p.name, q.name)) {
+          same = std::fabs(p.value - q.value) <= 1e-5f * std::fmax(1.0f, std::fabs(q.value));
+          break;
+        }
+    }
     if (same) continue;
     char num[40];
     std::snprintf(num, sizeof(num), "%.6g", double(p.value));

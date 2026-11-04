@@ -2034,10 +2034,10 @@ const ScalarLayout& ScalarParamsOf(uint32_t mic) {
 // cooked material instances whose scalar parameters the game changes in place (the focus highlight: `Activated`
 // goes 0 -> 1 on the poster's shared instance, and every object drawn with it lights up). A cooked file holds only the
 // unfocused value, so the feed watches the cooked instances of the meshes it feeds (the mesh's own materials and the
-// component's Materials), remembers their scalar parameters the first time it sees them, and names every instance whose
+// component's Materials), compares their scalar parameters with the cooked ones (Activated against its cooked 0, others against the first read), and names every instance whose
 // live scalars differ as a material variant (HybridScene::live_materials); n1 draws each section that uses the
 // instance with it, whichever object it belongs to. Per frame it reads only the instances a fed component names, and a
-// parameter array only when its hash changed. BOTS_N1_FOCUS=0: off; BOTS_N1_LIVE_PARAMS=activated|all picks the set.
+// parameter array only when its hash changed. BOTS_N1_FOCUS=0: off; BOTS_N1_LIVE_PARAMS=all also follows every other scalar (default: Activated only).
 struct MicWatch {
   uint32_t mic = 0, name = 0, cls = 0;  // the object, and its name and class words (a freed one no longer matches)
   const char* base = nullptr;           // interned cooked path
@@ -2051,7 +2051,7 @@ struct MicWatch {
 
 bots::livemic::Mode LiveMicMode() {
   static const bots::livemic::Mode mode =
-      bots::livemic::ModeFrom(std::getenv("BOTS_N1_FOCUS"), std::getenv("BOTS_N1_LIVE_PARAMS"), bots::livemic::Mode::kAll);
+      bots::livemic::ModeFrom(std::getenv("BOTS_N1_FOCUS"), std::getenv("BOTS_N1_LIVE_PARAMS"), bots::livemic::Mode::kActivated);
   return mode;
 }
 bool LiveMicLog() {
@@ -2078,6 +2078,9 @@ uint64_t ReadScalars(uint32_t mic, std::vector<bots::livemic::Param>* out) {
   return h;
 }
 
+// Every cooked material instance the feed has watched, in a deque so the pointers in LiveComponent::mics stay valid. Dead
+// watches (an instance the engine freed) are flagged but never dropped: a chapter feeds a few hundred at most, each a few
+// dozen bytes, and a reload keeps them until the process ends. Revisit if a level streams instances in and out.
 std::deque<MicWatch> g_mic_watches;
 std::unordered_map<uint32_t, MicWatch*> g_mic_by_object;
 std::vector<MicWatch*> g_mic_active;  // watches a component fed in the current walk
@@ -2098,6 +2101,10 @@ MicWatch* MicWatchFor(uint32_t m) {
   w.mic = m, w.name = U32(m + 0x2C), w.cls = U32(m + 0x34), w.base = Intern(path);
   w.fp = ReadScalars(m, &w.first);
   g_mic_by_object[m] = &w;
+  if (LiveMicLog())
+    for (const auto& q : w.first)
+      if (bots::livemic::SameName(q.name, "Activated"))
+        REXLOG_INFO("scenefeed: watching {} at {:08X}, Activated read {} on first sight", w.base, m, q.value);
   return &w;
 }
 
@@ -2107,12 +2114,23 @@ MicWatch* MicWatchFor(uint32_t m) {
 // before). Layout read from a running game (posters, coins); the first mesh that fails is logged.
 void MeshMaterials(uint32_t mesh, std::vector<uint32_t>& out) {
   static bool failed_logged = false;
+  // Coverage of the layout check: distinct fed static meshes (by address) that pass / fail it. BOTS_N1_LIVEMIC_LOG=1
+  // logs the running count each time a new mesh is seen.
+  static std::unordered_set<uint32_t> counted;
+  static uint32_t passed = 0, failed = 0;
+  const auto count_mesh = [&](bool pass) {
+    if (!counted.insert(mesh).second) return;
+    ++(pass ? passed : failed);
+    if (LiveMicLog())
+      REXLOG_INFO("scenefeed: live material mesh layout coverage: {} of {} fed static meshes validate", passed, passed + failed);
+  };
   const uint32_t lods = U32(mesh + 0x3C), nlods = U32(mesh + 0x40), maxlods = U32(mesh + 0x44);
   bool ok = Readable(lods) && nlods >= 1 && nlods <= 8 && maxlods >= nlods;
   const uint32_t render = ok ? U32(lods) : 0;
   const uint32_t elems = Readable(render) ? U32(render + 0x100) : 0;
   const uint32_t count = Readable(render) ? U32(render + 0x104) : 0, max = Readable(render) ? U32(render + 0x108) : 0;
   ok = ok && Readable(elems) && count >= 1 && count <= 64 && max >= count;
+  count_mesh(ok);
   if (!ok) {
     if (!failed_logged) {
       failed_logged = true;

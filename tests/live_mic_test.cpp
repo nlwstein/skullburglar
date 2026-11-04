@@ -10,7 +10,7 @@ static int failures = 0;
 
 int main() {
   // Switches: BOTS_N1_FOCUS=0 is off whatever else is set; BOTS_N1_LIVE_PARAMS picks the set.
-  CHECK(ModeFrom(nullptr, nullptr, Mode::kAll) == Mode::kAll);
+  CHECK(ModeFrom(nullptr, nullptr, Mode::kActivated) == Mode::kActivated);
   CHECK(ModeFrom("1", nullptr, Mode::kActivated) == Mode::kActivated);
   CHECK(ModeFrom("0", "all", Mode::kAll) == Mode::kOff);
   CHECK(ModeFrom("0", nullptr, Mode::kAll) == Mode::kOff);
@@ -39,7 +39,12 @@ int main() {
   CHECK(Suffix(Mode::kOff, first, {{"Activated", 1.f}}).empty());
   // A parameter the engine adds on first use counts as changed, even at 0.
   CHECK(Suffix(Mode::kActivated, {}, {{"Activated", 1.f}}) == "&s:Activated=1");
-  CHECK(Suffix(Mode::kActivated, {{"Glow", 1.f}}, {{"Glow", 1.f}, {"Activated", 0.f}}) == "&s:Activated=0");
+  CHECK(Suffix(Mode::kActivated, {{"Glow", 1.f}}, {{"Glow", 1.f}, {"Activated", 0.f}}).empty());  // 0 is the cooked value
+  // First seen while focused: the first read (Activated = 1) must not become the baseline.
+  const std::vector<Param> seen_focused = {{"Activated", 1.f}, {"Glow", 2.f}};
+  CHECK(Suffix(Mode::kActivated, seen_focused, {{"Activated", 1.f}, {"Glow", 2.f}}) == "&s:Activated=1");
+  CHECK(Suffix(Mode::kAll, seen_focused, {{"Activated", 1.f}, {"Glow", 2.f}}) == "&s:Activated=1");
+  CHECK(Suffix(Mode::kActivated, seen_focused, {{"Activated", 0.f}, {"Glow", 2.f}}).empty());  // released: no Activated=0 variant
   // Tiny float noise is not a change; names compare without case.
   CHECK(Suffix(Mode::kAll, {{"Glow", 1000.f}}, {{"glow", 1000.001f}}).empty());
   CHECK(Suffix(Mode::kAll, {{"Glow", 1000.f}}, {{"glow", 1001.f}}) == "&s:glow=1001");
