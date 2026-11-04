@@ -9,7 +9,7 @@
 //! component and then sends plain structs every frame.
 
 use crate::{
-    Backend, Blend, Instance, MaterialDesc, MeshDesc, NONE, SKIP, SectionDesc, TexFormat, TextureDesc,
+    Backend, Blend, INST_FOCUS, Instance, MaterialDesc, MeshDesc, NONE, SKIP, SectionDesc, TexFormat, TextureDesc,
 };
 use anyhow::{Context, Result};
 use assetdb::{AssetDb, ComponentLight, MaterialAsset, MeshAsset, TexFmt, TextureAsset};
@@ -38,6 +38,12 @@ struct Slot {
 }
 
 /// A run-time material instance: the scene feed puts its parameter values after `?` in the path.
+/// B-318: `BOTS_N1_FOCUS=0` turns the focus highlight off.
+fn focus_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BOTS_N1_FOCUS").map_or(true, |v| v != "0"))
+}
+
 fn is_variant(path: &str) -> bool {
     path.contains('?')
 }
@@ -225,6 +231,8 @@ pub struct Resolver {
     /// B-287: renderer material ids each mesh slot's sections use, texture ids each material samples (diffuse first),
     /// and the light-map texture ids of each light slot: what eviction counts to know what is still referenced.
     mesh_mats: HashMap<u32, Vec<u32>>,
+    /// B-318: renderer material id of every section of a mesh slot, in section order (NONE where it has none).
+    mesh_secs: HashMap<u32, Vec<u32>>,
     mat_tex: HashMap<u32, Vec<u32>>,
     light_tex: HashMap<u32, [u32; 3]>,
     /// B-287: the clock value at each level change (`level_boundary`).
@@ -288,6 +296,7 @@ impl Resolver {
             out_overrides: Vec::new(),
             frame: 0,
             mesh_mats: HashMap::new(),
+            mesh_secs: HashMap::new(),
             mat_tex: HashMap::new(),
             light_tex: HashMap::new(),
             boundaries: Vec::new(),
@@ -531,7 +540,7 @@ impl Resolver {
         r: &mut impl Backend,
         m: &MeshAsset,
         mats: &[(String, MatLoad)],
-    ) -> (u32, Vec<u32>) {
+    ) -> (u32, Vec<u32>, Vec<u32>) {
         let sections: Vec<SectionDesc> = m
             .sections
             .iter()
@@ -567,7 +576,8 @@ impl Resolver {
             center: m.center,
             radius: m.radius,
         });
-        (id, used)
+        let secs = sections.iter().map(|s| s.material).collect();
+        (id, used, secs)
     }
 
     fn apply(&mut self, r: &mut impl Backend, l: Loaded) {
@@ -579,8 +589,9 @@ impl Resolver {
             } => {
                 let st = match mesh {
                     Some(m) => {
-                        let (id, mats) = self.upload_mesh(r, &m, &materials);
+                        let (id, mats, secs) = self.upload_mesh(r, &m, &materials);
                         self.mesh_mats.insert(handle, mats);
+                        self.mesh_secs.insert(handle, secs);
                         SlotState::Ready(id)
                     }
                     None => SlotState::Missing,
@@ -848,6 +859,7 @@ impl Resolver {
             }
             r.free_mesh(id);
             self.mesh_mats.remove(&(h as u32));
+            self.mesh_secs.remove(&(h as u32));
             self.forgets.push_back(Forget::Mesh(slot.path.clone()));
             slot.state = SlotState::Pending;
             slot.requested = false;
@@ -967,6 +979,34 @@ impl Resolver {
         }
     }
 
+    /// B-318: for a focused instance, fills the sections that have no explicit override (from `off`, which already holds
+    /// `out_o.len() - off` entries) with the section's own material re-resolved as `<path>?s:Activated=1`, the value
+    /// the game writes to the shared material instance while the player targets the object. A variant still loading
+    /// leaves the section as it was. Returns the number of sections covered.
+    fn focus_overrides(&mut self, r: &mut impl Backend, mesh_h: u32, off: u32, out_o: &mut Vec<u32>) -> u32 {
+        let Some(secs) = self.mesh_secs.get(&mesh_h).cloned() else { return 0 };
+        for (k, &base) in secs.iter().enumerate() {
+            let at = off as usize + k;
+            if at == out_o.len() {
+                out_o.push(NONE);
+            }
+            if out_o[at] != NONE || base == NONE {
+                continue;
+            }
+            let Some(path) = self.mat_ids.iter().find(|&(_, &id)| id == base).map(|(p, _)| p.clone()) else { continue };
+            if is_variant(&path) {
+                continue;
+            }
+            let h = self.material_handle(&format!("{path}?s:Activated=1"));
+            let id = self.ensure_material(r, h);
+            // SKIP is what a loading variant answers; keep the base look until it is in.
+            if id != SKIP {
+                out_o[at] = id;
+            }
+        }
+        secs.len() as u32
+    }
+
     /// Handles -> renderer ids for one frame. Input instances carry handles (mesh, light, and material handles in
     /// `overrides`); returns the renderer-ready instances and override ids (borrowed until the next call).
     pub fn translate(
@@ -1001,13 +1041,18 @@ impl Resolver {
                     self.ensure_material(r, h)
                 });
             }
+            let mut mat_count = inst.mat_count;
+            if inst.flags & INST_FOCUS != 0 && focus_on() {
+                mat_count = mat_count.max(self.focus_overrides(r, inst.mesh, off, &mut out_o));
+            }
             out_i.push(Instance {
                 transform: inst.transform,
                 mesh,
                 light,
                 mat_offset: off,
-                mat_count: inst.mat_count,
+                mat_count,
                 env: inst.env,
+                flags: inst.flags,
             });
         }
         self.out_instances = out_i;

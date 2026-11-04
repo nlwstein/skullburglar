@@ -672,6 +672,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     out.light = Handle(host->lights, in.light, host->r, n1_light);
     out.mesh = Handle(host->meshes, in.mesh, host->r, n1_mesh);
     out.env = Handle(host->envs, in.env, host->r, n1_env);
+    out.flags = in.flags;
     out.mat_offset = uint32_t(host->material_handles.size());
     out.mat_count = in.mat_count;
     for (uint32_t i = 0; i < in.mat_count; ++i)
@@ -1167,6 +1168,14 @@ struct DualState {
     uint32_t w = 0, h = 0;
     VkFormat format = VK_FORMAT_UNDEFINED;
     std::string stem, json;
+    struct Extra {  // B-313: the port's 128x128 god-rays mask and ray texture at the moment of the shot
+      VkBuffer buffer = nullptr;
+      VmaAllocation alloc = nullptr;
+      void* map = nullptr;
+      VkFormat format = VK_FORMAT_UNDEFINED;
+      std::string name;
+    };
+    std::vector<Extra> extra;
   };
   std::vector<Pending> pending;
 };
@@ -1226,6 +1235,17 @@ bool Renderer::DrawSceneDual(Image& target, const HybridCamera& cam, const VkRec
       if (!WritePng(p.stem + names[k], rgb, p.w, p.h)) REXLOG_WARN("hybrid dual: can't write {}{}", p.stem, names[k]);
       vmaDestroyBuffer(allocator_, p.buffer[k], p.alloc[k]);
     }
+    for (auto& e : p.extra) {
+      vmaInvalidateAllocation(allocator_, e.alloc, 0, VK_WHOLE_SIZE);
+      std::vector<uint8_t> g(128 * 128 * 3);
+      for (size_t i = 0; i < 128 * 128; ++i) {
+        const uint8_t* s = static_cast<const uint8_t*>(e.map);
+        if (e.format == VK_FORMAT_R8_UNORM) g[i * 3] = g[i * 3 + 1] = g[i * 3 + 2] = s[i];
+        else for (int k = 0; k < 3; ++k) g[i * 3 + k] = s[i * 4 + k];
+      }
+      WritePng(p.stem + e.name, g, 128, 128);
+      vmaDestroyBuffer(allocator_, e.buffer, e.alloc);
+    }
     if (FILE* f = std::fopen((p.stem + ".json").c_str(), "wb")) {
       std::fwrite(p.json.data(), 1, p.json.size(), f);
       std::fclose(f);
@@ -1282,6 +1302,23 @@ bool Renderer::DrawSceneDual(Image& target, const HybridCamera& cam, const VkRec
   region.imageExtent = {p.w, p.h, 1};
   vk_.vkCmdCopyImageToBuffer(cmd_, target.image, VK_IMAGE_LAYOUT_GENERAL, p.buffer[0], 1, &region);
   vk_.vkCmdCopyImageToBuffer(cmd_, image->image, VK_IMAGE_LAYOUT_GENERAL, p.buffer[1], 1, &region);
+  // B-313: the port's god-rays mask (8-bit) and ray texture (8888), 128x128 each, from its latest resolves.
+  for (Image* g : {god_mask_, god_rays_}) {
+    if (!g || g->width != 128 || g->height != 128 || (g->format != VK_FORMAT_R8_UNORM && g->format != VK_FORMAT_R8G8B8A8_UNORM)) continue;
+    DualState::Pending::Extra e;
+    VkBufferCreateInfo xi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    xi.size = 128 * 128 * (g->format == VK_FORMAT_R8_UNORM ? 1 : 4);
+    xi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VmaAllocationInfo xm{};
+    if (vmaCreateBuffer(allocator_, &xi, &alloc, &e.buffer, &e.alloc, &xm) != VK_SUCCESS) continue;
+    e.map = xm.pMappedData, e.format = g->format;
+    e.name = g->format == VK_FORMAT_R8_UNORM ? ".port-mask.png" : ".port-rays.png";
+    VkBufferImageCopy xr{};
+    xr.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    xr.imageExtent = {128, 128, 1};
+    vk_.vkCmdCopyImageToBuffer(cmd_, g->image, VK_IMAGE_LAYOUT_GENERAL, e.buffer, 1, &xr);
+    p.extra.push_back(e);
+  }
   Barrier();  // before the HUD draws over the target
 
   char stem[64];

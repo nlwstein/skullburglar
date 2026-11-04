@@ -56,6 +56,11 @@ const POST_MATS: usize = 3;
 // them), padding, and the last set is the god-rays pass (B-307).
 const POST_PASSES: usize = 9 + POST_MATS;
 const _: () = assert!(8 + POST_MATS < POST_PASSES, "the god-rays set must not overlap a material or the damage set");
+/// The god-rays target's side: the port's ray pass and its mask are 128x128 (B-313).
+const GOD_GRID: u32 = 128;
+/// B-313: view distance (UE units) from which the god-rays mask counts a pixel as sky. The port's mask pass leaves
+/// out the sky dome; n1's depth has it, so the dome (and nothing nearer) must fall past this.
+const GOD_SKY_DIST: f32 = 5.0e4;
 const DYN_AT: u64 = POST_AT + 256 * POST_PASSES as u64;
 
 /// Texture ids of the built-in 1x1 textures.
@@ -391,7 +396,7 @@ pub struct Renderer {
     free_mats: Vec<(u64, u32)>,
     /// B-228 decal geometry: meshes, vertex-light ranges and light entries given back (`free_decal`), each with the
     /// serial of its last possible use; reused once that serial has completed.
-    free_meshes: Vec<(u64, u32)>,
+    free_meshes: MeshSlots,
     free_words: Vec<(u64, u32, u32)>,
     free_lights: Vec<(u64, u32)>,
     /// B-287: texture and skinned-mesh slots given back by eviction, each with the serial of its last possible use.
@@ -440,6 +445,8 @@ pub struct Renderer {
     slots: Vec<Slot>,
     hdr: Option<Rt>,
     bloom: Option<[Rt; 3]>,
+    /// B-313: the god-rays texture, 128x128 like the port's (`GOD_GRID` in post.wgsl), whatever the render size.
+    god: Option<Rt>,
     /// W4: the graded scene (full res), when the level's MaterialEffect grade isn't the identity.
     graded: Option<Rt>,
     /// B-273: a copy of the HDR target taken before the sprite pass, for DestColor particle materials (the QTE ring).
@@ -721,7 +728,7 @@ impl Renderer {
                 ready: HashMap::new(),
                 unresolved: Vec::new(),
                 free_mats: Vec::new(),
-                free_meshes: Vec::new(),
+                free_meshes: MeshSlots::default(),
                 free_words: Vec::new(),
                 free_lights: Vec::new(),
                 free_tex: Vec::new(),
@@ -760,6 +767,7 @@ impl Renderer {
                 slots: Vec::new(),
                 hdr: None,
                 bloom: None,
+                god: None,
                 graded: None,
                 destc: None,
                 near: 5.0,
@@ -1523,7 +1531,7 @@ impl Renderer {
         if self.hdr.as_ref().is_some_and(|r| r.width == w && r.height == h) {
             return Ok(());
         }
-        for r in [self.hdr.take(), self.depth.take(), self.graded.take(), self.destc.take()].into_iter().flatten() {
+        for r in [self.hdr.take(), self.depth.take(), self.graded.take(), self.destc.take(), self.god.take()].into_iter().flatten() {
             self.defer(Garbage::Image(r.image, r.view, r.alloc));
         }
         if let Some(b) = self.bloom.take() {
@@ -1538,6 +1546,7 @@ impl Renderer {
         let b = self.rt(HDR_FORMAT, bw, bh, false, "n1 post q1")?;
         let c = self.rt(HDR_FORMAT, bw, bh, false, "n1 post q2")?;
         self.bloom = Some([a, b, c]);
+        self.god = Some(self.rt(HDR_FORMAT, GOD_GRID, GOD_GRID, false, "n1 god rays")?);
         self.graded = Some(self.rt(HDR_FORMAT, w, h, false, "n1 graded")?);
         self.destc = Some(self.rt(HDR_FORMAT, w, h, false, "n1 dest color")?);
         if let Some(m) = self.outline_mask.take() {
@@ -2288,7 +2297,8 @@ impl Renderer {
         }
         debug_assert!(blocks.len() < POST_PASSES, "post passes: {} blocks before the god-rays set", blocks.len());
         // B-307: the god-rays pass is the last set; the composites read its texture when it ran.
-        let god = if post_on { pp.god_fields() } else { None };
+        // Debug bit 17 (131072) turns the pass off for an A/B in one session (B-313).
+        let god = if post_on && self.debug_bits & 131072 == 0 { pp.god_fields() } else { None };
         let god_on = god.is_some();
         if std::env::var("BOTS_N1_POST_LOG").is_ok_and(|v| v != "0") {
             thread_local!(static LAST: std::cell::Cell<Option<([f32; 4], [f32; 4])>> = const { std::cell::Cell::new(None) });
@@ -2304,8 +2314,17 @@ impl Renderer {
             if let Some((g0, g1)) = god {
                 o[5] = g0;
                 o[6] = g1;
-                blocks[5][14][3] = 1.0;
-                blocks[7][14][3] = 1.0;
+                // B-313 diagnostics, debug bits 18-19 (`hybrid n1debug`): 1 shows the ray texture alone, 2 the sky
+                // mask, 3 depth x 1000.
+                let dbg = ((self.debug_bits >> 18) & 3) as f32;
+                o[4][3] = dbg;
+                // B-313: the sky mask's distance (UE units): past it counts as sky. Debug bits 21-23 pick another
+                // from the table for a sweep in one session (7: only where nothing was drawn, as before).
+                const SKY: [f32; 8] = [GOD_SKY_DIST, 1.0e4, 2.0e4, 5.0e4, 1.0e5, 2.0e5, 5.0e5, f32::INFINITY];
+                o[4][0] = SKY[((self.debug_bits >> 21) & 7) as usize];
+                let on = if dbg > 0.0 { 2.0 } else { 1.0 };
+                blocks[5][14][3] = on;
+                blocks[7][14][3] = on;
             }
             blocks.push(o);
         }
@@ -2445,6 +2464,7 @@ impl Renderer {
             let scene = if damage_pre.is_some() { pre_dst } else { scene_orig };
             let dv = self.depth.as_ref().unwrap().view;
             let [q0, q1, q2] = self.bloom.as_ref().map(|x| [x[0].view, x[1].view, x[2].view]).unwrap();
+            let gv = self.god.as_ref().unwrap().view;
             let mut srcs = vec![
                 (hdr, q0, q0),   // grade
                 (scene, q0, q0), // down -> q0
@@ -2474,6 +2494,7 @@ impl Renderer {
                 srcs.push((scene_orig, self.tex_view(ids[0], TEX_BLACK), self.tex_view(ids[1], TEX_BLACK)));
             }
             // B-307: the god-rays set is last; it reads depth only (bloom[0] stands in for the texture it writes).
+            // Every other set's binding 8 is the god-rays texture.
             while srcs.len() < POST_PASSES - 1 {
                 srcs.push((q0, q0, q0));
             }
@@ -2510,7 +2531,7 @@ impl Renderer {
                 }];
                 let set = s.post_sets[k];
                 let i5 = img(self.outline_mask.as_ref().map_or(*src, |m| m.view));
-                let i6 = img(if k == POST_PASSES - 1 { q0 } else { q1 });
+                let i6 = img(if k == POST_PASSES - 1 { q0 } else { gv });
                 let writes = [
                     vk::WriteDescriptorSet::default()
                         .dst_set(set)
@@ -2684,6 +2705,11 @@ impl Renderer {
                         | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
                 )],
             );
+            // The post chain samples depth (the grade's sky clamp, DOF, the god-rays sky mask), so the scene pass stores
+            // it whenever the post chain runs; with DONT_CARE its contents afterwards are undefined (B-313 found the
+            // RTX 3090 keeping them anyway). Debug bit 20 (1048576) puts back the old rule (stored only for the sprite
+            // pass or the outline) for an A/B.
+            let depth_kept = pg_sprites || outline_on || (post_on && self.debug_bits & 1048576 == 0);
             let cc = target.clear.unwrap_or([0.0, 0.0, 0.0, 1.0]);
             let clear = [
                 srgb_to_linear(cc[0]),
@@ -2703,7 +2729,7 @@ impl Renderer {
                 .image_view(depth.view)
                 .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(if pg_sprites || outline_on {
+                .store_op(if depth_kept {
                     vk::AttachmentStoreOp::STORE
                 } else {
                     vk::AttachmentStoreOp::DONT_CARE
@@ -3069,11 +3095,25 @@ impl Renderer {
                     };
                     barrier(frag, frag, &[ro(bloom[0].image), ro(bloom[2].image), ro(bloom[1].image)]);
                 }
-                if god_on {
-                    // B-307: rays into bloom[1] (free by now), read by the composite.
-                    barrier(frag, cao, &[to_att(bloom[1].image)]);
-                    pass(bloom[1].view, catt_layout, bq, p_god, ps[POST_PASSES - 1]);
-                    barrier(cao, frag, &[to_read(bloom[1].image)]);
+                {
+                    // B-307: the rays into their own 128x128 target, read by the composite (binding 8; in the sampled
+                    // layout even when the pass didn't run, as the bloom targets above).
+                    let god_rt = self.god.as_ref().unwrap();
+                    if god_on {
+                        barrier(frag, cao, &[to_att(god_rt.image)]);
+                        pass(god_rt.view, catt_layout, full(GOD_GRID, GOD_GRID), p_god, ps[POST_PASSES - 1]);
+                        barrier(cao, frag, &[to_read(god_rt.image)]);
+                    } else {
+                        let ro = layout_barrier(
+                            god_rt.image,
+                            color,
+                            vk::ImageLayout::UNDEFINED,
+                            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                            vk::AccessFlags::empty(),
+                            vk::AccessFlags::SHADER_READ,
+                        );
+                        barrier(frag, frag, &[ro]);
+                    }
                 }
                 if mats.is_empty() {
                     pass(target.view, target.layout, target.rect, p_comp, ps[5]);
@@ -3199,7 +3239,7 @@ impl Renderer {
     /// until it is reused, once the newest submission that could have drawn it has completed.
     pub fn free_mesh(&mut self, id: u32) {
         let serial = self.last_serial + 1;
-        if self.free_meshes.iter().any(|x| x.1 == id) {
+        if self.free_meshes.is_free(id) {
             return;
         }
         if let Some(gm) = self.meshes.get_mut(id as usize) {
@@ -3209,7 +3249,8 @@ impl Renderer {
             self.mesh_info[id as usize].sections.clear();
             self.defer_at(serial, Garbage::Buffer(old.vbuf));
             self.defer_at(serial, Garbage::Buffer(old.ibuf));
-            self.free_meshes.push((serial, id));
+            // B-316: never offered for reuse, see `MeshSlots`.
+            self.free_meshes.release(serial, id, false);
         }
     }
 
@@ -3300,8 +3341,8 @@ impl Renderer {
     }
 
     fn try_add_mesh(&mut self, m: &MeshDesc) -> Result<u32> {
-        // B-287: a static mesh evicted at a level change leaves a slot, reused once the GPU is done with it.
-        self.try_add_mesh_at(m, true)
+        // B-316: a static mesh always gets a new slot (see `MeshSlots`); only decal meshes reuse given-back ones.
+        self.try_add_mesh_at(m, false)
     }
 
     fn try_add_mesh_at(&mut self, m: &MeshDesc, reuse: bool) -> Result<u32> {
@@ -3353,8 +3394,7 @@ impl Renderer {
         // B-228: a decal mesh given back reuses its slot once the GPU is done with it.
         if reuse {
             let done = self.completed;
-            if let Some(k) = self.free_meshes.iter().position(|&(s, _)| s <= done) {
-                let (_, id) = self.free_meshes.swap_remove(k);
+            if let Some(id) = self.free_meshes.take(done) {
                 self.meshes[id as usize] = GpuMesh { vbuf, ibuf };
                 self.mesh_info[id as usize] = info;
                 return Ok(id);
@@ -3385,7 +3425,7 @@ impl Renderer {
             self.mesh_info[mesh as usize].sections.clear();
             self.defer_at(serial, Garbage::Buffer(old.vbuf));
             self.defer_at(serial, Garbage::Buffer(old.ibuf));
-            self.free_meshes.push((serial, mesh));
+            self.free_meshes.release(serial, mesh, true);
         }
         if let Some(LightInfo::Words { base, count, .. }) = self.lights.get(light as usize) {
             let (base, count) = (*base, *count);
@@ -3672,7 +3712,7 @@ impl Drop for Renderer {
                     self.free(Garbage::Image(t.image, t.view, a));
                 }
             }
-            let mut rts: Vec<Rt> = [self.hdr.take(), self.depth.take(), self.graded.take(), self.destc.take(), self.outline_mask.take()].into_iter().flatten().collect();
+            let mut rts: Vec<Rt> = [self.hdr.take(), self.depth.take(), self.graded.take(), self.destc.take(), self.outline_mask.take(), self.god.take()].into_iter().flatten().collect();
             if let Some(b) = self.bloom.take() {
                 rts.extend(b);
             }
@@ -3706,6 +3746,75 @@ impl Drop for Renderer {
             }
             self.allocator.take();
         }
+    }
+}
+
+/// Mesh slots given back (static meshes by B-287 eviction, decal meshes by `free_decal`). A slot is empty (draws
+/// nothing) from `release` on. Only a decal slot may be handed out again (`take`), and only once the serial of its last
+/// possible use has completed.
+///
+/// B-316: a static mesh uploaded into a slot a static mesh of an earlier chapter had used drew about 11% darker than
+/// the same mesh in a fresh process (lit surfaces of a level after other chapters had been played), so evicted static
+/// slots stay empty and the next static mesh appends. The empty slot costs a few bytes of `MeshInfo`; its GPU buffers
+/// are freed all the same.
+#[derive(Default)]
+struct MeshSlots {
+    /// (serial of the slot's last possible use, id, may be reused)
+    free: Vec<(u64, u32, bool)>,
+}
+
+impl MeshSlots {
+    fn release(&mut self, serial: u64, id: u32, reusable: bool) {
+        self.free.push((serial, id, reusable));
+    }
+
+    fn is_free(&self, id: u32) -> bool {
+        self.free.iter().any(|f| f.1 == id)
+    }
+
+    /// A reusable slot whose last use has completed (`done` is the newest completed serial).
+    fn take(&mut self, done: u64) -> Option<u32> {
+        let k = self.free.iter().position(|&(s, _, r)| r && s <= done)?;
+        Some(self.free.swap_remove(k).1)
+    }
+
+    /// Slots currently given back, reusable or not.
+    fn len(&self) -> usize {
+        self.free.len()
+    }
+}
+
+#[cfg(test)]
+mod mesh_slot_tests {
+    use super::MeshSlots;
+
+    #[test]
+    fn static_slots_are_never_handed_out_again() {
+        let mut m = MeshSlots::default();
+        m.release(5, 7, false);
+        assert_eq!(m.take(u64::MAX), None);
+        assert!(m.is_free(7));
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn decal_slot_waits_for_the_gpu() {
+        let mut m = MeshSlots::default();
+        m.release(5, 3, true);
+        assert_eq!(m.take(4), None);
+        assert_eq!(m.take(5), Some(3));
+        assert_eq!(m.take(5), None);
+        assert!(!m.is_free(3));
+    }
+
+    #[test]
+    fn decal_reuse_skips_static_slots() {
+        let mut m = MeshSlots::default();
+        m.release(1, 10, false);
+        m.release(1, 11, true);
+        assert_eq!(m.take(9), Some(11));
+        assert_eq!(m.take(9), None);
+        assert_eq!(m.len(), 1);
     }
 }
 

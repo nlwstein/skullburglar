@@ -184,6 +184,24 @@ int Render(Capture& capture, const std::filesystem::path& out, int repeat) {
               (unsigned long long)s.render_passes, (unsigned long long)s.pipelines,
               (unsigned long long)s.failed_shaders, (unsigned long long)s.unsupported_primitives);
 
+  // BOTS_REPLAY_READ=ADDR[,ADDR...] (hex guest addresses of resolved textures, as the draw trace's t0=.../(rt) names
+  // them) writes each one to OUT.<ADDR>.ppm (debugging; BOTS_DUMP_ALPHA=1 shows alpha).
+  if (const char* v = std::getenv("BOTS_REPLAY_READ")) {
+    for (const char* q = v; *q;) {
+      char* end;
+      const auto addr = uint32_t(std::strtoul(q, &end, 16));
+      std::vector<uint8_t> t;
+      uint32_t tw, th;
+      if (renderer.ReadTexture(addr, t, tw, th)) {
+        const auto path = std::filesystem::path(out.string() + "." + std::string(q, size_t(end - q)) + ".ppm");
+        bots::gfx::WritePpm(path, t.data(), tw, th, size_t(tw) * 3, 3);
+        std::printf("read %08X: %ux%u -> %s\n", addr, tw, th, path.c_str());
+      } else {
+        std::printf("read %08X: no such resolved texture\n", addr);
+      }
+      q = *end == ',' ? end + 1 : end;
+    }
+  }
   std::vector<uint8_t> image, reference;
   uint32_t w, h, rw, rh;
   if (!renderer.ReadTexture(renderer.last_resolve_address(), image, w, h)) {

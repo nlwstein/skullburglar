@@ -125,6 +125,7 @@ struct HybridScene {
     const char* light;    // the component's path (its baked vertex light), or null
     uint32_t mat_offset, mat_count;  // range in `materials` (Materials overrides; null entries keep the mesh's)
     const char* env;      // the owner's DynamicLightEnvironmentComponent path (LightEnvironment), or null
+    uint32_t flags = 0;   // bots::focus::kInstFocus: the owner has focus (B-318)
   };
   struct Skel {
     float transform[16];  // LocalToWorld

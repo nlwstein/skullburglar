@@ -820,6 +820,18 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
         std::fprintf(stderr, "  %s%u = %g %g %g %g\n", tag, c, f[0], f[1], f[2], f[3]);
       }
     };
+    // Boolean and loop constants (loop: count, start, step packed in one word; B-313 found the god-rays loop's here).
+    for (uint32_t i = 0; i < 8; ++i) {
+      if (regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 + i]) {
+        std::fprintf(stderr, "  bool[%u..%u] = %08X\n", i * 32, i * 32 + 31,
+                     regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 + i]);
+      }
+    }
+    for (uint32_t i = 0; i < 32; ++i) {
+      if (regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_LOOP_00 + i]) {
+        std::fprintf(stderr, "  loop i%u = %08X\n", i, regs.values[rg::XE_GPU_REG_SHADER_CONSTANT_LOOP_00 + i]);
+      }
+    }
     consts(rg::XE_GPU_REG_SHADER_CONSTANT_000_X, "vc");
     if (pshader) {
       std::fprintf(stderr, "--- pixel shader %08X\n%s", ps.address, pshader->ucode_disassembly().c_str());

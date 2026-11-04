@@ -85,7 +85,7 @@ esac
 
 step configure
 [ -z "$NOGEN" ] || [ "$PLATFORM" = windows ] || set -- "$@" -DREXGLUE_HOST_CLI="$NOGEN"
-set -- "$@" -DBOTS_VERSION="${VERSION:-dev}" -DBOTS_UPDATE_URL="${UPDATE_URL:-}"
+set -- "$@" -DBOTS_VERSION="${VERSION:-dev}" -DBOTS_UPDATE_URL="${UPDATE_URL:-}" ${CI_COMMIT_SHORT_SHA:+-DBOTS_COMMIT="$CI_COMMIT_SHORT_SHA"}
 cmake -S . -B "$B" "$@" -DBOTS_CCACHE=$([ -n "$CCACHE" ] && echo ON || echo OFF) >/dev/null
 if [ ! -f generated/default/sources.cmake ]; then
   # The generated sources are listed at configure time, so configure again once codegen has written them.

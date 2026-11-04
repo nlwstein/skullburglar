@@ -1,0 +1,8 @@
+[
+ "Sun-facing views in the desert levels now get the game's god rays (a warm glow streaming from the sun) in the new renderer.",
+ "Fixed lighting in a level getting darker after you had played other chapters in the same session; a level now looks the same whether it's the first one you load or the tenth.",
+ "The pulsing highlight on posters and other objects you can interact with is back in the new renderer.",
+ "The frame rate limit can now be set to 90, 120, 144 or Unlimited (experimental). Vehicles still run at 60 fps while you drive them, because they drive slower at higher frame rates.",
+ "The game now keeps a copy of your save before every launch (the newest 10, in a save-backups folder next to your save folder), and keeps the log and crash report of a crashed session in a crashes folder, so a lost save can be restored and a crash can be reported.",
+ "Log files now start with the game version and build, which makes bug reports easier to match to a release."
+]

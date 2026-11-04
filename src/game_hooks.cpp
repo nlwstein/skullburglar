@@ -48,6 +48,7 @@
 #include "mnk_input.h"
 #include "prompt_state.h"
 #include "scene_feed.h"
+#include "vehicle_fps_cap.h"
 
 namespace bots::hybrid {
 bool Command(const std::string& cmd);  // hybrid.cpp
@@ -2753,13 +2754,31 @@ extern "C" void sub_8281D990(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_8281D990(ctx, base);
 }
 
+// Frame limit while driving (B-275): vehicles drive slower the shorter the frame, so above 60 fps the host limit falls
+// back to 60 while the player's pawn is a vehicle (src/vehicle_fps_cap.h). BOTS_FPS_VEHICLE_CAP=0 turns it off.
+static void VehicleFpsCap(bool driving) {
+  static const bool enabled = [] { const char* v = std::getenv("BOTS_FPS_VEHICLE_CAP"); return !(v && *v == '0'); }();
+  static bots::fps::VehicleCap cap;
+  const uint32_t current = rex::cvar::Query<uint32_t>("framerate_limit");
+  const auto step = cap.Update(current, driving, enabled);
+  if (!step.write) return;
+  rex::cvar::SetFlagByName("framerate_limit", std::to_string(step.value));
+  if (step.value == bots::fps::kVehicleLimit)
+    REXLOG_INFO("fps: driving, frame limit {} -> {} until the vehicle is left", current ? std::to_string(current) : "unlimited",
+                step.value);
+  else
+    REXLOG_INFO("fps: left the vehicle, frame limit {} -> {}", current, step.value ? std::to_string(step.value) : "unlimited");
+}
+
 extern "C" void sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_82E2E860(ctx, base);
   bots::instr::HudTick();
   split_screen::Tick(base);
+  const bool driving = Driving(base);
+  VehicleFpsCap(driving);
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) {
     kbm->NoteHudTick();
-    kbm->SetDriving(Driving(base));
+    kbm->SetDriving(driving);
   }
 }
 
