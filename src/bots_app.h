@@ -57,7 +57,9 @@
 #include "hybrid_state.h"
 #include "renderer_choice.h"
 #include "script_input.h"
+#include "save_backup.h"
 #include "setup/app_paths.h"
+#include "setup/update_check.h"
 #include "setup/settings.h"
 #include "setup/setup_dialog.h"
 #include "fps_counter.h"
@@ -65,6 +67,8 @@
 
 #if defined(_WIN32)
 void InstallWindowsCrashLogger();  // src/crash_win.cpp
+void SetWindowsCrashArchive(const std::filesystem::path& dir, const std::string& stamp,
+                            const std::filesystem::path& log);  // src/crash_win.cpp (B-065)
 #endif
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
@@ -237,6 +241,52 @@ class BotsApp : public rex::ReXApp {
     rex::cvar::SetFlagByName("log_file", bots::PathUtf8(dir / ("bots-" + std::string(stamp) + ".log")));
   }
 
+  // B-065: before anything can touch the saves, copy the user data root (without the shader cache) to
+  // save-backups/<stamp> beside it, newest 10 kept (save_backup.h). Nothing to back up: nothing happens. A failure is
+  // logged and the launch goes on; the live save is only read. Crash archives are pruned here too.
+  static void BackUpSaves(const std::filesystem::path& root) {
+    if (root.empty()) return;
+    try {
+      const auto stamp = bots::savebackup::Timestamp(std::time(nullptr));
+      std::string error;
+      const auto dir = bots::savebackup::BackUp(root, bots::savebackup::SiblingDir(root, "save-backups"), stamp, &error);
+      if (!error.empty()) REXLOG_WARN("save backup failed: {}", error);
+      else if (!dir.empty()) REXLOG_INFO("save backup: {}", bots::PathUtf8(dir));
+      std::error_code ec;
+      const auto crashes = bots::savebackup::SiblingDir(root, "crashes");
+      if (std::filesystem::is_directory(crashes, ec)) bots::savebackup::Prune(crashes);
+    } catch (const std::exception& e) {
+      REXLOG_WARN("save backup failed: {}", e.what());
+    }
+  }
+
+  // Where this session's log goes: --log_file, else the newest numbered log in logs/ next to the executable.
+  static std::filesystem::path SessionLog() {
+    const std::string given = rex::cvar::Query<std::string>("log_file");
+    if (!given.empty()) return bots::PathFromUtf8(given);
+    return bots::savebackup::NewestLog(rex::filesystem::GetExecutableFolder() / "logs", "bots_");
+  }
+
+  // The first lines of the log: which build this is (B-125). On the desktop, also say where a crash will be archived.
+  void LogBuildInfo() {
+    REXLOG_INFO("Skullburglar {} (commit {})", bots::setup::AppVersion(), bots::setup::AppCommit());
+#if !TARGET_OS_IPHONE && !defined(__ANDROID__)
+    try {
+      if (user_data_root().empty()) return;
+      const auto stamp = bots::savebackup::Timestamp(std::time(nullptr));
+      const auto crashes = bots::savebackup::SiblingDir(user_data_root(), "crashes");
+      const auto log = SessionLog();
+#if defined(_WIN32)
+      SetWindowsCrashArchive(crashes, stamp, log);
+#else
+      bots::savebackup::Arm(crashes, stamp, log);
+#endif
+    } catch (const std::exception& e) {
+      REXLOG_WARN("crash archive not set up: {}", e.what());
+    }
+#endif
+  }
+
   // The launcher opens on every start and starts the runtime when the player presses Play. Skipped
   // with --launcher=false (or bots.toml / REX_LAUNCHER) or BOTS_LAUNCHER=0, and by default when the
   // game files are given on the command line (dev and test launches). Missing game files always
@@ -258,6 +308,7 @@ class BotsApp : public rex::ReXApp {
     // <data>/game before the game starts, or they are copied there by hand (OnConfigurePaths).
     return defaults;
 #endif
+    BackUpSaves(defaults.user_data_root);
     bool requested = !game_root_given_;
     if (rex::cvar::GetFlagSource("launcher") != rex::cvar::Source::kDefault)
       requested = rex::cvar::Query<bool>("launcher");
@@ -404,17 +455,30 @@ class BotsApp : public rex::ReXApp {
     int len = snprintf(buf, sizeof(buf), "\n=== bots crash: signal %d, load addr 0x%lx ===\n", sig, load);
     write(2, buf, len);
     backtrace_symbols_fd(frames, n, 2);
+    // B-065: the same backtrace and this session's log, kept under crashes/<stamp> beside the user data root.
+    if (const int fd = bots::savebackup::OpenBacktrace(); fd >= 0) {
+      write(fd, buf, len);
+      backtrace_symbols_fd(frames, n, fd);
+      close(fd);
+      bots::savebackup::CopyLog();
+    }
     signal(sig, SIG_DFL);
     raise(sig);
   }
   void OnPostInitLogging() override {
+    LogBuildInfo();
     signal(SIGABRT, CrashHandler);
 #if defined(__linux__)
     signal(SIGBUS, CrashHandler);  // the SDK claims SIGBUS on macOS only
 #endif
   }
 #elif defined(_WIN32)
-  void OnPostInitLogging() override { InstallWindowsCrashLogger(); }
+  void OnPostInitLogging() override {
+    LogBuildInfo();
+    InstallWindowsCrashLogger();
+  }
+#else
+  void OnPostInitLogging() override { LogBuildInfo(); }
 #endif
 
   // A built-in default for an SDK cvar, as REX_<NAME> (see OnPreSetup): skipped when bots.toml

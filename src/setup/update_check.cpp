@@ -28,6 +28,9 @@ extern char** environ;
 #ifndef BOTS_VERSION
 #define BOTS_VERSION "dev"
 #endif
+#ifndef BOTS_COMMIT
+#define BOTS_COMMIT "unknown"
+#endif
 #ifndef BOTS_UPDATE_URL
 #define BOTS_UPDATE_URL ""
 #endif
@@ -137,6 +140,8 @@ std::string Fetch(const std::string& url, std::string& error) {
 }  // namespace
 
 const char* AppVersion() { return BOTS_VERSION; }
+
+const char* AppCommit() { return BOTS_COMMIT; }
 
 bool UpdateCheckAvailable() { return IsUpdateUrl(kUpdateUrl) && HasVersionNumber(BOTS_VERSION); }
 

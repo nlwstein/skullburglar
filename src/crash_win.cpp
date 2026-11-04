@@ -11,8 +11,18 @@
 #include <dbghelp.h>
 
 #include <cstdio>
+#include <filesystem>
+#include <string>
+#include <vector>
+
+#include "save_backup.h"
 
 namespace {
+
+// Where a crash is archived (B-065; save_backup.h): set at startup by SetWindowsCrashArchive.
+std::filesystem::path g_crash_dir;
+std::filesystem::path g_crash_log;
+std::string g_crash_stamp;
 
 void PrintFrame(int i, DWORD64 pc) {
   HMODULE module = nullptr;
@@ -30,7 +40,7 @@ void PrintFrame(int i, DWORD64 pc) {
                static_cast<unsigned long long>(pc - reinterpret_cast<DWORD64>(module)));
 }
 
-void WriteMinidump(EXCEPTION_POINTERS* ep) {
+std::string WriteMinidump(EXCEPTION_POINTERS* ep) {
   using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE,
                                             PMINIDUMP_EXCEPTION_INFORMATION,
                                             PMINIDUMP_USER_STREAM_INFORMATION,
@@ -41,7 +51,7 @@ void WriteMinidump(EXCEPTION_POINTERS* ep) {
               : nullptr;
   if (!write_dump) {
     std::fprintf(stderr, "minidump: dbghelp.dll unavailable\n");
-    return;
+    return {};
   }
   char path[64];
   std::snprintf(path, sizeof(path), "logs\\crash-%lu.dmp", GetCurrentProcessId());
@@ -49,7 +59,7 @@ void WriteMinidump(EXCEPTION_POINTERS* ep) {
                             nullptr);
   if (file == INVALID_HANDLE_VALUE) {
     std::fprintf(stderr, "minidump: can't create %s\n", path);
-    return;
+    return {};
   }
   MINIDUMP_EXCEPTION_INFORMATION info{GetCurrentThreadId(), ep, FALSE};
   // Not full memory: the guest address space alone is several GB of reservations.
@@ -59,6 +69,7 @@ void WriteMinidump(EXCEPTION_POINTERS* ep) {
                        nullptr);
   CloseHandle(file);
   std::fprintf(stderr, "minidump: %s %s\n", path, ok ? "written" : "FAILED");
+  return ok ? path : std::string();
 }
 
 LONG WINAPI UnhandledFilter(EXCEPTION_POINTERS* ep) {
@@ -94,12 +105,26 @@ LONG WINAPI UnhandledFilter(EXCEPTION_POINTERS* ep) {
     }
   }
   std::fflush(stderr);
-  WriteMinidump(ep);
+  const std::string dump = WriteMinidump(ep);
+  // Keep the dump and this session's log under crashes\<stamp>, where the next launch won't rotate them away.
+  if (!g_crash_dir.empty()) {
+    std::vector<std::filesystem::path> files{g_crash_log};
+    if (!dump.empty()) files.push_back(dump);
+    const int n = bots::savebackup::ArchiveCrash(files, g_crash_dir, g_crash_stamp);
+    std::fprintf(stderr, "crash archive: %d file(s) in crashes\\%s\n", n, g_crash_stamp.c_str());
+  }
   std::fflush(stderr);
   return EXCEPTION_CONTINUE_SEARCH;
 }
 
 }  // namespace
+
+void SetWindowsCrashArchive(const std::filesystem::path& dir, const std::string& stamp,
+                            const std::filesystem::path& log) {
+  g_crash_log = log;
+  g_crash_stamp = stamp;
+  g_crash_dir = dir;
+}
 
 void InstallWindowsCrashLogger() { SetUnhandledExceptionFilter(UnhandledFilter); }
 
