@@ -672,6 +672,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     out.light = Handle(host->lights, in.light, host->r, n1_light);
     out.mesh = Handle(host->meshes, in.mesh, host->r, n1_mesh);
     out.env = Handle(host->envs, in.env, host->r, n1_env);
+    out.flags = in.flags;
     out.mat_offset = uint32_t(host->material_handles.size());
     out.mat_count = in.mat_count;
     for (uint32_t i = 0; i < in.mat_count; ++i)
