@@ -2048,7 +2048,77 @@ impl Renderer {
                 }
             })
         });
+        self.debug_filter_draws();
         self.log_draws();
+    }
+
+    /// Debug switches for finding what draws a haze (B-327), for A/B in one running session. Debug bits 22-24
+    /// (`hybrid n1debug`) leave out every translucent / additive / modulate draw. `BOTS_N1_SKIP_FILE=<path>` names a
+    /// text file read every 15 frames with `key=value` lines: `mats=a,b` (material ids, the numbers in the
+    /// `BOTS_N1_COMPILE_LOG=1` lines), `blend=<mask>` (bit per blend code: 0 opaque, 1 masked, 2 translucent, 3 additive,
+    /// 4 modulate), `idx=lo-hi` (positions in the frame's draw order, 0-based, from the first drawlog line) and
+    /// `dump=1` (one drawlog dump on the next frame). A left-out draw keeps its place with no indices.
+    fn debug_filter_draws(&mut self) {
+        let bits = self.debug_bits;
+        let blend_bits = (bits >> 22) & 7;
+        let file = self.skip_file();
+        if blend_bits == 0 && file.is_none() {
+            return;
+        }
+        let (mats, fblend, lo, hi, dump) = file.unwrap_or_default();
+        for (i, d) in self.draws.iter_mut().enumerate() {
+            let by_blend = d.key.blend >= 2 && (blend_bits >> (d.key.blend - 2)) & 1 != 0;
+            let by_file = mats.contains(&d.mat) || (fblend >> d.key.blend) & 1 != 0 || (i as u32 >= lo && (i as u32) < hi);
+            if by_blend || by_file {
+                d.index_count = 0;
+            }
+        }
+        if dump {
+            self.dump_draws_once();
+        }
+    }
+
+    fn skip_file(&self) -> Option<(Vec<u32>, u32, u32, u32, bool)> {
+        use std::sync::Mutex;
+        static ST: Mutex<(u64, Option<(Vec<u32>, u32, u32, u32, bool)>)> = Mutex::new((0, None));
+        let path = std::env::var("BOTS_N1_SKIP_FILE").ok()?;
+        let mut st = ST.lock().ok()?;
+        st.0 += 1;
+        if st.0 % 15 == 1 {
+            let mut v = (Vec::new(), 0u32, 0u32, 0u32, false);
+            if let Ok(t) = std::fs::read_to_string(&path) {
+                for l in t.lines() {
+                    let Some((k, val)) = l.split_once('=') else { continue };
+                    match k.trim() {
+                        "mats" => v.0 = val.split(',').filter_map(|x| x.trim().parse().ok()).collect(),
+                        "blend" => v.1 = val.trim().parse().unwrap_or(0),
+                        "idx" => {
+                            if let Some((a, b)) = val.split_once('-') {
+                                v.2 = a.trim().parse().unwrap_or(0);
+                                v.3 = b.trim().parse().unwrap_or(0);
+                            }
+                        }
+                        "dump" => v.4 = val.trim() == "1",
+                        _ => {}
+                    }
+                }
+            }
+            st.1 = Some(v);
+        } else if let Some(v) = st.1.as_mut() {
+            v.4 = false;
+        }
+        st.1.clone()
+    }
+
+    fn dump_draws_once(&self) {
+        for (i, d) in self.draws.iter().enumerate() {
+            let sp = self.spheres.get(d.instance as usize).copied().unwrap_or(([0.0; 3], 0.0));
+            eprintln!(
+                "n1ffi: drawdump #{i} mat {} blend {} two_sided {} mesh {} idx {} depth {:.0} sphere ({:.0} {:.0} {:.0}) r {:.0}",
+                d.mat, d.key.blend, d.key.two_sided, d.mesh, d.index_count, d.depth, sp.0[0], sp.0[1], sp.0[2], sp.1
+            );
+        }
+        eprintln!("n1ffi: drawdump end");
     }
 
     /// `BOTS_N1_DRAWLOG=<N>`: every Nth frame, one line per draw in draw order (material id, blend, sides,
@@ -2067,6 +2137,16 @@ impl Renderer {
         let f = FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if f % every != 0 {
             return;
+        }
+        let near_r: f32 = std::env::var("BOTS_N1_DRAWLOG_NEAR").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        if near_r > 0.0 {
+            for d in self.draws.iter().filter(|d| blended(d.key.blend) && d.depth < near_r) {
+                let sp = self.spheres.get(d.instance as usize).copied().unwrap_or(([0.0; 3], 0.0));
+                eprintln!(
+                    "n1ffi: drawnear frame {f}: mat {} blend {} two_sided {} mesh {} idx {} depth {:.0} r {:.0}",
+                    d.mat, d.key.blend, d.key.two_sided, d.mesh, d.index_count, d.depth, sp.1
+                );
+            }
         }
         let opaque = self.draws.iter().filter(|d| !blended(d.key.blend)).count();
         eprintln!("n1ffi: drawlog frame {f}: {} draws, {opaque} opaque/masked", self.draws.len());
