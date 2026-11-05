@@ -530,6 +530,9 @@ class Renderer : public Pm4Sink {
   // both are read back on request (hybrid_fill.cpp).
   bool DrawSceneDual(Image& target, const bots::HybridCamera& cam, const VkRect2D& area);
   void* dual_ = nullptr;
+  // The guest's display gamma ramp as of the last Present (256 entries), so dual pictures can be mapped as `shot` is.
+  uint32_t present_ramp_[256] = {};
+  bool have_present_ramp_ = false;
   // BOTS_CAPTURE_BURST (present.cpp): consecutive presented frames to disk; nothing runs while it is unset.
   void CaptureBurst(const Image& source);
   void DestroyBurst();
