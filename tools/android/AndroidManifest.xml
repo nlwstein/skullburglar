@@ -17,6 +17,7 @@
     <!-- extractNativeLibs: the GPU plugins are loaded by path from the app's native library folder. -->
     <application
         android:label="Skullburglar"
+        android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
         android:extractNativeLibs="true"
         android:hardwareAccelerated="true"
