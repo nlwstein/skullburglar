@@ -1001,6 +1001,31 @@ pub extern "C" fn n1_tree_asset(r: *const N1Renderer, path: *const c_char) -> u3
     with(r, scenekit::NONE, |i| i.trees.asset_handle(p))
 }
 
+/// a cooked material instance the game changed in place, and the variant that carries its live values.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct N1LiveMaterial {
+    pub base: u32,
+    pub variant: u32,
+}
+
+/// the cooked material instances whose scalar parameters differ from the cooked file (copied; kept until the next
+/// call). Both are `n1_material` handles; every section drawn with `base` is drawn with `variant` (see
+/// `Resolver::set_live_materials`).
+///
+/// # Safety
+/// `items` valid for `count` entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn n1_set_live_materials(r: *const N1Renderer, items: *const N1LiveMaterial, count: u32) {
+    let it: &[N1LiveMaterial] = if count == 0 || items.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(items, count as usize) }
+    };
+    let pairs: Vec<(u32, u32)> = it.iter().map(|m| (m.base, m.variant)).collect();
+    with(r, (), |i| i.resolver.set_live_materials(&pairs))
+}
+
 /// B-228: the next `n1_record`'s decals (copied; used once). `receivers`: indices into that call's instances.
 ///
 /// # Safety

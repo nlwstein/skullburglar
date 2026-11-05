@@ -135,6 +135,7 @@ struct N1Host {
   std::vector<float> quad_rows;  // B-229 single-quad debug: the kept particles' rows
   uint64_t quad_logged = 0;      // scene frame of the last "hybrid quad" log line
   std::vector<N1Instance> instances;
+  std::vector<N1LiveMaterial> live_materials;
   std::vector<N1Decal> decals;
   std::vector<N1SkelInstance> skeletal;
   std::vector<uint32_t> skel_materials;
@@ -672,13 +673,18 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     out.light = Handle(host->lights, in.light, host->r, n1_light);
     out.mesh = Handle(host->meshes, in.mesh, host->r, n1_mesh);
     out.env = Handle(host->envs, in.env, host->r, n1_env);
-    out.flags = in.flags;
     out.mat_offset = uint32_t(host->material_handles.size());
     out.mat_count = in.mat_count;
     for (uint32_t i = 0; i < in.mat_count; ++i)
       host->material_handles.push_back(Handle(host->materials, host->scene.materials[in.mat_offset + i], host->r,
                                               n1_material));
   }
+  // cooked material instances whose live parameters differ from the cooked file (BOTS_N1_FOCUS=0: none).
+  host->live_materials.clear();
+  for (const HybridScene::LiveMaterial& in : host->scene.live_materials)
+    host->live_materials.push_back({Handle(host->materials, in.base, host->r, n1_material),
+                                    Handle(host->materials, in.variant, host->r, n1_material)});
+  n1_set_live_materials(host->r, host->live_materials.data(), uint32_t(host->live_materials.size()));
   // B-228 decals: receivers are indices into `instances` (one per scene instance, same order).
   static_assert(sizeof(N1Decal) == 192, "N1Decal layout");
   host->decals.clear();

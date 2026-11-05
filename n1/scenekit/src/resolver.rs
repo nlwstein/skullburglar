@@ -9,7 +9,7 @@
 //! component and then sends plain structs every frame.
 
 use crate::{
-    Backend, Blend, INST_FOCUS, Instance, MaterialDesc, MeshDesc, NONE, SKIP, SectionDesc, TexFormat, TextureDesc,
+    Backend, Blend, Instance, MaterialDesc, MeshDesc, NONE, SKIP, SectionDesc, TexFormat, TextureDesc,
 };
 use anyhow::{Context, Result};
 use assetdb::{AssetDb, ComponentLight, MaterialAsset, MeshAsset, TexFmt, TextureAsset};
@@ -233,6 +233,8 @@ pub struct Resolver {
     mesh_mats: HashMap<u32, Vec<u32>>,
     /// B-318: renderer material id of every section of a mesh slot, in section order (NONE where it has none).
     mesh_secs: HashMap<u32, Vec<u32>>,
+    /// (base, variant) material handle pairs from `set_live_materials`.
+    live: Vec<(u32, u32)>,
     mat_tex: HashMap<u32, Vec<u32>>,
     light_tex: HashMap<u32, [u32; 3]>,
     /// B-287: the clock value at each level change (`level_boundary`).
@@ -297,6 +299,7 @@ impl Resolver {
             frame: 0,
             mesh_mats: HashMap::new(),
             mesh_secs: HashMap::new(),
+            live: Vec::new(),
             mat_tex: HashMap::new(),
             light_tex: HashMap::new(),
             boundaries: Vec::new(),
@@ -980,32 +983,40 @@ impl Resolver {
         }
     }
 
-    /// B-318: for a focused instance, fills the sections that have no explicit override (from `off`, which already holds
-    /// `out_o.len() - off` entries) with the section's own material re-resolved as `<path>?s:Activated=1`, the value
-    /// the game writes to the shared material instance while the player targets the object. A variant still loading
-    /// leaves the section as it was. Returns the number of sections covered.
-    fn focus_overrides(&mut self, r: &mut impl Backend, mesh_h: u32, off: u32, out_o: &mut Vec<u32>) -> u32 {
-        let Some(secs) = self.mesh_secs.get(&mesh_h).cloned() else { return 0 };
-        for (k, &base) in secs.iter().enumerate() {
+    /// the cooked material instances whose scalar parameters the game changed in place (the focus highlight
+    /// writes `Activated` = 1 into a poster's shared instance): pairs of (base handle, variant handle), both
+    /// `material_handle`s, the variant being the base path with the live values (`<path>?&s:Name=v`). Kept until the
+    /// next call; `translate` draws every section that uses a base material with its variant, whichever instance it
+    /// belongs to. `BOTS_N1_FOCUS=0` ignores the list.
+    pub fn set_live_materials(&mut self, pairs: &[(u32, u32)]) {
+        self.live.clear();
+        if focus_on() {
+            self.live.extend_from_slice(pairs);
+        }
+    }
+
+    /// for one instance, replaces the material of every section whose effective material (the instance's own
+    /// override, else the mesh's) is the base of a live pair (`live`: renderer id of the base, variant handle) by the
+    /// variant. A variant still loading leaves the section as it was. Returns how many leading sections `out_o`
+    /// covers for this instance afterwards (0 when nothing changed).
+    fn apply_live(&mut self, r: &mut impl Backend, mesh_h: u32, off: u32, live: &[(u32, u32)], out_o: &mut Vec<u32>) -> u32 {
+        let Some(secs) = self.mesh_secs.get(&mesh_h) else { return 0 };
+        let hits = live_sections(secs, out_o, off as usize, live);
+        let mut covered = 0;
+        for (k, variant) in hits {
+            let id = self.ensure_material(r, variant);
+            // SKIP is what a loading variant answers; keep the base look until it is in.
+            if id == SKIP || id == NONE {
+                continue;
+            }
             let at = off as usize + k;
-            if at == out_o.len() {
+            while out_o.len() <= at {
                 out_o.push(NONE);
             }
-            if out_o[at] != NONE || base == NONE {
-                continue;
-            }
-            let Some(path) = self.mat_ids.iter().find(|&(_, &id)| id == base).map(|(p, _)| p.clone()) else { continue };
-            if is_variant(&path) {
-                continue;
-            }
-            let h = self.material_handle(&format!("{path}?s:Activated=1"));
-            let id = self.ensure_material(r, h);
-            // SKIP is what a loading variant answers; keep the base look until it is in.
-            if id != SKIP {
-                out_o[at] = id;
-            }
+            out_o[at] = id;
+            covered = covered.max(k as u32 + 1);
         }
-        secs.len() as u32
+        covered
     }
 
     /// Handles -> renderer ids for one frame. Input instances carry handles (mesh, light, and material handles in
@@ -1021,6 +1032,14 @@ impl Resolver {
         let mut out_o = std::mem::take(&mut self.out_overrides);
         out_i.clear();
         out_o.clear();
+        // the live pairs as (renderer id of the base material, variant handle); a base nothing has loaded yet
+        // has no id and no section to change.
+        let mut live: Vec<(u32, u32)> = Vec::new();
+        for &(base_h, variant_h) in &self.live {
+            if let Some(&id) = self.materials.get(base_h as usize).and_then(|s| self.mat_ids.get(&s.path)) {
+                live.push((id, variant_h));
+            }
+        }
         for inst in instances {
             let Some(mesh) = self.ensure_mesh(r, inst.mesh) else {
                 continue;
@@ -1043,8 +1062,8 @@ impl Resolver {
                 });
             }
             let mut mat_count = inst.mat_count;
-            if inst.flags & INST_FOCUS != 0 && focus_on() {
-                mat_count = mat_count.max(self.focus_overrides(r, inst.mesh, off, &mut out_o));
+            if !live.is_empty() {
+                mat_count = mat_count.max(self.apply_live(r, inst.mesh, off, &live, &mut out_o));
             }
             out_i.push(Instance {
                 transform: inst.transform,
@@ -1053,7 +1072,6 @@ impl Resolver {
                 mat_offset: off,
                 mat_count,
                 env: inst.env,
-                flags: inst.flags,
             });
         }
         self.out_instances = out_i;
@@ -1167,5 +1185,50 @@ mod evict_tests {
         let mut v: Vec<u32> = s.into_iter().collect();
         v.sort_unstable();
         assert_eq!(v, vec![1, 2, 3, 7, 9]);
+    }
+}
+
+/// the sections of one instance that draw with a live pair's base material, as (section, variant handle). A
+/// section's material is the instance's override (`overrides[off + k]`, when that range holds it and it is not NONE),
+/// else the mesh's own (`secs[k]`). `live`: (renderer id of the base, variant handle).
+fn live_sections(secs: &[u32], overrides: &[u32], off: usize, live: &[(u32, u32)]) -> Vec<(usize, u32)> {
+    let mut hits = Vec::new();
+    for (k, &own) in secs.iter().enumerate() {
+        let cur = match overrides.get(off + k) {
+            Some(&o) if o != NONE => o,
+            _ => own,
+        };
+        if cur == NONE {
+            continue;
+        }
+        if let Some(&(_, variant)) = live.iter().find(|&&(base, _)| base == cur) {
+            hits.push((k, variant));
+        }
+    }
+    hits
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_sections_follow_the_effective_material() {
+        // The mesh's own sections 10, 11, 10; material 10 is live (variant handle 77).
+        let secs = [10, 11, 10];
+        let live = [(10, 77)];
+        // No overrides: both sections that use 10 change, the other is left alone.
+        assert_eq!(live_sections(&secs, &[], 0, &live), vec![(0, 77), (2, 77)]);
+        // An override replaces the mesh's material: section 0 now draws 11 (not live), section 2 keeps 10.
+        assert_eq!(live_sections(&secs, &[11, NONE], 0, &live), vec![(2, 77)]);
+        // An override that is the live base counts even where the mesh has another material.
+        assert_eq!(live_sections(&secs, &[NONE, 10], 0, &live), vec![(0, 77), (1, 77), (2, 77)]);
+        // Overrides of earlier instances (before `off`) are not this instance's.
+        assert_eq!(live_sections(&secs, &[11, 11, 11, NONE], 3, &live), vec![(0, 77), (2, 77)]);
+        // A section with no material at all, and an empty live list, change nothing.
+        assert!(live_sections(&[NONE, NONE], &[], 0, &live).is_empty());
+        assert!(live_sections(&secs, &[], 0, &[]).is_empty());
+        // Several pairs: each base picks its own variant.
+        assert_eq!(live_sections(&secs, &[], 0, &[(11, 5), (10, 6)]), vec![(0, 6), (1, 5), (2, 6)]);
     }
 }

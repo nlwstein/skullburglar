@@ -136,13 +136,7 @@ pub struct Instance {
     pub mat_count: u32,
     /// Light environment index in the frame's lighting (`n1_set_lighting`), or NONE.
     pub env: u32,
-    /// `INST_*` bits.
-    pub flags: u32,
 }
-
-/// `Instance::flags`: the object has focus (B-318), so its materials draw with `Activated` = 1, as the game sets on the
-/// shared material instance while the player targets it.
-pub const INST_FOCUS: u32 = 1;
 
 /// Interleaved vertex as both backends upload it.
 #[repr(C)]
