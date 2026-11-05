@@ -227,6 +227,9 @@ pub struct MatInfo {
     /// Texture count of the set's layout (`mat_layout(ntex)`), so a retired entry is only reused with the same one.
     ntex: usize,
     pub blend: Blend,
+    /// B-328: an indoor material the port lights with the dynamic skies only when nothing else lights it
+    /// (`light::dyn_sky_material`).
+    dyn_sky: bool,
     pub two_sided: bool,
 }
 
@@ -1374,6 +1377,7 @@ impl Renderer {
                     ntex: c.ntex,
                     blend: m.blend,
                     two_sided: m.two_sided,
+                    dyn_sky: false,
                 });
                 (self.materials.len() as u32 - 1, set, b)
             }
@@ -1439,6 +1443,7 @@ impl Renderer {
         mi.skey = skey;
         mi.blend = m.blend;
         mi.two_sided = m.two_sided;
+        mi.dyn_sky = crate::light::dyn_sky_material(&def.path);
         Ok(id)
     }
 
@@ -1962,6 +1967,10 @@ impl Renderer {
                 let Some(mt) = self.materials.get(mat as usize) else {
                     continue;
                 };
+                // B-328: marks a lightless instance of an indoor material (`light_base` is unused when flags is 0).
+                if mt.dyn_sky && self.gpu_insts[ii as usize].flags == 0 {
+                    self.gpu_insts[ii as usize].light_base = -2;
+                }
                 self.draws.push(Draw {
                     key: Key {
                         shader: mt.shader,
@@ -2371,15 +2380,17 @@ impl Renderer {
             let refl_ts = self.knobs.refl_ts && self.debug_bits & 4096 == 0;
             // B-277 flag bit 5: tangent-space view for a Fresnel's Normal input (debug bit 13, 8192, off).
             let fresnel_ts = self.knobs.fresnel_ts && self.debug_bits & 8192 == 0;
-            // B-328 flag bit 6: the dynamic-object sky (`dsky_*`) in place of hemisphere + sun (debug bit 14, 16384, off).
-            let dyn_sky = self.knobs.dyn_sky && self.debug_bits & 16384 == 0;
+            // B-328 flag bit 6: the dynamic-object sky (`dsky_*`) in place of hemisphere + sun for marked instances (light_base -2;
+            // bit 7: every lightless instance); debug bit 14 (16384) turns it off.
+            let dyn_sky = self.knobs.dyn_sky != 0 && self.debug_bits & 16384 == 0;
             globals.amb_up[3] = (post as u32
                 | (lv as u32) << 1
                 | (spec as u32) << 2
                 | (env_spec as u32) << 3
                 | (refl_ts as u32) << 4
                 | (fresnel_ts as u32) << 5
-                | (dyn_sky as u32) << 6) as f32;
+                | (dyn_sky as u32) << 6
+                | ((self.knobs.dyn_sky == 2) as u32) << 7) as f32;
             put(b, GLOBALS_AT, bytemuck::bytes_of(&globals));
             for (k, blk) in blocks.iter().enumerate() {
                 put(b, POST_AT + 256 * k as u64, bytemuck::cast_slice(blk));

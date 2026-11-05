@@ -490,9 +490,10 @@ pub struct Knobs {
     pub refl_ts: bool,
     /// B-277: a Fresnel with a Normal input uses the tangent-space view vector (`BOTS_N1_FRESNEL_TS=0`: the world-space view).
     pub fresnel_ts: bool,
-    /// B-328: objects with no baked light and no light environment get the port's dynamic sky (no sun) instead of the
-    /// global hemisphere + sun. `BOTS_N1_DYNSKY=0` restores the old lighting.
-    pub dyn_sky: bool,
+    /// B-328: 0 off, 1 (default) the indoor materials of [`dyn_sky_material`] with no baked light and no light
+    /// environment get the port's dynamic sky (no sun) instead of the global hemisphere + sun, 2 every such object.
+    /// `BOTS_N1_DYNSKY=0` restores the old lighting; `=all` is the second mode.
+    pub dyn_sky: u8,
     /// Clamp mesh particles' instance colour rgb to 1 like the original's 8-bit colour (B-246). `BOTS_N1_MESH_VCOL_CLAMP=0` off.
     pub mesh_vcol_clamp: bool,
     /// B-264: the vertex-light buffer grows by a GPU copy of the old words (the CPU writes only the new ones) and syncs on
@@ -516,6 +517,24 @@ pub struct Knobs {
     /// the GPU objects it gave back (`BOTS_N1_FREE_MS`, default 1.5).
     pub evict_budget: std::time::Duration,
     pub free_budget: std::time::Duration,
+}
+
+/// B-328: `BOTS_N1_DYNSKY` value to mode (see [`Knobs::dyn_sky`]).
+pub fn dyn_sky_mode(v: Option<&str>) -> u8 {
+    match v {
+        None => 1,
+        Some(s) if s == "0" || s.eq_ignore_ascii_case("false") || s.eq_ignore_ascii_case("off") => 0,
+        Some(s) if s.eq_ignore_ascii_case("all") || s == "2" => 2,
+        Some(_) => 1,
+    }
+}
+
+/// B-328: the materials the port lights with the dynamic skies only. The sun and one of the level's skies are
+/// excluded inside the building volumes the cooked light components carry (`ExclusionConvexVolumes`), which n1 does not
+/// read yet, so a lightless indoor object is picked by its material instead: the doors (chapter 72545's arched doors,
+/// an old door; the same pale-gray failure on any of them).
+pub fn dyn_sky_material(path: &str) -> bool {
+    path.starts_with("AST_BuildingsDoors.")
 }
 
 fn env_flag(name: &str, default: bool) -> bool {
@@ -564,7 +583,7 @@ impl Knobs {
             mesh_vcol_clamp: env_flag("BOTS_N1_MESH_VCOL_CLAMP", true),
             refl_ts: env_flag("BOTS_N1_REFL_TS", true),
             fresnel_ts: env_flag("BOTS_N1_FRESNEL_TS", true),
-            dyn_sky: env_flag("BOTS_N1_DYNSKY", true),
+            dyn_sky: dyn_sky_mode(std::env::var("BOTS_N1_DYNSKY").ok().as_deref()),
             light_grow: env_flag("BOTS_N1_LIGHT_GROW", true),
             lod_bones: env_flag("BOTS_N1_LOD_BONES", true),
             outline: env_num("BOTS_N1_OUTLINE", 1u32),
@@ -664,6 +683,49 @@ impl Lighting {
             }
         }
         self.frames += 1;
+    }
+}
+
+#[cfg(test)]
+mod dyn_sky_tests {
+    use super::*;
+
+    #[test]
+    fn dyn_sky_mode_parses_the_switch() {
+        assert_eq!(dyn_sky_mode(None), 1);
+        assert_eq!(dyn_sky_mode(Some("1")), 1);
+        assert_eq!(dyn_sky_mode(Some("0")), 0);
+        assert_eq!(dyn_sky_mode(Some("off")), 0);
+        assert_eq!(dyn_sky_mode(Some("all")), 2);
+    }
+
+    #[test]
+    fn dyn_sky_picks_the_door_materials() {
+        assert!(dyn_sky_material("AST_BuildingsDoors.ArchDoor01_MAT01"));
+        assert!(!dyn_sky_material("AST_BuildingsWalls.Brick01_MAT01"));
+        assert!(!dyn_sky_material(""));
+    }
+
+    #[test]
+    fn env_carries_the_dynamic_sky_only_when_the_frame_has_one() {
+        let base = Env::default();
+        let none = Env::from_feed(&lightfeed::Frame::default(), &base, true);
+        assert!(none.dyn_sky.is_none());
+        assert_eq!(none.globals([0.0; 16], [0.0; 3], 0.0).dsky_up[3], 0.0);
+        let fr = lightfeed::Frame {
+            sky_dyn_count: 2,
+            sky_dyn_up_ue3: [0.2, 0.1, 0.05],
+            sky_dyn_down_ue3: [0.04, 0.03, 0.02],
+            sky_dyn_up: [0.5, 0.4, 0.3],
+            sky_dyn_down: [0.1, 0.1, 0.1],
+            ..Default::default()
+        };
+        let g = Env::from_feed(&fr, &base, true).globals([0.0; 16], [0.0; 3], 0.0);
+        assert_eq!(g.dsky_up, [0.2, 0.1, 0.05, 1.0]);
+        assert_eq!(g.dsky_dn[..3], [0.04, 0.03, 0.02]);
+        // The plain-colour mode (BOTS_N1_SKY_GAMMA=0) uses the plain sums.
+        let g = Env::from_feed(&fr, &base, false).globals([0.0; 16], [0.0; 3], 0.0);
+        assert_eq!(g.dsky_up, [0.5, 0.4, 0.3, 1.0]);
     }
 }
 
