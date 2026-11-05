@@ -450,6 +450,9 @@ pub struct Renderer {
     post_layout: vk::DescriptorSetLayout,
     post_pipe_layout: vk::PipelineLayout,
     post_module: vk::ShaderModule,
+    /// B-332: on `split_entries` GPUs, the post module's words and a module per entry point.
+    post_words: Vec<u32>,
+    post_split: HashMap<&'static str, vk::ShaderModule>,
     post_pipes: HashMap<(&'static str, i32), vk::Pipeline>,
     /// B-266: post-material textures by path: (texture id, takes Xenos's gamma curve in the shader).
     post_tex: HashMap<String, (u32, bool)>,
@@ -731,6 +734,13 @@ impl Renderer {
             let sampler = mk_sampler(vk::SamplerAddressMode::REPEAT)?;
             let lm_sampler = mk_sampler(vk::SamplerAddressMode::CLAMP_TO_EDGE)?;
             let post_sampler = mk_sampler(vk::SamplerAddressMode::CLAMP_TO_EDGE)?;
+            // B-332: one entry point per module on Adreno (`shaders::split_entries`); BOTS_N1_SPLIT_ENTRIES=1/0 forces it.
+            let vendor = instance.get_physical_device_properties(ctx.physical_device).vendor_id;
+            shaders::set_split_entries(match std::env::var("BOTS_N1_SPLIT_ENTRIES").as_deref() {
+                Ok("1") => true,
+                Ok("0") => false,
+                _ => vendor == 0x5143,
+            });
             let knobs = Knobs::from_env();
             let pg = pgpu::PGpu::new(&device)?;
             let tg = tgpu::TGpu::new(&device)?;
@@ -783,6 +793,8 @@ impl Renderer {
                 post_layout,
                 post_pipe_layout,
                 post_module,
+                post_words: if shaders::split_entries() { words } else { Vec::new() },
+                post_split: HashMap::new(),
                 post_pipes: HashMap::new(),
                 post_tex: HashMap::new(),
                 damage_tex: None,
@@ -1494,6 +1506,18 @@ impl Renderer {
         Ok(id)
     }
 
+    /// The post module for one entry point (B-332: its own copy on `split_entries` GPUs).
+    fn post_stage(&mut self, entry: &'static str) -> Result<vk::ShaderModule> {
+        if let Some(&m) = self.post_split.get(entry) {
+            return Ok(m);
+        }
+        let (m, own) = unsafe { shaders::stage_module(&self.device, self.post_module, &self.post_words, entry)? };
+        if let Some(own) = own {
+            self.post_split.insert(entry, own);
+        }
+        Ok(m)
+    }
+
     fn post_pipe(&mut self, fs: &'static str, out: vk::Format) -> Result<vk::Pipeline> {
         let k = (fs, out.as_raw());
         if let Some(&p) = self.post_pipes.get(&k) {
@@ -1501,14 +1525,15 @@ impl Renderer {
         }
         unsafe {
             let name = std::ffi::CString::new(fs).unwrap();
+            let (vs_module, fs_module) = (self.post_stage("vs")?, self.post_stage(fs)?);
             let stages = [
                 vk::PipelineShaderStageCreateInfo::default()
                     .stage(vk::ShaderStageFlags::VERTEX)
-                    .module(self.post_module)
+                    .module(vs_module)
                     .name(c"vs"),
                 vk::PipelineShaderStageCreateInfo::default()
                     .stage(vk::ShaderStageFlags::FRAGMENT)
-                    .module(self.post_module)
+                    .module(fs_module)
                     .name(&name),
             ];
             let vi = vk::PipelineVertexInputStateCreateInfo::default();
@@ -3924,6 +3949,9 @@ impl Drop for Renderer {
                 self.device.destroy_descriptor_set_layout(l, None);
             }
             self.device.destroy_shader_module(self.post_module, None);
+            for (_, m) in self.post_split.drain() {
+                self.device.destroy_shader_module(m, None);
+            }
             self.shadows.destroy(&self.device, self.allocator.as_mut().unwrap());
             if let Some(mut o) = self.outline.take() {
                 o.destroy(&self.device);
