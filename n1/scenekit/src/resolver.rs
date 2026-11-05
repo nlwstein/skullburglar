@@ -477,6 +477,7 @@ impl Resolver {
             mips: &mips,
             normal: t.normal,
             gamma,
+            clamp: t.clamp_bits(),
         });
         self.tex_ids.insert(key, id);
         id

@@ -57,6 +57,9 @@ pub struct TextureDesc<'a> {
     /// B-235: the original fetches this texture with Xenos's gamma sign. The uploader keeps it raw (`srgb` is false)
     /// and the material or lightmap shader applies the piecewise-linear curve after filtering.
     pub gamma: bool,
+    /// B-324: the texture's own addressing (`TA_Clamp`): bit 0 clamps U, bit 1 clamps V. Material shaders apply it in
+    /// their sample (`matdef::codegen::compile_addr`); the sampler itself repeats.
+    pub clamp: u8,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]

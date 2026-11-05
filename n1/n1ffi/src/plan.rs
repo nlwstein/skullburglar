@@ -15,6 +15,8 @@ pub struct TexInfo {
     pub unpack: Option<([f32; 3], [f32; 3])>,
     /// B-235: uploaded raw for Xenos's gamma fetch; the shader applies the PWL curve (`scenekit::tex_gamma`).
     pub gamma: bool,
+    /// B-324: `AddressX`/`AddressY` clamp (bit 0 U, bit 1 V), applied in the shader's sample.
+    pub clamp: u8,
 }
 
 impl TexInfo {
@@ -23,6 +25,7 @@ impl TexInfo {
             bc5: m.fmt == TexFmt::Bc5 && bc5_ok,
             unpack: m.unpack,
             gamma: scenekit::tex_gamma(m.srgb, m.normal, m.fmt),
+            clamp: assetdb::clamp_bits(m.addr),
         }
     }
 }
@@ -114,7 +117,8 @@ pub fn plan(features: u32, m: &MaterialAsset, diffuse_tex: bool, tex: &dyn Fn(us
     // BC5 normal maps (characters, weapons) hold X and Y only: rebuild Z as UE3 does.
     let recon_z: Vec<bool> = info.iter().map(|t| t.bc5).collect();
     let gamma: Vec<bool> = info.iter().map(|t| t.gamma).collect();
-    let c = matdef::codegen::compile_gamma(def, &unpack, &recon_z, &gamma);
+    let clamp: Vec<u8> = info.iter().map(|t| t.clamp).collect();
+    let c = matdef::codegen::compile_addr(def, &unpack, &recon_z, &gamma, &clamp);
     let blend = Blend::from_ue3(
         m.def.as_deref().map(|d| d.blend.as_str()).filter(|b| !b.is_empty()).unwrap_or(&m.blend),
     );

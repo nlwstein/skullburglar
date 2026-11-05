@@ -14,7 +14,10 @@ fn main() {
         match &db.material(m).def {
             Some(d) => {
                 let unpack = vec![None; d.textures.len()];
-                let c = matdef::codegen::compile(d, &unpack);
+                let n = d.textures.len();
+                let clamp: Vec<u8> =
+                    d.textures.iter().map(|t| db.texture_meta(&t.path).map_or(0, |m| assetdb::clamp_bits(m.addr))).collect();
+                let c = matdef::codegen::compile_addr(d, &unpack, &vec![false; n], &vec![false; n], &clamp);
                 println!("{}\nparams {:?}\nunsupported {:?}", c.body, c.params, c.unsupported);
             }
             None => println!("(no def)"),

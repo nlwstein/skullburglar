@@ -266,6 +266,27 @@ mod tests {
         spirv(&src).unwrap();
     }
 
+    /// B-324: a clamp-addressed texture makes a valid shader that clamps its coordinate, the structure key changes with
+    /// the addressing, and a repeating texture is untouched.
+    #[test]
+    fn clamp_addressing_compiles() {
+        let tex = MatDef {
+            textures: vec![TexRef { path: "a".into(), normal: false }, TexRef { path: "b".into(), normal: false }],
+            nodes: vec![Node::Tex { tex: 0, uv: None }, Node::Tex { tex: 1, uv: None }],
+            diffuse: Some(0),
+            emissive: Some(1),
+            ..Default::default()
+        };
+        let plain = matdef::codegen::compile(&tex, &[None, None]);
+        let c = matdef::codegen::compile_addr(&tex, &[None, None], &[false, false], &[false, false], &[3, 1]);
+        assert!(c.body.contains("textureSampleGrad(t0, smp, clamp("), "{}", c.body);
+        assert!(c.body.contains("select(") && c.body.contains("textureSampleGrad(t1"), "{}", c.body);
+        assert_ne!(c.key, plain.key);
+        let none = matdef::codegen::compile_addr(&tex, &[None, None], &[false, false], &[false, false], &[0, 0]);
+        assert_eq!(none.key, plain.key);
+        spirv(&scene_source(&c, ShaderFlags::new(false, false, false, 330))).unwrap();
+    }
+
     /// B-273: additive draws fade toward black in fog and modulate draws toward white; the rest toward the fog colour.
     #[test]
     fn fog_target_follows_the_blend() {

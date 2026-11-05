@@ -39,6 +39,20 @@ pub fn compile_gamma(
     recon_z: &[bool],
     gamma: &[bool],
 ) -> Compiled {
+    compile_addr(def, unpack, recon_z, gamma, &[])
+}
+
+/// As `compile_gamma`; `clamp[i]`: texture `i` has clamp addressing (bit 0 on U, bit 1 on V; UE3 `TA_Clamp`). The
+/// scene sampler repeats, so a clamped sample takes the coordinate clamped to the edge texels' centres and the
+/// derivatives of the unclamped one (B-324: a rotated rotor-blur card read the opposite edge of its texture and drew
+/// streaks past the disc).
+pub fn compile_addr(
+    def: &MatDef,
+    unpack: &[Option<([f32; 3], [f32; 3])>],
+    recon_z: &[bool],
+    gamma: &[bool],
+    clamp: &[u8],
+) -> Compiled {
     let mut params: Vec<[f32; 4]> = Vec::new();
     // One slot per use, never shared by value: two materials with the same graph but constants that happen to
     // coincide would otherwise index differently and need different shaders. The key stays purely structural.
@@ -112,7 +126,10 @@ pub fn compile_gamma(
             }
             Node::Tex { tex, uv } => {
                 let t = *tex as usize;
-                let mut e = format!("textureSample(t{t}, smp, {})", uvs(uv));
+                let mut e = match clamp.get(t).copied().unwrap_or(0) & 3 {
+                    0 => format!("textureSample(t{t}, smp, {})", uvs(uv)),
+                    m => clamped_sample(t, &uvs(uv), m),
+                };
                 if gamma.get(t).copied().unwrap_or(false) {
                     e = format!("xe_pwl({e})");
                 }
@@ -297,6 +314,18 @@ pub fn compile_gamma(
     body.push_str("    return o;\n}\n");
     let key = format!("{}#{}#{}", ntex, params.len().max(1), body);
     Compiled { body, params, ntex, key, has_normal: def.normal.is_some(), unsupported: def.unsupported.clone() }
+}
+
+/// A sample of texture `t` at `uv` with clamp-to-edge addressing on the axes in `mask` (bit 0 U, bit 1 V).
+fn clamped_sample(t: usize, uv: &str, mask: u8) -> String {
+    let half = format!("(vec2<f32>(0.5) / vec2<f32>(textureDimensions(t{t})))");
+    let both = format!("clamp({uv}, {half}, vec2<f32>(1.0) - {half})");
+    let c = if mask == 3 {
+        both
+    } else {
+        format!("select({uv}, {both}, vec2<bool>({}, {}))", mask & 1 != 0, mask & 2 != 0)
+    };
+    format!("textureSampleGrad(t{t}, smp, {c}, dpdx({uv}), dpdy({uv}))")
 }
 
 fn children(n: &Node) -> Vec<u32> {

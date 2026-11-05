@@ -199,6 +199,7 @@ pub fn tex_desc<'a>(t: &'a TextureAsset, mips: &'a [&'a [u8]], raw: bool) -> sce
         // Particles apply Xenos's curve in their own shader (`xe_pwl_raw` on a raw upload, G6; `xe_pwl` on the sRGB view,
         // B-229); trees sample sRGB.
         gamma: false,
+        clamp: 0,
     }
 }
 
