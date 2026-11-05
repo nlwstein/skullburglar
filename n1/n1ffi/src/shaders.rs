@@ -280,4 +280,33 @@ mod tests {
         assert_eq!(crate::plan::fog_mode(scenekit::Blend::Opaque), 0);
         assert_eq!(crate::plan::fog_mode(scenekit::Blend::Translucent), 0);
     }
+    /// B-327: a material with a DepthBiasedAlpha opacity reads the scene depth (set 0, binding 10), fades by the planar
+    /// depth gap, and still makes a valid shader; one without it declares no depth binding.
+    #[test]
+    fn soft_alpha_reads_the_scene_depth() {
+        let m = MatDef {
+            nodes: vec![
+                Node::Const { v: [1.0, 0.7, 0.4, 0.0], n: 3 },
+                Node::Const { v: [0.7, 0.0, 0.0, 0.0], n: 1 },
+                Node::SoftAlpha { alpha: None, bias: Some(1), scale: 500.0 },
+            ],
+            emissive: Some(0),
+            opacity: Some(2),
+            blend: "BLEND_Additive".into(),
+            ..Default::default()
+        };
+        let c = matdef::codegen::compile(&m, &[]);
+        assert!(c.soft);
+        let f = ShaderFlags::new(false, true, true, 330);
+        let src = scene_source(&c, f);
+        assert!(src.contains("@group(0) @binding(10) var scene_depth: texture_depth_2d;"));
+        assert!(src.contains("fi.scene_w - fi.view_w"));
+        spirv(&src).unwrap();
+        let grey = MatDef { diffuse_const: Some([0.6, 0.6, 0.6, 1.0]), ..Default::default() };
+        let c = matdef::codegen::compile(&grey, &[]);
+        assert!(!c.soft);
+        let src = scene_source(&c, f);
+        assert!(!src.contains("scene_depth"));
+        spirv(&src).unwrap();
+    }
 }

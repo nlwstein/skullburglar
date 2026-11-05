@@ -228,6 +228,8 @@ pub struct MatInfo {
     ntex: usize,
     pub blend: Blend,
     pub two_sided: bool,
+    /// B-327: the shader reads the scene depth (soft edge), so the draw goes in the read-only-depth pass.
+    soft: bool,
 }
 
 /// B-228: a receiver's baked light as a decal on it sees it (`Renderer::decal_light_source`).
@@ -280,6 +282,19 @@ pub(crate) fn blend_of(b: Blend) -> u8 {
         Blend::Additive => 3,
         Blend::Modulate => 4,
     }
+}
+
+/// `BOTS_N1_SKIP_FILE` contents: material ids, blend mask, draw range, dump flag, soft edges on, planar PixelDepth.
+type SkipCfg = (Vec<u32>, u32, u32, u32, bool, bool, bool);
+
+/// B-327: `BOTS_N1_SOFTALPHA=0` draws soft-edged materials in the main pass with a hard edge (the old look).
+fn soft_alpha_pass() -> bool {
+    std::env::var("BOTS_N1_SOFTALPHA").map_or(true, |v| v != "0")
+}
+
+/// B-327: `BOTS_N1_PIXDEPTH=euclid` starts with PixelDepth as the distance to the eye (the old value).
+fn planar_depth_off() -> bool {
+    std::env::var("BOTS_N1_PIXDEPTH").is_ok_and(|v| v == "euclid")
 }
 
 fn blended(b: u8) -> bool {
@@ -472,6 +487,9 @@ pub struct Renderer {
     pub fade: [[f32; 3]; 2],
     /// `n1_set_debug_bits` (debug A/B switches; 0 normally).
     pub debug_bits: u32,
+    /// B-327 run-time A/B (skip file `soft=` / `pixdepth=`): soft edges on, PixelDepth planar.
+    dbg_soft: bool,
+    dbg_planar: bool,
     /// B-244: debug bit 1's one-shot log has been written for the current setting.
     dyn_logged: bool,
     // per frame
@@ -636,6 +654,8 @@ impl Renderer {
             // B-189: shadow maps (array) and their comparison sampler.
             set0.push(b(8, vk::DescriptorType::SAMPLED_IMAGE, fr));
             set0.push(b(9, vk::DescriptorType::SAMPLER, fr));
+            // B-327: the scene depth, for materials with a soft edge (read in the read-only-depth pass).
+            set0.push(b(10, vk::DescriptorType::SAMPLED_IMAGE, fr));
             let set0_layout = device.create_descriptor_set_layout(
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&set0),
                 None,
@@ -785,6 +805,8 @@ impl Renderer {
                 world_time: None,
                 fade: [[1.0; 3], [0.0; 3]],
                 debug_bits: 0,
+                dbg_soft: true,
+                dbg_planar: !planar_depth_off(),
                 dyn_logged: false,
                 gpu_insts: Vec::new(),
                 spheres: Vec::new(),
@@ -1374,6 +1396,7 @@ impl Renderer {
                     ntex: c.ntex,
                     blend: m.blend,
                     two_sided: m.two_sided,
+                    soft: c.soft,
                 });
                 (self.materials.len() as u32 - 1, set, b)
             }
@@ -1439,6 +1462,7 @@ impl Renderer {
         mi.skey = skey;
         mi.blend = m.blend;
         mi.two_sided = m.two_sided;
+        mi.soft = c.soft && soft_alpha_pass();
         Ok(id)
     }
 
@@ -2062,10 +2086,13 @@ impl Renderer {
         let bits = self.debug_bits;
         let blend_bits = (bits >> 22) & 7;
         let file = self.skip_file();
+        // Debug bit 25 (`hybrid n1debug`): hard edges; bit 26: PixelDepth as the distance to the eye.
+        self.dbg_soft = bits & (1 << 25) == 0 && file.as_ref().map_or(true, |f| f.5);
+        self.dbg_planar = bits & (1 << 26) == 0 && file.as_ref().map_or(!planar_depth_off(), |f| f.6);
         if blend_bits == 0 && file.is_none() {
             return;
         }
-        let (mats, fblend, lo, hi, dump) = file.unwrap_or_default();
+        let (mats, fblend, lo, hi, dump) = file.map(|f| (f.0, f.1, f.2, f.3, f.4)).unwrap_or_default();
         for (i, d) in self.draws.iter_mut().enumerate() {
             let by_blend = d.key.blend >= 2 && (blend_bits >> (d.key.blend - 2)) & 1 != 0;
             let by_file = mats.contains(&d.mat) || (fblend >> d.key.blend) & 1 != 0 || (i as u32 >= lo && (i as u32) < hi);
@@ -2078,14 +2105,14 @@ impl Renderer {
         }
     }
 
-    fn skip_file(&self) -> Option<(Vec<u32>, u32, u32, u32, bool)> {
+    fn skip_file(&self) -> Option<SkipCfg> {
         use std::sync::Mutex;
-        static ST: Mutex<(u64, Option<(Vec<u32>, u32, u32, u32, bool)>)> = Mutex::new((0, None));
+        static ST: Mutex<(u64, Option<SkipCfg>)> = Mutex::new((0, None));
         let path = std::env::var("BOTS_N1_SKIP_FILE").ok()?;
         let mut st = ST.lock().ok()?;
         st.0 += 1;
         if st.0 % 15 == 1 {
-            let mut v = (Vec::new(), 0u32, 0u32, 0u32, false);
+            let mut v: SkipCfg = (Vec::new(), 0u32, 0u32, 0u32, false, true, true);
             if let Ok(t) = std::fs::read_to_string(&path) {
                 for l in t.lines() {
                     let Some((k, val)) = l.split_once('=') else { continue };
@@ -2099,6 +2126,10 @@ impl Renderer {
                             }
                         }
                         "dump" => v.4 = val.trim() == "1",
+                        // B-327, for a same-pose A/B in one session: `soft=0` draws soft-edged cards with a hard edge,
+                        // `pixdepth=euclid` gives PixelDepth the distance to the eye instead of the planar depth.
+                        "soft" => v.5 = val.trim() != "0",
+                        "pixdepth" => v.6 = val.trim() != "euclid",
                         _ => {}
                     }
                 }
@@ -2426,6 +2457,9 @@ impl Renderer {
             let put = |b: &mut [u8], at: u64, src: &[u8]| {
                 b[at as usize..at as usize + src.len()].copy_from_slice(src)
             };
+            globals.vol_n[1] = self.near; // B-327: the scene shader linearises the depth buffer with it
+            globals.vol_n[2] = if self.dbg_soft { 1.0 } else { 0.0 };
+            globals.vol_n[3] = if self.dbg_planar { 1.0 } else { 0.0 };
             globals.tune2[3] = if self.knobs.shadow_apply { self.shadows.frame.len() as f32 } else { 0.0 };
             // B-244 debug A/B: bit 2 shows the lighting alone (`BOTS_N1_ENVP=irr`), bit 3 drops the modulated shadows,
             // bit 4 the dynamic lights (gain 0).
@@ -2516,6 +2550,18 @@ impl Renderer {
                 image_layout: vk::ImageLayout::UNDEFINED,
             }];
             let mut writes = writes;
+            let dimg = [vk::DescriptorImageInfo {
+                sampler: vk::Sampler::null(),
+                image_view: self.depth.as_ref().unwrap().view,
+                image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            }];
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(s.set)
+                    .dst_binding(10)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(&dimg),
+            );
             writes.push(
                 vk::WriteDescriptorSet::default()
                     .dst_set(s.set)
@@ -2666,6 +2712,11 @@ impl Renderer {
         // Particles (B-186): globals and instances into this slot's buffer.
         let pf = std::mem::take(&mut self.pframe);
         let pg_sprites = pf.has_sprites();
+        // B-327: draws of materials that read the scene depth (soft edges) need the read-only-depth pass too.
+        let soft_any = self.draws.iter().any(|dr| {
+            dr.key.shader != NO_SHADER && self.materials.get(dr.mat as usize).is_some_and(|m| m.soft)
+        });
+        let late_pass = pg_sprites || soft_any;
         let pg_meshes = pf.has_meshes();
         if pg_sprites || pg_meshes {
             self.pg_stage(si, &pf, view_proj, eye, rw, rh)?;
@@ -2789,7 +2840,7 @@ impl Renderer {
             // it whenever the post chain runs; with DONT_CARE its contents afterwards are undefined (B-313 found the
             // RTX 3090 keeping them anyway). Debug bit 20 (1048576) puts back the old rule (stored only for the sprite
             // pass or the outline) for an A/B.
-            let depth_kept = pg_sprites || outline_on || (post_on && self.debug_bits & 1048576 == 0);
+            let depth_kept = late_pass || outline_on || (post_on && self.debug_bits & 1048576 == 0);
             let cc = target.clear.unwrap_or([0.0, 0.0, 0.0, 1.0]);
             let clear = [
                 srgb_to_linear(cc[0]),
@@ -2830,90 +2881,98 @@ impl Renderer {
             );
             viewport(0.0, 0.0, rw, rh);
             d.cmd_set_scissor(cmd, 0, &[full(rw, rh)]);
-            let (mut cur_key, mut cur_mat, mut cur_lm, mut cur_mesh) =
-                (None, u32::MAX, vk::DescriptorSet::null(), (false, u32::MAX));
-            let mut cur_layout = vk::PipelineLayout::null();
-            let mut cur_pipe = vk::Pipeline::null();
-            for dr in &self.draws {
-                let sk = SceneKey {
-                    shader: dr.key.shader,
-                    blend: dr.key.blend,
-                    skin: dr.key.skin,
-                    cull: if self.dyn_cull { 0 } else { dr.key.two_sided as u8 | (dr.key.mirrored as u8) << 1 },
-                };
-                let Some(&pipe) = self.ready.get(&sk) else { continue };
-                if cur_key != Some(dr.key) {
-                    if pipe != cur_pipe {
-                        d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipe);
-                        cur_pipe = pipe;
+            // B-327: `late`: the draws of materials that read the scene depth (a soft edge), recorded in the pass that has
+            // it bound read-only; every other draw goes in the main pass.
+            let record_scene = |late: bool, st: &mut FrameStats| {
+                let (mut cur_key, mut cur_mat, mut cur_lm, mut cur_mesh) =
+                    (None, u32::MAX, vk::DescriptorSet::null(), (false, u32::MAX));
+                let mut cur_layout = vk::PipelineLayout::null();
+                let mut cur_pipe = vk::Pipeline::null();
+                for dr in &self.draws {
+                    if (dr.key.shader != NO_SHADER && self.materials.get(dr.mat as usize).is_some_and(|m| m.soft)) != late {
+                        continue;
                     }
-                    if self.dyn_cull {
-                        d.cmd_set_cull_mode(
-                            cmd,
-                            if dr.key.two_sided { vk::CullModeFlags::NONE } else { vk::CullModeFlags::BACK },
-                        );
-                        d.cmd_set_front_face(
-                            cmd,
-                            if dr.key.mirrored { vk::FrontFace::CLOCKWISE } else { vk::FrontFace::COUNTER_CLOCKWISE },
-                        );
+                    let sk = SceneKey {
+                        shader: dr.key.shader,
+                        blend: dr.key.blend,
+                        skin: dr.key.skin,
+                        cull: if self.dyn_cull { 0 } else { dr.key.two_sided as u8 | (dr.key.mirrored as u8) << 1 },
+                    };
+                    let Some(&pipe) = self.ready.get(&sk) else { continue };
+                    if cur_key != Some(dr.key) {
+                        if pipe != cur_pipe {
+                            d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipe);
+                            cur_pipe = pipe;
+                        }
+                        if self.dyn_cull {
+                            d.cmd_set_cull_mode(
+                                cmd,
+                                if dr.key.two_sided { vk::CullModeFlags::NONE } else { vk::CullModeFlags::BACK },
+                            );
+                            d.cmd_set_front_face(
+                                cmd,
+                                if dr.key.mirrored { vk::FrontFace::CLOCKWISE } else { vk::FrontFace::COUNTER_CLOCKWISE },
+                            );
+                        }
+                        let ntex = self.store.ntex_of(dr.key.shader);
+                        let layout = self.store.mat_layout(ntex).map(|l| l.1).unwrap_or(cur_layout);
+                        if layout != cur_layout {
+                            // Set 0 and 1 have the same layout in every pipeline layout, so they stay bound; binding
+                            // again after a layout switch is cheap and keeps validation layers quiet.
+                            d.cmd_bind_descriptor_sets(
+                                cmd,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                layout,
+                                0,
+                                &[self.slots[si].set],
+                                &[],
+                            );
+                            cur_layout = layout;
+                            cur_lm = vk::DescriptorSet::null();
+                            cur_mat = u32::MAX;
+                        }
+                        cur_key = Some(dr.key);
+                        st.pipeline_changes += 1;
                     }
-                    let ntex = self.store.ntex_of(dr.key.shader);
-                    let layout = self.store.mat_layout(ntex).map(|l| l.1).unwrap_or(cur_layout);
-                    if layout != cur_layout {
-                        // Set 0 and 1 have the same layout in every pipeline layout, so they stay bound; binding
-                        // again after a layout switch is cheap and keeps validation layers quiet.
+                    if cur_lm != dr.lm {
                         d.cmd_bind_descriptor_sets(
                             cmd,
                             vk::PipelineBindPoint::GRAPHICS,
-                            layout,
-                            0,
-                            &[self.slots[si].set],
+                            cur_layout,
+                            1,
+                            &[dr.lm],
                             &[],
                         );
-                        cur_layout = layout;
-                        cur_lm = vk::DescriptorSet::null();
-                        cur_mat = u32::MAX;
+                        cur_lm = dr.lm;
                     }
-                    cur_key = Some(dr.key);
-                    st.pipeline_changes += 1;
+                    if cur_mat != dr.mat {
+                        d.cmd_bind_descriptor_sets(
+                            cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            cur_layout,
+                            2,
+                            &[self.materials[dr.mat as usize].set],
+                            &[],
+                        );
+                        cur_mat = dr.mat;
+                        st.bind_changes += 1;
+                    }
+                    if cur_mesh != (dr.key.skin, dr.mesh) {
+                        let m = if dr.key.skin {
+                            &self.skin_meshes[dr.mesh as usize]
+                        } else {
+                            &self.meshes[dr.mesh as usize]
+                        };
+                        d.cmd_bind_vertex_buffers(cmd, 0, &[m.vbuf.buffer], &[0]);
+                        d.cmd_bind_index_buffer(cmd, m.ibuf.buffer, 0, vk::IndexType::UINT32);
+                        cur_mesh = (dr.key.skin, dr.mesh);
+                    }
+                    d.cmd_draw_indexed(cmd, dr.index_count, 1, dr.first_index, 0, dr.instance);
+                    st.draws += 1;
+                    st.triangles += dr.index_count as u64 / 3;
                 }
-                if cur_lm != dr.lm {
-                    d.cmd_bind_descriptor_sets(
-                        cmd,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        cur_layout,
-                        1,
-                        &[dr.lm],
-                        &[],
-                    );
-                    cur_lm = dr.lm;
-                }
-                if cur_mat != dr.mat {
-                    d.cmd_bind_descriptor_sets(
-                        cmd,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        cur_layout,
-                        2,
-                        &[self.materials[dr.mat as usize].set],
-                        &[],
-                    );
-                    cur_mat = dr.mat;
-                    st.bind_changes += 1;
-                }
-                if cur_mesh != (dr.key.skin, dr.mesh) {
-                    let m = if dr.key.skin {
-                        &self.skin_meshes[dr.mesh as usize]
-                    } else {
-                        &self.meshes[dr.mesh as usize]
-                    };
-                    d.cmd_bind_vertex_buffers(cmd, 0, &[m.vbuf.buffer], &[0]);
-                    d.cmd_bind_index_buffer(cmd, m.ibuf.buffer, 0, vk::IndexType::UINT32);
-                    cur_mesh = (dr.key.skin, dr.mesh);
-                }
-                d.cmd_draw_indexed(cmd, dr.index_count, 1, dr.first_index, 0, dr.instance);
-                st.draws += 1;
-                st.triangles += dr.index_count as u64 / 3;
-            }
+            };
+            record_scene(false, &mut st);
             if let Some(g) = &self.gprof {
                 g.mark(d, cmd, 2);
             }
@@ -3006,7 +3065,7 @@ impl Renderer {
                     );
                 }
             }
-            if pg_sprites {
+            if late_pass {
                 // Sprite pass: same HDR target, depth bound read-only (tested, sampled for soft particles).
                 let dep = layout_barrier(
                     depth.image,
@@ -3050,12 +3109,15 @@ impl Renderer {
                 );
                 viewport(0.0, 0.0, rw, rh);
                 d.cmd_set_scissor(cmd, 0, &[full(rw, rh)]);
-                st.draws += self.pg_record(cmd, si, &pf, false);
+                record_scene(true, &mut st);
+                if pg_sprites {
+                    st.draws += self.pg_record(cmd, si, &pf, false);
+                }
                 d.cmd_end_rendering(cmd);
             }
             if outline_on {
                 // B-277(e): the marked pawns into the R8 mask, tested against the scene depth (read-only).
-                if !pg_sprites {
+                if !late_pass {
                     let dep = layout_barrier(
                         depth.image,
                         vk::ImageAspectFlags::DEPTH,
@@ -3120,7 +3182,7 @@ impl Renderer {
             let dep = layout_barrier(
                 depth.image,
                 vk::ImageAspectFlags::DEPTH,
-                if pg_sprites || outline_on {
+                if late_pass || outline_on {
                     vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL
                 } else {
                     vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL
