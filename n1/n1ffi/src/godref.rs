@@ -23,6 +23,18 @@ pub const MASK_EPS: f32 = 1.0 / 512.0;
 /// The ray loop's iteration count (loop constant i31 = 0x50).
 pub const STEPS: usize = 80;
 
+/// B-320: how much of the ray texture the composite adds at a pixel whose scene is `z` UE units from the camera.
+/// The game adds the rays to every pixel, so a wall next to the camera is veiled as much as a far hill; here the veil
+/// fades in with distance (a smoothstep from `near` to `far`), like haze that needs air to scatter in. `far <= near`
+/// turns the fade off (1 everywhere). The composite in post.wgsl (`god_depth_fade`) is this function.
+pub fn depth_fade(z: f32, near: f32, far: f32) -> f32 {
+    if far <= near {
+        return 1.0;
+    }
+    let t = ((z - near) / (far - near)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// The pass's constants: c3.xy the light point, c4.x magnitude, c4.y decay per step, c4.z exposure, c5 the ray colour
 /// (the ModulateRayColour already raised to 2.2).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -112,6 +124,24 @@ mod tests {
 
     fn at(img: &[[f32; 3]], x: usize, y: usize) -> [f32; 3] {
         img[y * GRID + x]
+    }
+
+    /// B-320: the distance fade is 0 up to `near`, 1 from `far`, smooth between, monotonic, and off when `far <= near`.
+    #[test]
+    fn depth_fade_ramp() {
+        assert_eq!(depth_fade(0.0, 1000.0, 5000.0), 0.0);
+        assert_eq!(depth_fade(1000.0, 1000.0, 5000.0), 0.0);
+        assert_eq!(depth_fade(5000.0, 1000.0, 5000.0), 1.0);
+        assert_eq!(depth_fade(1.0e7, 1000.0, 5000.0), 1.0);
+        assert!((depth_fade(3000.0, 1000.0, 5000.0) - 0.5).abs() < 1e-6);
+        let mut last = 0.0;
+        for k in 0..=100 {
+            let f = depth_fade(1000.0 + 40.0 * k as f32, 1000.0, 5000.0);
+            assert!(f >= last);
+            last = f;
+        }
+        assert_eq!(depth_fade(10.0, 0.0, 0.0), 1.0);
+        assert_eq!(depth_fade(10.0, 5000.0, 1000.0), 1.0);
     }
 
     #[test]

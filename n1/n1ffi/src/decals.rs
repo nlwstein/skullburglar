@@ -182,7 +182,6 @@ impl Decals {
                     mat_offset: out_o.len() as u32,
                     mat_count: 1,
                     env: inst.env,
-                    flags: 0,
                 });
                 out_o.push(mat);
                 drawn += 1;
@@ -594,7 +593,7 @@ mod tests {
         t[10] = 1.0;
         t[15] = 1.0;
         t[12] = 1000.0;
-        let inst = Instance { transform: t, mesh: 0, light: NONE, mat_offset: 0, mat_count: 0, env: NONE, flags: 0 };
+        let inst = Instance { transform: t, mesh: 0, light: NONE, mat_offset: 0, mat_count: 0, env: NONE };
         (m, inst)
     }
 

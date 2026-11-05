@@ -57,6 +57,9 @@ pub struct TextureDesc<'a> {
     /// B-235: the original fetches this texture with Xenos's gamma sign. The uploader keeps it raw (`srgb` is false)
     /// and the material or lightmap shader applies the piecewise-linear curve after filtering.
     pub gamma: bool,
+    /// B-324: the texture's own addressing (`TA_Clamp`): bit 0 clamps U, bit 1 clamps V. Material shaders apply it in
+    /// their sample (`matdef::codegen::compile_addr`); the sampler itself repeats.
+    pub clamp: u8,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -133,13 +136,7 @@ pub struct Instance {
     pub mat_count: u32,
     /// Light environment index in the frame's lighting (`n1_set_lighting`), or NONE.
     pub env: u32,
-    /// `INST_*` bits.
-    pub flags: u32,
 }
-
-/// `Instance::flags`: the object has focus (B-318), so its materials draw with `Activated` = 1, as the game sets on the
-/// shared material instance while the player targets it.
-pub const INST_FOCUS: u32 = 1;
 
 /// Interleaved vertex as both backends upload it.
 #[repr(C)]

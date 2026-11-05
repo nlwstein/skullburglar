@@ -172,6 +172,8 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
     if (!ramp) return false;
   }
   std::memcpy(ramp, gamma_ramp, 256 * 4);
+  std::memcpy(present_ramp_, gamma_ramp, 256 * 4);
+  have_present_ramp_ = true;
   // BOTS_GFX_UPSCALE=bilinear: the plain linear sampler instead of Catmull-Rom below render scale 1.
   static const bool bilinear = [] {
     const char* v = std::getenv("BOTS_GFX_UPSCALE");

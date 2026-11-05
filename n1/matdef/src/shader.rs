@@ -45,7 +45,20 @@ pub fn assemble(c: &Compiled, f: ShaderFlags) -> String {
             body.push('\n');
         }
     }
+    // B-327: the scene depth is bound (set 0, binding 10) only for shaders that read it.
+    let soft = body.contains("fi.scene_w");
+    let scene_depth = if soft {
+        "@group(0) @binding(10) var scene_depth: texture_depth_2d;\n\
+         fn scene_view_w(frag: vec2<f32>) -> f32 {\n\
+         \x20   let d = textureLoad(scene_depth, vec2<i32>(frag), 0);\n\
+         \x20   return select(1.0e9, g.vol_n.y / d, d > 0.0);\n\
+         }\n"
+    } else {
+        ""
+    };
     SCENE_WGSL
+        .replace("{{SCENE_DEPTH}}", scene_depth)
+        .replace("SCENE_W_EXPR", if soft { "select(1.0e9, scene_view_w(i.pos.xy), g.vol_n.z > 0.5)" } else { "1.0e9" })
         .replace("{{MP_N}}", &c.params.len().max(1).to_string())
         .replace("{{TEXTURES}}", &textures)
         .replace("{{ENVLIGHT}}", ENVLIGHT_WGSL)

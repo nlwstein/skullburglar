@@ -63,7 +63,6 @@ typedef struct N1Instance {
   uint32_t mat_offset; /* range in the frame's material handle array, one per mesh section */
   uint32_t mat_count;
   uint32_t env;        /* n1_env handle (owner's DynamicLightEnvironmentComponent) or N1_NONE */
-  uint32_t flags;      /* bit 0: the owner has focus, draw with Activated = 1 (B-318) */
 } N1Instance;
 
 typedef struct N1SkelInstance {
@@ -354,6 +353,17 @@ typedef struct N1Decal {
 } N1Decal; /* 192 bytes */
 void n1_set_decals(N1Renderer* r, const N1Decal* decals, uint32_t count, const uint32_t* receivers,
                    uint32_t receiver_count);
+
+/* live material parameters: cooked material instances whose scalar parameters the game changed in place (the
+ * focus highlight sets Activated = 1 on a poster's shared instance). Both are n1_material handles: `base` the cooked
+ * instance, `variant` the same path with the live values ("<path>?&s:Name=v"). Until replaced, every section drawn with
+ * `base`, whether from an override or the mesh's own material, is drawn with `variant` (the base while it loads).
+ * BOTS_N1_FOCUS=0 (environment, read at n1_create) ignores the list. */
+typedef struct N1LiveMaterial {
+  uint32_t base;
+  uint32_t variant;
+} N1LiveMaterial;
+void n1_set_live_materials(N1Renderer* r, const N1LiveMaterial* items, uint32_t count);
 
 /* serial: the host's number for the submission cmd will be part of (increasing); completed: the newest serial known
  * finished on the GPU. Returns 0, or -1 with n1_last_error set. */

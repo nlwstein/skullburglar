@@ -249,6 +249,16 @@ fn fs_god(i: VOut) -> @location(0) vec4<f32> {
     return vec4<f32>(v, 1.0);
 }
 
+// B-320: the rays fade in with the distance of what they land on (taps[3]: x near, y 1 / (far - near); y = 0 is off).
+// godref.rs `depth_fade` is this function.
+fn god_depth_fade(z: f32) -> f32 {
+    if (p.taps[3].y <= 0.0) {
+        return 1.0;
+    }
+    let t = clamp((z - p.taps[3].x) * p.taps[3].y, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
 fn composite(px: vec2<i32>, uv: vec2<f32>) -> vec3<f32> {
     var c = textureLoad(src, px, 0).rgb;
     if (p.comp.z > 0.5) {
@@ -265,7 +275,7 @@ fn composite(px: vec2<i32>, uv: vec2<f32>) -> vec3<f32> {
         // B-313: the mean of the 8 taps. The port stores its rays / 4 in an 8888 target and the composite's x4 undoes
         // that; fs_god writes them unscaled into a float target, so a x4 here made them 4 times too strong (a sweep
         // against the port at the 73575 sun views: x1, x1/2, x1/3, x1/4 gave mean abs. difference 9.9, 7.6, 6.7, 6.2).
-        c += g * 0.125;
+        c += g * 0.125 * god_depth_fade(view_z(px));
         if (p.taps[4].w > 1.5) {
             // B-313 diagnostics: the god-rays texture alone (x4, to see it).
             c = textureLoad(gods, min(vec2<i32>(floor(uv * 128.0)), vec2<i32>(127)), 0).rgb * 4.0;

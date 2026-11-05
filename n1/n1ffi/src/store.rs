@@ -76,6 +76,8 @@ pub struct ModEntry {
     /// The SPIR-V's name in the disk cache: the hash of the WGSL (scene) or of the words (particles).
     pub spv: u64,
     pub particle: bool,
+    /// B-332: the SPIR-V, kept only on `shaders::split_entries` GPUs to make one module per stage from.
+    pub words: Option<Arc<Vec<u32>>>,
 }
 
 /// Who asked: the startup step or the render thread in play.
@@ -524,6 +526,16 @@ impl Store {
         (m.module, m.ntex)
     }
 
+    /// One stage's module for pipeline `id` (see `shaders::stage_module`); the caller destroys what `Some` holds.
+    unsafe fn stage(&self, id: u32, entry: &std::ffi::CStr) -> Result<(vk::ShaderModule, Option<vk::ShaderModule>)> {
+        let (module, words) = {
+            let i = self.inner.lock().unwrap();
+            let m = &i.mods[id as usize];
+            (m.module, m.words.clone())
+        };
+        unsafe { shaders::stage_module(&self.device, module, words.as_deref().map_or(&[], |w| w), entry.to_str().unwrap_or("")) }
+    }
+
     pub fn ntex_of(&self, id: u32) -> usize {
         self.inner.lock().unwrap().mods[id as usize].ntex
     }
@@ -545,11 +557,12 @@ impl Store {
         true
     }
 
-    fn finish_module(&self, key: u64, r: Result<(vk::ShaderModule, usize, u64)>, particle: bool, origin: Origin, ms: f64) -> Option<u32> {
+    fn finish_module(&self, key: u64, r: Result<(vk::ShaderModule, usize, u64)>, words: &[u32], particle: bool, origin: Origin, ms: f64) -> Option<u32> {
         let mut i = self.inner.lock().unwrap();
         match r {
             Ok((module, ntex, spv)) => {
-                i.mods.push(ModEntry { module, ntex, key, spv, particle });
+                let words = shaders::split_entries().then(|| Arc::new(words.to_vec()));
+                i.mods.push(ModEntry { module, ntex, key, spv, particle, words });
                 let id = i.mods.len() as u32 - 1;
                 i.by_key.insert(key, MState::Ready(id));
                 match origin {
@@ -588,9 +601,13 @@ impl Store {
         let r = (|| {
             let src = shaders::scene_source(c, flags);
             let (words, h) = self.spirv_cached(&src)?;
-            Ok((self.make_module(&words)?, c.ntex, h))
+            Ok(((self.make_module(&words)?, c.ntex, h), words))
         })();
-        self.finish_module(key, r, false, origin, t.elapsed().as_secs_f64() * 1e3)
+        let (r, words) = match r {
+            Ok((m, w)) => (Ok(m), w),
+            Err(e) => (Err(e), Arc::default()),
+        };
+        self.finish_module(key, r, &words, false, origin, t.elapsed().as_secs_f64() * 1e3)
     }
 
     /// Builds a scene shader from the disk cache alone (a manifest entry): no WGSL, no packages. `None` if the SPIR-V
@@ -600,10 +617,11 @@ impl Store {
             return self.wait_module(key, origin);
         }
         let t = std::time::Instant::now();
-        let r = match self.read_spv(&format!("{spv:016x}")) {
+        let w = self.read_spv(&format!("{spv:016x}"));
+        let r = match &w {
             Some(w) => {
                 self.ctr.spv_hits.fetch_add(1, Relaxed);
-                self.make_module(&w).map(|m| (m, ntex, spv)).map_err(Into::into)
+                self.make_module(w).map(|m| (m, ntex, spv)).map_err(Into::into)
             }
             None => {
                 // Not a failure: the caller will enumerate instead, which builds it from its WGSL.
@@ -611,7 +629,7 @@ impl Store {
                 return None;
             }
         };
-        self.finish_module(key, r, false, origin, t.elapsed().as_secs_f64() * 1e3)
+        self.finish_module(key, r, w.as_deref().unwrap_or(&[]), false, origin, t.elapsed().as_secs_f64() * 1e3)
     }
 
     /// A particle module from the disk cache (a manifest entry).
@@ -619,14 +637,15 @@ impl Store {
         if !self.claim_module(key) {
             return self.wait_module(key, origin);
         }
-        let r = match self.read_spv(&format!("p{key:016x}")) {
-            Some(w) => self.make_module(&w).map(|m| (m, 0, key)).map_err(Into::into),
+        let w = self.read_spv(&format!("p{key:016x}"));
+        let r = match &w {
+            Some(w) => self.make_module(w).map(|m| (m, 0, key)).map_err(Into::into),
             None => {
                 self.inner.lock().unwrap().by_key.remove(&key);
                 return None;
             }
         };
-        self.finish_module(key, r, true, origin, 0.0)
+        self.finish_module(key, r, w.as_deref().unwrap_or(&[]), true, origin, 0.0)
     }
 
     /// A module from SPIR-V words already in hand (particle materials), keyed by `key` (hash of its WGSL).
@@ -647,7 +666,7 @@ impl Store {
             self.ctr.late_shaders.fetch_add(1, Relaxed);
         }
         let r = self.make_module(words).map(|m| (m, 0, key)).map_err(Into::into);
-        self.finish_module(key, r, true, origin, 0.0)
+        self.finish_module(key, r, words, true, origin, 0.0)
     }
 
     /// Asks for a scene shader without waiting: the render thread's call when a material arrives whose shader isn't
@@ -791,19 +810,22 @@ impl Store {
     }
 
     fn create_scene_pipe(&self, key: SceneKey) -> Result<vk::Pipeline> {
-        let (module, ntex) = self.module(key.shader);
+        let ntex = self.ntex_of(key.shader);
         let (_, layout) = self.mat_layout(ntex)?;
         unsafe {
+            let vs_entry = if key.skin { c"vs_skin" } else { c"vs" };
+            let (vs_module, vs_own) = self.stage(key.shader, vs_entry)?;
+            let (fs_module, fs_own) = self.stage(key.shader, c"fs")?;
             let blend = blend_state(key.blend);
             let write = key.blend < 2;
             let stages = [
                 vk::PipelineShaderStageCreateInfo::default()
                     .stage(vk::ShaderStageFlags::VERTEX)
-                    .module(module)
-                    .name(if key.skin { c"vs_skin" } else { c"vs" }),
+                    .module(vs_module)
+                    .name(vs_entry),
                 vk::PipelineShaderStageCreateInfo::default()
                     .stage(vk::ShaderStageFlags::FRAGMENT)
-                    .module(module)
+                    .module(fs_module)
                     .name(c"fs"),
             ];
             let stride = if key.skin {
@@ -882,15 +904,15 @@ impl Store {
                 .layout(layout)
                 .push_next(&mut rendering);
             let _use = self.cache_use.read().unwrap_or_else(|p| p.into_inner());
-            Ok(self
-                .device
-                .create_graphics_pipelines(self.cache, &[info], None)
-                .map_err(|(_, e)| anyhow!("pipeline {key:?}: {e}"))?[0])
+            let pipe = self.device.create_graphics_pipelines(self.cache, &[info], None);
+            for m in [vs_own, fs_own].into_iter().flatten() {
+                self.device.destroy_shader_module(m, None);
+            }
+            Ok(pipe.map_err(|(_, e)| anyhow!("pipeline {key:?}: {e}"))?[0])
         }
     }
 
     fn create_part_pipe(&self, key: PartKey) -> Result<vk::Pipeline> {
-        let module = self.module(key.module).0;
         let mesh = key.variant == 2;
         unsafe {
             let blend = blend_state(key.blend);
@@ -899,9 +921,11 @@ impl Store {
                 1 => c"vs_velocity",
                 _ => c"vs_mesh",
             };
+            let (vs_module, vs_own) = self.stage(key.module, entry)?;
+            let (fs_module, fs_own) = self.stage(key.module, c"fs")?;
             let stages = [
-                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(module).name(entry),
-                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(module).name(c"fs"),
+                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vs_module).name(entry),
+                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fs_module).name(c"fs"),
             ];
             let f4 = vk::Format::R32G32B32A32_SFLOAT;
             let sprite_binds =
@@ -964,10 +988,11 @@ impl Store {
                 .layout(self.particle_layout)
                 .push_next(&mut rendering);
             let _use = self.cache_use.read().unwrap_or_else(|p| p.into_inner());
-            Ok(self
-                .device
-                .create_graphics_pipelines(self.cache, &[info], None)
-                .map_err(|(_, e)| anyhow!("particle pipeline {key:?}: {e}"))?[0])
+            let pipe = self.device.create_graphics_pipelines(self.cache, &[info], None);
+            for m in [vs_own, fs_own].into_iter().flatten() {
+                self.device.destroy_shader_module(m, None);
+            }
+            Ok(pipe.map_err(|(_, e)| anyhow!("particle pipeline {key:?}: {e}"))?[0])
         }
     }
 

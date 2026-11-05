@@ -53,6 +53,9 @@ pub struct Texture {
     pub lod_group: String,
     /// CompressionSettings enum name (TC_Normalmap ...), UnpackMin/Max (sample = tex * (max - min) + min).
     pub compression: String,
+    /// AddressX / AddressY enum names (`TA_Wrap` when absent): how a material sample outside 0..1 behaves.
+    pub address_x: String,
+    pub address_y: String,
     pub unpack_min: [f32; 3],
     pub unpack_max: [f32; 3],
     /// Linear (untiled, little-endian) mips, largest first.
@@ -262,6 +265,8 @@ pub fn read_texture(pkg: &Package, idx: i32, tfc: &TfcCache) -> Result<Texture> 
         srgb: props.get("SRGB").map(|p| p.bool_value).unwrap_or(true),
         lod_group: String::new(),
         compression: String::new(),
+        address_x: String::new(),
+        address_y: String::new(),
         unpack_min: [0.0; 3],
         unpack_max: [1.0; 3],
         mips: vec![],
@@ -279,6 +284,8 @@ pub fn read_texture(pkg: &Package, idx: i32, tfc: &TfcCache) -> Result<Texture> 
     }
     t.lod_group = enum_name("LODGroup");
     t.compression = enum_name("CompressionSettings");
+    t.address_x = enum_name("AddressX");
+    t.address_y = enum_name("AddressY");
     for k in 0..3 {
         if let Some(p) = props.get_idx("UnpackMin", k as i32) {
             t.unpack_min[k] = p.as_f32();

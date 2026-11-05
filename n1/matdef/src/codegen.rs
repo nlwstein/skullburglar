@@ -17,6 +17,9 @@ pub struct Compiled {
     pub has_normal: bool,
     /// Needs the tangent frame / view vector (any of Normal, BumpOffset, Fresnel, Reflection)
     pub unsupported: Vec<String>,
+    /// B-327: reads the scene depth (a `SoftAlpha` node is live). The renderer draws such a material in the pass that
+    /// has the depth buffer bound read-only.
+    pub soft: bool,
 }
 
 /// `unpack[i]` = Some((min, max)) when texture `i` needs `tex * (max - min) + min` applied (normal maps).
@@ -38,6 +41,20 @@ pub fn compile_gamma(
     unpack: &[Option<([f32; 3], [f32; 3])>],
     recon_z: &[bool],
     gamma: &[bool],
+) -> Compiled {
+    compile_addr(def, unpack, recon_z, gamma, &[])
+}
+
+/// As `compile_gamma`; `clamp[i]`: texture `i` has clamp addressing (bit 0 on U, bit 1 on V; UE3 `TA_Clamp`). The
+/// scene sampler repeats, so a clamped sample takes the coordinate clamped to the edge texels' centres and the
+/// derivatives of the unclamped one (B-324: a rotated rotor-blur card read the opposite edge of its texture and drew
+/// streaks past the disc).
+pub fn compile_addr(
+    def: &MatDef,
+    unpack: &[Option<([f32; 3], [f32; 3])>],
+    recon_z: &[bool],
+    gamma: &[bool],
+    clamp: &[u8],
 ) -> Compiled {
     let mut params: Vec<[f32; 4]> = Vec::new();
     // One slot per use, never shared by value: two materials with the same graph but constants that happen to
@@ -112,7 +129,10 @@ pub fn compile_gamma(
             }
             Node::Tex { tex, uv } => {
                 let t = *tex as usize;
-                let mut e = format!("textureSample(t{t}, smp, {})", uvs(uv));
+                let mut e = match clamp.get(t).copied().unwrap_or(0) & 3 {
+                    0 => format!("textureSample(t{t}, smp, {})", uvs(uv)),
+                    m => clamped_sample(t, &uvs(uv), m),
+                };
                 if gamma.get(t).copied().unwrap_or(false) {
                     e = format!("xe_pwl({e})");
                 }
@@ -237,6 +257,17 @@ pub fn compile_gamma(
             }
             Node::WorldPos => ("vec4<f32>(fi.wpos, 1.0)".into(), 3),
             Node::PixelDepth => ("vec4<f32>(fi.depth)".into(), 1),
+            Node::SoftAlpha { alpha, bias, scale } => {
+                // UE3 MaterialTemplate (as the particle compiler reads it): DepthBias = (1 - Bias) * BiasScale, and
+                // alpha *= saturate((SceneDepth - PixelDepth) / max(DepthBias, 0.001)), both in planar view depth.
+                let k = p([*scale, 0.0, 0.0, 0.0]);
+                let a = alpha.map(|j| format!("n{j}.x")).unwrap_or("1.0".into());
+                let b = bias.map(|j| format!("n{j}.x")).unwrap_or("1.0".into());
+                (
+                    format!("vec4<f32>({a} * clamp((fi.scene_w - fi.view_w) / max((1.0 - {b}) * mp.c[{k}].x, 0.001), 0.0, 1.0))"),
+                    1,
+                )
+            }
             Node::If { a, b, gt, eq, lt } => (
                 format!("select(select({}, {}, {}.x > {}.x), {}, {}.x == {}.x)", v(*lt), v(*gt), v(*a), v(*b), v(*eq), v(*a), v(*b)),
                 nc[*gt as usize].max(nc[*lt as usize]),
@@ -296,7 +327,20 @@ pub fn compile_gamma(
     let _ = writeln!(body, "    o.mask = {};", sc(def.opacity_mask, "1.0"));
     body.push_str("    return o;\n}\n");
     let key = format!("{}#{}#{}", ntex, params.len().max(1), body);
-    Compiled { body, params, ntex, key, has_normal: def.normal.is_some(), unsupported: def.unsupported.clone() }
+    let soft = (0..n).any(|i| live[i] && matches!(def.nodes[i], Node::SoftAlpha { .. }));
+    Compiled { body, params, ntex, key, has_normal: def.normal.is_some(), unsupported: def.unsupported.clone(), soft }
+}
+
+/// A sample of texture `t` at `uv` with clamp-to-edge addressing on the axes in `mask` (bit 0 U, bit 1 V).
+fn clamped_sample(t: usize, uv: &str, mask: u8) -> String {
+    let half = format!("(vec2<f32>(0.5) / vec2<f32>(textureDimensions(t{t})))");
+    let both = format!("clamp({uv}, {half}, vec2<f32>(1.0) - {half})");
+    let c = if mask == 3 {
+        both
+    } else {
+        format!("select({uv}, {both}, vec2<bool>({}, {}))", mask & 1 != 0, mask & 2 != 0)
+    };
+    format!("textureSampleGrad(t{t}, smp, {c}, dpdx({uv}), dpdy({uv}))")
 }
 
 fn children(n: &Node) -> Vec<u32> {
@@ -310,6 +354,7 @@ fn children(n: &Node) -> Vec<u32> {
         Node::Panner { coord, time, .. } | Node::Rotator { coord, time, .. } => [*coord, *time].into_iter().flatten().collect(),
         Node::BumpOffset { coord, height, .. } => vec![*coord, *height],
         Node::Fresnel { n, .. } => n.iter().copied().collect(),
+        Node::SoftAlpha { alpha, bias, .. } => [*alpha, *bias].into_iter().flatten().collect(),
         Node::If { a, b, gt, eq, lt } => vec![*a, *b, *gt, *eq, *lt],
         _ => vec![],
     }

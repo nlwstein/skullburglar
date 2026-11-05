@@ -95,7 +95,10 @@ do_apk() {
   # versionCode: x*10000 + y*100 + z for a release, else 1 (dev builds).
   code=$(echo "${appver:-0.0.0}" | awk -F. '{print $1*10000 + $2*100 + $3}')
   [ "$code" -gt 0 ] || code=1
+  # Resources: the launcher icon (tools/android/res, from the iOS app icon).
+  "$ANDROID_BUILD_TOOLS/aapt2" compile --dir tools/android/res -o "$W/res.zip"
   "$ANDROID_BUILD_TOOLS/aapt2" link -o "$W/base.apk" -I "$ANDROID_PLATFORM_JAR" --manifest tools/android/AndroidManifest.xml \
+    "$W/res.zip" \
     --min-sdk-version $MIN_SDK --target-sdk-version $TARGET_SDK --version-code "$code" \
     --version-name "${VERSION:-dev}" --rename-manifest-package "$PACKAGE" \
     $([ "${DEBUGGABLE:-0}" = 1 ] && echo --debug-mode)

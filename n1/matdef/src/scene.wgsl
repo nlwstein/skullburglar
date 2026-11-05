@@ -13,8 +13,10 @@ struct Globals {
     tune: vec4<f32>,      // x lightmap gain, y spec gain, z vertex-light gain, w debug mode
     tune2: vec4<f32>,     // x vertex colour channel map, y sun-visibility luma, z normal-map strength, w unused
     tune3: vec4<f32>,     // N10: x light-environment gain, y ambient kept under an environment, z dynamic light gain, w vertex-lightmap gamma (B-189)
-    vol_n: vec4<f32>,     // B-310: x = fog volume count
+    vol_n: vec4<f32>,     // B-310: x = fog volume count; B-327: y = near plane, z = soft edges on, w = planar PixelDepth
     vols: array<vec4<f32>, 24>,  // per volume: (center, kind), (half extents or radius, density), (colour, 0)
+    dsky_up: vec4<f32>,   // B-328: w = 1 when the frame has a dynamic-object sky
+    dsky_dn: vec4<f32>,
 };
 
 struct Instance {
@@ -46,6 +48,8 @@ struct MatParams { c: array<vec4<f32>, {{MP_N}}> };
 @group(2) @binding(1) var lm1: texture_2d<f32>;
 @group(2) @binding(2) var lm2: texture_2d<f32>;
 @group(2) @binding(3) var lms: sampler;
+
+{{SCENE_DEPTH}}
 
 struct VOut {
     @builtin(position) pos: vec4<f32>,
@@ -128,6 +132,8 @@ struct FragIn {
     nrm: vec3<f32>,
     wpos: vec3<f32>,
     depth: f32,
+    view_w: f32,          // B-327: planar view depth of the fragment (what UE3's PixelDepth and the depth buffer hold)
+    scene_w: f32,         // B-327: planar view depth already in the depth buffer under this pixel (1e9: nothing)
     view_ts: vec3<f32>,
     refl_ts: bool,        // B-261: ReflectionVector in tangent space about the material Normal (flag bit 4)
     fresnel_ts: bool,     // B-277: a Fresnel with a Normal input dots it with the tangent-space view (flag bit 5)
@@ -236,7 +242,10 @@ fn fs(i: VOut, @builtin(front_facing) ff: bool) -> @location(0) vec4<f32> {
     fi.view = V;
     fi.nrm = N;
     fi.wpos = i.wpos;
-    fi.depth = length(g.cam_pos.xyz - i.wpos);
+    fi.view_w = 1.0 / i.pos.w;
+    // B-327: PixelDepth is the planar view depth (UE3's ScreenPosition.w); vol_n.w = 0 gives the distance to the eye.
+    fi.depth = select(length(g.cam_pos.xyz - i.wpos), fi.view_w, g.vol_n.w > 0.5);
+    fi.scene_w = SCENE_W_EXPR;
     fi.view_ts = vec3<f32>(dot(V, T0), dot(V, B), dot(V, N));
     // B-189: TemplateBody_Mat and other skin materials bend their normal toward LightVector (a wrap).
     var Lk = g.sun_dir.xyz;
@@ -278,6 +287,15 @@ fn fs(i: VOut, @builtin(front_facing) ff: bool) -> @location(0) vec4<f32> {
     } else {
         let hemi = mix(g.amb_dn.rgb, g.amb_up.rgb, Nw.y * 0.5 + 0.5);
         irr = hemi + g.sun_col.rgb * g.sun_dir.w * max(dot(Nw, g.sun_dir.xyz), 0.0);
+        if (g.dsky_up.w > 0.5 && (u32(g.amb_up.w) & 64u) != 0u) {
+            // B-328: the port's base pass for an object with no baked light and no light environment: only the lights that
+            // reach dynamic objects. The skies by the squared half-Lambert of the normal against up, plus the sun's N.L
+            // when it reaches them (`lightfeed::lightless_irradiance`). The sun's shadow map is not modelled.
+            let wu = Nw.y * 0.5 + 0.5;
+            let wd = 0.5 - Nw.y * 0.5;
+            irr = wu * wu * g.dsky_up.rgb + wd * wd * g.dsky_dn.rgb
+                + g.sun_col.rgb * g.sun_dir.w * g.dsky_dn.w * max(dot(Nw, g.sun_dir.xyz), 0.0);
+        }
         if (DYN_ON) {
             let ev = inst_dyn[i.inst].y;
             if (ev > 0u) {

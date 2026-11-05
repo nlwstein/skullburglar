@@ -1,0 +1,36 @@
+diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
+index 5be7868..c7b7173 100644
+--- a/src/audio/sdl/sdl_audio_driver.cpp
++++ b/src/audio/sdl/sdl_audio_driver.cpp
+@@ -26,6 +26,7 @@
+ #include <rex/dbg.h>
+ #include <rex/logging.h>
+ #include <rex/perf/counter.h>
++#include <rex/platform.h>
+ #include <SDL3/SDL.h>
+ 
+ REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
+@@ -87,7 +88,13 @@ bool SDLAudioDriver::Initialize() {
+   desired_spec.freq = frame_frequency_;
+   desired_spec.format = SDL_AUDIO_F32LE;
+   desired_spec.channels = frame_channels_;
+-  sdl_device_channels_ = frame_channels_;
++#if REX_PLATFORM_ANDROID
++  // Open stereo from the start: on Meta Quest a 6-channel AAudio stream
++  // crashes the system audioserver (libepsmixer), and the dead stream then
++  // faults SDL's audio thread. Phones and headsets are stereo endpoints anyway.
++  desired_spec.channels = 2;
++#endif
++  sdl_device_channels_ = desired_spec.channels;
+   sdl_stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desired_spec,
+                                           SDLCallback, this);
+   if (!sdl_stream_) {
+@@ -108,7 +115,7 @@ bool SDLAudioDriver::Initialize() {
+ 
+   // A 1-channel device gets the stereo fold too, then SDL collapses to mono.
+   // Handing it a 6ch stream instead would use SDL's own downmix.
+-  if (obtained_spec.channels <= 2) {
++  if (obtained_spec.channels <= 2 && sdl_device_channels_ != 2) {
+     SDL_DestroyAudioStream(sdl_stream_);
+     sdl_stream_ = nullptr;
+     desired_spec.channels = 2;

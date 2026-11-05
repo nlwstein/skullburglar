@@ -62,6 +62,25 @@ pub struct TextureAsset {
     pub normal: bool,
     /// UnpackMin/Max when not the identity: sample = tex * (max - min) + min.
     pub unpack: Option<([f32; 3], [f32; 3])>,
+    /// `AddressX` / `AddressY`: the addressing a material sample of this texture uses (B-324).
+    pub addr: [TexAddr; 2],
+}
+
+impl TextureAsset {
+    /// Bit 0: U clamps, bit 1: V clamps (`matdef::codegen::compile_addr`).
+    pub fn clamp_bits(&self) -> u8 {
+        clamp_bits(self.addr)
+    }
+}
+
+/// Bit 0: U clamps to the edge, bit 1: V does. `BOTS_N1_TEX_ADDR=0` ignores the textures' addressing (always repeat,
+/// as before B-324).
+pub fn clamp_bits(a: [TexAddr; 2]) -> u8 {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("BOTS_N1_TEX_ADDR").map_or(true, |v| v != "0")) {
+        return 0;
+    }
+    (a[0] == TexAddr::Clamp) as u8 | (((a[1] == TexAddr::Clamp) as u8) << 1)
 }
 
 /// A texture's header facts (see `AssetDb::texture_meta`).
@@ -71,6 +90,27 @@ pub struct TexMeta {
     pub srgb: bool,
     pub normal: bool,
     pub unpack: Option<([f32; 3], [f32; 3])>,
+    /// `AddressX` / `AddressY` (`TA_*`): the sampler addressing a material sample of this texture uses.
+    pub addr: [TexAddr; 2],
+}
+
+/// UE3 `TextureAddress`: how a texture is sampled outside 0..1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TexAddr {
+    #[default]
+    Wrap,
+    Clamp,
+    Mirror,
+}
+
+impl TexAddr {
+    fn from_name(n: &str) -> TexAddr {
+        match n {
+            "TA_Clamp" => TexAddr::Clamp,
+            "TA_Mirror" => TexAddr::Mirror,
+            _ => TexAddr::Wrap,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -790,6 +830,7 @@ impl AssetDb {
             srgb: props.get("SRGB").map(|p| p.bool_value).unwrap_or(true),
             normal: name("CompressionSettings").contains("Normalmap"),
             unpack: (mn != [0.0; 3] || mx != [1.0; 3]).then_some((mn, mx)),
+            addr: [TexAddr::from_name(&name("AddressX")), TexAddr::from_name(&name("AddressY"))],
         })
     }
 
@@ -826,7 +867,15 @@ impl AssetDb {
     fn load_texture(&self, path: &str) -> Result<Option<Arc<TextureAsset>>> {
         let file = self.cache.join("tex").join(cache_name(path) + ".bin");
         if let Ok(b) = std::fs::read(&file) {
-            if let Ok(t) = decode_texture(path, &b) {
+            if let Ok(mut t) = decode_texture(path, &b) {
+                // B-324: a file from before the addressing was stored gets it from the texture's header (cheap next
+                // to a full convert) and is written back, so this runs once per texture.
+                if b.get(..4) != Some(&TEX_MAGIC3.to_le_bytes()[..]) {
+                    if let Some(m) = self.texture_meta(path) {
+                        t.addr = m.addr;
+                        let _ = std::fs::write(&file, encode_texture(&t));
+                    }
+                }
                 return Ok(Some(Arc::new(self.trim(t))));
             }
         }
@@ -1120,6 +1169,7 @@ fn convert_texture(name: &str, mut t: ue3::texture::Texture) -> Result<TextureAs
         mips,
         normal: t.compression.contains("Normalmap"),
         unpack,
+        addr: [TexAddr::from_name(&t.address_x), TexAddr::from_name(&t.address_y)],
     })
 }
 
@@ -1275,6 +1325,7 @@ impl<'a> R<'a> {
 const MESH_MAGIC: u32 = 0x4853_4D32; // "2MSH": + tangents, colours, uv1
 const TEX_MAGIC: u32 = 0x5845_5432; // + normal, unpack
 const TEX_MAGIC2: u32 = 0x5845_5433; // same layout; small packed-mip textures decoded from the right place (B-292)
+const TEX_MAGIC3: u32 = 0x5845_5434; // + AddressX/AddressY after the unpack range (B-324)
 const LIGHT_MAGIC: u32 = 0x5447_4C31;
 const TREELIGHT_MAGIC: u32 = 0x5447_4C33;
 
@@ -1500,7 +1551,7 @@ fn decode_mesh(name: &str, b: &[u8]) -> Result<MeshAsset> {
 
 fn encode_texture(t: &TextureAsset) -> Vec<u8> {
     let mut w = W(Vec::new());
-    w.u32(TEX_MAGIC2);
+    w.u32(TEX_MAGIC3);
     w.u32(t.fmt as u32);
     w.u32(t.srgb as u32);
     w.u32(t.width);
@@ -1513,13 +1564,15 @@ fn encode_texture(t: &TextureAsset) -> Vec<u8> {
     let (mn, mx) = t.unpack.unwrap_or(([0.0; 3], [1.0; 3]));
     w.u32(t.unpack.is_some() as u32);
     mn.iter().chain(&mx).for_each(|&v| w.f32(v));
+    w.u32(t.addr[0] as u32);
+    w.u32(t.addr[1] as u32);
     w.0
 }
 
 fn decode_texture(name: &str, b: &[u8]) -> Result<TextureAsset> {
     let mut r = R(b, 0);
     let magic = r.u32()?;
-    if magic != TEX_MAGIC && magic != TEX_MAGIC2 {
+    if magic != TEX_MAGIC && magic != TEX_MAGIC2 && magic != TEX_MAGIC3 {
         bail!("magic");
     }
     let fmt = match r.u32()? {
@@ -1545,7 +1598,15 @@ fn decode_texture(name: &str, b: &[u8]) -> Result<TextureAsset> {
     let has_unpack = r.u32()? != 0;
     let mn = [r.f32()?, r.f32()?, r.f32()?];
     let mx = [r.f32()?, r.f32()?, r.f32()?];
+    let from_u32 = |v: u32| match v {
+        1 => TexAddr::Clamp,
+        2 => TexAddr::Mirror,
+        _ => TexAddr::Wrap,
+    };
+    // A file from before B-324 has no addressing: `load_texture` fills it in from the package.
+    let addr = if magic == TEX_MAGIC3 { [from_u32(r.u32()?), from_u32(r.u32()?)] } else { [TexAddr::Wrap; 2] };
     Ok(TextureAsset {
+        addr,
         normal,
         unpack: has_unpack.then_some((mn, mx)),
         name: name.to_string(),
