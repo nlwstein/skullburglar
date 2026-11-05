@@ -1,0 +1,12 @@
+[
+ "Android devices with a Qualcomm Adreno GPU: the new renderer now starts instead of showing a graphics warning. Found on Meta Quest 3, but the fix applies to every Adreno phone, tablet and headset.",
+ "The Android and Quest app now has its icon.",
+ "Fixed a crash on the first loading screen on Meta Quest 3.",
+ "Doors and other loose props now get the same light as in the original game: they no longer look pale and flat indoors, and they pick up sunlight outdoors.",
+ "Arched wooden doors in the Mountain City indoor areas are no longer pale gray; they are dark brown again.",
+ "Light shafts in doorways and windows now fade softly at their edges like the original game, instead of showing as a hazy glass-like panel.",
+ "Helicopter rotor discs no longer show dark streaks leaking out of their square corners.",
+ "Fixed a milky haze over nearby dark buildings and walls when looking toward the sun.",
+ "Posters that were already highlighted when the level loaded now still light correctly in the new renderer.",
+ "Shared highlighted materials (such as posters that share one picture) now light together in the new renderer, matching the original."
+]
