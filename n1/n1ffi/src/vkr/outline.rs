@@ -97,9 +97,12 @@ impl Outline {
             let layout = device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&sets), None)?;
             let words = shaders::spirv(MASK_WGSL)?;
             let module = device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)?;
+            // B-332: per-entry-point copies on `split_entries` GPUs, destroyed once the pipeline is made.
+            let (vs_module, vs_own) = shaders::stage_module(device, module, &words, "vs_skin")?;
+            let (fs_module, fs_own) = shaders::stage_module(device, module, &words, "fs_mask")?;
             let stages = [
-                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(module).name(c"vs_skin"),
-                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(module).name(c"fs_mask"),
+                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vs_module).name(c"vs_skin"),
+                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fs_module).name(c"fs_mask"),
             ];
             let bindings = [vk::VertexInputBindingDescription {
                 binding: 0,
@@ -153,7 +156,11 @@ impl Outline {
                 .push_next(&mut rendering);
             let pipe = device
                 .create_graphics_pipelines(cache, &[info], None)
-                .map_err(|(_, e)| anyhow!("outline pipeline: {e}"))?[0];
+                .map_err(|(_, e)| anyhow!("outline pipeline: {e}"));
+            for m in vs_own.into_iter().chain(fs_own) {
+                device.destroy_shader_module(m, None);
+            }
+            let pipe = pipe?[0];
             Ok(Outline { module, layout, pipe })
         }
     }

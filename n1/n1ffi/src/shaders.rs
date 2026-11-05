@@ -182,9 +182,135 @@ pub fn spirv_caps(src: &str, caps: naga::valid::Capabilities) -> Result<Vec<u32>
     naga::back::spv::write_vec(&module, &info, &opts, None).map_err(|e| anyhow!("spv: {e}"))
 }
 
+/// B-332: the Adreno 740 driver (Quest 3) fails vkCreateGraphicsPipelines with VK_ERROR_UNKNOWN for a stage whose
+/// module also declares other entry points (valid SPIR-V, and fine on every other GPU we test). On those GPUs each
+/// stage gets its own copy of the module with only its entry point declared (`keep_entry`); elsewhere nothing changes.
+static SPLIT_ENTRIES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_split_entries(on: bool) {
+    SPLIT_ENTRIES.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn split_entries() -> bool {
+    SPLIT_ENTRIES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The instructions of a SPIR-V module after its header: (word index, word count, opcode).
+fn insts(words: &[u32]) -> impl Iterator<Item = (usize, usize, u32)> + '_ {
+    let mut i = 5;
+    std::iter::from_fn(move || {
+        let (n, op) = ((*words.get(i)? >> 16) as usize, words[i] & 0xffff);
+        if n == 0 || i + n > words.len() {
+            return None;
+        }
+        i += n;
+        Some((i - n, n, op))
+    })
+}
+
+/// The entry points of a SPIR-V module: (function id, name, interface ids).
+fn entry_points(words: &[u32]) -> Vec<(u32, String, Vec<u32>)> {
+    let mut out = Vec::new();
+    for (i, n, op) in insts(words) {
+        if op == 15 && n >= 4 {
+            let name = &words[i + 3..i + n];
+            // The name is a nul-terminated string padded to whole words; the interface ids follow it.
+            let len = name.iter().position(|w| w.to_le_bytes().contains(&0)).map_or(name.len(), |k| k + 1);
+            let bytes: Vec<u8> = name[..len].iter().flat_map(|w| w.to_le_bytes()).take_while(|&b| b != 0).collect();
+            out.push((words[i + 2], String::from_utf8_lossy(&bytes).into_owned(), name[len..].to_vec()));
+        }
+    }
+    out
+}
+
+/// `words` with only `entry` left: the other entry points go, with their execution modes, their functions and the
+/// Input/Output variables only they use (and those ids' names and decorations). Types, constants and helper functions
+/// are kept as they are (unused ones are still valid SPIR-V). B-332: Adreno 740 rejects a pipeline whose stage module
+/// declares more than one entry point, or still holds the other entries' functions and interface variables.
+pub fn keep_entry(words: &[u32], entry: &str) -> Vec<u32> {
+    let eps = entry_points(words);
+    let keep_iface: Vec<u32> = eps.iter().filter(|e| e.1 == entry).flat_map(|e| e.2.clone()).collect();
+    let mut gone: std::collections::HashSet<u32> = eps.iter().filter(|e| e.1 != entry).map(|e| e.0).collect();
+    let fns = gone.clone();
+    for (i, n, op) in insts(words) {
+        // OpVariable: result type, id, storage class (Input 1, Output 3).
+        if op == 59 && n >= 4 && matches!(words[i + 3], 1 | 3) && !keep_iface.contains(&words[i + 2]) {
+            gone.insert(words[i + 2]);
+        }
+    }
+    let mut out = words[..5.min(words.len())].to_vec();
+    let mut in_dropped_fn = false;
+    let mut end = 5;
+    for (i, n, op) in insts(words) {
+        end = i + n;
+        let skip = match op {
+            54 => {
+                // OpFunction: result type, id.
+                in_dropped_fn = fns.contains(&words[i + 2]);
+                in_dropped_fn
+            }
+            56 => std::mem::replace(&mut in_dropped_fn, false),
+            _ if in_dropped_fn => true,
+            15 => n >= 3 && gone.contains(&words[i + 2]),
+            59 => n >= 3 && gone.contains(&words[i + 2]),
+            // OpName, OpMemberName, OpExecutionMode, OpDecorate, OpMemberDecorate, OpExecutionModeId, OpDecorateId,
+            // OpDecorateString, OpMemberDecorateString: the target is word 1.
+            5 | 6 | 16 | 71 | 72 | 331 | 332 | 5632 | 5633 => n >= 2 && gone.contains(&words[i + 1]),
+            _ => false,
+        };
+        if !skip {
+            out.extend_from_slice(&words[i..i + n]);
+        }
+    }
+    out.extend_from_slice(&words[end.min(words.len())..]);
+    out
+}
+
+/// A module for one stage: `module` itself, or on `split_entries` GPUs a new module from `words` with only `entry`.
+/// The caller destroys what `Some` holds.
+///
+/// # Safety
+/// `device` must be valid.
+pub unsafe fn stage_module(
+    device: &ash::Device,
+    module: ash::vk::ShaderModule,
+    words: &[u32],
+    entry: &str,
+) -> Result<(ash::vk::ShaderModule, Option<ash::vk::ShaderModule>)> {
+    if !split_entries() || words.is_empty() {
+        return Ok((module, None));
+    }
+    let w = keep_entry(words, entry);
+    let m = unsafe { device.create_shader_module(&ash::vk::ShaderModuleCreateInfo::default().code(&w), None)? };
+    Ok((m, Some(m)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B-332: `keep_entry` leaves exactly the named entry point and drops only the other entry points' declarations.
+    #[test]
+    fn keep_entry_leaves_one_entry_point() {
+        let w = spirv(&post_source()).unwrap();
+        let all = entry_points(&w);
+        assert!(all.len() > 2);
+        let s = spirv_caps(SHADOW_DEPTH_WGSL, naga::valid::Capabilities::IMMEDIATES).unwrap();
+        let dir = std::env::var_os("N1_SPV_DUMP").map(std::path::PathBuf::from);
+        for (src, w) in [("post", &w), ("shadow", &s)] {
+            for (_, name, iface) in entry_points(w) {
+                let k = keep_entry(w, &name);
+                let left = entry_points(&k);
+                assert_eq!(left.len(), 1);
+                assert_eq!((&left[0].1, &left[0].2), (&name, &iface));
+                assert!(k.len() < w.len() && k[..5] == w[..5]);
+                if let Some(d) = &dir {
+                    let bytes: Vec<u8> = k.iter().flat_map(|w| w.to_le_bytes()).collect();
+                    std::fs::write(d.join(format!("{src}-{name}.spv")), bytes).unwrap();
+                }
+            }
+        }
+    }
     use matdef::{MatDef, Node, TexRef};
 
     /// G6: a sub-UV particle material whose texture is uploaded raw compiles with `xe_pwl_raw` on both fetches, for the

@@ -248,15 +248,21 @@ impl Renderer {
             let dyns = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
             let dy = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyns);
             let formats = [HDR_FORMAT];
+            // B-332: per-entry-point copies on `split_entries` GPUs, destroyed once the pipelines are made.
+            let words =
+                if crate::shaders::split_entries() { crate::shaders::spirv(include_str!("tree.wgsl"))? } else { Vec::new() };
             for (k, fs) in [c"fs_opaque", c"fs_masked"].iter().enumerate() {
+                let (vs_module, vs_own) = crate::shaders::stage_module(&self.device, self.tg.module, &words, "vs")?;
+                let (fs_module, fs_own) =
+                    crate::shaders::stage_module(&self.device, self.tg.module, &words, fs.to_str().unwrap_or(""))?;
                 let stages = [
                     vk::PipelineShaderStageCreateInfo::default()
                         .stage(vk::ShaderStageFlags::VERTEX)
-                        .module(self.tg.module)
+                        .module(vs_module)
                         .name(c"vs"),
                     vk::PipelineShaderStageCreateInfo::default()
                         .stage(vk::ShaderStageFlags::FRAGMENT)
-                        .module(self.tg.module)
+                        .module(fs_module)
                         .name(fs),
                 ];
                 let mut rendering = vk::PipelineRenderingCreateInfo::default()
@@ -277,8 +283,11 @@ impl Renderer {
                 let p = self
                     .device
                     .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
-                    .map_err(|(_, e)| anyhow!("tree pipeline {k}: {e}"))?[0];
-                self.tg.pipes[k] = p;
+                    .map_err(|(_, e)| anyhow!("tree pipeline {k}: {e}"));
+                for m in vs_own.into_iter().chain(fs_own) {
+                    self.device.destroy_shader_module(m, None);
+                }
+                self.tg.pipes[k] = p?[0];
             }
         }
         Ok(())

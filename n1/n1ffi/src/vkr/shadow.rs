@@ -84,6 +84,8 @@ pub(super) struct Shadows {
     pub sampler: vk::Sampler,
     pipe_layout: vk::PipelineLayout,
     module: vk::ShaderModule,
+    /// B-332: per-entry-point copies on `split_entries` GPUs (static, skin).
+    stage_modules: Vec<vk::ShaderModule>,
     pipe_static: vk::Pipeline,
     pipe_skin: vk::Pipeline,
     pub layers: u32,
@@ -377,10 +379,14 @@ impl Shadows {
             )?;
             let words = shaders::spirv_caps(shaders::SHADOW_DEPTH_WGSL, naga::valid::Capabilities::IMMEDIATES)?;
             let module = device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)?;
-            let mk = |skin: bool| -> Result<vk::Pipeline> {
+            let mut stage_modules = Vec::new();
+            let mut mk = |skin: bool| -> Result<vk::Pipeline> {
+                let (stage_module, own) =
+                    shaders::stage_module(device, module, &words, if skin { "vs_skin" } else { "vs_static" })?;
+                stage_modules.extend(own);
                 let stages = [vk::PipelineShaderStageCreateInfo::default()
                     .stage(vk::ShaderStageFlags::VERTEX)
-                    .module(module)
+                    .module(stage_module)
                     .name(if skin { c"vs_skin" } else { c"vs_static" })];
                 let stride = if skin { std::mem::size_of::<SkinVertex>() } else { std::mem::size_of::<Vertex>() } as u32;
                 let bindings =
@@ -454,6 +460,7 @@ impl Shadows {
                 sampler,
                 pipe_layout,
                 module,
+                stage_modules,
                 pipe_static,
                 pipe_skin,
                 layers,
@@ -476,6 +483,9 @@ impl Shadows {
             device.destroy_pipeline(self.pipe_static, None);
             device.destroy_pipeline(self.pipe_skin, None);
             device.destroy_shader_module(self.module, None);
+            for m in self.stage_modules.drain(..) {
+                device.destroy_shader_module(m, None);
+            }
             device.destroy_pipeline_layout(self.pipe_layout, None);
             device.destroy_sampler(self.sampler, None);
             for v in self.layer_views.drain(..) {
