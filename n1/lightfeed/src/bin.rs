@@ -41,6 +41,8 @@ pub const LF_MODULATED: u32 = 64;
 /// B-249: a sky light carries its raw `LightColor / 255` in `pos` and raw `LowerColor / 255` in `axis` (sky lights
 /// have no use for either; the position is irrelevant to a sky light).
 pub const LF_SKY_RAW: u32 = 128;
+/// B-328: `bUseVolumes` (a sky light limited to its light volumes).
+pub const LF_USE_VOLUMES: u32 = 256;
 
 // `FeedPost::flags`
 pub const PF_UBER: u32 = 1;
@@ -316,6 +318,12 @@ pub unsafe fn decode(b: &FeedBin) -> Result<Decoded, String> {
     let sh = arr(b.sh, b.sh_count * 27);
     let path = |i: u32| paths.get(i as usize).cloned();
     let mut out = Vec::with_capacity(lights.len());
+    // Test aid for a host that predates `LF_USE_VOLUMES`: `BOTS_N1_SKYVOL=0,2` marks the first and third sky lights in
+    // feed order as volume-limited.
+    let sky_vol: Vec<usize> = std::env::var("BOTS_N1_SKYVOL")
+        .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .unwrap_or_default();
+    let mut sky_n = 0usize;
     for l in lights {
         let kind = match l.kind {
             KIND_POINT => Kind::Point,
@@ -350,6 +358,11 @@ pub unsafe fn decode(b: &FeedBin) -> Result<Decoded, String> {
             cast_dynamic_shadows: l.flags & LF_CAST_DYN_SHADOWS != 0,
             affects_static: l.flags & LF_CHAN_STATIC != 0,
             affects_dynamic: l.flags & LF_CHAN_DYNAMIC != 0,
+            use_volumes: l.flags & LF_USE_VOLUMES != 0
+                || (kind == Kind::Sky && {
+                    sky_n += 1;
+                    sky_vol.contains(&(sky_n - 1))
+                }),
             lower: if raw_slot { [0.0; 3] } else { l.lower },
             raw: if raw_slot { l.lower } else if sky_raw { l.pos } else { [0.0; 3] },
             raw_lower: if sky_raw { l.axis } else { [0.0; 3] },

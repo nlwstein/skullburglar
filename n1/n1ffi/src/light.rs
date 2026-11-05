@@ -21,6 +21,10 @@ pub struct Globals {
     pub vol_n: [f32; 4],
     /// Three vec4 per volume: (center xyz, kind 0 box / 1 sphere), (half extents xyz or radius, density), (colour rgb, 0).
     pub vols: [[f32; 4]; 3 * MAX_FOG_VOLUMES],
+    /// B-328: the sky an instance with no baked light and no light environment gets instead of `amb_*` + sun
+    /// (rgb; `dsky_up.w` is 1 when it applies, else the old hemisphere + sun).
+    pub dsky_up: [f32; 4],
+    pub dsky_dn: [f32; 4],
 }
 
 pub const MAX_FOG_VOLUMES: usize = 8;
@@ -87,6 +91,8 @@ pub struct Env {
     pub sun_enabled: bool,
     pub amb_up: [f32; 3],
     pub amb_dn: [f32; 3],
+    /// B-328: the dynamic-object sky (see [`Globals::dsky_up`]), when the frame has one: (up, down).
+    pub dyn_sky: Option<([f32; 3], [f32; 3])>,
     /// (colour, density, height (Y), start distance, height falloff)
     pub fog: Option<([f32; 3], f32, f32, f32, f32)>,
     pub lm_gain: f32,
@@ -117,6 +123,7 @@ impl Default for Env {
             sun_enabled: true,
             amb_up: [0.35, 0.38, 0.45],
             amb_dn: [0.20, 0.18, 0.15],
+            dyn_sky: None,
             fog: Some(([0.612, 0.737, 0.983], 4e-6, 6443.0, 4000.0, 1e8)),
             lm_gain: 1.0,
             spec_gain: 1.0,
@@ -164,6 +171,10 @@ impl Env {
                     e.amb_dn[k] += c[k];
                 }
             }
+        }
+        // B-328: the sky of the port's base pass for objects with no baked light and no light environment.
+        if fr.sky_dyn_count > 0 {
+            e.dyn_sky = Some(if ue3_gamma { (fr.sky_dyn_up_ue3, fr.sky_dyn_down_ue3) } else { (fr.sky_dyn_up, fr.sky_dyn_down) });
         }
         // W4: as the port's fog pass (draw 911 of capture f4420): colour LightColor^2.2, extinction distance in w.
         e.fog = fr.fog.as_ref().map(|f| (f.light_color.map(|c| c.powf(2.2)), f.density, f.height, f.start, f.extinction));
@@ -233,6 +244,8 @@ impl Env {
             tune3: [self.env_gain, self.env_ambient, self.dyn_gain, self.vl_gamma],
             vol_n: [0.0; 4],
             vols: [[0.0; 4]; 3 * MAX_FOG_VOLUMES],
+            dsky_up: self.dyn_sky.map_or([0.0; 4], |(u, _)| [u[0], u[1], u[2], 1.0]),
+            dsky_dn: self.dyn_sky.map_or([0.0; 4], |(_, d)| [d[0], d[1], d[2], 0.0]),
         }
     }
 }
@@ -477,6 +490,9 @@ pub struct Knobs {
     pub refl_ts: bool,
     /// B-277: a Fresnel with a Normal input uses the tangent-space view vector (`BOTS_N1_FRESNEL_TS=0`: the world-space view).
     pub fresnel_ts: bool,
+    /// B-328: objects with no baked light and no light environment get the port's dynamic sky (no sun) instead of the
+    /// global hemisphere + sun. `BOTS_N1_DYNSKY=0` restores the old lighting.
+    pub dyn_sky: bool,
     /// Clamp mesh particles' instance colour rgb to 1 like the original's 8-bit colour (B-246). `BOTS_N1_MESH_VCOL_CLAMP=0` off.
     pub mesh_vcol_clamp: bool,
     /// B-264: the vertex-light buffer grows by a GPU copy of the old words (the CPU writes only the new ones) and syncs on
@@ -548,6 +564,7 @@ impl Knobs {
             mesh_vcol_clamp: env_flag("BOTS_N1_MESH_VCOL_CLAMP", true),
             refl_ts: env_flag("BOTS_N1_REFL_TS", true),
             fresnel_ts: env_flag("BOTS_N1_FRESNEL_TS", true),
+            dyn_sky: env_flag("BOTS_N1_DYNSKY", true),
             light_grow: env_flag("BOTS_N1_LIGHT_GROW", true),
             lod_bones: env_flag("BOTS_N1_LOD_BONES", true),
             outline: env_num("BOTS_N1_OUTLINE", 1u32),

@@ -59,6 +59,9 @@ pub struct Light {
     pub cast_dynamic_shadows: bool,
     pub affects_static: bool,
     pub affects_dynamic: bool,
+    /// B-328: `bUseVolumes`: a sky light that only lights primitives inside its light volumes (the level's other skies
+    /// light everything). Zero from a host that doesn't carry it.
+    pub use_volumes: bool,
     /// Sky light lower hemisphere colour times LowerBrightness.
     pub lower: [f32; 3],
     /// B-230: point and spot lights: raw `LightColor / 255` (no brightness), or zeros when the feed doesn't carry it
@@ -164,6 +167,7 @@ impl Light {
             cast_dynamic_shadows: b(p, "CastDynamicShadows"),
             affects_static: chan("Static"),
             affects_dynamic: chan("Dynamic"),
+            use_volumes: b(p, "bUseVolumes"),
             lower: {
                 let lc = col(p, "LowerColor");
                 [lc[0] * lb, lc[1] * lb, lc[2] * lb]
@@ -185,6 +189,13 @@ impl Light {
             shadow_falloff_exp: f(p, "ShadowFalloffExponent", 2.0),
             min_shadow_falloff_radius: f(p, "MinShadowFalloffRadius", 0.0),
         })
+    }
+
+    /// B-328: whether this (enabled) sky light is one the port's base pass applies to every dynamic object: its `Dynamic`
+    /// lighting channel is on and it isn't limited to light volumes. Chapter 72545's five skies: three pass; two have
+    /// `Dynamic` off and one has `bUseVolumes`, and the port's door shader sums exactly the passing ones.
+    pub fn lights_dynamic_sky(&self) -> bool {
+        self.kind == Kind::Sky && self.enabled && self.affects_dynamic && !self.use_volumes
     }
 
     /// Short owner label of a light environment component path (the actor before `.DynamicLightEnvironmentComponent_N`).
@@ -323,6 +334,14 @@ pub struct Frame {
     /// B-249: the same sums with each sky light decoded as UE3 does ([`Light::ue3_sky`]).
     pub sky_up_ue3: [f32; 3],
     pub sky_down_ue3: [f32; 3],
+    /// B-328: the skies the port's base pass applies to a dynamic object with no baked light and no light environment:
+    /// enabled, `Dynamic` lighting channel on, not volume-limited (see [`Light::lights_dynamic_sky`]). Sums as
+    /// `sky_up` / `sky_up_ue3` are, and how many skies went in.
+    pub sky_dyn_up: [f32; 3],
+    pub sky_dyn_down: [f32; 3],
+    pub sky_dyn_up_ue3: [f32; 3],
+    pub sky_dyn_down_ue3: [f32; 3],
+    pub sky_dyn_count: u32,
     /// Level lights that are really dynamic: they light static meshes too.
     pub dynamic: Vec<Light>,
     /// Count of baked level lights skipped (already in lightmaps).
@@ -425,6 +444,15 @@ impl Frame {
                         for k in 0..3 {
                             fr.sky_up_ue3[k] += up[k];
                             fr.sky_down_ue3[k] += dn[k];
+                        }
+                        if l.lights_dynamic_sky() {
+                            fr.sky_dyn_count += 1;
+                            for k in 0..3 {
+                                fr.sky_dyn_up[k] += l.color[k];
+                                fr.sky_dyn_down[k] += l.lower[k];
+                                fr.sky_dyn_up_ue3[k] += up[k];
+                                fr.sky_dyn_down_ue3[k] += dn[k];
+                            }
                         }
                     }
                 }
@@ -564,6 +592,36 @@ mod tests {
         let mut l = Light::parse(&serde_json::from_str::<Value>(r#"{"class":"SkyLightComponent","props":{"LightToWorld":[1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1],"Brightness":0.7,"LightColor":[128,149,159,0],"bEnabled":true}}"#).unwrap()).unwrap();
         l.raw = [0.0; 3];
         assert_eq!(l.ue3_sky().0, l.color);
+    }
+
+    #[test]
+    fn dynamic_sky_is_the_lights_that_reach_every_dynamic_object() {
+        // B-328: a chapter's five skies and what the port's base pass for a door with no baked light and no light
+        // environment summed: up (0.2062, 0.1675, 0.0646), down (0.0433, 0.0465, 0.0276). Two skies have the `Dynamic`
+        // channel off, one is limited to its light volumes (`bUseVolumes`); the other two are the port's sum.
+        let sky = |c: [u8; 3], b: f32, lc: [u8; 3], lb: f32, dynamic: bool, vol: bool| {
+            format!(
+                r#"{{"class":"SkyLightComponent","props":{{"LightToWorld":[1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1],"Brightness":{b},"LightColor":[{},{},{},0],"LowerBrightness":{lb},"LowerColor":[{},{},{},0],"bEnabled":true,"bUseVolumes":{vol},"LightingChannels":{{"Static":true,"Dynamic":{dynamic}}}}}}}"#,
+                c[0], c[1], c[2], lc[0], lc[1], lc[2]
+            )
+        };
+        let lights = [
+            sky([179, 152, 117], 0.43, [146, 173, 166], 0.19, true, true),
+            sky([97, 79, 54], 0.5, [220, 156, 99], 0.04, true, false),
+            sky([146, 138, 88], 0.5, [79, 115, 97], 0.19, true, false),
+            sky([255, 255, 255], 0.5, [255, 255, 255], 0.0, false, false),
+            sky([219, 171, 136], 0.6, [181, 182, 210], 0.12, false, false),
+        ];
+        let fr = Frame::from_json(&format!(r#"{{"lights":[{}]}}"#, lights.join(","))).unwrap();
+        let near = |c: &[f32], want: [f32; 3]| c.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.002);
+        assert_eq!(fr.sky_dyn_count, 2);
+        assert!(near(&fr.sky_dyn_up_ue3, [0.2062, 0.1675, 0.0646]), "{:?}", fr.sky_dyn_up_ue3);
+        assert!(near(&fr.sky_dyn_down_ue3, [0.0433, 0.0465, 0.0276]), "{:?}", fr.sky_dyn_down_ue3);
+        // The all-skies sum the hemisphere uses stays as it was (a lot brighter).
+        assert!(fr.sky_up_ue3[0] > 0.4, "{:?}", fr.sky_up_ue3);
+        // A host that doesn't carry `bUseVolumes` counts the volume-limited sky in.
+        let old = lights.join(",").replace(r#""bUseVolumes":true,"#, "");
+        assert_eq!(Frame::from_json(&format!(r#"{{"lights":[{old}]}}"#)).unwrap().sky_dyn_count, 3);
     }
 
     #[test]

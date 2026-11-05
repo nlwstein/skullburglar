@@ -15,6 +15,8 @@ struct Globals {
     tune3: vec4<f32>,     // N10: x light-environment gain, y ambient kept under an environment, z dynamic light gain, w vertex-lightmap gamma (B-189)
     vol_n: vec4<f32>,     // B-310: x = fog volume count
     vols: array<vec4<f32>, 24>,  // per volume: (center, kind), (half extents or radius, density), (colour, 0)
+    dsky_up: vec4<f32>,   // B-328: w = 1 when the frame has a dynamic-object sky
+    dsky_dn: vec4<f32>,
 };
 
 struct Instance {
@@ -278,6 +280,13 @@ fn fs(i: VOut, @builtin(front_facing) ff: bool) -> @location(0) vec4<f32> {
     } else {
         let hemi = mix(g.amb_dn.rgb, g.amb_up.rgb, Nw.y * 0.5 + 0.5);
         irr = hemi + g.sun_col.rgb * g.sun_dir.w * max(dot(Nw, g.sun_dir.xyz), 0.0);
+        if (g.dsky_up.w > 0.5 && (u32(g.amb_up.w) & 64u) != 0u) {
+            // B-328: the port's base pass for an object with no baked light and no light environment: the dynamic
+            // skies only (no sun), up and down colours weighted by the squared half-Lambert of the normal against up.
+            let wu = Nw.y * 0.5 + 0.5;
+            let wd = 0.5 - Nw.y * 0.5;
+            irr = wu * wu * g.dsky_up.rgb + wd * wd * g.dsky_dn.rgb;
+        }
         if (DYN_ON) {
             let ev = inst_dyn[i.inst].y;
             if (ev > 0u) {

@@ -768,7 +768,7 @@ constexpr const char* kLiveLightProps[] = {
     "LightToWorld", "Brightness", "LightColor", "LightAffectsClassification", "LightingChannels",
     "UseDirectLightMap", "LowerBrightness", "LowerColor", "WorldSpaceIncidentLighting", "LightEnvironment",
     "bEnabled", "Radius", "FalloffExponent", "InnerConeAngle", "OuterConeAngle", "CastShadows",
-    "CastDynamicShadows", "LightShadowMode",
+    "CastDynamicShadows", "LightShadowMode", "bUseVolumes",
     // B-205: the rest of the shadow light (B-189 modulated shadows).
     "ModShadowColor", "ModShadowFadeoutExponent", "ShadowFalloffExponent", "MinShadowFalloffRadius"};
 
@@ -1713,12 +1713,12 @@ struct ColorLayout {
 };
 
 constexpr uint32_t kLfEnabled = 1, kLfBaked = 2, kLfCast = 4, kLfStatic = 8, kLfDynamic = 16, kLfCastShadows = 32,
-                   kLfModulated = 64, kLfSkyRaw = 128;
+                   kLfModulated = 64, kLfSkyRaw = 128, kLfUseVolumes = 256;
 
 struct LightLayout {
   int kind = -1;  // HybridLight::kind, -1: not a class the renderer reads
   FieldEx l2w, brightness, color, affects, channels, direct, lower_b, lower_c, wsil, env, enabled, radius, falloff,
-      inner, outer, cast, ch_static, ch_dynamic;
+      inner, outer, cast, ch_static, ch_dynamic, use_volumes;
   // B-205: the shadow light's fields (modulated shadows). `modulate`: LightShadowMode's value for
   // LightShadow_Modulate, -1 if the enum has none.
   FieldEx cast_shadows, shadow_mode, mod_color, mod_r, mod_g, mod_b, mod_fade, shadow_falloff, min_falloff;
@@ -1749,6 +1749,7 @@ const LightLayout& LayoutFor(uint32_t light) {
   L.falloff = FindEx(cls, "FalloffExponent"), L.inner = FindEx(cls, "InnerConeAngle");
   L.outer = FindEx(cls, "OuterConeAngle"), L.cast = FindEx(cls, "CastDynamicShadows");
   L.ch_static = Member(L.channels, "Static"), L.ch_dynamic = Member(L.channels, "Dynamic");
+  L.use_volumes = FindEx(cls, "bUseVolumes");
   L.cast_shadows = FindEx(cls, "CastShadows"), L.shadow_mode = FindEx(cls, "LightShadowMode");
   L.mod_color = FindEx(cls, "ModShadowColor"), L.mod_fade = FindEx(cls, "ModShadowFadeoutExponent");
   L.shadow_falloff = FindEx(cls, "ShadowFalloffExponent"), L.min_falloff = FindEx(cls, "MinShadowFalloffRadius");
@@ -1809,6 +1810,7 @@ void LightsBin(HybridLighting& out, uint32_t stamp) {
                    ? kLfDynamic
                    : 0);
     if (FieldB(l, L.cast_shadows)) h.flags |= kLfCastShadows;
+    if (FieldB(l, L.use_volumes)) h.flags |= kLfUseVolumes;  // B-328
     if (L.modulate >= 0 && *Raw(l + L.shadow_mode.offset) == L.modulate) h.flags |= kLfModulated;
     for (int k = 0; k < 3; ++k) {
       const FieldEx& m = k == 0 ? L.mod_r : k == 1 ? L.mod_g : L.mod_b;
