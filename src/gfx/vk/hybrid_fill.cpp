@@ -41,6 +41,7 @@
 
 #include "../../hybrid_state.h"
 #include "../../instr_state.h"
+#include "../image_diff.h"
 #include "../start_failure.h"
 #include "renderer.h"
 
@@ -1034,6 +1035,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
 // copied out and written as PNG with a JSON sidecar. Both pictures are post-process output in the target's encoding
 // (n1 resolves its linear RGBA16F scene through post and sRGB-encodes for a UNORM target, as the port does), so they
 // compare directly. Environment:
+//   BOTS_HYBRID_DUAL_RAMP    1 (default): pictures get the guest's display gamma ramp, like `shot`; 0: raw (pre-B-329)
 //   BOTS_HYBRID_DUAL_DIR     where pictures go (default "dual"; must exist)
 //   BOTS_HYBRID_DUAL_EVERY   also take a pair every <s> seconds (default 0: only on "hybrid dualshot <tag>")
 //   BOTS_HYBRID_DUAL_SETTLE  frames n1 must have nothing loading or waiting (meshes, pipelines, particle materials)
@@ -1232,6 +1234,10 @@ bool Renderer::DrawSceneDual(Image& target, const HybridCamera& cam, const VkRec
     for (int k = 0; k < 2; ++k) {
       vmaInvalidateAllocation(allocator_, p.alloc[k], 0, VK_WHOLE_SIZE);
       DualToRgb(p.format, static_cast<const uint8_t*>(p.map[k]), size_t(p.w) * p.h, rgb);
+      // B-329: `shot` shows the front buffer after Present's display gamma ramp; these copies are taken before it, so
+      // they came out ~15 luma brighter. Map them the same way. BOTS_HYBRID_DUAL_RAMP=0 writes them raw.
+      static const bool ramp_on = std::atoi(EnvOr("BOTS_HYBRID_DUAL_RAMP", "1")) != 0;
+      if (ramp_on && have_present_ramp_) ApplyGammaRamp(rgb, present_ramp_);
       if (!WritePng(p.stem + names[k], rgb, p.w, p.h)) REXLOG_WARN("hybrid dual: can't write {}{}", p.stem, names[k]);
       vmaDestroyBuffer(allocator_, p.buffer[k], p.alloc[k]);
     }
