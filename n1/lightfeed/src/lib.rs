@@ -191,11 +191,13 @@ impl Light {
         })
     }
 
-    /// B-328: whether this (enabled) sky light is one the port's base pass applies to every dynamic object: its `Dynamic`
-    /// lighting channel is on and it isn't limited to light volumes. Chapter 72545's five skies: three pass; two have
-    /// `Dynamic` off and one has `bUseVolumes`, and the port's door shader sums exactly the passing ones.
-    pub fn lights_dynamic_sky(&self) -> bool {
-        self.kind == Kind::Sky && self.enabled && self.affects_dynamic && !self.use_volumes
+    /// B-328: whether this light reaches a dynamic primitive that stands in none of the level's light volumes (UE3's
+    /// affecting rule for an object with no baked light and no light environment): the light is enabled, its `Dynamic`
+    /// lighting channel is on, and it isn't limited to light volumes (`bUseVolumes`, whose inclusion volumes such a
+    /// primitive is not in). Chapter 72545's five skies: two pass, two have `Dynamic` off and one has `bUseVolumes`,
+    /// and the port's base pass for a lightless object sums exactly the two. The sun passes too.
+    pub fn reaches_dynamic(&self) -> bool {
+        self.enabled && self.affects_dynamic && !self.use_volumes
     }
 
     /// Short owner label of a light environment component path (the actor before `.DynamicLightEnvironmentComponent_N`).
@@ -335,13 +337,16 @@ pub struct Frame {
     pub sky_up_ue3: [f32; 3],
     pub sky_down_ue3: [f32; 3],
     /// B-328: the skies the port's base pass applies to a dynamic object with no baked light and no light environment:
-    /// enabled, `Dynamic` lighting channel on, not volume-limited (see [`Light::lights_dynamic_sky`]). Sums as
+    /// enabled, `Dynamic` lighting channel on, not volume-limited (see [`Light::reaches_dynamic`]). Sums as
     /// `sky_up` / `sky_up_ue3` are, and how many skies went in.
     pub sky_dyn_up: [f32; 3],
     pub sky_dyn_down: [f32; 3],
     pub sky_dyn_up_ue3: [f32; 3],
     pub sky_dyn_down_ue3: [f32; 3],
     pub sky_dyn_count: u32,
+    /// B-328: the sun reaches a lightless dynamic object ([`Light::reaches_dynamic`]); the port draws its directional pass
+    /// for such an object (shadowed by a shadow map n1 doesn't have).
+    pub sun_dyn: bool,
     /// Level lights that are really dynamic: they light static meshes too.
     pub dynamic: Vec<Light>,
     /// Count of baked level lights skipped (already in lightmaps).
@@ -428,7 +433,10 @@ impl Frame {
             .map(|(i, _)| i);
         for (i, l) in level.into_iter().enumerate() {
             match l.kind {
-                Kind::Directional if Some(i) == sun_idx => fr.sun = Some(l),
+                Kind::Directional if Some(i) == sun_idx => {
+                    fr.sun_dyn = l.reaches_dynamic();
+                    fr.sun = Some(l)
+                }
                 Kind::Directional => {
                     if l.enabled {
                         fr.fills.push(l);
@@ -445,7 +453,7 @@ impl Frame {
                             fr.sky_up_ue3[k] += up[k];
                             fr.sky_down_ue3[k] += dn[k];
                         }
-                        if l.lights_dynamic_sky() {
+                        if l.reaches_dynamic() {
                             fr.sky_dyn_count += 1;
                             for k in 0..3 {
                                 fr.sky_dyn_up[k] += l.color[k];
@@ -535,6 +543,23 @@ pub fn sh_diffuse(sh: &[[f32; 9]; 3], n_ue: [f32; 3]) -> [f32; 3] {
     o
 }
 
+/// B-328: the irradiance the port's base pass gives a dynamic object with no baked light and no light environment, from
+/// the lights that reach it ([`Light::reaches_dynamic`]): the skies weighted by the squared half-Lambert of the normal
+/// against up (`n_up`, the normal's component along up), plus the sun's `N.L` diffuse when it reaches the object. The
+/// WGSL in `matdef/src/scene.wgsl` computes the same. The sun's shadow map is not modelled.
+pub fn lightless_irradiance(n_up: f32, sky_up: [f32; 3], sky_down: [f32; 3], sun: Option<([f32; 3], f32)>) -> [f32; 3] {
+    let wu = 0.5 + 0.5 * n_up;
+    let wd = 0.5 - 0.5 * n_up;
+    let mut out = [0.0; 3];
+    for k in 0..3 {
+        out[k] = wu * wu * sky_up[k] + wd * wd * sky_down[k];
+        if let Some((col, n_dot_l)) = sun {
+            out[k] += col[k] * n_dot_l.max(0.0);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,6 +640,7 @@ mod tests {
         let fr = Frame::from_json(&format!(r#"{{"lights":[{}]}}"#, lights.join(","))).unwrap();
         let near = |c: &[f32], want: [f32; 3]| c.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.002);
         assert_eq!(fr.sky_dyn_count, 2);
+        assert!(!fr.sun_dyn, "no sun in this feed");
         assert!(near(&fr.sky_dyn_up_ue3, [0.2062, 0.1675, 0.0646]), "{:?}", fr.sky_dyn_up_ue3);
         assert!(near(&fr.sky_dyn_down_ue3, [0.0433, 0.0465, 0.0276]), "{:?}", fr.sky_dyn_down_ue3);
         // The all-skies sum the hemisphere uses stays as it was (a lot brighter).
@@ -622,6 +648,35 @@ mod tests {
         // A host that doesn't carry `bUseVolumes` counts the volume-limited sky in.
         let old = lights.join(",").replace(r#""bUseVolumes":true,"#, "");
         assert_eq!(Frame::from_json(&format!(r#"{{"lights":[{old}]}}"#)).unwrap().sky_dyn_count, 3);
+    }
+
+    #[test]
+    fn lightless_irradiance_is_squared_half_lambert_skies_plus_the_sun() {
+        let (up, dn) = ([0.2062, 0.1675, 0.0646], [0.0433, 0.0465, 0.0276]);
+        // Facing up: the up colour alone; facing down: the down colour alone; sideways: a quarter of each.
+        assert_eq!(lightless_irradiance(1.0, up, dn, None), up);
+        assert_eq!(lightless_irradiance(-1.0, up, dn, None), dn);
+        let side = lightless_irradiance(0.0, up, dn, None);
+        assert!((side[0] - 0.25 * (up[0] + dn[0])).abs() < 1e-6);
+        // The sun adds colour * N.L, nothing when the surface faces away.
+        let sun = ([4.87, 2.83, 1.23], 0.5);
+        let lit = lightless_irradiance(0.0, up, dn, Some(sun));
+        assert!((lit[0] - side[0] - 2.435).abs() < 1e-4);
+        assert_eq!(lightless_irradiance(0.0, up, dn, Some((sun.0, -0.3))), side);
+    }
+
+    #[test]
+    fn sun_reaches_dynamic_objects_by_its_channel_and_volume_flag() {
+        // B-328: chapter 72545's sun (Static + Dynamic channels, bUseVolumes off) gets the port's directional pass on a
+        // lightless object; its exclusion volumes are ignored because bUseVolumes is off.
+        let sun = |dynamic: bool, vol: bool| {
+            format!(
+                r#"{{"lights":[{{"class":"DirectionalLightComponent","props":{{"LightToWorld":[1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1],"Brightness":5,"LightColor":[252,197,135,0],"bEnabled":true,"CastDynamicShadows":true,"bUseVolumes":{vol},"LightingChannels":{{"Static":true,"Dynamic":{dynamic}}}}}}}]}}"#
+            )
+        };
+        assert!(Frame::from_json(&sun(true, false)).unwrap().sun_dyn);
+        assert!(!Frame::from_json(&sun(false, false)).unwrap().sun_dyn);
+        assert!(!Frame::from_json(&sun(true, true)).unwrap().sun_dyn);
     }
 
     #[test]

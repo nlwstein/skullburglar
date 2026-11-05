@@ -21,8 +21,9 @@ pub struct Globals {
     pub vol_n: [f32; 4],
     /// Three vec4 per volume: (center xyz, kind 0 box / 1 sphere), (half extents xyz or radius, density), (colour rgb, 0).
     pub vols: [[f32; 4]; 3 * MAX_FOG_VOLUMES],
-    /// B-328: the sky an instance with no baked light and no light environment gets instead of `amb_*` + sun
-    /// (rgb; `dsky_up.w` is 1 when it applies, else the old hemisphere + sun).
+    /// B-328: the lights that reach an instance with no baked light and no light environment (rgb): the skies that
+    /// reach dynamic objects, instead of the all-skies `amb_*`. `dsky_up.w` is 1 when the frame has them (else the
+    /// old hemisphere + sun); `dsky_dn.w` is 1 when the sun reaches such an object too.
     pub dsky_up: [f32; 4],
     pub dsky_dn: [f32; 4],
 }
@@ -93,6 +94,8 @@ pub struct Env {
     pub amb_dn: [f32; 3],
     /// B-328: the dynamic-object sky (see [`Globals::dsky_up`]), when the frame has one: (up, down).
     pub dyn_sky: Option<([f32; 3], [f32; 3])>,
+    /// B-328: the sun reaches a lightless dynamic object (`lightfeed::Frame::sun_dyn`).
+    pub dyn_sun: bool,
     /// (colour, density, height (Y), start distance, height falloff)
     pub fog: Option<([f32; 3], f32, f32, f32, f32)>,
     pub lm_gain: f32,
@@ -124,6 +127,7 @@ impl Default for Env {
             amb_up: [0.35, 0.38, 0.45],
             amb_dn: [0.20, 0.18, 0.15],
             dyn_sky: None,
+            dyn_sun: false,
             fog: Some(([0.612, 0.737, 0.983], 4e-6, 6443.0, 4000.0, 1e8)),
             lm_gain: 1.0,
             spec_gain: 1.0,
@@ -175,6 +179,7 @@ impl Env {
         // B-328: the sky of the port's base pass for objects with no baked light and no light environment.
         if fr.sky_dyn_count > 0 {
             e.dyn_sky = Some(if ue3_gamma { (fr.sky_dyn_up_ue3, fr.sky_dyn_down_ue3) } else { (fr.sky_dyn_up, fr.sky_dyn_down) });
+            e.dyn_sun = fr.sun_dyn;
         }
         // W4: as the port's fog pass (draw 911 of capture f4420): colour LightColor^2.2, extinction distance in w.
         e.fog = fr.fog.as_ref().map(|f| (f.light_color.map(|c| c.powf(2.2)), f.density, f.height, f.start, f.extinction));
@@ -245,7 +250,7 @@ impl Env {
             vol_n: [0.0; 4],
             vols: [[0.0; 4]; 3 * MAX_FOG_VOLUMES],
             dsky_up: self.dyn_sky.map_or([0.0; 4], |(u, _)| [u[0], u[1], u[2], 1.0]),
-            dsky_dn: self.dyn_sky.map_or([0.0; 4], |(_, d)| [d[0], d[1], d[2], 0.0]),
+            dsky_dn: self.dyn_sky.map_or([0.0; 4], |(_, d)| [d[0], d[1], d[2], self.dyn_sun as u32 as f32]),
         }
     }
 }
@@ -490,10 +495,10 @@ pub struct Knobs {
     pub refl_ts: bool,
     /// B-277: a Fresnel with a Normal input uses the tangent-space view vector (`BOTS_N1_FRESNEL_TS=0`: the world-space view).
     pub fresnel_ts: bool,
-    /// B-328: 0 off, 1 (default) the indoor materials of [`dyn_sky_material`] with no baked light and no light
-    /// environment get the port's dynamic sky (no sun) instead of the global hemisphere + sun, 2 every such object.
-    /// `BOTS_N1_DYNSKY=0` restores the old lighting; `=all` is the second mode.
-    pub dyn_sky: u8,
+    /// B-328: an object with no baked light and no light environment is lit by the lights that reach dynamic objects
+    /// (the sky subset and the sun's `N.L`), as the port's base pass does, instead of the all-skies hemisphere + sun.
+    /// `BOTS_N1_DYNSKY=0` restores the old lighting.
+    pub dyn_sky: bool,
     /// Clamp mesh particles' instance colour rgb to 1 like the original's 8-bit colour (B-246). `BOTS_N1_MESH_VCOL_CLAMP=0` off.
     pub mesh_vcol_clamp: bool,
     /// B-264: the vertex-light buffer grows by a GPU copy of the old words (the CPU writes only the new ones) and syncs on
@@ -517,24 +522,6 @@ pub struct Knobs {
     /// the GPU objects it gave back (`BOTS_N1_FREE_MS`, default 1.5).
     pub evict_budget: std::time::Duration,
     pub free_budget: std::time::Duration,
-}
-
-/// B-328: `BOTS_N1_DYNSKY` value to mode (see [`Knobs::dyn_sky`]).
-pub fn dyn_sky_mode(v: Option<&str>) -> u8 {
-    match v {
-        None => 1,
-        Some(s) if s == "0" || s.eq_ignore_ascii_case("false") || s.eq_ignore_ascii_case("off") => 0,
-        Some(s) if s.eq_ignore_ascii_case("all") || s == "2" => 2,
-        Some(_) => 1,
-    }
-}
-
-/// B-328: the materials the port lights with the dynamic skies only. The sun and one of the level's skies are
-/// excluded inside the building volumes the cooked light components carry (`ExclusionConvexVolumes`), which n1 does not
-/// read yet, so a lightless indoor object is picked by its material instead: the doors (chapter 72545's arched doors,
-/// an old door; the same pale-gray failure on any of them).
-pub fn dyn_sky_material(path: &str) -> bool {
-    path.starts_with("AST_BuildingsDoors.")
 }
 
 fn env_flag(name: &str, default: bool) -> bool {
@@ -583,7 +570,7 @@ impl Knobs {
             mesh_vcol_clamp: env_flag("BOTS_N1_MESH_VCOL_CLAMP", true),
             refl_ts: env_flag("BOTS_N1_REFL_TS", true),
             fresnel_ts: env_flag("BOTS_N1_FRESNEL_TS", true),
-            dyn_sky: dyn_sky_mode(std::env::var("BOTS_N1_DYNSKY").ok().as_deref()),
+            dyn_sky: env_flag("BOTS_N1_DYNSKY", true),
             light_grow: env_flag("BOTS_N1_LIGHT_GROW", true),
             lod_bones: env_flag("BOTS_N1_LOD_BONES", true),
             outline: env_num("BOTS_N1_OUTLINE", 1u32),
@@ -691,22 +678,6 @@ mod dyn_sky_tests {
     use super::*;
 
     #[test]
-    fn dyn_sky_mode_parses_the_switch() {
-        assert_eq!(dyn_sky_mode(None), 1);
-        assert_eq!(dyn_sky_mode(Some("1")), 1);
-        assert_eq!(dyn_sky_mode(Some("0")), 0);
-        assert_eq!(dyn_sky_mode(Some("off")), 0);
-        assert_eq!(dyn_sky_mode(Some("all")), 2);
-    }
-
-    #[test]
-    fn dyn_sky_picks_the_door_materials() {
-        assert!(dyn_sky_material("AST_BuildingsDoors.ArchDoor01_MAT01"));
-        assert!(!dyn_sky_material("AST_BuildingsWalls.Brick01_MAT01"));
-        assert!(!dyn_sky_material(""));
-    }
-
-    #[test]
     fn env_carries_the_dynamic_sky_only_when_the_frame_has_one() {
         let base = Env::default();
         let none = Env::from_feed(&lightfeed::Frame::default(), &base, true);
@@ -718,11 +689,12 @@ mod dyn_sky_tests {
             sky_dyn_down_ue3: [0.04, 0.03, 0.02],
             sky_dyn_up: [0.5, 0.4, 0.3],
             sky_dyn_down: [0.1, 0.1, 0.1],
+            sun_dyn: true,
             ..Default::default()
         };
         let g = Env::from_feed(&fr, &base, true).globals([0.0; 16], [0.0; 3], 0.0);
         assert_eq!(g.dsky_up, [0.2, 0.1, 0.05, 1.0]);
-        assert_eq!(g.dsky_dn[..3], [0.04, 0.03, 0.02]);
+        assert_eq!(g.dsky_dn, [0.04, 0.03, 0.02, 1.0]);
         // The plain-colour mode (BOTS_N1_SKY_GAMMA=0) uses the plain sums.
         let g = Env::from_feed(&fr, &base, false).globals([0.0; 16], [0.0; 3], 0.0);
         assert_eq!(g.dsky_up, [0.5, 0.4, 0.3, 1.0]);

@@ -280,13 +280,14 @@ fn fs(i: VOut, @builtin(front_facing) ff: bool) -> @location(0) vec4<f32> {
     } else {
         let hemi = mix(g.amb_dn.rgb, g.amb_up.rgb, Nw.y * 0.5 + 0.5);
         irr = hemi + g.sun_col.rgb * g.sun_dir.w * max(dot(Nw, g.sun_dir.xyz), 0.0);
-        if (g.dsky_up.w > 0.5 && (u32(g.amb_up.w) & 64u) != 0u && (inst.light_base == -2 || (u32(g.amb_up.w) & 128u) != 0u)) {
-            // B-328: the port's base pass for an indoor object (a door material: instance light_base -2; every lightless
-            // object with flag bit 7) with no baked light and no light environment: the dynamic skies only (no sun), up
-            // and down colours weighted by the squared half-Lambert of the normal against up.
+        if (g.dsky_up.w > 0.5 && (u32(g.amb_up.w) & 64u) != 0u) {
+            // B-328: the port's base pass for an object with no baked light and no light environment: only the lights that
+            // reach dynamic objects. The skies by the squared half-Lambert of the normal against up, plus the sun's N.L
+            // when it reaches them (`lightfeed::lightless_irradiance`). The sun's shadow map is not modelled.
             let wu = Nw.y * 0.5 + 0.5;
             let wd = 0.5 - Nw.y * 0.5;
-            irr = wu * wu * g.dsky_up.rgb + wd * wd * g.dsky_dn.rgb;
+            irr = wu * wu * g.dsky_up.rgb + wd * wd * g.dsky_dn.rgb
+                + g.sun_col.rgb * g.sun_dir.w * g.dsky_dn.w * max(dot(Nw, g.sun_dir.xyz), 0.0);
         }
         if (DYN_ON) {
             let ev = inst_dyn[i.inst].y;
