@@ -477,6 +477,11 @@ impl Comp<'_> {
                 if b("IsXbox") { self.input(&e, "Input").unwrap_or_else(|| self.cst(0.0)) } else { self.cst(0.0) }
             }
             "Transform" => self.input(&e, "Input").unwrap_or_else(|| self.cst(0.0)),
+            "DepthBiasedAlpha" if soft_alpha_on() => {
+                let alpha = self.input(&e, "Alpha");
+                let bias = self.input(&e, "Bias");
+                self.push(Node::SoftAlpha { alpha, bias, scale: f("BiasScale", 1.0) })
+            }
             "DepthBiasedAlpha" => self.input(&e, "Alpha").unwrap_or_else(|| self.cst(1.0)),
             _ => {
                 let _ = out;
@@ -484,6 +489,11 @@ impl Comp<'_> {
             }
         }
     }
+}
+
+/// B-327: `BOTS_N1_SOFTALPHA=0` goes back to ignoring DepthBiasedAlpha on mesh materials (a hard-edged card).
+pub fn soft_alpha_on() -> bool {
+    std::env::var("BOTS_N1_SOFTALPHA").map_or(true, |v| v != "0")
 }
 
 fn compile(pkg: &Package, g: &MatGraph, params: &Params) -> MatDef {

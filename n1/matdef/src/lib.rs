@@ -44,6 +44,10 @@ pub enum Node {
     Fresnel { exp: f32, n: Option<u32> },
     WorldPos,
     PixelDepth,
+    /// UE3 `DepthBiasedAlpha` (B-327): the alpha fades out where the surface comes within `(1 - bias) * scale` view
+    /// units of what is already drawn behind it (a soft edge where a light-shaft card meets a wall or the floor).
+    /// Reads the scene depth, so the draw goes in the pass that has it bound.
+    SoftAlpha { alpha: Option<u32>, bias: Option<u32>, scale: f32 },
     If { a: u32, b: u32, gt: u32, eq: u32, lt: u32 },
     /// Unsupported expression, evaluated as a constant (named for the coverage report).
     Unsup { class: String },
