@@ -740,7 +740,7 @@ const char* NameOf(uint8_t* base, uint32_t index) {
 // Name indices this file needs, found once by scanning FName::Names (they all exist once the script packages load).
 struct Names {
   uint32_t option = 0, toggle = 0, slider = 0, image = 0, left = 0, right = 0, main_menu = 0, quit = 0, title = 0, label = 0, online_message = 0;
-  uint32_t easel = 0, music_player = 0, conveyer = 0, loadout = 0, driving_vehicle = 0;
+  uint32_t easel = 0, music_player = 0, conveyer = 0, loadout = 0, driving_vehicle = 0, ai_driving_vehicle = 0;
 };
 
 const Names* GetNames(uint8_t* base) {
@@ -761,7 +761,8 @@ const Names* GetNames(uint8_t* base) {
                                                       {"C1UI_MusicPlayer", &n.music_player},
                                                       {"C1UI_DataConveyer", &n.conveyer},
                                                       {"C1UI_WeaponLoadout", &n.loadout},
-                                                      {"C1DrivingVehicleBase", &n.driving_vehicle}};
+                                                      {"C1DrivingVehicleBase", &n.driving_vehicle},
+                                                      {"C1AIDrivingVehicle", &n.ai_driving_vehicle}};
   for (uint32_t i = 0; i < count; ++i) {
     const uint32_t entry = LoadU32(base, names + 4 * i);
     if (!Readable(entry)) continue;
@@ -2754,20 +2755,70 @@ extern "C" void sub_8281D990(PPCContext& __restrict ctx, uint8_t* base) {
   __imp__sub_8281D990(ctx, base);
 }
 
+// Live AI-driven vehicles (C1AIDrivingVehicle and subclasses: the tech trucks) in the world. They are PhysX rigid
+// bodies like the player's, so they drive slower at a short frame too (src/vehicle_fps_cap.h). One pass over
+// GObjObjects (TArray<UObject*>: data, num, max) about once a second, only while the limit is above 60 (otherwise the
+// cap can't do anything). Class pointer -> {derives from C1AIDrivingVehicle, Health offset} is memoized.
+static uint32_t LiveAiVehicles(uint8_t* base) {
+  using menu_pointer::Readable;
+  constexpr uint32_t kObjects = 0x8380B15C;
+  struct ClassInfo {
+    bool ai = false;
+    uint32_t health = 0;  // UProperty +0x64 Offset of "Health" (Pawn), 0 if not found
+  };
+  static std::unordered_map<uint32_t, ClassInfo> classes;
+  static uint32_t count = 0;
+  static auto next = std::chrono::steady_clock::now();
+  const auto now = std::chrono::steady_clock::now();
+  if (now < next) return count;
+  next = now + std::chrono::seconds(1);
+  count = 0;
+  const auto* n = menu_pointer::GetNames(base);
+  const uint32_t data = LoadU32(base, kObjects), num = LoadU32(base, kObjects + 4);
+  if (!n || !Readable(data) || num > 4000000) return count;
+  for (uint32_t i = 0; i < num; ++i) {
+    const uint32_t object = LoadU32(base, data + 4 * i);
+    if (!Readable(object)) continue;
+    const uint32_t cls = LoadU32(base, object + 0x34);
+    if (!Readable(cls)) continue;
+    auto it = classes.find(cls);
+    if (it == classes.end()) {
+      ClassInfo info;
+      info.ai = menu_pointer::IsA(base, object, n->ai_driving_vehicle);
+      for (uint32_t c = cls, depth = 0; info.ai && !info.health && Readable(c) && depth < 16;
+           c = LoadU32(base, c + 0x3C), ++depth)
+        for (uint32_t f = LoadU32(base, c + 0x50), k = 0; Readable(f) && k < 4096; f = LoadU32(base, f + 0x40), ++k)
+          if (!std::strcmp(menu_pointer::NameOf(base, LoadU32(base, f + 0x2C)), "Health")) {
+            info.health = LoadU32(base, f + 0x64);
+            break;
+          }
+      it = classes.emplace(cls, info).first;
+    }
+    if (!it->second.ai || !it->second.health) continue;
+    // Skip the class default object.
+    if (!std::strncmp(menu_pointer::NameOf(base, LoadU32(base, object + 0x2C)), "Default__", 9)) continue;
+    if (bots::fps::AiVehicleLive(int32_t(LoadU32(base, object + it->second.health)))) ++count;
+  }
+  return count;
+}
+
 // Frame limit while driving (B-275): vehicles drive slower the shorter the frame, so above 60 fps the host limit falls
-// back to 60 while the player's pawn is a vehicle (src/vehicle_fps_cap.h). BOTS_FPS_VEHICLE_CAP=0 turns it off.
-static void VehicleFpsCap(bool driving) {
+// back to 60 while the player's pawn is a vehicle, or while an AI-driven vehicle is alive (src/vehicle_fps_cap.h).
+// BOTS_FPS_VEHICLE_CAP=0 turns it off.
+static void VehicleFpsCap(uint8_t* base, bool driving) {
   static const bool enabled = [] { const char* v = std::getenv("BOTS_FPS_VEHICLE_CAP"); return !(v && *v == '0'); }();
   static bots::fps::VehicleCap cap;
   const uint32_t current = rex::cvar::Query<uint32_t>("framerate_limit");
-  const auto step = cap.Update(current, driving, enabled);
+  const bool scan = enabled && (cap.capped() || bots::fps::AboveVehicleLimit(current));
+  const uint32_t ai = scan ? LiveAiVehicles(base) : 0;
+  const auto step = cap.Update(current, bots::fps::HoldCap(driving, ai), enabled);
   if (!step.write) return;
   rex::cvar::SetFlagByName("framerate_limit", std::to_string(step.value));
   if (step.value == bots::fps::kVehicleLimit)
-    REXLOG_INFO("fps: driving, frame limit {} -> {} until the vehicle is left", current ? std::to_string(current) : "unlimited",
-                step.value);
+    REXLOG_INFO("fps: {}, frame limit {} -> {} until it is over", driving ? "driving" : "an AI vehicle is alive",
+                current ? std::to_string(current) : "unlimited", step.value);
   else
-    REXLOG_INFO("fps: left the vehicle, frame limit {} -> {}", current, step.value ? std::to_string(step.value) : "unlimited");
+    REXLOG_INFO("fps: vehicles gone, frame limit {} -> {}", current, step.value ? std::to_string(step.value) : "unlimited");
 }
 
 extern "C" void sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base) {
@@ -2775,7 +2826,7 @@ extern "C" void sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base) {
   bots::instr::HudTick();
   split_screen::Tick(base);
   const bool driving = Driving(base);
-  VehicleFpsCap(driving);
+  VehicleFpsCap(base, driving);
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) {
     kbm->NoteHudTick();
     kbm->SetDriving(driving);

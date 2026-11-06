@@ -7,9 +7,40 @@ static int failures = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++failures; } } while (0)
 
 using bots::fps::AboveVehicleLimit;
+using bots::fps::AiVehicleLive;
+using bots::fps::HoldCap;
 using bots::fps::VehicleCap;
 
 int main() {
+  CHECK(AiVehicleLive(1500));
+  CHECK(AiVehicleLive(1));
+  CHECK(!AiVehicleLive(0));
+  CHECK(!AiVehicleLive(-1089));  // a wreck
+  CHECK(!HoldCap(false, 0));
+  CHECK(HoldCap(true, 0));
+  CHECK(HoldCap(false, 1));
+  CHECK(HoldCap(true, 3));
+
+  {  // An AI truck appears while the player is on foot, then is destroyed: cap on, then the player's value back.
+    VehicleCap c;
+    CHECK(!c.Update(120, HoldCap(false, 0), true).write);
+    auto s = c.Update(120, HoldCap(false, 2), true);
+    CHECK(s.write && s.value == 60 && c.capped());
+    CHECK(!c.Update(60, HoldCap(false, 1), true).write);  // one left
+    s = c.Update(60, HoldCap(false, 0), true);
+    CHECK(s.write && s.value == 120 && !c.capped());
+  }
+  {  // The player gets in a vehicle while an AI truck is around: one cap, released only when both are gone.
+    VehicleCap c;
+    CHECK(c.Update(120, HoldCap(false, 1), true).write);
+    CHECK(!c.Update(60, HoldCap(true, 1), true).write);
+    CHECK(!c.Update(60, HoldCap(true, 0), true).write);
+    CHECK(c.Update(60, HoldCap(false, 0), true).value == 120);
+  }
+  {  // The off switch covers AI vehicles too.
+    VehicleCap c;
+    CHECK(!c.Update(144, HoldCap(false, 4), false).write);
+  }
   CHECK(!AboveVehicleLimit(30));
   CHECK(!AboveVehicleLimit(60));
   CHECK(AboveVehicleLimit(90));
