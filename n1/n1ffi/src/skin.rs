@@ -342,7 +342,7 @@ impl Skins {
             } else {
                 env_map.get(inst.env as usize).copied().unwrap_or(NONE)
             };
-            if env != NONE && res.suspect_active() && r.lighting.zero_envs.contains_key(&(env as usize)) {
+            if env != NONE && res.suspect_active() && r.lighting.zero_envs.get(env as usize).is_some_and(Option::is_some) {
                 res.suspect.skin_zero += 1;
                 res.suspect.note(scenekit::SuspectSample {
                     kind: "skin-env-zero",

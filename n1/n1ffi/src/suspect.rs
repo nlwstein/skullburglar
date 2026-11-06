@@ -6,6 +6,8 @@
 //! nothing that is drawn. `BOTS_N1_SUSPECT=0` turns it off (no counting, no lines).
 
 use std::collections::{HashMap, HashSet};
+
+use crate::light::ZeroEnv;
 use std::time::{Duration, Instant};
 
 use scenekit::{Resolver, SuspectFrame, NONE};
@@ -35,7 +37,8 @@ impl Suspect {
         &mut self,
         res: &Resolver,
         skins: &Skins,
-        zero_envs: &HashMap<usize, String>,
+        zero_envs: &[Option<ZeroEnv>],
+        env_index: &HashMap<String, usize>,
         f: &SuspectFrame,
     ) -> Option<String> {
         self.frame_no += 1;
@@ -62,7 +65,15 @@ impl Suspect {
         let material = if s.material == NONE { "none" } else { res.material_path(s.material).unwrap_or("?") };
         // The mesh's package is its path up to the first dot (the level or content package it was cooked in).
         let package = mesh.split('.').next().unwrap_or("?");
-        let env = zero_envs.get(&(s.env as usize)).map(|d| format!(" env: {d}")).unwrap_or_default();
+        let env = zero_envs
+            .get(s.env as usize)
+            .copied()
+            .flatten()
+            .map(|z| {
+                let path = env_index.iter().find(|(_, i)| **i == s.env as usize).map_or("?", |(p, _)| p.as_str());
+                format!(" env: {}", z.describe(path))
+            })
+            .unwrap_or_default();
         Some(format!(
             "n1: suspicious draw ({}{}): mesh={mesh} material={material} package={package}{env} frame_counts=missing:{} \
              default:{} skin_grey:{} skin_zero:{} scene_frame={} (line {} of {MAX_LINES}; BOTS_N1_SUSPECT=0 \

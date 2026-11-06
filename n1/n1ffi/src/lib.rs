@@ -1647,7 +1647,7 @@ pub unsafe extern "C" fn n1_record(
         );
         lp.lap("skins_build");
         let sf = i.resolver.suspect;
-        if let Some(line) = i.suspect.note(&i.resolver, &i.skins, &i.renderer.lighting.zero_envs, &sf) {
+        if let Some(line) = i.suspect.note(&i.resolver, &i.skins, &i.renderer.lighting.zero_envs, &i.renderer.lighting.env_index, &sf) {
             eprintln!("{line}");
         }
         // B-186: particles. Material and mesh loads finish on the loader thread; a few are taken per frame.
