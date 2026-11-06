@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "path_utf8.h"
 #include "save_backup.h"
 
 namespace {
@@ -23,6 +24,7 @@ namespace {
 std::filesystem::path g_crash_dir;
 std::filesystem::path g_crash_log;
 std::string g_crash_stamp;
+std::filesystem::path g_exe_folder;  // where logs\ is: next to bots.exe, whatever the working directory is
 
 void PrintFrame(int i, DWORD64 pc) {
   HMODULE module = nullptr;
@@ -40,7 +42,9 @@ void PrintFrame(int i, DWORD64 pc) {
                static_cast<unsigned long long>(pc - reinterpret_cast<DWORD64>(module)));
 }
 
-std::string WriteMinidump(EXCEPTION_POINTERS* ep) {
+// Returns the dump's path, or empty when it couldn't be written. The path is absolute and wide: it doesn't depend on
+// the working directory, and an install folder with a non-ASCII name works.
+std::filesystem::path WriteMinidump(EXCEPTION_POINTERS* ep) {
   using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE,
                                             PMINIDUMP_EXCEPTION_INFORMATION,
                                             PMINIDUMP_USER_STREAM_INFORMATION,
@@ -53,12 +57,14 @@ std::string WriteMinidump(EXCEPTION_POINTERS* ep) {
     std::fprintf(stderr, "minidump: dbghelp.dll unavailable\n");
     return {};
   }
-  char path[64];
-  std::snprintf(path, sizeof(path), "logs\\crash-%lu.dmp", GetCurrentProcessId());
-  HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+  const std::filesystem::path path = bots::savebackup::DumpPath(g_exe_folder, GetCurrentProcessId());
+  const std::string shown = bots::PathUtf8(path);
+  std::error_code ec;
+  std::filesystem::create_directories(path.parent_path(), ec);
+  HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
                             nullptr);
   if (file == INVALID_HANDLE_VALUE) {
-    std::fprintf(stderr, "minidump: can't create %s\n", path);
+    std::fprintf(stderr, "minidump: can't create %s\n", shown.c_str());
     return {};
   }
   MINIDUMP_EXCEPTION_INFORMATION info{GetCurrentThreadId(), ep, FALSE};
@@ -68,8 +74,8 @@ std::string WriteMinidump(EXCEPTION_POINTERS* ep) {
   BOOL ok = write_dump(GetCurrentProcess(), GetCurrentProcessId(), file, type, &info, nullptr,
                        nullptr);
   CloseHandle(file);
-  std::fprintf(stderr, "minidump: %s %s\n", path, ok ? "written" : "FAILED");
-  return ok ? path : std::string();
+  std::fprintf(stderr, "minidump: %s %s\n", shown.c_str(), ok ? "written" : "FAILED");
+  return ok ? path : std::filesystem::path();
 }
 
 LONG WINAPI UnhandledFilter(EXCEPTION_POINTERS* ep) {
@@ -105,7 +111,7 @@ LONG WINAPI UnhandledFilter(EXCEPTION_POINTERS* ep) {
     }
   }
   std::fflush(stderr);
-  const std::string dump = WriteMinidump(ep);
+  const std::filesystem::path dump = WriteMinidump(ep);
   // Keep the dump and this session's log under crashes\<stamp>, where the next launch won't rotate them away.
   if (!g_crash_dir.empty()) {
     std::vector<std::filesystem::path> files{g_crash_log};
@@ -126,6 +132,12 @@ void SetWindowsCrashArchive(const std::filesystem::path& dir, const std::string&
   g_crash_dir = dir;
 }
 
-void InstallWindowsCrashLogger() { SetUnhandledExceptionFilter(UnhandledFilter); }
+void InstallWindowsCrashLogger() {
+  // The executable's folder, read now: the crash handler shouldn't have to ask the system while the process is dying.
+  wchar_t exe[MAX_PATH * 4];
+  const DWORD n = GetModuleFileNameW(nullptr, exe, DWORD(sizeof(exe) / sizeof(exe[0])));
+  if (n > 0 && n < sizeof(exe) / sizeof(exe[0])) g_exe_folder = std::filesystem::path(exe).parent_path();
+  SetUnhandledExceptionFilter(UnhandledFilter);
+}
 
 #endif
