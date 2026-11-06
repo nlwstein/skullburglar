@@ -58,6 +58,8 @@ struct InstrState {
   std::atomic<uint32_t> n1_pipelines_live{0}, n1_shaders_live{0}, n1_late_pipelines{0}, n1_late_shaders{0},
       n1_build_failures{0}, n1_partial_frames{0};
   std::atomic<uint64_t> n1_draws_no_pipe{0}, n1_fallback_draws{0};
+  // n1's suspect-draw detector (log-only): frames with any, and draws by kind, over the session.
+  std::atomic<uint64_t> n1_suspect_frames{0}, n1_suspect_draws{0};
   std::atomic<uint32_t> n1_record_worst_us{0};  // since the reader reset it
   std::atomic<uint32_t> n1_failed{0};           // n1_create / n1_record failed: the hybrid fell back
 

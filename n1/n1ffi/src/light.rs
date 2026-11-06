@@ -598,9 +598,25 @@ pub struct Lighting {
     pub envs_alt: Vec<[f32; lightfeed::pack::ENV_F32]>,
     /// Environment component path -> index into `dyn_frame.envs`.
     pub env_index: std::collections::HashMap<String, usize>,
+    /// Suspect detector: environments (index into `dyn_frame.envs`) that packed to zero light, with a description of
+    /// their lights. A skinned mesh bound to one is drawn pure black.
+    pub zero_envs: std::collections::HashMap<usize, String>,
     /// B-310: fog volumes from the feed, `FOG_VOL_F32` floats each (Y-up world).
     pub fog_vols: Vec<f32>,
     pub frames: u64,
+}
+
+/// What a light environment holds, for the suspect detector's log line: each composite light's enabled flag, radius
+/// and colour times brightness.
+fn describe_env(e: &lightfeed::LightEnv) -> String {
+    let one = |name: &str, l: &Option<lightfeed::Light>| match l {
+        None => format!("{name}=none"),
+        Some(l) => format!(
+            "{name}=(enabled:{} radius:{:.0} rgb:{:.2},{:.2},{:.2})",
+            l.enabled, l.radius, l.color[0], l.color[1], l.color[2]
+        ),
+    };
+    format!("dle={} {} {} {}", e.path, one("directional", &e.directional), one("point", &e.point), one("sh", &e.sh))
 }
 
 impl Lighting {
@@ -623,6 +639,7 @@ impl Lighting {
             dyn_lights_alt: vec![],
             envs_alt: vec![],
             env_index: Default::default(),
+            zero_envs: Default::default(),
             fog_vols: vec![],
             frames: 0,
         }
@@ -664,6 +681,14 @@ impl Lighting {
             }
         }
         self.env_index.clear();
+        self.zero_envs.clear();
+        if k.envs && std::env::var("BOTS_N1_SUSPECT").map_or(true, |v| v != "0") {
+            for (i, (packed, e)) in self.dyn_frame.envs.iter().zip(fr.envs.iter()).enumerate() {
+                if packed.iter().all(|x| *x == 0.0) {
+                    self.zero_envs.insert(i, describe_env(e));
+                }
+            }
+        }
         if k.envs {
             for (i, e) in fr.envs.iter().take(lightfeed::pack::MAX_ENVS).enumerate() {
                 self.env_index.insert(e.path.clone(), i);

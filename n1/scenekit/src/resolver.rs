@@ -35,6 +35,51 @@ struct Slot {
     preload: bool,
     /// B-287: given back by eviction and not asked for since: not waiting for anything.
     idle: bool,
+    /// The path names the engine's stand-in look (`WorldGrid`, `DefaultMaterial`): drawing it is never intended.
+    default_look: bool,
+}
+
+/// What looked wrong in one frame's draws (the suspect detector, log-only). `BOTS_N1_SUSPECT=0` turns the counting off.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct SuspectSample {
+    pub kind: &'static str,
+    /// Mesh handle (a skinned mesh's when `skel`) and the material handle that drew wrong.
+    pub mesh: u32,
+    pub skel: bool,
+    pub material: u32,
+    /// Index of the light environment involved (`dyn_frame.envs`), or NONE.
+    pub env: u32,
+}
+
+#[derive(Default, Clone, Copy, Debug)]
+pub struct SuspectFrame {
+    /// Draws whose material is missing for good (the mesh's own is drawn).
+    pub missing: u32,
+    /// Draws whose material path is the engine's default look.
+    pub default_look: u32,
+    /// Skinned sections drawn with the grey stand-in because their material is missing or absent.
+    pub skin_grey: u32,
+    /// Skinned instances that name a light environment n1 has no record of (lit by nothing).
+    pub skin_env: u32,
+    /// Skinned instances whose light environment exists but packed to zero light (drawn pure black).
+    pub skin_zero: u32,
+    pub sample: Option<SuspectSample>,
+}
+
+impl SuspectFrame {
+    pub fn total(&self) -> u32 {
+        self.missing + self.default_look + self.skin_grey + self.skin_env + self.skin_zero
+    }
+    pub fn note(&mut self, s: SuspectSample) {
+        if self.sample.is_none() {
+            self.sample = Some(s);
+        }
+    }
+}
+
+fn suspect_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BOTS_N1_SUSPECT").map_or(true, |v| v != "0"))
 }
 
 /// A run-time material instance: the scene feed puts its parameter values after `?` in the path.
@@ -241,6 +286,9 @@ pub struct Resolver {
     boundaries: Vec<u64>,
     forgets: VecDeque<Forget>,
     pub evict: EvictCounters,
+    /// This frame's suspect counts (reset by `translate`; the skinned build adds to it).
+    pub suspect: SuspectFrame,
+    suspect_on: bool,
 }
 
 fn tex_format(f: TexFmt) -> TexFormat {
@@ -305,6 +353,8 @@ impl Resolver {
             boundaries: Vec::new(),
             forgets: VecDeque::new(),
             evict: EvictCounters::default(),
+            suspect: SuspectFrame::default(),
+            suspect_on: suspect_enabled(),
         }
     }
 
@@ -370,6 +420,7 @@ impl Resolver {
             last_used: 0,
             preload: false,
             idle: false,
+            default_look: path.starts_with("EngineMaterials.") || path.contains("WorldGrid") || path.contains("DefaultMaterial"),
         });
         let h = slots.len() as u32 - 1;
         by_path.insert(path.to_string(), h);
@@ -394,6 +445,33 @@ impl Resolver {
 
     pub fn mesh_state(&self, h: u32) -> Option<SlotState> {
         self.meshes.get(h as usize).map(|s| s.state)
+    }
+    pub fn suspect_active(&self) -> bool {
+        self.suspect_on
+    }
+    pub fn material_path(&self, h: u32) -> Option<&str> {
+        self.materials.get(h as usize).map(|s| s.path.as_str())
+    }
+    /// The material handle's slot is missing for good (never "still loading").
+    pub fn material_missing(&self, h: u32) -> bool {
+        self.materials.get(h as usize).is_some_and(|s| s.state == SlotState::Missing)
+    }
+    /// Suspect detector: notes a draw with material handle `h` (answered `id` by `material_id`) of mesh handle `mesh`.
+    pub fn note_draw_material(&mut self, mesh: u32, skel: bool, h: u32, id: u32) {
+        if !self.suspect_on || h == NONE {
+            return;
+        }
+        let Some(slot) = self.materials.get(h as usize) else { return };
+        let kind = if slot.default_look {
+            self.suspect.default_look += 1;
+            "default-material"
+        } else if id == NONE && slot.state == SlotState::Missing {
+            self.suspect.missing += 1;
+            "material-missing"
+        } else {
+            return;
+        };
+        self.suspect.note(SuspectSample { kind, mesh, skel, material: h, env: NONE });
     }
     pub fn mesh_path(&self, h: u32) -> Option<&str> {
         self.meshes.get(h as usize).map(|s| s.path.as_str())
@@ -1028,6 +1106,7 @@ impl Resolver {
         overrides: &[u32],
     ) -> (&[Instance], &[u32]) {
         self.frame += 1;
+        self.suspect = SuspectFrame::default();
         let mut out_i = std::mem::take(&mut self.out_instances);
         let mut out_o = std::mem::take(&mut self.out_overrides);
         out_i.clear();
@@ -1055,11 +1134,13 @@ impl Resolver {
                     .get((inst.mat_offset + k) as usize)
                     .copied()
                     .unwrap_or(NONE);
-                out_o.push(if h == NONE {
+                let id = if h == NONE {
                     NONE
                 } else {
                     self.ensure_material(r, h)
-                });
+                };
+                self.note_draw_material(inst.mesh, false, h, id);
+                out_o.push(id);
             }
             let mut mat_count = inst.mat_count;
             if !live.is_empty() {

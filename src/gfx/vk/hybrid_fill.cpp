@@ -946,6 +946,8 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     is->n1_build_failures.store(uint32_t(st.build_failures), r);
     is->n1_partial_frames.store(uint32_t(st.partial_frames), r);
     is->n1_draws_no_pipe.store(uint64_t(st.draws_no_pipe), r), is->n1_fallback_draws.store(uint64_t(st.fallback_draws), r);
+    is->n1_suspect_frames.store(st.suspect_frames, r);
+    is->n1_suspect_draws.store(st.suspect_missing + st.suspect_default + st.suspect_skin_grey + st.suspect_skin_env + st.suspect_skin_zero, r);
     const uint32_t us = uint32_t(std::chrono::duration<double, std::micro>(t2 - t1).count());
     if (us > is->n1_record_worst_us.load(r)) is->n1_record_worst_us.store(us, r);
   }
@@ -1003,6 +1005,12 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
                   "CPU copies queued)", st.evict_boundaries, st.evict_sweeps, st.evict_last_ms, st.evict_max_ms,
                   st.meshes_freed, st.skin_meshes_freed, st.textures_freed, st.materials_freed, st.lights_freed,
                   double(st.bytes_freed) / 1048576.0, st.textures_kept, st.forgets_pending);
+    if (st.suspect_frames)
+      REXLOG_WARN("hybrid n1 suspect: {} frames drew something wrong so far: {} missing materials, {} default-look "
+                  "materials, {} skinned sections on the grey stand-in, {} skinned meshes with an unknown light "
+                  "environment, {} skinned meshes lit by an environment with no light ({} lines written; BOTS_N1_SUSPECT=0 turns the detector off)",
+                  st.suspect_frames, st.suspect_missing, st.suspect_default, st.suspect_skin_grey, st.suspect_skin_env,
+                  st.suspect_skin_zero, st.suspect_lines);
     if (st.repreload_levels)
       REXLOG_INFO("hybrid n1 repreload: {} level starts and reopened packages loaded given-back assets again, {} visit "
                   "requests", st.repreload_levels, st.repreload_requests);
@@ -1354,6 +1362,7 @@ bool Renderer::DrawSceneDual(Image& target, const HybridCamera& cam, const VkRec
       ",\"meshes_pending\":" + std::to_string(st.meshes_pending) +
       ",\"meshes_missing\":" + std::to_string(st.meshes_missing) + ",\"loading\":" + std::to_string(st.loading) +
       ",\"textures_unsupported\":" + std::to_string(st.textures_unsupported) +
+      ",\"suspect_frames\":" + std::to_string(st.suspect_frames) +
       ",\"skel_drawn\":" + std::to_string(st.skel_drawn) + ",\"skel_culled\":" + std::to_string(st.skel_culled) +
       ",\"skel_skipped\":" + std::to_string(st.skel_skipped) +
       ",\"skel_meshes_ready\":" + std::to_string(st.skel_meshes_ready) + ",\"culled\":" + std::to_string(st.culled) +

@@ -23,6 +23,7 @@ pub mod precompile;
 pub mod shaders;
 pub mod skin;
 pub mod store;
+pub mod suspect;
 pub mod vkr;
 pub mod trees;
 pub mod xenos_vs;
@@ -220,6 +221,15 @@ pub struct N1Stats {
     /// B-287: level starts that loaded a past visit's assets again, and the requests that made.
     pub repreload_levels: u64,
     pub repreload_requests: u64,
+    /// Suspect-draw detector, session totals: frames with any, then draws by kind (material missing, default-look
+    /// material, skinned grey stand-in, skinned light environment unknown), and the lines written.
+    pub suspect_frames: u64,
+    pub suspect_missing: u64,
+    pub suspect_default: u64,
+    pub suspect_skin_grey: u64,
+    pub suspect_skin_env: u64,
+    pub suspect_skin_zero: u64,
+    pub suspect_lines: u32,
 }
 
 /// B-199: one package's worth of things to load, found on a scan thread.
@@ -542,6 +552,7 @@ struct Inner {
     renderer: Renderer,
     resolver: Resolver,
     skins: skin::Skins,
+    suspect: suspect::Suspect,
     skel_instances: Vec<skin::SkelInstance>,
     skel_bones: Vec<f32>,
     skel_materials: Vec<u32>,
@@ -627,6 +638,7 @@ pub unsafe extern "C" fn n1_create(init: *const N1Init) -> *mut N1Renderer {
             pre: Mutex::new(None),
             inner: Mutex::new(Inner {
                 skins: skin::Skins::new(db.clone()),
+                suspect: suspect::Suspect::default(),
                 skel_instances: Vec::new(),
                 skel_bones: Vec::new(),
                 skel_materials: Vec::new(),
@@ -1635,6 +1647,10 @@ pub unsafe extern "C" fn n1_record(
             &i.env_map,
         );
         lp.lap("skins_build");
+        let sf = i.resolver.suspect;
+        if let Some(line) = i.suspect.note(&i.resolver, &i.skins, &i.renderer.lighting.zero_envs, &sf) {
+            eprintln!("{line}");
+        }
         // B-186: particles. Material and mesh loads finish on the loader thread; a few are taken per frame.
         let near = if c.near_plane > 0.0 { c.near_plane } else { 5.0 };
         let mut pf = i.ps.prepare(&mut i.renderer, &vp, c.location, 2);
@@ -1741,6 +1757,13 @@ pub unsafe extern "C" fn n1_record(
                         decal_triangles: i.decals.stats.triangles,
                         ..Default::default()
                     };
+                    out.suspect_frames = i.suspect.frames;
+                    out.suspect_missing = i.suspect.missing;
+                    out.suspect_default = i.suspect.default_look;
+                    out.suspect_skin_grey = i.suspect.skin_grey;
+                    out.suspect_skin_env = i.suspect.skin_env;
+                    out.suspect_skin_zero = i.suspect.skin_zero;
+                    out.suspect_lines = i.suspect.lines;
                     i.fill_load_stats(out);
                 }
                 0
