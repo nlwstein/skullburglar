@@ -160,6 +160,13 @@ inline std::filesystem::path NewestLog(const std::filesystem::path& log_dir, con
   return best.empty() ? fs::path() : log_dir / bots::PathFromUtf8(best);
 }
 
+// Where the Windows minidump of process `pid` goes: logs/crash-<pid>.dmp in the folder of the executable, the same
+// place as the session log. (It used to be the relative path logs/crash-<pid>.dmp, which follows the working
+// directory: a launch from any other folder had no logs folder there and no dump.)
+inline std::filesystem::path DumpPath(const std::filesystem::path& exe_folder, unsigned long pid) {
+  return exe_folder / "logs" / bots::PathFromUtf8("crash-" + std::to_string(pid) + ".dmp");
+}
+
 // Copies the given files into crash_dir/<stamp> (those that exist). Returns how many were copied.
 inline int ArchiveCrash(const std::vector<std::filesystem::path>& files, const std::filesystem::path& crash_dir,
                         const std::string& stamp) {

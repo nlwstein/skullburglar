@@ -97,6 +97,15 @@ int main() {
   CHECK(!fs::exists(first / "cache"));
   CHECK(Read(root / "B13EBABEBABEBABE" / "default_checkpoint.sav") == std::string(5000, 'S'));
   CHECK(fs::exists(root / "cache" / "shaders.bin"));
+  // The Windows minidump path: logs/crash-<pid>.dmp beside the executable, absolute, whatever the working directory.
+  {
+    const fs::path exe_dir = fs::path("C:/Games/Skull burglar") / bots::PathFromUtf8("caf\xC3\xA9");
+    CHECK(sb::DumpPath(exe_dir, 4242) == exe_dir / "logs" / "crash-4242.dmp");
+    CHECK(sb::DumpPath(exe_dir, 7).parent_path() == exe_dir / "logs");
+    CHECK(sb::DumpPath(exe_dir, 7).is_absolute() == exe_dir.is_absolute());
+    CHECK(bots::PathUtf8(sb::DumpPath(exe_dir, 7).parent_path().parent_path().filename()) == "caf\xC3\xA9");
+  }
+
   // The same second again: no second copy.
   CHECK(sb::BackUp(root, bdir, Stamp(0)).empty());
 
