@@ -113,7 +113,8 @@ Saves, settings (bots.toml) and the shader cache
 Logs
   Windows  logs\ in the install folder (and a crash-<number>.dmp if it crashes)
   macOS    ~/Library/Logs/Skullburglar
-  Linux    logs/ next to bots; the AppImage writes ~/.local/state/bots-recomp/logs
+  Linux    logs/ next to bots; the AppImage writes ~/.local/state/bots-recomp/logs, one bots-<time>.log per
+           launch (newest 10 kept)
 
 Updating: the launcher's "Update now" button does it for the Windows setup, the macOS app, the Linux AppImage and an
 unpacked Linux .tar.xz (the folder is swapped as a whole; the game folder, logs and any files you added stay). Otherwise,
