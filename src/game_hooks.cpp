@@ -2756,48 +2756,46 @@ extern "C" void sub_8281D990(PPCContext& __restrict ctx, uint8_t* base) {
 }
 
 // Live AI-driven vehicles (C1AIDrivingVehicle and subclasses: the tech trucks) in the world. They are PhysX rigid
-// bodies like the player's, so they drive slower at a short frame too (src/vehicle_fps_cap.h). One pass over
-// GObjObjects (TArray<UObject*>: data, num, max) about once a second, only while the limit is above 60 (otherwise the
-// cap can't do anything). Class pointer -> {derives from C1AIDrivingVehicle, Health offset} is memoized.
+// bodies like the player's, so they drive slower at a short frame too (src/vehicle_fps_cap.h). Vehicles are Pawns, so
+// this walks the world's pawn list (WorldInfo.PawnList, then Pawn.NextPawn: a few dozen entries), not the whole object
+// table. The player controller's Actor.WorldInfo gives the WorldInfo; every offset is found once by field name by
+// walking the class chain (UObject +0x2C Name, +0x34 Class; UStruct +0x3C SuperStruct, +0x50 Children; UField +0x40
+// Next; UProperty +0x64 Offset). Nothing is remembered per class, so a class address reused after a package unload
+// can't leave stale state; the three Pawn offsets are the same for every subclass.
+static uint32_t FieldOffset(uint8_t* base, uint32_t cls, const char* name) {
+  using menu_pointer::Readable;
+  for (uint32_t c = cls, depth = 0; Readable(c) && depth < 16; c = LoadU32(base, c + 0x3C), ++depth)
+    for (uint32_t f = LoadU32(base, c + 0x50), k = 0; Readable(f) && k < 4096; f = LoadU32(base, f + 0x40), ++k)
+      if (!std::strcmp(menu_pointer::NameOf(base, LoadU32(base, f + 0x2C)), name)) return LoadU32(base, f + 0x64);
+  return 0;
+}
+
 static uint32_t LiveAiVehicles(uint8_t* base) {
   using menu_pointer::Readable;
-  constexpr uint32_t kObjects = 0x8380B15C;
-  struct ClassInfo {
-    bool ai = false;
-    uint32_t health = 0;  // UProperty +0x64 Offset of "Health" (Pawn), 0 if not found
-  };
-  static std::unordered_map<uint32_t, ClassInfo> classes;
-  static uint32_t count = 0;
-  static auto next = std::chrono::steady_clock::now();
-  const auto now = std::chrono::steady_clock::now();
-  if (now < next) return count;
-  next = now + std::chrono::seconds(1);
+  static uint32_t world_info = 0, pawn_list = 0, next_pawn = 0, health = 0;
+  static uint32_t count = 0, tick = 0;
+  if (tick++ % 4) return count;  // every 4th call: a few frames of delay is nothing for a cap
   count = 0;
   const auto* n = menu_pointer::GetNames(base);
-  const uint32_t data = LoadU32(base, kObjects), num = LoadU32(base, kObjects + 4);
-  if (!n || !Readable(data) || num > 4000000) return count;
-  for (uint32_t i = 0; i < num; ++i) {
-    const uint32_t object = LoadU32(base, data + 4 * i);
-    if (!Readable(object)) continue;
-    const uint32_t cls = LoadU32(base, object + 0x34);
-    if (!Readable(cls)) continue;
-    auto it = classes.find(cls);
-    if (it == classes.end()) {
-      ClassInfo info;
-      info.ai = menu_pointer::IsA(base, object, n->ai_driving_vehicle);
-      for (uint32_t c = cls, depth = 0; info.ai && !info.health && Readable(c) && depth < 16;
-           c = LoadU32(base, c + 0x3C), ++depth)
-        for (uint32_t f = LoadU32(base, c + 0x50), k = 0; Readable(f) && k < 4096; f = LoadU32(base, f + 0x40), ++k)
-          if (!std::strcmp(menu_pointer::NameOf(base, LoadU32(base, f + 0x2C)), "Health")) {
-            info.health = LoadU32(base, f + 0x64);
-            break;
-          }
-      it = classes.emplace(cls, info).first;
-    }
-    if (!it->second.ai || !it->second.health) continue;
-    // Skip the class default object.
-    if (!std::strncmp(menu_pointer::NameOf(base, LoadU32(base, object + 0x2C)), "Default__", 9)) continue;
-    if (bots::fps::AiVehicleLive(int32_t(LoadU32(base, object + it->second.health)))) ++count;
+  const uint32_t engine = LoadU32(base, kGEngine);
+  if (!n || !Readable(engine) || !LoadU32(base, engine + 0x2D8 + 4)) return count;
+  const uint32_t players = LoadU32(base, engine + 0x2D8);
+  const uint32_t player = Readable(players) ? LoadU32(base, players) : 0;
+  const uint32_t controller = Readable(player) ? LoadU32(base, player + 0x40) : 0;
+  if (!Readable(controller)) return count;
+  if (!world_info) world_info = FieldOffset(base, LoadU32(base, controller + 0x34), "WorldInfo");
+  const uint32_t wi = world_info ? LoadU32(base, controller + world_info) : 0;
+  if (!Readable(wi)) return count;
+  if (!pawn_list) pawn_list = FieldOffset(base, LoadU32(base, wi + 0x34), "PawnList");
+  uint32_t pawn = pawn_list ? LoadU32(base, wi + pawn_list) : 0;
+  for (int i = 0; i < 1024 && Readable(pawn); ++i) {
+    if (!next_pawn) next_pawn = FieldOffset(base, LoadU32(base, pawn + 0x34), "NextPawn");
+    if (!health) health = FieldOffset(base, LoadU32(base, pawn + 0x34), "Health");
+    if (!next_pawn || !health) return count;
+    if (menu_pointer::IsA(base, pawn, n->ai_driving_vehicle) &&
+        bots::fps::AiVehicleLive(int32_t(LoadU32(base, pawn + health))))
+      ++count;
+    pawn = LoadU32(base, pawn + next_pawn);
   }
   return count;
 }
