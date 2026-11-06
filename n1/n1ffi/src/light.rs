@@ -602,9 +602,53 @@ pub struct Lighting {
     pub envs_alt: Vec<[f32; lightfeed::pack::ENV_F32]>,
     /// Environment component path -> index into `dyn_frame.envs`.
     pub env_index: std::collections::HashMap<String, usize>,
+    /// Suspect detector: environments (index into `dyn_frame.envs`) that packed to zero light, with a description of
+    /// their lights. A skinned mesh bound to one is drawn pure black.
+    pub zero_envs: Vec<Option<ZeroEnv>>,
     /// B-310: fog volumes from the feed, `FOG_VOL_F32` floats each (Y-up world).
     pub fog_vols: Vec<f32>,
     pub frames: u64,
+}
+
+/// One composite light of a light environment, as the suspect detector's log line shows it: present, enabled, radius,
+/// colour times brightness.
+#[derive(Clone, Copy, Default)]
+pub struct EnvLightInfo {
+    pub present: bool,
+    pub enabled: bool,
+    pub radius: f32,
+    pub rgb: [f32; 3],
+}
+
+/// A light environment that packed to zero light (no allocation: the detector asks about these every frame).
+#[derive(Clone, Copy, Default)]
+pub struct ZeroEnv {
+    pub directional: EnvLightInfo,
+    pub point: EnvLightInfo,
+    pub sh: EnvLightInfo,
+}
+
+fn env_light_info(l: &Option<lightfeed::Light>) -> EnvLightInfo {
+    l.as_ref().map_or_else(EnvLightInfo::default, |l| EnvLightInfo { present: true, enabled: l.enabled, radius: l.radius, rgb: l.color })
+}
+
+fn suspect_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BOTS_N1_SUSPECT").map_or(true, |v| v != "0"))
+}
+
+impl ZeroEnv {
+    /// For the log line: each composite light's enabled flag, radius and colour times brightness.
+    pub fn describe(&self, path: &str) -> String {
+        let one = |name: &str, l: &EnvLightInfo| {
+            if !l.present {
+                format!("{name}=none")
+            } else {
+                format!("{name}=(enabled:{} radius:{:.0} rgb:{:.2},{:.2},{:.2})", l.enabled, l.radius, l.rgb[0], l.rgb[1], l.rgb[2])
+            }
+        };
+        format!("dle={path} {} {} {}", one("directional", &self.directional), one("point", &self.point), one("sh", &self.sh))
+    }
 }
 
 impl Lighting {
@@ -627,6 +671,7 @@ impl Lighting {
             dyn_lights_alt: vec![],
             envs_alt: vec![],
             env_index: Default::default(),
+            zero_envs: Vec::new(),
             fog_vols: vec![],
             frames: 0,
         }
@@ -668,6 +713,16 @@ impl Lighting {
             }
         }
         self.env_index.clear();
+        self.zero_envs.clear();
+        if k.envs && suspect_on() {
+            for (packed, e) in self.dyn_frame.envs.iter().zip(fr.envs.iter()) {
+                self.zero_envs.push(packed.iter().all(|x| *x == 0.0).then(|| ZeroEnv {
+                    directional: env_light_info(&e.directional),
+                    point: env_light_info(&e.point),
+                    sh: env_light_info(&e.sh),
+                }));
+            }
+        }
         if k.envs {
             for (i, e) in fr.envs.iter().take(lightfeed::pack::MAX_ENVS).enumerate() {
                 self.env_index.insert(e.path.clone(), i);
@@ -920,5 +975,23 @@ mod b205_tests {
         assert_eq!(e.globals([0.0; 16], [0.0; 3], 0.0).sun_col[3], ENV_SPEC_GAIN);
         e.apply("envspec=1");
         assert_eq!(e.globals([0.0; 16], [0.0; 3], 0.0).sun_col[3], 1.0);
+    }
+}
+
+#[cfg(test)]
+mod zero_env_tests {
+    use super::*;
+
+    #[test]
+    fn zero_env_describes_each_light() {
+        let z = ZeroEnv {
+            directional: EnvLightInfo { present: true, enabled: false, radius: 0.0, rgb: [1.0, 0.5, 0.25] },
+            point: EnvLightInfo::default(),
+            sh: EnvLightInfo::default(),
+        };
+        let d = z.describe("L.DLE");
+        assert!(d.contains("directional=(enabled:false"), "{d}");
+        assert!(d.contains("point=none"), "{d}");
+        assert!(d.contains("rgb:1.00,0.50,0.25"), "{d}");
     }
 }

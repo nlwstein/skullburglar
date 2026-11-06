@@ -275,6 +275,16 @@ bool Command(uint8_t* base, const std::string& cmd, std::vector<std::string>& ex
       ++settled;
     }
     REXLOG_INFO("range: {} {} pawns set falling", settled, klass);
+  } else if (rest.rfind("setloc ", 0) == 0) {
+    // setloc x y z [yaw_degrees]: teleport the player (BugItGo). A spot inside the floor is refused by the engine: add ~30 to z.
+    float x = 0, y = 0, z = 0, yaw_deg = 0;
+    const int got = std::sscanf(rest.c_str(), "setloc %f %f %f %f", &x, &y, &z, &yaw_deg);
+    if (got < 3) {
+      REXLOG_WARN("range: setloc x y z [yaw_degrees]");
+      return true;
+    }
+    const int yaw_units = int(yaw_deg * 65536.0f / 360.0f);
+    expand.push_back(bots::range::BugItGo(bots::range::Spot{x, y, z}, yaw_units));
   } else if (rest == "where" || rest.rfind("spawn ", 0) == 0) {
     const uint32_t pc = PlayerController(), pawn = PropObj(pc, "Pawn");
     float pos[3] = {0, 0, 0};

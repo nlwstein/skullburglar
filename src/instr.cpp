@@ -1988,6 +1988,8 @@ std::string BuildStatus(bool window, std::map<std::string, std::string>* flat) {
       .Int("partial_frames", g_state.n1_partial_frames)
       .Int("draws_no_pipe", int64_t(g_state.n1_draws_no_pipe.load()))
       .Int("fallback_draws", int64_t(g_state.n1_fallback_draws.load()))
+      .Int("suspect_frames", int64_t(g_state.n1_suspect_frames.load()))
+      .Int("suspect_draws", int64_t(g_state.n1_suspect_draws.load()))
       .Num("record_worst_ms", (window ? g_state.n1_record_worst_us.exchange(0) : g_state.n1_record_worst_us.load()) /
                                   1000.0, "%.2f")
       .Bool("failed", g_state.n1_failed != 0)

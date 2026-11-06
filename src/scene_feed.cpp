@@ -200,12 +200,20 @@ struct Offsets {
       static_mesh_ref,
       forced_lod, skeletal_mesh_ref, space_bases, predicted_lod, template_ref, decal_material,
       special_highlight;  // B-277(e): SkeletalMeshComponent.bSpecialHighlight (the enemy outline)
+  Field owner_no_see, only_owner_see;  // suspect detector: view-owner-dependent hide flags of a primitive
   bool actor = false;
   Field actor_hidden;
   bool skel_asset = false;
   Field ref_skeleton, skel_materials;
 };
 Offsets g_off;
+// Suspect detector state (see n1's suspect.rs): off with BOTS_N1_SUSPECT=0.
+const bool g_suspect_on = [] {
+  const char* v = std::getenv("BOTS_N1_SUSPECT");
+  return !(v && v[0] == '0');
+}();
+uint32_t g_suspect_lines = 0;
+std::unordered_set<uint32_t> g_suspect_seen;
 
 std::unordered_map<uint32_t, ClassInfo> g_classes;
 
@@ -261,6 +269,8 @@ const ClassInfo& ClassifySlow(uint32_t cls) {
       o.owner = FindProp(cls, "Owner");
       o.cull_dist = FindProp(cls, "CullDistance");
       o.cached_cull = FindProp(cls, "CachedCullDistance");
+      o.owner_no_see = FindProp(cls, "bOwnerNoSee");
+      o.only_owner_see = FindProp(cls, "bOnlyOwnerSee");
       REXLOG_INFO("scenefeed: PrimitiveComponent CullDistance +{:X} CachedCullDistance +{:X}", o.cull_dist.offset,
                   o.cached_cull.offset);
       REXLOG_INFO("scenefeed: PrimitiveComponent SceneInfo +{:X} LocalToWorld +{:X} Bounds +{:X} HiddenGame +{:X}/{:08X} "
@@ -3167,6 +3177,18 @@ void Live(uint8_t* base) {
       continue;
     }
     NoteSkip(c, kFed, cam);
+    if (g_suspect_on && (g_off.owner_no_see.ok() || g_off.only_owner_see.ok())) {
+      // Suspect detector (log-only): the engine hides this primitive from some views (the feed doesn't model the view
+      // owner), so n1 may be drawing something the game wouldn't. One line per distinct component, a few per session.
+      const bool no_see = g_off.owner_no_see.ok() && (U32(c + g_off.owner_no_see.offset) & g_off.owner_no_see.mask);
+      const bool only_see = g_off.only_owner_see.ok() && (U32(c + g_off.only_owner_see.offset) & g_off.only_owner_see.mask);
+      if ((no_see || only_see) && g_suspect_lines < 8 && g_suspect_seen.insert(c).second) {
+        ++g_suspect_lines;
+        REXLOG_WARN("n1: suspicious draw (hidden-flag): fed {} {} with {}{}: mesh={} (BOTS_N1_SUSPECT=0 turns this off)",
+                    skel ? "skinned" : "static", NameText(U32(c + 0x2C)), no_see ? "bOwnerNoSee " : "",
+                    only_see ? "bOnlyOwnerSee" : "", Path(mesh));
+      }
+    }
     uint32_t mats = 0, mat_count = 0;
     if (g_off.materials.ok()) {
       mats = U32(c + g_off.materials.offset);
