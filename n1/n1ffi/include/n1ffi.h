@@ -161,9 +161,9 @@ typedef struct N1Stats {
    * made for visits. */
   uint64_t repreload_levels, repreload_requests;
   /* Suspect-draw detector (log-only; BOTS_N1_SUSPECT=0 turns it off), session totals: frames with any suspect draw, then
-   * draws by kind (material missing, default-look material, skinned grey stand-in, skinned light environment unknown, skinned light environment packed to zero light),
+   * draws by kind (material missing, default-look material, skinned grey stand-in, skinned light environment packed to zero light),
    * and the log lines written. */
-  uint64_t suspect_frames, suspect_missing, suspect_default, suspect_skin_grey, suspect_skin_env, suspect_skin_zero;
+  uint64_t suspect_frames, suspect_missing, suspect_default, suspect_skin_grey, suspect_skin_zero;
   uint32_t suspect_lines;
 } N1Stats;
 

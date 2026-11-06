@@ -947,7 +947,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     is->n1_partial_frames.store(uint32_t(st.partial_frames), r);
     is->n1_draws_no_pipe.store(uint64_t(st.draws_no_pipe), r), is->n1_fallback_draws.store(uint64_t(st.fallback_draws), r);
     is->n1_suspect_frames.store(st.suspect_frames, r);
-    is->n1_suspect_draws.store(st.suspect_missing + st.suspect_default + st.suspect_skin_grey + st.suspect_skin_env + st.suspect_skin_zero, r);
+    is->n1_suspect_draws.store(st.suspect_missing + st.suspect_default + st.suspect_skin_grey + st.suspect_skin_zero, r);
     const uint32_t us = uint32_t(std::chrono::duration<double, std::micro>(t2 - t1).count());
     if (us > is->n1_record_worst_us.load(r)) is->n1_record_worst_us.store(us, r);
   }
@@ -1007,9 +1007,9 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
                   double(st.bytes_freed) / 1048576.0, st.textures_kept, st.forgets_pending);
     if (st.suspect_frames)
       REXLOG_WARN("hybrid n1 suspect: {} frames drew something wrong so far: {} missing materials, {} default-look "
-                  "materials, {} skinned sections on the grey stand-in, {} skinned meshes with an unknown light "
-                  "environment, {} skinned meshes lit by an environment with no light ({} lines written; BOTS_N1_SUSPECT=0 turns the detector off)",
-                  st.suspect_frames, st.suspect_missing, st.suspect_default, st.suspect_skin_grey, st.suspect_skin_env,
+                  "materials, {} skinned sections on the grey stand-in, {} skinned meshes lit by an environment "
+                  "with no light ({} lines written; BOTS_N1_SUSPECT=0 turns the detector off)",
+                  st.suspect_frames, st.suspect_missing, st.suspect_default, st.suspect_skin_grey,
                   st.suspect_skin_zero, st.suspect_lines);
     if (st.repreload_levels)
       REXLOG_INFO("hybrid n1 repreload: {} level starts and reopened packages loaded given-back assets again, {} visit "

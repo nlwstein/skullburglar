@@ -342,16 +342,7 @@ impl Skins {
             } else {
                 env_map.get(inst.env as usize).copied().unwrap_or(NONE)
             };
-            if inst.env != NONE && env == NONE && res.suspect_active() {
-                res.suspect.skin_env += 1;
-                res.suspect.note(scenekit::SuspectSample {
-                    kind: "skin-env-unresolved",
-                    mesh: inst.mesh,
-                    skel: true,
-                    material: NONE,
-                    env: NONE,
-                });
-            } else if env != NONE && res.suspect_active() && r.lighting.zero_envs.contains_key(&(env as usize)) {
+            if env != NONE && res.suspect_active() && r.lighting.zero_envs.contains_key(&(env as usize)) {
                 res.suspect.skin_zero += 1;
                 res.suspect.note(scenekit::SuspectSample {
                     kind: "skin-env-zero",

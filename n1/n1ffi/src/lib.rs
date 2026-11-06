@@ -222,12 +222,11 @@ pub struct N1Stats {
     pub repreload_levels: u64,
     pub repreload_requests: u64,
     /// Suspect-draw detector, session totals: frames with any, then draws by kind (material missing, default-look
-    /// material, skinned grey stand-in, skinned light environment unknown), and the lines written.
+    /// material, skinned grey stand-in, skinned light environment with no light), and the lines written.
     pub suspect_frames: u64,
     pub suspect_missing: u64,
     pub suspect_default: u64,
     pub suspect_skin_grey: u64,
-    pub suspect_skin_env: u64,
     pub suspect_skin_zero: u64,
     pub suspect_lines: u32,
 }
@@ -1761,7 +1760,6 @@ pub unsafe extern "C" fn n1_record(
                     out.suspect_missing = i.suspect.missing;
                     out.suspect_default = i.suspect.default_look;
                     out.suspect_skin_grey = i.suspect.skin_grey;
-                    out.suspect_skin_env = i.suspect.skin_env;
                     out.suspect_skin_zero = i.suspect.skin_zero;
                     out.suspect_lines = i.suspect.lines;
                     i.fill_load_stats(out);

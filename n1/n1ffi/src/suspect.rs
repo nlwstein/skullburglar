@@ -1,6 +1,6 @@
 //! Suspect-draw detector (log-only). Each frame the resolver and the skinned build count draws that look wrong:
 //! a material missing for good, a material that is the engine's default look (`WorldGrid`, `DefaultMaterial`), a
-//! skinned section drawn with the grey stand-in, a skinned mesh whose light environment n1 has no record of. This
+//! skinned section drawn with the grey stand-in, a skinned mesh whose light environment packed to zero light (drawn pure black). This
 //! module keeps the session totals and writes one `n1: suspicious draw ...` line the first time a frame has any, then
 //! at most one more per distinct (mesh, material, kind) every two seconds, up to `MAX_LINES` a session. It changes
 //! nothing that is drawn. `BOTS_N1_SUSPECT=0` turns it off (no counting, no lines).
@@ -22,7 +22,6 @@ pub struct Suspect {
     pub missing: u64,
     pub default_look: u64,
     pub skin_grey: u64,
-    pub skin_env: u64,
     pub skin_zero: u64,
     pub lines: u32,
     seen: HashSet<(&'static str, bool, u32, u32, u32)>,
@@ -47,7 +46,6 @@ impl Suspect {
         self.missing += u64::from(f.missing);
         self.default_look += u64::from(f.default_look);
         self.skin_grey += u64::from(f.skin_grey);
-        self.skin_env += u64::from(f.skin_env);
         self.skin_zero += u64::from(f.skin_zero);
         let s = f.sample?;
         if self.lines >= MAX_LINES || !self.seen.insert((s.kind, s.skel, s.mesh, s.material, s.env)) {
@@ -67,14 +65,13 @@ impl Suspect {
         let env = zero_envs.get(&(s.env as usize)).map(|d| format!(" env: {d}")).unwrap_or_default();
         Some(format!(
             "n1: suspicious draw ({}{}): mesh={mesh} material={material} package={package}{env} frame_counts=missing:{} \
-             default:{} skin_grey:{} skin_env:{} skin_zero:{} scene_frame={} (line {} of {MAX_LINES}; BOTS_N1_SUSPECT=0 \
+             default:{} skin_grey:{} skin_zero:{} scene_frame={} (line {} of {MAX_LINES}; BOTS_N1_SUSPECT=0 \
              turns this off)",
             s.kind,
             if s.skel { ", skinned" } else { "" },
             f.missing,
             f.default_look,
             f.skin_grey,
-            f.skin_env,
             f.skin_zero,
             self.frame_no,
             self.lines,
@@ -94,7 +91,7 @@ mod tests {
 
     #[test]
     fn frame_total_adds_all_kinds() {
-        let f = SuspectFrame { missing: 1, default_look: 2, skin_grey: 3, skin_env: 4, skin_zero: 5, sample: None };
-        assert_eq!(f.total(), 15);
+        let f = SuspectFrame { missing: 1, default_look: 2, skin_grey: 3, skin_zero: 5, sample: None };
+        assert_eq!(f.total(), 11);
     }
 }

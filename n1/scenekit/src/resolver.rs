@@ -59,8 +59,6 @@ pub struct SuspectFrame {
     pub default_look: u32,
     /// Skinned sections drawn with the grey stand-in because their material is missing or absent.
     pub skin_grey: u32,
-    /// Skinned instances that name a light environment n1 has no record of (lit by nothing).
-    pub skin_env: u32,
     /// Skinned instances whose light environment exists but packed to zero light (drawn pure black).
     pub skin_zero: u32,
     pub sample: Option<SuspectSample>,
@@ -68,7 +66,7 @@ pub struct SuspectFrame {
 
 impl SuspectFrame {
     pub fn total(&self) -> u32 {
-        self.missing + self.default_look + self.skin_grey + self.skin_env + self.skin_zero
+        self.missing + self.default_look + self.skin_grey + self.skin_zero
     }
     pub fn note(&mut self, s: SuspectSample) {
         if self.sample.is_none() {
