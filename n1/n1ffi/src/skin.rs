@@ -381,7 +381,9 @@ impl Skins {
                     continue;
                 }
                 if id == NONE || id as usize >= r.materials.len() {
-                    if id == NONE && res.suspect_active() && (h == NONE || res.material_missing(h)) {
+                    // A mesh with no material at all (a helper like a fire anchor) is meant to draw nothing useful; only a
+                    // material that is named and missing counts.
+                    if id == NONE && res.suspect_active() && h != NONE && res.material_missing(h) {
                         res.suspect.skin_grey += 1;
                         res.suspect.note(scenekit::SuspectSample {
                             kind: "skin-grey-fallback",

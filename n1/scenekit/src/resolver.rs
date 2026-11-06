@@ -57,7 +57,7 @@ pub struct SuspectFrame {
     pub missing: u32,
     /// Draws whose material path is the engine's default look.
     pub default_look: u32,
-    /// Skinned sections drawn with the grey stand-in because their material is missing or absent.
+    /// Skinned sections drawn with the grey stand-in because their (named) material is missing for good.
     pub skin_grey: u32,
     /// Skinned instances whose light environment exists but packed to zero light (drawn pure black).
     pub skin_zero: u32,
