@@ -62,8 +62,8 @@ and that is where most of the work in this port has gone.
 - **60 fps on the Steam Deck.** The Deck holds the 60 fps cap (about 74 fps uncapped in the benchmark scene below),
   where GPU emulation runs at about 21.
 - **High refresh rates (1.9).** The launcher's Frame rate limit offers 90, 120 and 144 fps (and an experimental
-  Unlimited). Weapons, grenades, explosions, health regeneration and enemy AI were measured to play the same as at
-  60. Vehicles drive slower at higher frame rates, so the game holds 60 fps while you drive and while an AI-driven
+  Unlimited). Weapon fire rates and reloads, grenades, explosions, health regeneration and cutscenes were measured to
+  play the same as at 60. Vehicles drive slower at higher frame rates, so the game holds 60 fps while you drive and while an AI-driven
   vehicle is in play; a proper fix for vehicles is still to come
   ([#7](https://github.com/nlwstein/skullburglar/issues/7)).
 - **Shader precompilation.** On first launch the port compiles the game's shaders for your GPU before the title
