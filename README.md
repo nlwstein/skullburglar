@@ -61,6 +61,11 @@ and that is where most of the work in this port has gone.
   each frame's turn wobble.
 - **60 fps on the Steam Deck.** The Deck holds the 60 fps cap (about 74 fps uncapped in the benchmark scene below),
   where GPU emulation runs at about 21.
+- **High refresh rates (1.9).** The launcher's Frame rate limit offers 90, 120 and 144 fps (and an experimental
+  Unlimited). Weapons, grenades, explosions, health regeneration and enemy AI were measured to play the same as at
+  60. Vehicles drive slower at higher frame rates, so the game holds 60 fps while you drive and while an AI-driven
+  vehicle is in play; a proper fix for vehicles is still to come
+  ([#7](https://github.com/nlwstein/skullburglar/issues/7)).
 - **Shader precompilation.** On first launch the port compiles the game's shaders for your GPU before the title
   screen, with a progress screen: about 8 s on an RTX 3090, 13 s on the Steam Deck, about 30 s on Apple silicon.
   After that there is no shader-compile stutter in play, and later launches reuse the cache.
@@ -100,10 +105,6 @@ Each has a GitHub issue: subscribe to it for progress, or comment there rather t
 
 - **Online co-op** ([#6](https://github.com/nlwstein/skullburglar/issues/6)). Co-op over the internet without a VPN,
   not just on a local network.
-- **Frame rates above 60** ([#7](https://github.com/nlwstein/skullburglar/issues/7)). The launcher offers 90, 120, 144
-  and Unlimited as experimental frame rate limits. Almost everything plays the same at those rates, but vehicles
-  drive slower the higher the frame rate, so the game holds 60 fps while you drive; a proper fix for vehicles is still
-  to come.
 
 ## Reporting problems
 
