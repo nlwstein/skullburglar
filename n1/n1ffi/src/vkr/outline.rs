@@ -5,7 +5,10 @@
 //! port: about one pixel wide, additive in linear light before the gamma, K = (0.143, 0.0082, 0.0080); frozen with/without
 //! captures in `docs/plans/nextgen/b277-issue24.md`). n1 has no alpha channel to mark, so the marked instances are drawn
 //! into an R8 mask after the scene (depth-tested against the scene's own depth, so a pawn behind cover is not outlined
-//! through it), and the final post pass (`gamma_out` in post.wgsl) adds the edge of that mask.
+//! through it), and the post chain adds the edge of that mask: in the final pass (`gamma_out` in post.wgsl) when no post material follows the
+//! composite, otherwise in the linear composite (`fs_comp_lin`), before the materials (B-336), so a material that replaces the
+//! scene, such as the death screen, covers the outline as it does in the port. `BOTS_N1_OUTLINE_UNDER_UI=0` restores the old
+//! order (the last material's output).
 //!
 //! The mask draw reuses the shadow depth pass's skinned vertex layout and the scene's set 0 (globals, instances, bones).
 //! Nothing runs on a frame without a marked pawn. `BOTS_N1_OUTLINE=0` turns it all off; `BOTS_N1_OUTLINE=2` shows the

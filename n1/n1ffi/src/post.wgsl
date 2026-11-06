@@ -291,7 +291,8 @@ fn fs_comp(i: VOut) -> @location(0) vec4<f32> {
 
 @fragment
 fn fs_comp_lin(i: VOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(composite(vec2<i32>(i.pos.xy), i.uv), 1.0);
+    // B-336: the outline joins the scene here, before the post materials (taps[5].w is set on this block only then).
+    return vec4<f32>(with_outline(composite(vec2<i32>(i.pos.xy), i.uv), i.pos), 1.0);
 }
 
 // ---- post materials (B-266 / B-267)

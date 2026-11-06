@@ -511,6 +511,9 @@ pub struct Knobs {
     pub lod_bones: bool,
     /// B-277(e): the red outline around enemies with bSpecialHighlight. 0 off, 1 on (default), 2 shows the raw mask.
     pub outline: u32,
+    /// B-336: with post materials, the outline goes into the linear composite (before them, so a material that replaces
+    /// the scene, such as the death screen, covers it) instead of the last material's output. 0 restores the old order.
+    pub outline_early: bool,
     /// B-287: at a level change, release the meshes, textures, materials and baked lights the last `evict_keep` levels
     /// didn't name (on by default; `BOTS_N1_EVICT=0` keeps everything resident; `BOTS_N1_EVICT_KEEP=<levels>`, default 2).
     pub evict: bool,
@@ -574,6 +577,7 @@ impl Knobs {
             light_grow: env_flag("BOTS_N1_LIGHT_GROW", true),
             lod_bones: env_flag("BOTS_N1_LOD_BONES", true),
             outline: env_num("BOTS_N1_OUTLINE", 1u32),
+            outline_early: env_flag("BOTS_N1_OUTLINE_UNDER_UI", true),
             evict: env_flag("BOTS_N1_EVICT", true),
             evict_keep: env_num("BOTS_N1_EVICT_KEEP", 2u32).max(1),
             repreload: env_flag("BOTS_N1_REPRELOAD", true),
