@@ -2499,7 +2499,7 @@ impl Renderer {
             }
             blocks.push(o);
         }
-        // B-277(e): the passes that write the output (composite, copy, the last post material) add the outline from the
+        // B-277(e): the passes that write the output (composite, copy, the linear composite or the last post material) add the outline from the
         // mask when this frame drew one: taps[5].w = 1 (2: show the mask).
         let outline_on = self.outline_active();
         if outline_on {
@@ -2507,7 +2507,14 @@ impl Renderer {
             blocks[5][15][3] = mode;
             blocks[6][15][3] = mode;
             if !mats.is_empty() {
-                blocks[8 + mats.len() - 1][15][3] = mode;
+                // B-336: the port marks the pawn in the scene, so the post materials see it: the outline goes into the
+                // linear composite (block 7), and a material that replaces the scene (the death screen's clouds) covers
+                // it. BOTS_N1_OUTLINE_UNDER_UI=0: the last material's output, over everything.
+                if self.knobs.outline_early {
+                    blocks[7][15][3] = mode;
+                } else {
+                    blocks[8 + mats.len() - 1][15][3] = mode;
+                }
             }
         }
         {

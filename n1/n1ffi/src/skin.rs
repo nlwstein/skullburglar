@@ -79,6 +79,10 @@ pub struct Skins {
 }
 
 impl Skins {
+    pub fn mesh_path(&self, h: u32) -> Option<&str> {
+        self.paths.get(h as usize).map(String::as_str)
+    }
+
     pub fn new(db: Arc<AssetDb>) -> Self {
         let (tx, jobs) = channel::<(u32, String)>();
         let (done, rx) = channel();
@@ -338,6 +342,16 @@ impl Skins {
             } else {
                 env_map.get(inst.env as usize).copied().unwrap_or(NONE)
             };
+            if env != NONE && res.suspect_active() && r.lighting.zero_envs.get(env as usize).is_some_and(Option::is_some) {
+                res.suspect.skin_zero += 1;
+                res.suspect.note(scenekit::SuspectSample {
+                    kind: "skin-env-zero",
+                    mesh: inst.mesh,
+                    skel: true,
+                    material: NONE,
+                    env,
+                });
+            }
             f.insts.push(SkinInst {
                 bone_base: base,
                 env,
@@ -359,6 +373,7 @@ impl Skins {
                     mesh_mats.get(s.material).copied().unwrap_or(NONE)
                 };
                 let mut id = res.material_id(r, h);
+                res.note_draw_material(inst.mesh, true, h, id);
                 if id == scenekit::SKIP {
                     if traced {
                         trace_sig += &format!(" s{}:skip", s.material);
@@ -366,6 +381,18 @@ impl Skins {
                     continue;
                 }
                 if id == NONE || id as usize >= r.materials.len() {
+                    // A mesh with no material at all (a helper like a fire anchor) is meant to draw nothing useful; only a
+                    // material that is named and missing counts.
+                    if id == NONE && res.suspect_active() && h != NONE && res.material_missing(h) {
+                        res.suspect.skin_grey += 1;
+                        res.suspect.note(scenekit::SuspectSample {
+                            kind: "skin-grey-fallback",
+                            mesh: inst.mesh,
+                            skel: true,
+                            material: h,
+                            env: NONE,
+                        });
+                    }
                     id = r.grey_material();
                     if traced {
                         trace_sig += &format!(" s{}:grey", s.material);
