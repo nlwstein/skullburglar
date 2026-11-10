@@ -1,0 +1,4 @@
+[
+ "Pre-1.0 renderer: the first stylized counter-kill (the skull wipe with the parchment backdrop) after installing the game or clearing its shader cache no longer shows a white grid floor and black fighters. The shaders these kills need are now prepared while the game starts. The new renderer can still show this in some doorways; that fix is still in progress.",
+ "With the emulated GPU option (--gpu_plugin=xenos), new shaders load with fewer stalls on Vulkan, thanks to octaviawilde's suggestion in #40. The default renderers are unchanged."
+]
