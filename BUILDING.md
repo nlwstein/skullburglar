@@ -215,8 +215,10 @@ VERSION=dev tools/ci/package.sh linux out/ci     # -> out/ci/release/
 In this repository's GitLab CI (`.gitlab-ci.yml`), `main` builds Linux, Windows and macOS when it has releasable commits
 (`feat`, `fix`, `perf`; versions from [python-semantic-release](https://python-semantic-release.readthedocs.io/)) and
 makes a GitLab release whose packages stay in the project's private package registry. The game executable comes from
-a private assets project that only this project's CI jobs can read. The other jobs run on every push and need no game
-data.
+a private assets project that only this project's CI jobs can read, together with the shader refs for the first-launch
+pipeline warm-up (`pipelines/class3.refs`, `pipelines/class7.refs`). Their SHA-1s are pinned in `pipelines.sha1`, as
+the executable's is in `default.xex.sha1`, so new refs ship through a commit here. The other jobs run on every push and
+need no game data.
 
 When the project sets them as CI variables, the release also reaches players: `UPDATE_URL` (the address of the releases
 JSON) is built into the launcher, which then checks for newer versions (`src/setup/update_check.h`; the `check_updates`
