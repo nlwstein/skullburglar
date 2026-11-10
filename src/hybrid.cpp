@@ -68,6 +68,7 @@
 
 #include "hybrid_state.h"
 #include "renderer_choice.h"
+#include "counterkill_port.h"
 #include "scene_feed.h"
 
 extern "C" void __imp__sub_82BB3230(PPCContext& __restrict ctx, uint8_t* base);
@@ -138,6 +139,9 @@ double ThreadCpuMs() {
 std::atomic<int> g_suppress{0};  // 0 render, 1 skip Render(), 2 skip it but keep its visibility pass
 int g_suppress_mode = 1;         // what A/B toggles to
 std::atomic<bool> g_dump_view{false}, g_log_camera{false};
+// B-323: per published camera (seq % 64), whether that frame is a stylized counter-kill's, which the game draws itself
+// (scene_feed.cpp, StylizedKill). Written on the game thread with the camera, read by Render on the render thread.
+std::array<std::atomic<uint8_t>, 64> g_port_scene{};
 int g_camera_every = 0;
 int g_ab_seconds = 0;
 
@@ -322,6 +326,7 @@ int TraceBudget() {
 
 struct Stats {
   uint64_t families = 0, scene_families = 0, renders = 0, suppressed = 0, markers = 0, by_site[4] = {};
+  uint64_t port_kill = 0;             // B-323: stylized counter-kill frames the game drew itself
   double render_ms = 0;               // inside FSceneRenderer::Render (wall)
   double visibility_ms = 0;           // suppress 2: InitViews + LastRenderTime pass (wall)
   double rt_cpu_ms = 0, gt_cpu_ms = 0;  // thread CPU between consecutive frames on the render / game thread
@@ -342,12 +347,12 @@ void Report(std::chrono::steady_clock::time_point now) {
   REXLOG_INFO(
       "hybrid: {:.1f} s, suppress {}, fill {}: {:.1f} fps (view families), render thread CPU {:.2f} ms/frame, "
       "FSceneRenderer::Render {:.2f} ms/frame ({} run, {} skipped, visibility {:.2f} ms/frame, {} queries answered), game thread CPU {:.2f} ms/frame; sites "
-      "{}/{}/{}/{}, markers {} written {} seen {} filled",
+      "{}/{}/{}/{}, markers {} written {} seen {} filled, {} counter-kill frames by the game",
       secs, g_suppress.load(), st.fill.load(), double(s.families) / secs,
       s.rt_frames ? s.rt_cpu_ms / double(s.rt_frames) : 0.0, s.renders ? s.render_ms / double(s.renders) : 0.0,
       s.renders, s.suppressed, s.suppressed ? s.visibility_ms / double(s.suppressed) : 0.0,
       g_queries_answered.exchange(0), s.gt_frames ? s.gt_cpu_ms / double(s.gt_frames) : 0.0, s.by_site[0], s.by_site[1],
-      s.by_site[2], s.by_site[3], s.markers, st.markers_seen.load(), st.fills_drawn.load());
+      s.by_site[2], s.by_site[3], s.markers, st.markers_seen.load(), st.fills_drawn.load(), s.port_kill);
   g_stats = {};
   g_report = now;
 }
@@ -550,6 +555,10 @@ extern "C" void sub_82BB3230(PPCContext& __restrict ctx, uint8_t* base) {
           // The frame's scene, published before the render command that draws it exists: the render thread can no
           // longer reach this camera's marker first and draw the previous frame's scene (doubling, stutter).
           if (bots::scenefeed::LiveAtDraw()) bots::scenefeed::Live(base);
+          if (g_state.fill.load(std::memory_order_relaxed) == 4) {
+            bots::scenefeed::UpdateStylizedKill(base);
+            g_port_scene[seq % g_port_scene.size()].store(bots::scenefeed::StylizedKill(), std::memory_order_release);
+          }
         }
       }
     }
@@ -709,6 +718,16 @@ extern "C" void sub_82BB1E78(PPCContext& __restrict ctx, uint8_t* base) {
   if (suppress_now && port_until_ready && g_state.fill.load(std::memory_order_relaxed) == 4 &&
       !g_state.n1_ready.load(std::memory_order_acquire)) {
     suppress_now = 0;
+  }
+  // B-323: a stylized counter-kill's frame (the white room, its lights and the parchment post chain, none of which n1
+  // draws): the game draws its own scene, as above. BOTS_N1_COUNTERKILL_PORT=0 keeps n1 (scene_feed.cpp).
+  if (t_render_seq != 0 &&
+      bots::counterkill::GameDrawsScene(suppress_now, g_state.fill.load(std::memory_order_relaxed),
+                                        g_port_scene[t_render_seq % g_port_scene.size()].load(std::memory_order_acquire),
+                                        bots::scenefeed::StylizedKillPortOn())) {
+    suppress_now = 0;
+    std::lock_guard lock(g_stats_mutex);
+    ++g_stats.port_kill;
   }
   if (suppress_now == 2 && g_state.capture_frames.load(std::memory_order_relaxed) > 0) {
     g_state.capture_frames.fetch_sub(1, std::memory_order_relaxed);

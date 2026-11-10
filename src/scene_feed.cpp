@@ -50,6 +50,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cctype>
 #include <chrono>
@@ -76,6 +77,7 @@
 
 #include "hybrid_state.h"
 #include "live_mic.h"
+#include "counterkill_port.h"
 #include "outline_flag.h"
 
 namespace bots::scenefeed {
@@ -3076,6 +3078,71 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam, bool max_
   }
 }
 }  // namespace
+
+// B-323 (GitHub #32): the stylized counter-kills (the skull wipe, then the parchment backdrop) are SfCore's "Merk You
+// Space" effect. For the length of it the game spawns a white room mesh around the fighters, three spot lights and a
+// sky light for them, draws only the fighters, the room and the kill's particles (its own visibility drops every
+// level mesh: LastRenderTime stops for all of them), and swaps in a post chain (FX_MerkYouSpaceRescource.MerkSpaceWall_PP01)
+// whose MaterialEffects paint the parchment from the scene colour (BKGAndGhost: parchment x 3 x desaturated scene),
+// wipe in the skull (FadeIn) and burn out at the end (BurnOut). n1 reproduces none of that: it draws the level around
+// the room, lights the fighters only from their (empty) light environments, so they come out black, and has no port of
+// those post materials (SceneTexture, ScreenPosition), so the room's grid floor shows. That is the white grid floor and
+// black fighters of #32, every time the kill camera can see past the fighters.
+// While a MerkYouSpace post material is in the player's chain, the game draws its own scene (as before n1 is ready,
+// B-243): the pre-1.0 renderer's picture of the moment, which is the game's. BOTS_N1_COUNTERKILL_PORT=0 turns it off.
+namespace {
+std::atomic<bool> g_stylized_kill{false};
+}
+
+bool StylizedKillPortOn() {
+  static const bool on = [] {
+    const char* v = std::getenv("BOTS_N1_COUNTERKILL_PORT");
+    return !v || std::atoi(v) != 0;
+  }();
+  return on;
+}
+
+bool StylizedKill() { return g_stylized_kill.load(std::memory_order_acquire); }
+
+void UpdateStylizedKill(uint8_t* base) {
+  if (!StylizedKillPortOn()) return;
+  g_base = base;
+  // The chain and its effects' materials, compared with the last frame's: the paths are only built when they change.
+  static std::array<uint32_t, 34> last{};
+  std::array<uint32_t, 34> key{};
+  const uint32_t engine = Engine();
+  const uint32_t players = IsObject(engine) ? PropRecord(engine, "GamePlayers") : 0;
+  const uint32_t lp = players && U32(engine + U32(players + 0x64) + 4) ? U32(U32(engine + U32(players + 0x64))) : 0;
+  const uint32_t chain = IsObject(lp) ? PropU32(lp, "PlayerPostProcess") : 0;
+  uint32_t data = 0, n = 0;
+  if (IsObject(chain)) {
+    const Field effects = Prop(chain, "Effects");
+    if (effects.ok()) data = U32(chain + effects.offset), n = std::min<uint32_t>(U32(chain + effects.offset + 4), 32);
+  }
+  key[0] = chain, key[1] = n;
+  for (uint32_t i = 0; Readable(data) && i < n; ++i) {
+    const uint32_t e = U32(data + 4 * i);
+    if (!IsObject(e) || ClassName(e) != std::string_view("MaterialEffect")) continue;
+    const uint32_t cls = U32(e + 0x34);
+    if (!FieldB(e, FindEx(cls, "bShowInGame"))) continue;
+    const FieldEx m = FindEx(cls, "Material");
+    key[2 + i] = m.ok() ? U32(e + m.offset) : 0;
+  }
+  if (key == last) return;
+  last = key;
+  bool on = false;
+  std::string which;
+  for (uint32_t i = 0; i < n; ++i) {
+    if (!IsObject(key[2 + i])) continue;
+    std::string path = Path(key[2 + i]);
+    if (bots::counterkill::IsKillPostMaterial(path)) on = true, which = std::move(path);
+  }
+  if (on != g_stylized_kill.load(std::memory_order_relaxed)) {
+    if (on) REXLOG_INFO("n1: stylized counter-kill ({}): the game draws its own scene until it ends", which);
+    else REXLOG_INFO("n1: stylized counter-kill over: n1 draws the scene again");
+  }
+  g_stylized_kill.store(on, std::memory_order_release);
+}
 
 bool LiveAtDraw() {
   static const bool on = [] {
