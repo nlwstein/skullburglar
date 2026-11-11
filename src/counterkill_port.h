@@ -72,9 +72,12 @@ constexpr bool KillCull(Mode mode, bool kill, bool to_game) { return mode == Mod
 
 // The kill's culling: during it the game's view draws only the white room, the fighters and the kill's particles, so
 // only their LastRenderTime keeps up with the frames (the game's visibility pass runs in n1's frames too, hybrid.cpp
-// mode 2). A primitive is kept when it was rendered on the newest frame any primitive was (`newest`, the walk's maximum
-// LastRenderTime), within `slack` seconds.
-constexpr float kKillCullSlack = 1e-3f;
+// mode 2). A primitive is kept when it was rendered within `slack` seconds of the newest frame any primitive was
+// (`newest`, the walk's maximum LastRenderTime). The feed walks on the game thread while the render thread's visibility
+// pass may be half way through the previous frame, so a visible primitive can be one frame behind the newest; with a
+// 1 ms slack the room and the fighters dropped out of about half the frames (merk-native vn1). 0.15 s covers a frame
+// at 7 fps; the level, culled from the kill's first frame, is gone after that (under the skull wipe).
+constexpr float kKillCullSlack = 0.15f;
 constexpr bool KeepInKill(float last_render_time, float newest, float slack = kKillCullSlack) {
   return last_render_time >= newest - slack;
 }

@@ -59,7 +59,8 @@ int main() {
   CHECK(!KillCull(Mode::kNative, false, false));
   CHECK(KeepInKill(52.5f, 52.5f));
   CHECK(KeepInKill(52.4995f, 52.5f));
-  CHECK(!KeepInKill(52.45f, 52.5f));  // last drawn three frames earlier at 60 fps: culled by the kill's view
+  CHECK(KeepInKill(52.45f, 52.5f));   // one frame behind at 20 fps (the render thread mid-visibility): kept
+  CHECK(!KeepInKill(52.3f, 52.5f));   // last drawn 0.2 s earlier: culled by the kill's view
   CHECK(!KeepInKill(0.0f, 52.5f));
   if (failures) return 1;
   std::printf("counterkill_port_test: ok\n");
