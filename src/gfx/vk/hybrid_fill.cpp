@@ -1380,6 +1380,24 @@ bool Renderer::DrawSceneDual(Image& target, const HybridCamera& cam, const VkRec
 #endif
 
 #ifdef BOTS_N1FFI
+// BOTS_N1_DAMAGE_DUMP=<dir>: write the damage readbacks as they come back from the GPU, host bytes R, G, B, A as stored
+// (no swizzle), as <dir>/damage-<n>-<w>x<h>-s<swizzle octal>.rgba (at most 400, only ones that are not all one color).
+void Renderer::DumpDamage(const uint8_t* rgba, uint32_t w, uint32_t h, uint32_t swizzle) {
+  static const char* dir = std::getenv("BOTS_N1_DAMAGE_DUMP");
+  static int dumped = 0;
+  if (!dir || !*dir || dumped >= 400) return;
+  const size_t bytes = size_t(w) * h * 4;
+  bool flat = true;
+  for (size_t i = 4; i < bytes && flat; i += 4) flat = std::memcmp(rgba, rgba + i, 4) == 0;
+  if (flat) return;
+  char path[512];
+  std::snprintf(path, sizeof(path), "%s/damage-%03d-%ux%u-s%o.rgba", dir, dumped++, w, h, swizzle);
+  if (FILE* f = std::fopen(path, "wb")) {
+    std::fwrite(rgba, 1, bytes, f);
+    std::fclose(f);
+  }
+}
+
 // B-292: the game's damage-indicator capture (the HUD's DamageEffectTexture, a small render texture) is read back
 // without waiting: a copy into a host buffer at the marker, collected once its submission has completed.
 void Renderer::CaptureDamageTarget() {
@@ -1396,7 +1414,18 @@ void Renderer::CaptureDamageTarget() {
   if (damage_reads_.size() >= 3) return;  // the GPU is behind; the next capture comes soon
   DamageRead r;
   r.w = image->width, r.h = image->height;
-  r.swizzle = damage_swizzle_ ? damage_swizzle_ : image->swapped ? (2u | (1u << 3) | (0u << 6) | (3u << 9)) : 0x688u;
+  // Until a draw of the game's own renderer has sampled the texture (it never does when n1 is ready before the first
+  // gameplay frame, the usual case with warm caches), the swizzle is the one every such draw has shown: the damage
+  // material's fetch (BGRA) undoes the swapping resolve, so it reads the host channels as they are (3210). Guessing a
+  // red/blue swap here fed the picture's red channel to the ramp index: opaque red marks and a red screen at low
+  // health. BOTS_N1_DAMAGE_SWAP_GUESS=1 restores that guess.
+  static const bool swap_guess = [] {
+    const char* v = std::getenv("BOTS_N1_DAMAGE_SWAP_GUESS");
+    return v && std::atoi(v) != 0;
+  }();
+  r.swizzle = damage_swizzle_ ? damage_swizzle_
+              : swap_guess && image->swapped ? (2u | (1u << 3) | (0u << 6) | (3u << 9))
+                                             : 0x688u;
   VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   info.size = VkDeviceSize(r.w) * r.h * 4;
   info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -1425,7 +1454,7 @@ void Renderer::PumpDamage(void* n1_host, uint64_t completed) {
   std::vector<uint8_t> bgra;
   uint32_t w = 0, h = 0;
   bool content = false;
-  uint32_t blue_max = 0;
+  uint32_t blue_max = 0, used_swizzle = 0;
   std::erase_if(damage_reads_, [&](DamageRead& r) {
     if (r.serial > completed) return false;
     vmaInvalidateAllocation(allocator_, r.alloc, 0, VK_WHOLE_SIZE);
@@ -1433,6 +1462,7 @@ void Renderer::PumpDamage(void* n1_host, uint64_t completed) {
     // way round. n1 wants B, G, R, A in the guest's channels.
     const auto* src = static_cast<const uint8_t*>(r.map);
     const size_t n = size_t(r.w) * r.h;
+    DumpDamage(src, r.w, r.h, r.swizzle);
     bgra.resize(n * 4);
     blue_max = 0;
     for (size_t i = 0; i < n; ++i) {
@@ -1446,7 +1476,7 @@ void Renderer::PumpDamage(void* n1_host, uint64_t completed) {
       bgra[4 * i + 0] = guest_b, bgra[4 * i + 1] = guest_g, bgra[4 * i + 2] = guest_r, bgra[4 * i + 3] = guest_a;
       blue_max = std::max<uint32_t>(blue_max, guest_b);
     }
-    w = r.w, h = r.h;
+    w = r.w, h = r.h, used_swizzle = r.swizzle;
     content = blue_max > 2;
     newest = &r;
     vmaDestroyBuffer(allocator_, r.buffer, r.alloc);
@@ -1457,7 +1487,8 @@ void Renderer::PumpDamage(void* n1_host, uint64_t completed) {
     if (damage_held_ != bgra) {
       n1_set_damage_tex(host->r, bgra.data(), w, h);
       if (damage_held_.empty() && ++damage_shown_ <= 20)
-        REXLOG_INFO("hybrid n1: damage picture {}x{} on (blue max {}, swizzle {:o})", w, h, blue_max, damage_swizzle_);
+        REXLOG_INFO("hybrid n1: damage picture {}x{} on (blue max {}, swizzle {:o}, seen {:o})", w, h, blue_max, used_swizzle,
+                    damage_swizzle_);
       damage_held_ = std::move(bgra);
     }
   } else if (!damage_held_.empty()) {
