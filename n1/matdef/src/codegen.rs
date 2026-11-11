@@ -182,9 +182,16 @@ pub fn compile_addr(
                     "ceil" => format!("ceil({s})"),
                     "sqrt" => format!("sqrt(max({s}, vec4<f32>(0.0)))"),
                     "normalize" => format!("vec4<f32>(normalize({s}.xyz), 0.0)"),
+                    // B-345: the length of the input's own components, splatted (a scalar).
+                    "length" => match nc[*x as usize] {
+                        1 => format!("vec4<f32>(abs({s}.x))"),
+                        2 => format!("vec4<f32>(length({s}.xy))"),
+                        3 => format!("vec4<f32>(length({s}.xyz))"),
+                        _ => format!("vec4<f32>(length({s}))"),
+                    },
                     _ => format!("({s} * 0.5 + vec4<f32>(0.5))"),
                 };
-                (e, nc[*x as usize])
+                (e, if f == "length" { 1 } else { nc[*x as usize] })
             }
             Node::Trig { cos, x, period } => {
                 let k = p([std::f32::consts::TAU / period.max(1e-6), 0.0, 0.0, 0.0]);
@@ -398,5 +405,22 @@ mod refl_tests {
         def.nodes[1] = Node::Fresnel { exp: 6.0, n: None };
         let c = compile(&def, &[]);
         assert!(c.body.contains("dot(fi.nrm, fi.view)") && !c.body.contains("view_ts"), "{}", c.body);
+    }
+    /// B-345: VectorLength of a 2-vector (the white-room floor's uv - 0.5) is the length of its two components, as a
+    /// scalar the next nodes broadcast.
+    #[test]
+    fn vector_length_of_a_uv_offset() {
+        let def = MatDef {
+            nodes: vec![
+                Node::TexCoord { set: 0, u: 1.0, v: 1.0 },
+                Node::Const { v: [0.5, 0.5, 0.0, 0.0], n: 0 },
+                Node::Sub { a: 0, b: 1 },
+                Node::Un { f: "length".into(), x: 2 },
+            ],
+            emissive: Some(3),
+            ..Default::default()
+        };
+        let c = compile(&def, &[]);
+        assert!(c.body.contains("vec4<f32>(length(n2.xy))"), "{}", c.body);
     }
 }

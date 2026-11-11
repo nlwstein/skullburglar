@@ -25,7 +25,7 @@ pub enum Node {
     Lerp { a: u32, b: u32, t: u32 },
     Clamp { x: u32, lo: u32, hi: u32 },
     Sat { x: u32, lo: f32, hi: f32 },
-    /// Unary: one of oneminus, sin, cos, frac, floor, ceil, abs, normalize, half (x*0.5+0.5), sqrt
+    /// Unary: one of oneminus, sin, cos, frac, floor, ceil, abs, normalize, half (x*0.5+0.5), sqrt, length (VectorLength, a scalar)
     Un { f: String, x: u32 },
     /// sin/cos with a period (x * 2pi / period)
     Trig { cos: bool, x: u32, period: f32 },

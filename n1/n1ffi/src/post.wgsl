@@ -443,3 +443,62 @@ fn fs_death(i: VOut) -> @location(0) vec4<f32> {
     let out_max = 1.0 - 2.0 * clamp(k - 0.5, 0.0, 1.0);
     return mat_out(clamp(d, vec3<f32>(0.0), vec3<f32>(1.0)) * out_max, i.pos);
 }
+
+// ---- B-345 (#32): the stylized counter-kill ("Merk You Space"), FX_MerkYouSpaceRescource. Decoded node by node from
+// the package's material graphs (postmat.rs has the summary). UE3's Sine is sin(2 pi x / Period), Period 1 here;
+// TextureCoordinate and ScreenPosition (ScreenAlign) are both the screen uv in a post material. Time is g1.x.
+
+// The kill's pulse after a hit time: 1 - n while 0 <= n <= 1, else 0 (the graph's two If nodes).
+fn merk_pulse(n: f32) -> f32 {
+    return select(0.0, 1.0 - n, n >= 0.0 && n <= 1.0);
+}
+
+// BKGAndGhost_MAT (BKGAndGhost_MIC): g0.x HitTime, g0.y EffectLength, g0.z LV. tex0 = Wall (the parchment).
+@fragment
+fn fs_merk_bkg(i: VOut) -> @location(0) vec4<f32> {
+    let t = p.g1.x;
+    let uv = i.uv;
+    let n = (t - p.g0.x) / max(p.g0.y, 1e-4);
+    let n2 = (t - p.g0.x) / max(2.0 * p.g0.y, 1e-4);
+    let pulse = merk_pulse(n);
+    let pulse2 = merk_pulse(n2);
+    let tau = 6.283185307;
+    // the wall: zoomed in by the long pulse, swaying sideways with it
+    let wz = (uv - vec2<f32>(0.5)) * mix(vec2<f32>(0.663, 0.75), vec2<f32>(0.884, 1.0), pulse2) + vec2<f32>(0.5);
+    let wuv = vec2<f32>(wz.x + sin(t * 3.0 * tau) * mix(0.0, 0.2, pulse2), wz.y);
+    let s = textureSample(src, smp, uv).rgb;
+    let d0 = desat(s, 0.8, vec3<f32>(0.3, 0.49, 0.21));
+    let k = clamp(3.0 * mix(d0, vec3<f32>(0.5), -0.1), vec3<f32>(0.0), vec3<f32>(2.0));
+    let base = mat_tex0(wuv).rgb * k;
+    // two grey ghosts of the scene, zoomed toward (0.2, 0.2) as the hit pulse runs, darkening by (grey - 1) / 2 each
+    let lw = vec3<f32>(0.3, 0.59, 0.11);
+    let g1 = dot(textureSample(src, smp, vec2<f32>(0.2) + (uv - vec2<f32>(0.2)) * mix(1.0, 0.5, n)).rgb, lw);
+    let g2 = dot(textureSample(src, smp, vec2<f32>(0.2) + (uv - vec2<f32>(0.2)) * mix(1.0, 0.75, n)).rgb, lw);
+    let ghost = vec3<f32>(0.5 * ((g2 - 1.0) * pulse + (g1 - 1.0) * pulse));
+    let red = vec3<f32>(1.75 * pulse, 0.0, 0.0) * p.g0.z;
+    // vignette: 1 - |uv - 0.5| x 0.5..0.75, pulsing 10 times a second
+    let vig = 1.0 - length((uv - vec2<f32>(0.5)) * mix(0.75, 0.5, sin(t * 10.0 * tau) * 0.5 + 0.5));
+    return mat_out((red + base + ghost) * vig, i.pos);
+}
+
+// FadeIn_MAT (FadeIn_MAT_MIC): g0.x StartTime, g0.y EffectLength. tex0 = GLogo_02 (its red channel). FadeColour is
+// white in the instance. The logo, centred at 1.77:1, grows from the screen's size to infinity as c goes 0 -> 1, over a
+// fill that fades from white to the scene.
+@fragment
+fn fs_merk_fadein(i: VOut) -> @location(0) vec4<f32> {
+    let c = clamp((p.g1.x - p.g0.x) / max(p.g0.y, 1e-4), 0.0, 1.0);
+    let luv = (i.uv - vec2<f32>(0.5)) * vec2<f32>(1.77, 1.0) * (1.0 - c) + vec2<f32>(0.5);
+    let logo = mat_tex0_clamp(luv).r;
+    let s = textureSample(src, smp, i.uv).rgb;
+    return mat_out(logo * mix(vec3<f32>(1.0), s, c), i.pos);
+}
+
+// BurnOut_MAT (BurnOut_MIC): g0.x StartTime, g0.y EffectLength. SfCore's Levels expression with only InputMax wired
+// (taken as clamp(x / InputMax, 0, 1)): InputMax 0.1 -> 1 and desaturation 40% -> 0 as c = clamp(1.5 (t - start) / len).
+@fragment
+fn fs_merk_burnout(i: VOut) -> @location(0) vec4<f32> {
+    let c = clamp(1.5 * (p.g1.x - p.g0.x) / max(p.g0.y, 1e-4), 0.0, 1.0);
+    let s = textureSample(src, smp, i.uv).rgb;
+    let lv = clamp(s / mix(0.1, 1.0, c), vec3<f32>(0.0), vec3<f32>(1.0));
+    return mat_out(desat(lv, mix(0.4, 0.0, c), vec3<f32>(0.3, 0.59, 0.11)), i.pos);
+}

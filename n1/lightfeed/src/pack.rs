@@ -91,8 +91,23 @@ impl DynFrame {
     /// As [`DynFrame::from_frame_with`]; `env_gamma` (B-245) packs the light environments with UE3's colours too
     /// ([`pack_env_with`]).
     pub fn from_frame_env(fr: &Frame, max_lights: usize, with_envs: bool, ue3_gamma: bool, env_gamma: bool) -> DynFrame {
+        DynFrame::from_frame_opts(fr, max_lights, with_envs, ue3_gamma, env_gamma, false)
+    }
+
+    /// As [`DynFrame::from_frame_env`]. `dynamic_only` (B-345, the stylized counter-kill) also packs the lights that
+    /// light only dynamic objects (`Dynamic` channel on, `Static` off): the kill's spot lights for its fighters. Outside
+    /// the kill they are left out, as such lights are already in the characters' light environments.
+    pub fn from_frame_opts(
+        fr: &Frame,
+        max_lights: usize,
+        with_envs: bool,
+        ue3_gamma: bool,
+        env_gamma: bool,
+        dynamic_only: bool,
+    ) -> DynFrame {
         let mut d = DynFrame::default();
-        for l in fr.dynamic.iter().filter(|l| l.affects_static).take(max_lights.min(MAX_LIGHTS)) {
+        let keep = |l: &&Light| l.affects_static || (dynamic_only && l.affects_dynamic);
+        for l in fr.dynamic.iter().filter(keep).take(max_lights.min(MAX_LIGHTS)) {
             d.lights.push(pack_light(l, ue3_gamma));
         }
         if with_envs {

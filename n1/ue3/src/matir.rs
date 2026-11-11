@@ -411,6 +411,12 @@ impl Comp<'_> {
                 };
                 self.push(Node::Un { f: fname.into(), x })
             }
+            // B-345: VectorLength (the stylized counter-kill's white-room floor fades its tiles to white by the distance from
+            // the centre; drawn as 0, the floor was all tiles: #32's grid).
+            "VectorLength" => {
+                let x = self.input(&e, "Input").unwrap_or_else(|| self.cst(0.0));
+                self.push(Node::Un { f: "length".into(), x })
+            }
             "Sine" | "Cosine" => {
                 let x = self.input(&e, "Input").unwrap_or_else(|| self.cst(0.0));
                 self.push(Node::Trig { cos: cls == "Cosine", x, period: f("Period", 1.0) })

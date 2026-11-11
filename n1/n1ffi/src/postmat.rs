@@ -34,6 +34,18 @@ pub enum Kind {
     /// (dark lines) and the green channel (a lit dot) of the same texture. Scalar `g0.x` is the material's one scalar
     /// parameter, which picks the 16:9 or the narrower screen mapping; without the parameter it is 0 (16:9).
     Scope,
+    /// B-345 (#32), the stylized counter-kill ("Merk You Space") backdrop: `FX_MerkYouSpaceRescource.BKGAndGhost_MIC`
+    /// (the `MerkSpaceWall_PP01` chain). Scalars `HitTime`, `EffectLength` (0.25), `LV` (1) in g0.xyz. The parchment
+    /// `Wall` times clamp(3 x lerp(desaturate(scene, 80%), 0.5, -0.1), 0, 2) (the white room becomes twice the parchment,
+    /// the fighters a contrasty sepia), a red flash and two zoomed grey ghosts of the scene for `EffectLength` after
+    /// each `HitTime` (the wall zooms and wobbles for twice that), times a pulsing vignette. Decoded in `post.wgsl`.
+    MerkBkg,
+    /// B-345, the kill's start (`FadeIn_MAT_MIC`, chain `MerkStart_PP`): scalars `StartTime`, `EffectLength` (0.25).
+    /// The skull logo (`GLogo_02`, red channel) over white, opening onto the scene as it grows to fill the screen.
+    MerkFadeIn,
+    /// B-345, the kill's end (`BurnOut_MIC`, chain `MerkEnd_PP`): scalars `StartTime`, `EffectLength` (1.5). The scene
+    /// burnt to white (levels with input max 0.1, 40% desaturated) easing back to normal over EffectLength / 1.5.
+    MerkBurnOut,
 }
 
 impl Kind {
@@ -44,6 +56,9 @@ impl Kind {
             Kind::Death => &["UI_DeathEffect.FaderDeath_MIC", "UI_DeathEffect.FaderDeath_MAT"],
             Kind::Damage => &["FX_Damage.DamageEffectMaterial_MIC", "FX_Damage.DamageEffectMaterial"],
             Kind::Scope => &["C1HUD.SniperScope_MIC", "C1HUD.SniperScope_V02_MAT"],
+            Kind::MerkBkg => &["FX_MerkYouSpaceRescource.BKGAndGhost_MIC", "FX_MerkYouSpaceRescource.BKGAndGhost_MAT"],
+            Kind::MerkFadeIn => &["FX_MerkYouSpaceRescource.FadeIn_MAT_MIC", "FX_MerkYouSpaceRescource.FadeIn_MAT"],
+            Kind::MerkBurnOut => &["FX_MerkYouSpaceRescource.BurnOut_MIC", "FX_MerkYouSpaceRescource.BurnOut_MAT"],
         }
     }
 
@@ -54,6 +69,9 @@ impl Kind {
             Kind::Death => "fs_death",
             Kind::Damage => "fs_damage",
             Kind::Scope => "fs_scope",
+            Kind::MerkBkg => "fs_merk_bkg",
+            Kind::MerkFadeIn => "fs_merk_fadein",
+            Kind::MerkBurnOut => "fs_merk_burnout",
         }
     }
 
@@ -64,10 +82,19 @@ impl Kind {
             Kind::Death => ["UI_DeathEffect.DeathScreenBackground_Alphas", "UI_DeathEffect.HeatVisionClouds_Alpha"],
             Kind::Damage => ["FX_Damage.DamageRamp", ""],
             Kind::Scope => ["C1HUD.SniperScope_v02_EFCT", ""],
+            Kind::MerkBkg => ["FX_MerkYouSpaceRescource.Wall", ""],
+            Kind::MerkFadeIn => ["FX_MerkYouSpaceRescource.GLogo_02", ""],
+            Kind::MerkBurnOut => ["", ""],
         }
     }
 
-    pub const ALL: [Kind; 4] = [Kind::Gangsta, Kind::Death, Kind::Damage, Kind::Scope];
+    pub const ALL: [Kind; 7] =
+        [Kind::Gangsta, Kind::Death, Kind::Damage, Kind::Scope, Kind::MerkBkg, Kind::MerkFadeIn, Kind::MerkBurnOut];
+
+    /// The stylized counter-kill's effects (B-345), drawn only with `BOTS_N1_COUNTERKILL=native`.
+    pub const fn is_merk(self) -> bool {
+        matches!(self, Kind::MerkBkg | Kind::MerkFadeIn | Kind::MerkBurnOut)
+    }
 
     pub fn of(path: &str) -> Option<Kind> {
         Kind::ALL.into_iter().find(|k| k.paths().iter().any(|p| p.eq_ignore_ascii_case(path)))
@@ -128,9 +155,33 @@ fn scope_fx_on() -> bool {
     *ON.get_or_init(|| std::env::var("BOTS_N1_SCOPE_FX").map_or(true, |v| v != "0"))
 }
 
+/// B-345 (#32): `BOTS_N1_COUNTERKILL=native`: n1 draws the stylized counter-kills itself (their post materials here,
+/// their lights in `light.rs`; the host culls the level to the game's own view of the kill). Any other value (`port`,
+/// the default: the game's renderer draws those frames; `off`: neither) leaves all of that out.
+pub fn merk_native_on() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BOTS_N1_COUNTERKILL").is_ok_and(|v| v.eq_ignore_ascii_case("native")))
+}
+
+/// Whether a post feed is in a stylized counter-kill (a `FX_MerkYouSpaceRescource.` material in the chain).
+pub fn in_merk_kill(p: &PostFeed) -> bool {
+    p.present && p.material_effects.iter().any(|m| is_merk_path(m))
+}
+
+pub fn is_merk_path(m: &str) -> bool {
+    const PKG: &str = "fx_merkyouspacerescource.";
+    m.len() > PKG.len() && m[..PKG.len()].eq_ignore_ascii_case(PKG)
+}
+
 /// The active ported effects of a post feed, in chain order. A material whose strength is zero (or not positive) is
 /// left out, so the pass isn't recorded at all.
 pub fn effects(p: &PostFeed) -> Vec<Effect> {
+    effects_with(p, merk_native_on())
+}
+
+/// [`effects`] with the counter-kill switch given (`merk`: draw the stylized counter-kill's effects).
+pub fn effects_with(p: &PostFeed, merk: bool) -> Vec<Effect> {
     let mut out = Vec::new();
     if !p.present {
         return out;
@@ -142,6 +193,9 @@ pub fn effects(p: &PostFeed) -> Vec<Effect> {
             continue;
         }
         if kind == Kind::Scope && !scope_fx_on() {
+            continue;
+        }
+        if kind.is_merk() && !merk {
             continue;
         }
         if out.iter().any(|e: &Effect| e.kind == kind) {
@@ -169,6 +223,20 @@ pub fn effects(p: &PostFeed) -> Vec<Effect> {
                 let k = p.material_params.iter().find(|(pm, _, _)| pm.eq_ignore_ascii_case(m)).map_or(0.0, |(_, _, v)| *v);
                 let k = if k.is_finite() { k.clamp(0.0, 1.0) } else { 0.0 };
                 Some(Effect { kind, params: [k, 0.0, 0.0, 0.0] })
+            }
+            // B-345: the game sets HitTime / StartTime (world time) on the instances as the kill plays. Without them there
+            // is no flash (HitTime far in the past), and the wipe and burn are over (the plain scene).
+            Kind::MerkBkg => {
+                let hit = p.param(m, "HitTime").filter(|v| v.is_finite()).unwrap_or(-1.0e9);
+                let len = p.param(m, "EffectLength").filter(|v| v.is_finite() && *v > 0.0).unwrap_or(0.25);
+                let lv = p.param(m, "LV").filter(|v| v.is_finite()).unwrap_or(1.0);
+                Some(Effect { kind, params: [hit, len, lv, 0.0] })
+            }
+            Kind::MerkFadeIn | Kind::MerkBurnOut => {
+                let start = p.param(m, "StartTime").filter(|v| v.is_finite()).unwrap_or(-1.0e9);
+                let dflt = if kind == Kind::MerkFadeIn { 0.25 } else { 1.5 };
+                let len = p.param(m, "EffectLength").filter(|v| v.is_finite() && *v > 0.0).unwrap_or(dflt);
+                Some(Effect { kind, params: [start, len, 0.0, 0.0] })
             }
             Kind::Death => {
                 // StartTime is in the material's Time (the world time n1 already has); without it there's no ramp.
@@ -248,6 +316,28 @@ mod tests {
         assert_eq!(effects(&feed(&[m], &[("other", "x", 1.0)]))[0].params[0], 0.0);
         assert!(effects(&feed(&["a.b"], &[])).is_empty());
         assert_eq!(Kind::of("c1hud.sniperscope_v02_mat"), Some(Kind::Scope));
+    }
+
+    #[test]
+    fn merk_kill() {
+        let bkg = "FX_MerkYouSpaceRescource.BKGAndGhost_MIC";
+        let f = feed(&["GEN_PostProcess.AmbushPP_MAT01", bkg], &[(bkg, "HitTime", 12.0), (bkg, "EffectLength", 0.3)]);
+        assert!(in_merk_kill(&f));
+        // Off unless the switch says native.
+        assert!(effects_with(&f, false).is_empty());
+        assert_eq!(effects_with(&f, true), [Effect { kind: Kind::MerkBkg, params: [12.0, 0.3, 1.0, 0.0] }]);
+        // Defaults: no hit yet, the instance's own length and level.
+        let e = effects_with(&feed(&[bkg], &[]), true);
+        assert_eq!(e[0].params[1..3], [0.25, 1.0]);
+        assert!(e[0].params[0] < -1.0e8);
+        let fi = "fx_merkyouspacerescource.fadein_mat_mic";
+        assert_eq!(effects_with(&feed(&[fi], &[(fi, "StartTime", 5.0)]), true)[0], Effect { kind: Kind::MerkFadeIn, params: [5.0, 0.25, 0.0, 0.0] });
+        let bo = "FX_MerkYouSpaceRescource.BurnOut_MIC";
+        assert_eq!(effects_with(&feed(&[bo], &[(bo, "StartTime", 7.0)]), true)[0].params[..2], [7.0, 1.5]);
+        // The unported variant (PosterAndGhost) is a kill too, but has no pass: the host hands such frames to the game.
+        let pg = feed(&["FX_MerkYouSpaceRescource.PosterAndGhost_MIC"], &[]);
+        assert!(in_merk_kill(&pg) && effects_with(&pg, true).is_empty());
+        assert!(!in_merk_kill(&feed(&["C1HUD.SniperScope_MIC"], &[])));
     }
 
     #[test]
