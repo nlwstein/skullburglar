@@ -617,9 +617,13 @@ pub fn kill_scales() -> (f32, f32) {
     })
 }
 
-/// Default scales of the kill's sky and spot lights (B-345).
+/// Default scales of the kill's sky and spot lights (B-345). Measured against the game's own renderer on the same
+/// moves and cameras (median brightness of the fighters over the parchment, and the share of them clipped to black):
+/// the sky alone matches it, while the spot lights at full strength make the fighters about twice as bright and leave
+/// almost no black shadow side, and at a quarter strength they are still a little too bright. So the spots are off
+/// by default; `BOTS_N1_MERK_SPOTS` brings them back for tuning.
 pub const KILL_SKY: f32 = 1.0;
-pub const KILL_SPOTS: f32 = 1.0;
+pub const KILL_SPOTS: f32 = 0.0;
 
 /// The latest feed frame, digested.
 pub struct Lighting {
