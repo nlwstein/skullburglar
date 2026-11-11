@@ -18,6 +18,13 @@ void Live(uint8_t* base);
 // At the poll, the render thread could reach the frame's marker before its scene existed (stale or doubled frames).
 bool LiveAtDraw();
 
+// B-323: game thread, once per scene view family in n1 mode. Reads the player's post chain and notes whether a stylized
+// counter-kill (a MerkYouSpace post material) is on; StylizedKill() returns the last result. Nothing with
+// BOTS_N1_COUNTERKILL_PORT=0.
+void UpdateStylizedKill(uint8_t* base);
+bool StylizedKill();
+bool StylizedKillPortOn();
+
 // Console commands ("scenefeed ..."); returns false for anything else.
 bool Command(uint8_t* base, const std::string& cmd);
 

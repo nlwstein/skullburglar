@@ -1,0 +1,5 @@
+[
+ "Default renderer: the stylized counter-kills (the skull wipe and the parchment background) no longer turn into a white grid floor with pitch-black fighters. It happened whenever the kill camera could see past the fighters, for example next to a wall or in a narrow stairwell (issue #32).",
+ "Pre-1.0 renderer: a related first-launch glitch is fixed too. The first stylized counter-kill after a fresh install, or with an empty shader cache, could briefly show the same white grid and black fighters while the game prepared its shaders. They are now prepared while the game starts.",
+ "With the emulated GPU option (--gpu_plugin=xenos), new shaders load with fewer stalls on Vulkan, thanks to octaviawilde's suggestion in #40. The default renderers are unchanged."
+]

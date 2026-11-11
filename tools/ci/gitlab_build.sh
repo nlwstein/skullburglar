@@ -22,6 +22,10 @@ get() { curl -fsS --retry 3 -H "JOB-TOKEN: $CI_JOB_TOKEN" "$@"; }
 step assets
 rm -rf out/assets
 git clone -q --depth 1 "https://gitlab-ci-token:$CI_JOB_TOKEN@$CI_SERVER_HOST/$ASSETS_PROJECT.git" out/assets
+# The shader refs a release ships are pinned by pipelines.sha1, like the executable by default.xex.sha1: new refs in
+# the assets project reach players through a commit here (and so a release), never silently.
+(cd out/assets && if command -v sha1sum >/dev/null; then sha1sum -c ../../pipelines.sha1; else shasum -c ../../pipelines.sha1; fi) ||
+  { echo "the assets project's shader refs don't match pipelines.sha1: commit the new hashes here" >&2; exit 1; }
 mkdir -p game
 cp out/assets/default.xex game/
 
