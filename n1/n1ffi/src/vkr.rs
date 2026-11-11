@@ -874,6 +874,17 @@ impl Renderer {
             r.post_pipe("fs_comp", color_format)?;
             r.post_pipe("fs_copy", color_format)?;
             r.post_pipe("fs_god", HDR_FORMAT)?;
+            // The post materials' passes too (the damage effect's at the first hit, the gangsta-fire and death ones at
+            // their first use): built on the frame that first needs them, they can stall it (a Metal compile under
+            // MoltenVK). Each runs as a middle pass (HDR) or the last one (the target's format).
+            // BOTS_N1_POST_PREWARM=0 leaves them to their first frame.
+            if std::env::var("BOTS_N1_POST_PREWARM").map_or(true, |v| v != "0") {
+                r.post_pipe("fs_comp_lin", HDR_FORMAT)?;
+                for k in crate::postmat::Kind::ALL {
+                    r.post_pipe(k.fs(), HDR_FORMAT)?;
+                    r.post_pipe(k.fs(), color_format)?;
+                }
+            }
             Ok(r)
         }
     }

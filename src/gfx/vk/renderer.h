@@ -549,6 +549,7 @@ class Renderer : public Pm4Sink {
     uint32_t swizzle = 0;  // the host swizzle the damage material's fetch applies (3 bits per output channel)
   };
   uint32_t damage_swizzle_ = 0;  // seen at the last draw that sampled the damage render texture (0: none yet)
+  void DumpDamage(const uint8_t* rgba, uint32_t w, uint32_t h, uint32_t swizzle);  // BOTS_N1_DAMAGE_DUMP
   std::vector<DamageRead> damage_reads_;
   std::vector<uint8_t> damage_held_;  // BGRA picture n1 holds (empty: none)
   uint64_t damage_captures_ = 0, damage_shown_ = 0;

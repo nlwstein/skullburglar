@@ -1,0 +1,3 @@
+[
+ "Default renderer: getting shot no longer paints solid red shapes over the screen, and low health no longer turns the whole screen red. The red hit markers at the screen edges are a soft tint again. This could happen on any version since 1.6.0, but after 1.9.1's shader update it happened almost every time."
+]
