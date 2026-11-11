@@ -91,24 +91,32 @@ impl DynFrame {
     /// As [`DynFrame::from_frame_with`]; `env_gamma` (B-245) packs the light environments with UE3's colours too
     /// ([`pack_env_with`]).
     pub fn from_frame_env(fr: &Frame, max_lights: usize, with_envs: bool, ue3_gamma: bool, env_gamma: bool) -> DynFrame {
-        DynFrame::from_frame_opts(fr, max_lights, with_envs, ue3_gamma, env_gamma, false)
+        DynFrame::from_frame_opts(fr, max_lights, with_envs, ue3_gamma, env_gamma, None)
     }
 
     /// As [`DynFrame::from_frame_env`]. `dynamic_only` (B-345, the stylized counter-kill) also packs the lights that
-    /// light only dynamic objects (`Dynamic` channel on, `Static` off): the kill's spot lights for its fighters. Outside
-    /// the kill they are left out, as such lights are already in the characters' light environments.
+    /// light only dynamic objects (`Dynamic` channel on, `Static` off), the kill's spot lights for its fighters, with
+    /// their colour times the given scale. Outside the kill (`None`) they are left out, as such lights are already in
+    /// the characters' light environments.
     pub fn from_frame_opts(
         fr: &Frame,
         max_lights: usize,
         with_envs: bool,
         ue3_gamma: bool,
         env_gamma: bool,
-        dynamic_only: bool,
+        dynamic_only: Option<f32>,
     ) -> DynFrame {
         let mut d = DynFrame::default();
-        let keep = |l: &&Light| l.affects_static || (dynamic_only && l.affects_dynamic);
+        let keep = |l: &&Light| l.affects_static || (dynamic_only.is_some_and(|k| k > 0.0) && l.affects_dynamic);
         for l in fr.dynamic.iter().filter(keep).take(max_lights.min(MAX_LIGHTS)) {
-            d.lights.push(pack_light(l, ue3_gamma));
+            let mut p = pack_light(l, ue3_gamma);
+            if !l.affects_static {
+                let k = dynamic_only.unwrap_or(1.0);
+                for c in &mut p[4..7] {
+                    *c *= k;
+                }
+            }
+            d.lights.push(p);
         }
         if with_envs {
             for e in fr.envs.iter().take(MAX_ENVS) {

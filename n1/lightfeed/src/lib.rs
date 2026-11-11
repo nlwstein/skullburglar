@@ -648,7 +648,10 @@ mod tests {
         let fr = Frame::from_json(&format!(r#"{{"lights":[{},{},{}]}}"#, spot(0.0, true), spot(100.0, false), sky)).unwrap();
         assert_eq!(fr.dynamic.len(), 2);
         assert_eq!(pack::DynFrame::from_frame_env(&fr, 64, false, true, false).lights.len(), 1);
-        assert_eq!(pack::DynFrame::from_frame_opts(&fr, 64, false, true, false, true).lights.len(), 2);
+        let k = pack::DynFrame::from_frame_opts(&fr, 64, false, true, false, Some(0.5));
+        assert_eq!(k.lights.len(), 2);
+        assert!((k.lights[1][4] - 0.5 * k.lights[0][4]).abs() < 1e-5, "{:?}", k.lights);
+        assert_eq!(pack::DynFrame::from_frame_opts(&fr, 64, false, true, false, Some(0.0)).lights.len(), 1);
         assert_eq!(fr.sky_kill_count, 1);
         assert!((fr.sky_kill_up[0] - 3.0).abs() < 1e-4, "{:?}", fr.sky_kill_up);
         assert!(fr.sky_kill_up_ue3[0] > 0.0);
