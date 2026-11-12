@@ -15,7 +15,7 @@
 //! are host-visible; textures and render targets are device-local (textures uploaded through staging buffers
 //! recorded at the start of the next `record`).
 
-use crate::light::{Globals, Knobs, Lighting};
+use crate::light::{Globals, Knobs, Lighting, POST_VECS};
 use crate::shaders;
 use crate::store::{NO_SHADER, SceneKey, Store};
 use anyhow::{Result, anyhow, bail};
@@ -44,11 +44,13 @@ pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 pub const HDR_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 const ALIGN: u64 = 256;
 const GLOBALS_AT: u64 = 0;
-// Post uniform blocks, 256 bytes apart, after the globals (B-310: the globals grew past 256 bytes when the fog volumes
-// joined them, and the post blocks written after them overwrote the volumes).
+// Post uniform blocks after the globals (B-310: the globals grew past 256 bytes when the fog volumes joined them,
+// and the post blocks written after them overwrote the volumes).
 const POST_AT: u64 = 768;
 const _: () = assert!(std::mem::size_of::<Globals>() as u64 <= POST_AT);
-// grade, down, blur A h, blur A v, blur B, composite, copy, then (B-266) the linear composite and up to
+const POST_SIZE: u64 = (POST_VECS * std::mem::size_of::<[f32; 4]>()) as u64;
+const POST_STRIDE: u64 = (POST_SIZE + ALIGN - 1) & !(ALIGN - 1);
+// grade, down, blur A h/v, blur B h/v, composite/copy, then (B-266) the linear composite and up to
 // `POST_MATS` post-material passes
 const POST_MATS: usize = 3;
 // Sets: 0-7 the fixed passes above, from 8 the post materials, then (B-292) the damage pre-pass when it runs before
@@ -81,7 +83,7 @@ fn god_fade() -> [f32; 4] {
 }
 /// B-320: view distances (UE units) over which the rays fade in.
 const GOD_FADE: (f32, f32) = (2000.0, 8000.0);
-const DYN_AT: u64 = POST_AT + 256 * POST_PASSES as u64;
+const DYN_AT: u64 = POST_AT + POST_STRIDE * POST_PASSES as u64;
 
 /// Texture ids of the built-in 1x1 textures.
 pub const TEX_GREY: u32 = 0;
@@ -2401,13 +2403,14 @@ impl Renderer {
         let pp = &self.lighting.post;
         let grade_on = post_on && pp.grade.is_some();
         let blur_on = post_on && pp.blurs();
+        // UseDifferentKernelForBloom runs GaussianBlurFilterBuffer again: horizontal, then vertical.
+        let bloom_blur_on = blur_on && pp.uber.different_bloom_kernel && pp.bloom_mix != 0.0;
         let (bw, bh) = ((rw / 4).max(1), (rh / 4).max(1));
         let qt = [1.0 / bw as f32, 1.0 / bh as f32];
         let ft = [1.0 / rw as f32, 1.0 / rh as f32];
-        // Kernels are in quarter-res texels of the game's 1280x720.
-        let kscale = rh as f32 / 720.0;
-        let ka = crate::light::kernel_taps(pp.uber.blur_kernel, kscale);
-        let kb = crate::light::kernel_taps(pp.uber.bloom_kernel, kscale);
+        let filter_width = bw * 4;
+        let ka = if blur_on { crate::light::kernel_taps(pp.uber.blur_kernel, filter_width) } else { Vec::new() };
+        let kb = if bloom_blur_on { crate::light::kernel_taps(pp.uber.bloom_kernel, filter_width) } else { Vec::new() };
         let off = [target.rect.offset.x as f32, target.rect.offset.y as f32];
         let blk = |texel, dir, taps: &[(f32, f32)], offset| {
             pp.block(&crate::light::PostBlock {
@@ -2450,9 +2453,9 @@ impl Renderer {
             blk(ft, [0.0, 0.0], &[], [0.0, 0.0]), // down
             blk(qt, [1.0, 0.0], &ka, [0.0, 0.0]), // blur A h
             blk(qt, [0.0, 1.0], &ka, [0.0, 0.0]), // blur A v
-            blk(qt, [0.0, 1.0], &kb, [0.0, 0.0]), // blur B: the port's second bloom pass reads A (one direction only)
-            blk(ft, [0.0, 0.0], &[], off),        // composite
-            blk(ft, [0.0, 0.0], &[], off),        // copy
+            blk(qt, [1.0, 0.0], &kb, [0.0, 0.0]), // blur B h
+            blk(qt, [0.0, 1.0], &kb, [0.0, 0.0]), // blur B v
+            blk(ft, [0.0, 0.0], &[], off),        // composite / copy
             blk(ft, [0.0, 0.0], &[], [0.0, 0.0]), // linear composite
         ];
         for (j, (_, params, _, pwl)) in mats.iter().enumerate() {
@@ -2501,11 +2504,11 @@ impl Renderer {
                 const SKY: [f32; 8] = [GOD_SKY_DIST, 1.0e4, 2.0e4, 5.0e4, 1.0e5, 2.0e5, 5.0e5, f32::INFINITY];
                 o[4][0] = SKY[((self.debug_bits >> 21) & 7) as usize];
                 let on = if dbg > 0.0 { 2.0 } else { 1.0 };
-                blocks[5][14][3] = on;
+                blocks[6][14][3] = on;
                 blocks[7][14][3] = on;
                 // B-320: the composites fade the rays in with distance (taps[3]).
                 let fade = god_fade();
-                blocks[5][13] = fade;
+                blocks[6][13] = fade;
                 blocks[7][13] = fade;
             }
             blocks.push(o);
@@ -2515,7 +2518,6 @@ impl Renderer {
         let outline_on = self.outline_active();
         if outline_on {
             let mode = self.knobs.outline as f32;
-            blocks[5][15][3] = mode;
             blocks[6][15][3] = mode;
             if !mats.is_empty() {
                 // B-336: the port marks the pawn in the scene, so the post materials see it: the outline goes into the
@@ -2572,7 +2574,7 @@ impl Renderer {
                 | (dyn_sky as u32) << 6) as f32;
             put(b, GLOBALS_AT, bytemuck::bytes_of(&globals));
             for (k, blk) in blocks.iter().enumerate() {
-                put(b, POST_AT + 256 * k as u64, bytemuck::cast_slice(blk));
+                put(b, POST_AT + POST_STRIDE * k as u64, bytemuck::cast_slice(blk));
             }
             put(b, inst_at, &inst);
             put(b, idyn_at, &iw);
@@ -2672,21 +2674,22 @@ impl Renderer {
             let scene = if damage_pre.is_some() { pre_dst } else { scene_orig };
             let dv = self.depth.as_ref().unwrap().view;
             let [q0, q1, q2] = self.bloom.as_ref().map(|x| [x[0].view, x[1].view, x[2].view]).unwrap();
+            let bloom_b = if bloom_blur_on { q2 } else { q0 };
             let gv = self.god.as_ref().unwrap().view;
             let mut srcs = vec![
                 (hdr, q0, q0),   // grade
                 (scene, q0, q0), // down -> q0
                 (q0, q0, q0),    // blur A h -> q1
                 (q1, q1, q1),    // blur A v -> q0
-                (q0, q0, q0),    // blur B -> q2
-                (scene, q0, q2), // composite
-                (hdr, q0, q0),   // copy
+                (q0, q0, q0),    // blur B h -> q1
+                (q1, q1, q1),    // blur B v -> q2
+                (scene, q0, bloom_b), // composite / copy
             ];
             if !mats.is_empty() {
                 // B-266: the linear composite reads the scene and writes the other full-res target; the material
                 // passes ping-pong between the two, the last writing the output.
                 let other = if damage_pre.is_some() { scene_orig } else { pre_dst };
-                srcs.push((scene, q0, q2));
+                srcs.push((scene, q0, bloom_b));
                 let mut cur = other;
                 for (_, _, ids, _) in &mats {
                     srcs.push((cur, self.tex_view(ids[0], TEX_BLACK), self.tex_view(ids[1], TEX_BLACK)));
@@ -2696,7 +2699,7 @@ impl Renderer {
             if mats.is_empty() {
                 // Only the pre-pass (if any) follows set 6: its block sits at index 8, and set 7 is unused.
                 // The god-rays set (B-307) stays the last one, after the padding below.
-                srcs.push((scene, q0, q2));
+                srcs.push((scene, q0, bloom_b));
             }
             if let Some((_, _, ids, _)) = &damage_pre {
                 srcs.push((scene_orig, self.tex_view(ids[0], TEX_BLACK), self.tex_view(ids[1], TEX_BLACK)));
@@ -2711,8 +2714,8 @@ impl Renderer {
             for (k, (src, bl, bl2)) in srcs.iter().enumerate() {
                 let ub = [vk::DescriptorBufferInfo {
                     buffer: s.buf.buffer,
-                    offset: POST_AT + 256 * k as u64,
-                    range: 256,
+                    offset: POST_AT + POST_STRIDE * k as u64,
+                    range: POST_SIZE,
                 }];
                 let smp = [vk::DescriptorImageInfo {
                     sampler: self.post_sampler,
@@ -3300,13 +3303,18 @@ impl Renderer {
                     pass(bloom[1].view, catt_layout, bq, p_blur, ps[2]);
                     barrier(cao | frag, frag | cao, &[to_read(bloom[1].image), to_att(bloom[0].image)]);
                     pass(bloom[0].view, catt_layout, bq, p_blur, ps[3]);
-                    barrier(cao | frag, frag | cao, &[to_read(bloom[0].image), to_att(bloom[2].image)]);
-                    pass(bloom[2].view, catt_layout, bq, p_blur, ps[4]);
-                    barrier(cao, frag, &[to_read(bloom[2].image)]);
+                    if bloom_blur_on {
+                        barrier(cao | frag, frag | cao, &[to_read(bloom[0].image), to_att(bloom[1].image)]);
+                        pass(bloom[1].view, catt_layout, bq, p_blur, ps[4]);
+                        barrier(cao | frag, frag | cao, &[to_read(bloom[1].image), to_att(bloom[2].image)]);
+                        pass(bloom[2].view, catt_layout, bq, p_blur, ps[5]);
+                        barrier(cao, frag, &[to_read(bloom[2].image)]);
+                    } else {
+                        barrier(cao, frag, &[to_read(bloom[0].image)]);
+                    }
                 } else {
-                    // The composite shader binds the bloom targets even with blur off (its use is behind a uniform
-                    // branch, so nothing is read), but they must be in the descriptor's layout: validation's
-                    // VUID-vkCmdDraw-None-09600 (an image sampled in UNDEFINED) on scenes without DOF/bloom.
+                    // The composite shader binds q0 even with blur off (its use is behind a uniform branch), but it
+                    // must be in the descriptor's layout: validation's VUID-vkCmdDraw-None-09600.
                     let ro = |img| {
                         layout_barrier(
                             img,
@@ -3317,7 +3325,7 @@ impl Renderer {
                             vk::AccessFlags::SHADER_READ,
                         )
                     };
-                    barrier(frag, frag, &[ro(bloom[0].image), ro(bloom[2].image), ro(bloom[1].image)]);
+                    barrier(frag, frag, &[ro(bloom[0].image)]);
                 }
                 {
                     // B-307: the rays into their own 128x128 target, read by the composite (binding 8; in the sampled
@@ -3340,7 +3348,7 @@ impl Renderer {
                     }
                 }
                 if mats.is_empty() {
-                    pass(target.view, target.layout, target.rect, p_comp, ps[5]);
+                    pass(target.view, target.layout, target.rect, p_comp, ps[6]);
                     if let Some(g) = &self.gprof {
                         g.mark(d, cmd, 5);
                     }
