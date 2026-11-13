@@ -122,6 +122,21 @@ or if you prefer, replace the AppImage, folder or app with the new version from 
 files, saves and settings stay.
 
 
+Uninstalling
+------------
+
+Windows  Settings > Apps > Skullburglar > Uninstall.
+macOS    Drag Skullburglar from Applications to the Trash.
+Linux    Delete the AppImage or the unpacked folder.
+Steam Deck  In Steam: the game's gear icon > Manage > Remove non-Steam game from your library, then delete the
+            .AppImage (in Desktop Mode).
+
+That leaves the game files and your saves. Delete the folders listed under "Where things are kept" to
+remove them as well: on the Steam Deck and Linux, ~/.local/share/bots-recomp (the game files),
+~/.local/state/bots-recomp (the AppImage's logs) and ~/.local/share/bots (saves, settings, shader cache). Back up the
+saves folder first if you might play again. (In Desktop Mode, Ctrl+H shows those hidden folders in Dolphin.)
+
+
 Reporting a problem
 -------------------
 
