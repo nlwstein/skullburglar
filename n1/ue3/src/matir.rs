@@ -251,6 +251,9 @@ fn blend_by<P: std::ops::Deref<Target = Package>>(
         parts.push(compile(&pp, &g, params));
     }
     let start = params.scalar.get("starttime").copied().unwrap_or(BLEND_NOT_STARTED);
+    if std::env::var("BOTS_N1_BLEND_LOG").is_ok_and(|v| v == "1") {
+        eprintln!("n1: blended material {} StartTime {} ({} materials, windows {:?})", p.obj_path(ei), if start == BLEND_NOT_STARTED { "unset".to_string() } else { start.to_string() }, parts.len(), times);
+    }
     merge_blend(parts, &times, start)
 }
 
