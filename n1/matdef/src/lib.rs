@@ -53,6 +53,39 @@ pub enum Node {
     Unsup { class: String },
 }
 
+impl Node {
+    /// This node as it reads once its graph is appended behind `off` other nodes and `tex_off` other textures: every
+    /// node reference moves up by `off`, every texture index by `tex_off` (B-349: a blended material is the nodes of
+    /// several graphs in one list).
+    pub fn shifted(&self, off: u32, tex_off: u32) -> Node {
+        let o = |x: &Option<u32>| x.map(|i| i + off);
+        match self.clone() {
+            Node::Tex { tex, uv } => Node::Tex { tex: tex + tex_off, uv: o(&uv) },
+            Node::Add { a, b } => Node::Add { a: a + off, b: b + off },
+            Node::Sub { a, b } => Node::Sub { a: a + off, b: b + off },
+            Node::Mul { a, b } => Node::Mul { a: a + off, b: b + off },
+            Node::Div { a, b } => Node::Div { a: a + off, b: b + off },
+            Node::Pow { a, b } => Node::Pow { a: a + off, b: b + off },
+            Node::Dot { a, b } => Node::Dot { a: a + off, b: b + off },
+            Node::Append { a, b } => Node::Append { a: a + off, b: b + off },
+            Node::Lerp { a, b, t } => Node::Lerp { a: a + off, b: b + off, t: t + off },
+            Node::Clamp { x, lo, hi } => Node::Clamp { x: x + off, lo: lo + off, hi: hi + off },
+            Node::Sat { x, lo, hi } => Node::Sat { x: x + off, lo, hi },
+            Node::Un { f, x } => Node::Un { f, x: x + off },
+            Node::Trig { cos, x, period } => Node::Trig { cos, x: x + off, period },
+            Node::Mask { x, m } => Node::Mask { x: x + off, m },
+            Node::Desat { x, pct, w } => Node::Desat { x: x + off, pct: o(&pct), w },
+            Node::Panner { coord, time, sx, sy } => Node::Panner { coord: o(&coord), time: o(&time), sx, sy },
+            Node::Rotator { coord, time, cx, cy, speed } => Node::Rotator { coord: o(&coord), time: o(&time), cx, cy, speed },
+            Node::BumpOffset { coord, height, ratio, plane } => Node::BumpOffset { coord: coord + off, height: height + off, ratio, plane },
+            Node::Fresnel { exp, n } => Node::Fresnel { exp, n: o(&n) },
+            Node::SoftAlpha { alpha, bias, scale } => Node::SoftAlpha { alpha: o(&alpha), bias: o(&bias), scale },
+            Node::If { a, b, gt, eq, lt } => Node::If { a: a + off, b: b + off, gt: gt + off, eq: eq + off, lt: lt + off },
+            other => other,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct TexRef {
     pub path: String,

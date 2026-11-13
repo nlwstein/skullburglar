@@ -250,6 +250,8 @@ const INDEX_CLASSES: &[&str] = &[
     "StaticMesh",
     "SkeletalMesh",
     "Material",
+    // B-349: the burning characters' parent material (OnFire instances point at one); without it they had no definition.
+    "MaterialBlended",
     "MaterialInstanceConstant",
     "MaterialInstanceTimeVarying",
     "DecalMaterial",
@@ -259,7 +261,7 @@ const INDEX_CLASSES: &[&str] = &[
     "ParticleMeshEmitter",
 ];
 /// Bump when `INDEX_CLASSES` changes.
-const INDEX_REV: u32 = 3;
+const INDEX_REV: u32 = 4;
 
 impl AssetDb {
     /// Opens (or builds) the index. `cooked` is `game/C1Game/CookedXenon`.
