@@ -155,13 +155,27 @@ fn scope_fx_on() -> bool {
     *ON.get_or_init(|| std::env::var("BOTS_N1_SCOPE_FX").map_or(true, |v| v != "0"))
 }
 
-/// B-345 (#32): `BOTS_N1_COUNTERKILL=native`: n1 draws the stylized counter-kills itself (their post materials here,
-/// their lights in `light.rs`; the host culls the level to the game's own view of the kill). Any other value (`port`,
-/// the default: the game's renderer draws those frames; `off`: neither) leaves all of that out.
+/// B-345 (#32): n1 draws the stylized counter-kills itself (their post materials here, their lights in `light.rs`; the
+/// host culls the level to the game's own view of the kill). The default since 1.9.3. `BOTS_N1_COUNTERKILL=port` (the
+/// game's renderer draws those frames) or `off` (neither), or 1.9.1's `BOTS_N1_COUNTERKILL_PORT` when the new variable
+/// is unset, leave all of that out. Mirrors the host's `bots::counterkill::ParseMode` (src/counterkill_port.h).
 pub fn merk_native_on() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("BOTS_N1_COUNTERKILL").is_ok_and(|v| v.eq_ignore_ascii_case("native")))
+    *ON.get_or_init(|| {
+        merk_native_mode(
+            std::env::var("BOTS_N1_COUNTERKILL").ok().as_deref(),
+            std::env::var("BOTS_N1_COUNTERKILL_PORT").ok().as_deref(),
+        )
+    })
+}
+
+/// `merk_native_on` for given values of `BOTS_N1_COUNTERKILL` and `BOTS_N1_COUNTERKILL_PORT` (None = unset).
+pub fn merk_native_mode(counterkill: Option<&str>, legacy_port: Option<&str>) -> bool {
+    match counterkill.filter(|v| !v.is_empty()) {
+        Some(v) => !(v.eq_ignore_ascii_case("port") || v.eq_ignore_ascii_case("off") || v == "0"),
+        None => legacy_port.is_none_or(str::is_empty),
+    }
 }
 
 /// Whether a post feed is in a stylized counter-kill (a `FX_MerkYouSpaceRescource.` material in the chain).
@@ -258,6 +272,22 @@ pub fn effects_with(p: &PostFeed, merk: bool) -> Vec<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merk_native_mode_matches_the_host() {
+        // Same table as tests/counterkill_port_test.cpp: native unless port/off is asked for.
+        assert!(merk_native_mode(None, None));
+        assert!(merk_native_mode(Some(""), None));
+        assert!(merk_native_mode(Some("native"), Some("0")));
+        assert!(merk_native_mode(Some("bogus"), None));
+        assert!(!merk_native_mode(Some("Port"), None));
+        assert!(!merk_native_mode(Some("off"), None));
+        assert!(!merk_native_mode(Some("0"), None));
+        assert!(!merk_native_mode(Some(""), Some("0")));
+        assert!(!merk_native_mode(None, Some("0")));
+        assert!(!merk_native_mode(None, Some("1")));
+        assert!(merk_native_mode(None, Some("")));
+    }
 
     fn feed(mats: &[&str], params: &[(&str, &str, f32)]) -> PostFeed {
         let mut p = PostFeed::default();

@@ -34,13 +34,16 @@ int main() {
   CHECK(!GameDrawsScene(2, 3, true, true));   // debug grid fills
   CHECK(!GameDrawsScene(2, 0, true, true));
   // B-345: the switch.
-  CHECK(ParseMode(nullptr, nullptr) == Mode::kPort);
+  CHECK(ParseMode(nullptr, nullptr) == Mode::kNative);  // default since 1.9.3
   CHECK(ParseMode("native", nullptr) == Mode::kNative);
   CHECK(ParseMode("Native", "0") == Mode::kNative);  // the new variable wins
   CHECK(ParseMode("off", nullptr) == Mode::kOff);
   CHECK(ParseMode("0", nullptr) == Mode::kOff);
   CHECK(ParseMode("port", "0") == Mode::kPort);
   CHECK(ParseMode("", "0") == Mode::kOff);            // empty = not set
+  CHECK(ParseMode("", nullptr) == Mode::kNative);
+  CHECK(ParseMode(nullptr, "") == Mode::kNative);
+  CHECK(ParseMode("bogus", nullptr) == Mode::kNative);
   CHECK(ParseMode(nullptr, "0") == Mode::kOff);       // 1.9.1's BOTS_N1_COUNTERKILL_PORT=0
   CHECK(ParseMode(nullptr, "1") == Mode::kPort);
   CHECK(ParseMode(nullptr, "00") == Mode::kPort);

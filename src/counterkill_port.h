@@ -21,10 +21,10 @@ constexpr bool IsKillPostMaterial(std::string_view path) {
   return path.size() > kPostPackage.size() && path.substr(0, kPostPackage.size()) == kPostPackage;
 }
 
-// B-345: who draws a stylized counter-kill in n1 mode. BOTS_N1_COUNTERKILL=port (default, 1.9.1): the game's renderer;
-// native: n1, with the effect's post materials ported (n1ffi postmat.rs), its lights and the game's culling; off: n1
-// as in 1.9.0 (#32's look). BOTS_N1_COUNTERKILL_PORT, 1.9.1's switch, still works: 0 = off, anything else = port.
-// BOTS_N1_COUNTERKILL wins when both are set.
+// B-345: who draws a stylized counter-kill in n1 mode. BOTS_N1_COUNTERKILL=native (default since 1.9.3): n1, with the
+// effect's post materials ported (n1ffi postmat.rs), its lights and the game's culling; port (1.9.1-1.9.2): the game's
+// renderer; off: n1 as in 1.9.0 (#32's look). BOTS_N1_COUNTERKILL_PORT, 1.9.1's switch, still works: 0 = off, anything
+// else = port. BOTS_N1_COUNTERKILL wins when both are set.
 enum class Mode { kOff, kPort, kNative };
 
 constexpr bool EqualsNoCase(std::string_view a, std::string_view b) {
@@ -42,12 +42,12 @@ constexpr bool EqualsNoCase(std::string_view a, std::string_view b) {
 constexpr Mode ParseMode(const char* counterkill, const char* legacy_port) {
   if (counterkill && *counterkill) {
     const std::string_view v(counterkill);
-    if (EqualsNoCase(v, "native")) return Mode::kNative;
+    if (EqualsNoCase(v, "port")) return Mode::kPort;
     if (EqualsNoCase(v, "off") || v == "0") return Mode::kOff;
-    return Mode::kPort;
+    return Mode::kNative;
   }
-  if (legacy_port && *legacy_port == '0' && legacy_port[1] == 0) return Mode::kOff;
-  return Mode::kPort;
+  if (legacy_port && *legacy_port) return legacy_port[0] == '0' && legacy_port[1] == 0 ? Mode::kOff : Mode::kPort;
+  return Mode::kNative;
 }
 
 // The kill's post materials n1 has a pass for (n1ffi postmat.rs Kind::MerkBkg / MerkFadeIn / MerkBurnOut). Any other

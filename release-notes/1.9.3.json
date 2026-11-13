@@ -1,0 +1,3 @@
+[
+  "Default renderer: the stylized counter-kills (the skull wipe and the parchment background) are now drawn by the default renderer itself instead of being handed to the old renderer. That removes a stall of a tenth of a second to two seconds near the end of every one of those kills, which was worst on Macs and low-end PCs. BOTS_N1_COUNTERKILL=port brings back 1.9.2's behavior."
+]
