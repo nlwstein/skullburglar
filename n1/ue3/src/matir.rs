@@ -322,6 +322,8 @@ pub fn merge_blend(parts: Vec<MatDef>, times: &[(f32, f32)], start: f32) -> Opti
         let x = push(&mut out, Node::Mul { a: d, b: inv });
         ramps.push(push(&mut out, Node::Sat { x, lo: 0.0, hi: 1.0 }));
     }
+    // BOTS_N1_BLEND_FORCE=<i>: debug aid, shows material i alone (to compare one stage with the game's picture)
+    let force: Option<usize> = std::env::var("BOTS_N1_BLEND_FORCE").ok().and_then(|v| v.parse().ok()).filter(|&i| i < parts.len());
     let mut weights = vec![push(&mut out, Node::Un { f: "oneminus".into(), x: ramps[0] })];
     for i in 1..parts.len() {
         weights.push(match ramps.get(i + 1) {
@@ -331,6 +333,11 @@ pub fn merge_blend(parts: Vec<MatDef>, times: &[(f32, f32)], start: f32) -> Opti
             }
             None => ramps[i],
         });
+    }
+    if let Some(f) = force {
+        for (i, w) in weights.iter_mut().enumerate() {
+            *w = k(&mut out, if i == f { 1.0 } else { 0.0 });
+        }
     }
     // weighted sum of one output over the parts; `None` when no part has it
     let sum = |out: &mut MatDef, slot: usize, absent: [f32; 4], n: u8| -> Option<u32> {
