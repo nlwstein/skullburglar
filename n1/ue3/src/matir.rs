@@ -195,14 +195,181 @@ pub fn build_by<P: std::ops::Deref<Target = Package>>(path: &str, lookup: impl F
                 let _ = depth;
                 continue;
             }
-            let g = read_material(p, ei).ok()?;
-            let mut def = compile(p, &g, &params);
+            let mut def = if class == "MaterialBlended" {
+                if !blended_on() {
+                    return None;
+                }
+                blend_by(p, ei, &params, &lookup)?
+            } else {
+                let g = read_material(p, ei).ok()?;
+                compile(p, &g, &params)
+            };
             def.path = path.to_string();
             def.class = chain_class;
             return Some(def);
         }
         None
     }
+}
+
+/// `BOTS_N1_BLENDED=0` draws a `MaterialBlended` as before (no definition: the default untextured surface), the revert
+/// switch for B-349.
+pub fn blended_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BOTS_N1_BLENDED").map_or(true, |v| v != "0"))
+}
+
+/// `StartTime` a blended material's clock counts from when no instance has set it yet: far in the future, so every
+/// weight sits at its start (the first material only) and the graph keeps one shape with and without the parameter.
+const BLEND_NOT_STARTED: f32 = 1.0e9;
+
+/// B-349: a `MaterialBlended` (a licensee class: the burning characters' `TemplateBody_OnFire_Mat` and
+/// `TemplateHead_OnFire_Mat`) is a set of `BlendMaterials` the engine fades between by time, `BlendTimes[i]` giving each
+/// one's `StartTime`/`EndTime` in seconds after the instance's `StartTime` parameter (the game writes the world time
+/// when a character catches fire). Compiles every material with the same instance parameters and merges them.
+fn blend_by<P: std::ops::Deref<Target = Package>>(
+    p: &Package,
+    ei: i32,
+    params: &Params,
+    lookup: &impl Fn(&str) -> Option<(P, i32)>,
+) -> Option<MatDef> {
+    let (props, _) = object_props(p, ei).ok()?;
+    let mats = props.get("BlendMaterials")?.as_obj_array();
+    let times: Vec<(f32, f32)> = props
+        .get("BlendTimes")
+        .map(|t| {
+            array_elems(p, t.data)
+                .iter()
+                .map(|e| (e.get("StartTime").map_or(0.0, |x| x.as_f32()), e.get("EndTime").map_or(0.0, |x| x.as_f32())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut parts = Vec::new();
+    for o in mats {
+        let (pp, sei) = lookup(&p.obj_path(o))?;
+        let g = read_material(&pp, sei).ok()?;
+        parts.push(compile(&pp, &g, params));
+    }
+    let start = params.scalar.get("starttime").copied().unwrap_or(BLEND_NOT_STARTED);
+    if std::env::var("BOTS_N1_BLEND_LOG").is_ok_and(|v| v == "1") {
+        eprintln!("n1: blended material {} StartTime {} ({} materials, windows {:?})", p.obj_path(ei), if start == BLEND_NOT_STARTED { "unset".to_string() } else { start.to_string() }, parts.len(), times);
+    }
+    merge_blend(parts, &times, start)
+}
+
+/// Merges the graphs of a blended material into one: each material's nodes appended in turn, then the weights (from the
+/// seconds since `start`) and, for every output, the weighted sum of the materials' values. Material i+1 fades in over
+/// `times[i]` on top of the earlier ones (chained lerps), so the weights always add up to 1. With no usable windows the
+/// first material stands alone.
+pub fn merge_blend(parts: Vec<MatDef>, times: &[(f32, f32)], start: f32) -> Option<MatDef> {
+    let first = parts.first()?;
+    if parts.len() == 1 || times.len() != parts.len() {
+        return Some(first.clone());
+    }
+    let mut out = MatDef {
+        blend: first.blend.clone(),
+        lighting: first.lighting.clone(),
+        two_sided: first.two_sided,
+        clip: first.clip,
+        diffuse_const: first.diffuse_const,
+        spec_power_const: first.spec_power_const,
+        ..Default::default()
+    };
+    // (diffuse, specular, spec_power, normal, emissive) roots of every part, moved to the merged numbering
+    let mut roots: Vec<[Option<u32>; 5]> = Vec::new();
+    for d in &parts {
+        let off = out.nodes.len() as u32;
+        // a texture two materials share (the character's diffuse, say) takes one slot
+        let remap: Vec<u32> = d
+            .textures
+            .iter()
+            .map(|t| match out.textures.iter().position(|o| o.path == t.path && o.normal == t.normal) {
+                Some(i) => i as u32,
+                None => {
+                    out.textures.push(t.clone());
+                    out.textures.len() as u32 - 1
+                }
+            })
+            .collect();
+        out.nodes.extend(d.nodes.iter().map(|n| match n.shifted(off, 0) {
+            Node::Tex { tex, uv } => Node::Tex { tex: remap[tex as usize], uv },
+            other => other,
+        }));
+        let m = |o: Option<u32>| o.map(|i| i + off);
+        roots.push([m(d.diffuse), m(d.specular), m(d.spec_power), m(d.normal), m(d.emissive)]);
+        out.uses_vcolor |= d.uses_vcolor;
+        out.uses_uv1 |= d.uses_uv1;
+        for u in &d.unsupported {
+            if !out.unsupported.contains(u) {
+                out.unsupported.push(u.clone());
+            }
+        }
+    }
+    let push = |out: &mut MatDef, n: Node| -> u32 {
+        out.nodes.push(n);
+        out.nodes.len() as u32 - 1
+    };
+    let k = |out: &mut MatDef, v: f32| push(out, Node::Const { v: [v; 4], n: 1 });
+    let time = push(&mut out, Node::Time);
+    let st = k(&mut out, start);
+    let t = push(&mut out, Node::Sub { a: time, b: st });
+    // ramp(i): 0 before the window, 1 after it
+    let mut ramps = Vec::new();
+    for &(lo, hi) in times {
+        let lo_n = k(&mut out, lo);
+        let inv = k(&mut out, 1.0 / (hi - lo).max(1e-3));
+        let d = push(&mut out, Node::Sub { a: t, b: lo_n });
+        let x = push(&mut out, Node::Mul { a: d, b: inv });
+        ramps.push(push(&mut out, Node::Sat { x, lo: 0.0, hi: 1.0 }));
+    }
+    // BOTS_N1_BLEND_FORCE=<i>: debug aid, shows material i alone (to compare one stage with the game's picture)
+    let force: Option<usize> = std::env::var("BOTS_N1_BLEND_FORCE").ok().and_then(|v| v.parse().ok()).filter(|&i| i < parts.len());
+    // Chained fades: material i+1 fades in over window i (`times[i]`) on top of what the earlier ones made, so
+    // w0 = (1-r0)(1-r1).., w1 = r0 (1-r1).., w2 = r1: with the burn windows (0-1 s, 0-1 s) the surface goes body -> charred in
+    // about a second, as the game's own picture does. The last window has no later material and is not used.
+    let one_minus: Vec<u32> = (0..parts.len() - 1).map(|i| push(&mut out, Node::Un { f: "oneminus".into(), x: ramps[i] })).collect();
+    let mut weights = Vec::new();
+    for i in 0..parts.len() {
+        let mut w: Option<u32> = if i == 0 { None } else { Some(ramps[i - 1]) };
+        for &om in &one_minus[i..] {
+            w = Some(match w {
+                Some(x) => push(&mut out, Node::Mul { a: x, b: om }),
+                None => om,
+            });
+        }
+        weights.push(w.unwrap_or_else(|| k(&mut out, 1.0)));
+    }
+    if let Some(f) = force {
+        for (i, w) in weights.iter_mut().enumerate() {
+            *w = k(&mut out, if i == f { 1.0 } else { 0.0 });
+        }
+    }
+    // weighted sum of one output over the parts; `None` when no part has it
+    let sum = |out: &mut MatDef, slot: usize, absent: [f32; 4], n: u8| -> Option<u32> {
+        if roots.iter().all(|r| r[slot].is_none()) {
+            return None;
+        }
+        let mut acc: Option<u32> = None;
+        for (i, r) in roots.iter().enumerate() {
+            let v = match r[slot] {
+                Some(v) => v,
+                None => push(out, Node::Const { v: absent, n }),
+            };
+            let term = push(out, Node::Mul { a: weights[i], b: v });
+            acc = Some(match acc {
+                Some(a) => push(out, Node::Add { a, b: term }),
+                None => term,
+            });
+        }
+        acc
+    };
+    let dc = first.diffuse_const.unwrap_or([0.5, 0.5, 0.5, 1.0]);
+    out.diffuse = sum(&mut out, 0, dc, 0);
+    out.specular = sum(&mut out, 1, [0.0; 4], 0);
+    out.spec_power = sum(&mut out, 2, [first.spec_power_const.unwrap_or(15.0); 4], 1);
+    out.normal = sum(&mut out, 3, [0.0, 0.0, 1.0, 0.0], 3);
+    out.emissive = sum(&mut out, 4, [0.0; 4], 0);
+    Some(out)
 }
 
 /// A material's named parameters after the MIC chain: (base Material path, scalars, vectors), names lowercase.
@@ -587,5 +754,105 @@ mod static_switch_tests {
     fn ignores_uniform_expression_records() {
         let b = hex("00 00 00 01 00 00 01 47 00 00 00 00 00 00 00 01 00 00 00 01 10 86 c5 46 45 d1 1d d8 91 20 29 b9 35 ea 3d 29");
         assert!(scan_static_switches(&b, &names).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod blend_tests {
+    use super::*;
+
+    fn tex(path: &str) -> TexRef {
+        TexRef { path: path.into(), normal: false }
+    }
+
+    /// A material that is just texture `t` (diffuse) and a constant emissive.
+    fn part(t: &str, emissive: f32) -> MatDef {
+        MatDef {
+            nodes: vec![Node::Tex { tex: 0, uv: None }, Node::Const { v: [emissive; 4], n: 0 }],
+            textures: vec![tex(t)],
+            diffuse: Some(0),
+            emissive: Some(1),
+            ..Default::default()
+        }
+    }
+
+    /// Reference evaluation of the merged graph for the nodes the blend adds (Time, Sub, Mul, Sat, Un, Const, Add).
+    fn eval(d: &MatDef, i: u32, time: f32, tex_val: &dyn Fn(u32) -> f32) -> f32 {
+        let e = |j: &u32| eval(d, *j, time, tex_val);
+        match &d.nodes[i as usize] {
+            Node::Time => time,
+            Node::Const { v, .. } => v[0],
+            Node::Tex { tex, .. } => tex_val(*tex),
+            Node::Sub { a, b } => e(a) - e(b),
+            Node::Add { a, b } => e(a) + e(b),
+            Node::Mul { a, b } => e(a) * e(b),
+            Node::Sat { x, lo, hi } => e(x).clamp(*lo, *hi),
+            Node::Un { f, x } if f == "oneminus" => 1.0 - e(x),
+            n => panic!("unexpected {n:?}"),
+        }
+    }
+
+    // chained fades: flame over body during 0..1 s, then char over that during 0..1 s (the third window is unused)
+    const TIMES: [(f32, f32); 3] = [(0.0, 1.0), (0.0, 1.0), (1.0, 6.0)];
+
+    fn merged() -> MatDef {
+        merge_blend(vec![part("Body", 0.0), part("Flame", 4.0), part("Char", 0.0)], &TIMES, 100.0).unwrap()
+    }
+
+    #[test]
+    fn textures_are_shared_and_nodes_stay_ordered() {
+        let m = merge_blend(vec![part("Body", 0.0), part("Body", 1.0), part("Char", 0.0)], &TIMES, 0.0).unwrap();
+        assert_eq!(m.textures.iter().map(|t| t.path.as_str()).collect::<Vec<_>>(), ["Body", "Char"]);
+        // every reference points at an earlier node (topological order) and every texture index exists
+        for (i, n) in m.nodes.iter().enumerate() {
+            if let Node::Tex { tex, .. } = n {
+                assert!((*tex as usize) < m.textures.len());
+            }
+            let refs = match n {
+                Node::Add { a, b } | Node::Sub { a, b } | Node::Mul { a, b } => vec![*a, *b],
+                Node::Sat { x, .. } | Node::Un { x, .. } => vec![*x],
+                _ => vec![],
+            };
+            assert!(refs.iter().all(|&r| (r as usize) < i), "node {i} {n:?}");
+        }
+    }
+
+    #[test]
+    fn weights_follow_the_clock_and_sum_to_one() {
+        let m = merged();
+        // diffuse = w0*body + w1*flame + w2*char with each texture sampled as 1, 10, 100
+        let tv = |t: u32| [1.0, 10.0, 100.0][t as usize];
+        let at = |sec: f32| eval(&m, m.diffuse.unwrap(), 100.0 + sec, &tv);
+        assert_eq!(at(-5.0), 1.0, "before the start: the body alone");
+        assert!((at(0.0) - 1.0).abs() < 1e-4);
+        // t = 0.5: r = 0.5 for both fades: w0 = .25, w1 = .25, w2 = .5
+        assert!((at(0.5) - (0.25 * 1.0 + 0.25 * 10.0 + 0.5 * 100.0)).abs() < 1e-3, "{}", at(0.5));
+        assert!((at(1.0) - 100.0).abs() < 1e-3, "charred after a second");
+        assert!((at(60.0) - 100.0).abs() < 1e-3);
+        // the emissive follows the flame only: w1 = r0 (1 - r1) peaks at 0.25 and is gone by 1 s
+        let em = |sec: f32| eval(&m, m.emissive.unwrap(), 100.0 + sec, &tv);
+        assert_eq!(em(-5.0), 0.0);
+        assert!((em(0.5) - 0.25 * 4.0).abs() < 1e-4);
+        assert!(em(1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn unset_start_time_shows_the_body() {
+        let m = merge_blend(vec![part("Body", 0.0), part("Flame", 4.0), part("Char", 0.0)], &TIMES, BLEND_NOT_STARTED).unwrap();
+        let tv = |t: u32| [1.0, 10.0, 100.0][t as usize];
+        assert_eq!(eval(&m, m.diffuse.unwrap(), 12345.0, &tv), 1.0);
+    }
+
+    #[test]
+    fn missing_outputs_and_odd_inputs() {
+        // an output only some parts have is blended with the neutral value; one none has stays absent
+        let mut a = part("A", 0.0);
+        a.normal = Some(1);
+        let m = merge_blend(vec![a, part("B", 0.0), part("C", 0.0)], &TIMES, 0.0).unwrap();
+        assert!(m.normal.is_some() && m.specular.is_none() && m.opacity.is_none());
+        // windows that don't match the materials, or a single material: the first one, unchanged
+        let one = merge_blend(vec![part("A", 0.0), part("B", 0.0)], &TIMES, 0.0).unwrap();
+        assert_eq!(one.textures.len(), 1);
+        assert!(merge_blend(vec![], &TIMES, 0.0).is_none());
     }
 }
