@@ -1,7 +1,7 @@
 // Launcher text and layout size (B-348). The SDK's overlay font is a 10 px TrueType face (ProggyTiny) and the launcher's
 // layout is in fixed pixels, so on a 1080p laptop screen the launcher came out tiny whatever Windows' display scaling
 // said. The scale follows the height the launcher is drawn in, after the display scaling the SDK already applies (the
-// drawer's logical size is physical size * 96 / DPI): about 1.5 at 1080 physical pixels at any scaling setting, more on
+// drawer's logical size is physical size * 96 / DPI): the text comes out about 18 px high on screen at 1080 physical pixels at any scaling setting, more on
 // taller screens. BOTS_UI_SCALE overrides it (tests, or a player who wants it larger or smaller).
 // Plain C++ so tests/ui_scale_test.cpp can run it alone.
 #pragma once
@@ -13,7 +13,7 @@
 namespace bots::setup {
 
 // The height the layout is designed for: at this many logical pixels the scale is 1.
-inline constexpr float kUiScaleDesignHeight = 720.0f;
+inline constexpr float kUiScaleDesignHeight = 600.0f;
 inline constexpr float kUiScaleMin = 1.0f;
 inline constexpr float kUiScaleMax = 3.0f;
 
