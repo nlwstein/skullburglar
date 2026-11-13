@@ -2086,7 +2086,8 @@ impl Renderer {
             });
             let b = si.bounds;
             self.spheres.push(([b[0], b[2], b[1]], b[3]));
-            self.inst_env.push(si.env);
+            // B-345: in a stylized counter-kill n1 draws, the fighters' environments are empty; they take the kill's lights.
+            self.inst_env.push(if self.lighting.merk { NONE } else { si.env });
             self.inst_outline.push(si.outline);
         }
         for d in &skin.draws {

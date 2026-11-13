@@ -19,10 +19,12 @@ void Live(uint8_t* base);
 bool LiveAtDraw();
 
 // B-323: game thread, once per scene view family in n1 mode. Reads the player's post chain and notes whether a stylized
-// counter-kill (a MerkYouSpace post material) is on; StylizedKill() returns the last result. Nothing with
-// BOTS_N1_COUNTERKILL_PORT=0.
+// counter-kill (a MerkYouSpace post material) is on; StylizedKill() returns the last result, StylizedKillToGame()
+// whether that frame goes to the game's renderer (B-345: BOTS_N1_COUNTERKILL, counterkill_port.h). Nothing with the
+// switch off.
 void UpdateStylizedKill(uint8_t* base);
 bool StylizedKill();
+bool StylizedKillToGame();
 bool StylizedKillPortOn();
 
 // Console commands ("scenefeed ..."); returns false for anything else.
