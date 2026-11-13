@@ -32,12 +32,14 @@
 #include <rex/filesystem.h>
 #include <rex/logging.h>
 #include <rex/ui/imgui_dialog.h>
+#include <rex/ui/window.h>
 
 #include "app_paths.h"
 #include "file_picker.h"
 #include "iso_extract.h"
 #include "pad_nav.h"
 #include "settings.h"
+#include "ui_scale.h"
 #include "firewall.h"
 #include "update_check.h"
 #include "update_install.h"
@@ -97,7 +99,14 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     PollWorker();
     if (auto_) RunAuto();
 
-    const float width = std::min(720.0f, io.DisplaySize.x - 40.0f);
+    // Text and layout size (ui_scale.h): the style is scaled for this window only and put back at the end, so the
+    // game's overlays (FPS counter, shader progress) keep their own size.
+    ui_scale_ = LauncherUiScale(io.DisplaySize.y, std::getenv("BOTS_UI_SCALE"));
+    const ImGuiStyle unscaled_style = ImGui::GetStyle();
+    ImGui::GetStyle().ScaleAllSizes(ui_scale_);
+    ImGui::GetStyle().FontScaleMain *= ui_scale_;
+
+    const float width = std::min(720.0f * ui_scale_, io.DisplaySize.x - 40.0f);
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(width, 0));
@@ -105,6 +114,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     if (ImGui::Begin("50 Cent - Blood on the Sand##bots_setup", nullptr,
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                          ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
+      LogUiScale(io);  // before the draw calls: Play can delete this dialog
       DrawGameFiles();
       ImGui::Spacing();
       ImGui::Separator();
@@ -116,9 +126,26 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       DrawButtons();
     }
     ImGui::End();
+    ImGui::GetStyle() = unscaled_style;
   }
 
  private:
+  // Scaled pixels: a size from the layout (designed at scale 1) at this window's text scale.
+  float S(float pixels) const { return pixels * ui_scale_; }
+
+  // One log line per change of scale or window size: the numbers a "text too small" report needs.
+  void LogUiScale(const ImGuiIO& io) {
+    const float dpi = float(imgui_drawer()->window()->GetDpi());
+    const float font = ImGui::GetFontSize();
+    if (io.DisplaySize.x == logged_width_ && io.DisplaySize.y == logged_height_ && ui_scale_ == logged_scale_ &&
+        font == logged_font_)
+      return;
+    logged_width_ = io.DisplaySize.x, logged_height_ = io.DisplaySize.y, logged_scale_ = ui_scale_, logged_font_ = font;
+    REXLOG_INFO("setup: UI scale {:.2f} (window {:.0f}x{:.0f} logical, display scaling {:.0f}%, text {:.1f} px, "
+                "about {:.1f} px on screen)",
+                ui_scale_, io.DisplaySize.x, io.DisplaySize.y, dpi * 100.0f / 96.0f, font, font * dpi / 96.0f);
+  }
+
   void SetIsoPath(const std::string& path) {
     std::snprintf(iso_path_, sizeof(iso_path_), "%s", path.c_str());
   }
@@ -364,7 +391,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     ImGui::TextDisabled("%s", bots::PlainPathUtf8(game_dir_).c_str());
     DrawFolderChoice();
     ImGui::BeginDisabled(Extracting());
-    ImGui::SetNextItemWidth(-110.0f);
+    ImGui::SetNextItemWidth(-S(110.0f));
     ImGui::InputTextWithHint("##iso", "Path to the .iso file", iso_path_, sizeof(iso_path_));
     ImGui::SameLine();
     if (ImGui::Button("Browse...", ImVec2(-1, 0))) {
@@ -373,7 +400,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     }
     if (!installed_) ImGui::SetItemDefaultFocus();
     ImGui::BeginDisabled(iso_path_[0] == 0);
-    if (ImGui::Button(installed_ ? "Reinstall" : "Install", ImVec2(160, 0))) StartExtract();
+    if (ImGui::Button(installed_ ? "Reinstall" : "Install", ImVec2(S(160), 0))) StartExtract();
     ImGui::EndDisabled();
     ImGui::EndDisabled();
 
@@ -465,7 +492,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       ImGui::BeginDisabled(s.locked || Extracting() || kbm_off);
       if (s.slider_max > 0) {
         float v = float(std::strtod(s.value.c_str(), nullptr));
-        ImGui::SetNextItemWidth(260.0f);
+        ImGui::SetNextItemWidth(S(260.0f));
         if (ImGui::SliderFloat(s.label.c_str(), &v, float(s.slider_min), float(s.slider_max), s.slider_format.c_str(),
                                (s.slider_linear ? 0 : ImGuiSliderFlags_Logarithmic) | ImGuiSliderFlags_AlwaysClamp)) {
           char text[32];
@@ -479,7 +506,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
         auto it = std::find_if(s.choices.begin(), s.choices.end(),
                                [&](const Choice& c) { return c.value == s.value; });
         std::string preview = it != s.choices.end() ? it->label : s.value;
-        ImGui::SetNextItemWidth(260.0f);
+        ImGui::SetNextItemWidth(S(260.0f));
         if (ImGui::BeginCombo(s.label.c_str(), preview.c_str())) {
           for (const auto& c : s.choices) {
             if (ImGui::Selectable(c.label.c_str(), c.value == s.value)) s.value = c.value;
@@ -528,10 +555,10 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       if (capture_ >= 0) PollCapture();
       if (ImGui::BeginTable("##bindings", 3,
                             ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY,
-                            ImVec2(0, 240))) {
+                            ImVec2(0, S(240)))) {
         ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthStretch, 1.2f);
         ImGui::TableSetupColumn("Keys", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-        ImGui::TableSetupColumn("##edit", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+        ImGui::TableSetupColumn("##edit", ImGuiTableColumnFlags_WidthFixed, S(150.0f));
         for (int i = 0; i < int(settings_.size()); ++i) {
           Setting& s = settings_[i];
           if (!s.binding) continue;
@@ -674,7 +701,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     ImGui::PushStyleColor(ImGuiCol_Button, colors[ImGuiCol_ButtonHovered]);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, colors[ImGuiCol_ButtonActive]);
     ImGui::BeginDisabled(!can_play);
-    const bool pressed = ImGui::Button(play, ImVec2(220, ImGui::GetFrameHeight() * 1.5f));
+    const bool pressed = ImGui::Button(play, ImVec2(S(220), ImGui::GetFrameHeight() * 1.5f));
     if (can_play) ImGui::SetItemDefaultFocus();
     ImGui::EndDisabled();
     ImGui::PopStyleColor(2);
@@ -684,7 +711,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     }
     ImGui::SameLine();
     ImGui::BeginDisabled(UpdateCommitted());
-    const bool quit_pressed = ImGui::Button("Quit", ImVec2(120, ImGui::GetFrameHeight() * 1.5f));
+    const bool quit_pressed = ImGui::Button("Quit", ImVec2(S(120), ImGui::GetFrameHeight() * 1.5f));
     ImGui::EndDisabled();
     if (quit_pressed) {
       if (Extracting()) progress_->cancel = true;
@@ -777,6 +804,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   QuitFn quit_;
   std::vector<Setting> settings_;
   std::unique_ptr<PadNav> pad_;  // null once Play or Quit is pressed
+  float ui_scale_ = 1.0f;  // ui_scale.h; set at the start of every frame
+  float logged_width_ = 0, logged_height_ = 0, logged_scale_ = 0, logged_font_ = 0;
   bool installed_ = false;
   bool quit_requested_ = false;  // an installed update asked the program to quit
   bool show_reinstall_ = false;
