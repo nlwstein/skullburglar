@@ -5,6 +5,7 @@
 // native renderer instead of the emulated EDRAM backend. A plugin rather than part of the game so its SDK sources
 // and their cvars live in their own module, as the xenos plugin's do.
 #include "../diag.h"
+#include "../frame_trace.h"
 #include "../path_utf8.h"
 #include <algorithm>
 #include <chrono>
@@ -111,6 +112,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width, uint32_t frontbuffer_height) override {
     if (!renderer_) return;
     TrackFrame();
+    bots::FrameTrace::Get().Mark('s');
     renderer_->EndFrame();
     PublishWarmup();
     HoldForWarmup();
@@ -146,6 +148,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
             auto& vulkan_context =
                 static_cast<rex::ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext&>(context);
             context.SetIs8bpc(true);
+            bots::FrameTrace::Get().Mark('p');
             return renderer_->Present(frontbuffer_ptr & 0x1FFFFFFF, vulkan_context.image(),
                                       vulkan_context.image_view(), out_width, out_height, ramp);
           });
