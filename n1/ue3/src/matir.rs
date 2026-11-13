@@ -258,9 +258,9 @@ fn blend_by<P: std::ops::Deref<Target = Package>>(
 }
 
 /// Merges the graphs of a blended material into one: each material's nodes appended in turn, then the weights (from the
-/// seconds since `start`) and, for every output, the weighted sum of the materials' values. Material 0 fades out over
-/// `times[0]`; every later material fades in over its own window and out over the next one's, so the weights always add
-/// up to 1. With no usable windows the first material stands alone.
+/// seconds since `start`) and, for every output, the weighted sum of the materials' values. Material i+1 fades in over
+/// `times[i]` on top of the earlier ones (chained lerps), so the weights always add up to 1. With no usable windows the
+/// first material stands alone.
 pub fn merge_blend(parts: Vec<MatDef>, times: &[(f32, f32)], start: f32) -> Option<MatDef> {
     let first = parts.first()?;
     if parts.len() == 1 || times.len() != parts.len() {
@@ -324,15 +324,20 @@ pub fn merge_blend(parts: Vec<MatDef>, times: &[(f32, f32)], start: f32) -> Opti
     }
     // BOTS_N1_BLEND_FORCE=<i>: debug aid, shows material i alone (to compare one stage with the game's picture)
     let force: Option<usize> = std::env::var("BOTS_N1_BLEND_FORCE").ok().and_then(|v| v.parse().ok()).filter(|&i| i < parts.len());
-    let mut weights = vec![push(&mut out, Node::Un { f: "oneminus".into(), x: ramps[0] })];
-    for i in 1..parts.len() {
-        weights.push(match ramps.get(i + 1) {
-            Some(&next) => {
-                let diff = push(&mut out, Node::Sub { a: ramps[i], b: next });
-                push(&mut out, Node::Sat { x: diff, lo: 0.0, hi: 1.0 })
-            }
-            None => ramps[i],
-        });
+    // Chained fades: material i+1 fades in over window i (`times[i]`) on top of what the earlier ones made, so
+    // w0 = (1-r0)(1-r1).., w1 = r0 (1-r1).., w2 = r1: with the burn windows (0-1 s, 0-1 s) the surface goes body -> charred in
+    // about a second, as the game's own picture does. The last window has no later material and is not used.
+    let one_minus: Vec<u32> = (0..parts.len() - 1).map(|i| push(&mut out, Node::Un { f: "oneminus".into(), x: ramps[i] })).collect();
+    let mut weights = Vec::new();
+    for i in 0..parts.len() {
+        let mut w: Option<u32> = if i == 0 { None } else { Some(ramps[i - 1]) };
+        for &om in &one_minus[i..] {
+            w = Some(match w {
+                Some(x) => push(&mut out, Node::Mul { a: x, b: om }),
+                None => om,
+            });
+        }
+        weights.push(w.unwrap_or_else(|| k(&mut out, 1.0)));
     }
     if let Some(f) = force {
         for (i, w) in weights.iter_mut().enumerate() {
@@ -781,7 +786,7 @@ mod blend_tests {
         }
     }
 
-    // body fades out over 0..1 s, the flame fades in over 0..1 and out over 1..6, the char fades in over 1..6
+    // chained fades: flame over body during 0..1 s, then char over that during 0..1 s (the third window is unused)
     const TIMES: [(f32, f32); 3] = [(0.0, 1.0), (0.0, 1.0), (1.0, 6.0)];
 
     fn merged() -> MatDef {
@@ -809,23 +814,20 @@ mod blend_tests {
     #[test]
     fn weights_follow_the_clock_and_sum_to_one() {
         let m = merged();
-        // diffuse = w0*body + w1*flame + w2*char with each texture sampled as its slot number + 1
+        // diffuse = w0*body + w1*flame + w2*char with each texture sampled as 1, 10, 100
         let tv = |t: u32| [1.0, 10.0, 100.0][t as usize];
         let at = |sec: f32| eval(&m, m.diffuse.unwrap(), 100.0 + sec, &tv);
         assert_eq!(at(-5.0), 1.0, "before the start: the body alone");
         assert!((at(0.0) - 1.0).abs() < 1e-4);
-        assert!((at(0.5) - (0.5 * 1.0 + 0.5 * 10.0)).abs() < 1e-3, "{}", at(0.5));
-        assert!((at(1.0) - 10.0).abs() < 1e-3, "flame at full strength after a second");
-        let w_char = 0.5; // halfway through 1..6 s
-        let w_flame = 0.5;
-        assert!((at(3.5) - (w_flame * 10.0 + w_char * 100.0)).abs() < 1e-2, "{}", at(3.5));
-        assert!((at(6.0) - 100.0).abs() < 1e-2, "charred for good");
-        assert!((at(60.0) - 100.0).abs() < 1e-2);
-        // the emissive follows the flame only
+        // t = 0.5: r = 0.5 for both fades: w0 = .25, w1 = .25, w2 = .5
+        assert!((at(0.5) - (0.25 * 1.0 + 0.25 * 10.0 + 0.5 * 100.0)).abs() < 1e-3, "{}", at(0.5));
+        assert!((at(1.0) - 100.0).abs() < 1e-3, "charred after a second");
+        assert!((at(60.0) - 100.0).abs() < 1e-3);
+        // the emissive follows the flame only: w1 = r0 (1 - r1) peaks at 0.25 and is gone by 1 s
         let em = |sec: f32| eval(&m, m.emissive.unwrap(), 100.0 + sec, &tv);
         assert_eq!(em(-5.0), 0.0);
-        assert!((em(1.0) - 4.0).abs() < 1e-4);
-        assert!((em(6.0)).abs() < 1e-4);
+        assert!((em(0.5) - 0.25 * 4.0).abs() < 1e-4);
+        assert!(em(1.0).abs() < 1e-4);
     }
 
     #[test]
