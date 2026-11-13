@@ -109,7 +109,9 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     const float width = std::min(720.0f * ui_scale_, io.DisplaySize.x - 40.0f);
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(width, 0));
+    // The settings scroll inside the window and the buttons stay at the bottom, so at a larger text size Play is
+    // always in view (it was the last line of one long scrolling window).
+    ImGui::SetNextWindowSize(ImVec2(width, io.DisplaySize.y - S(20.0f)));
     ImGui::SetNextWindowBgAlpha(0.95f);
     if (ImGui::Begin("50 Cent - Blood on the Sand##bots_setup", nullptr,
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
@@ -119,11 +121,19 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       ImGui::Spacing();
       ImGui::Separator();
       ImGui::Spacing();
-      DrawSettings();
+      // The footer's height is what the last frame measured (an update notice makes it taller); 0 on the first.
+      // Kept in ImGui's window storage, not a member: Play can delete this dialog inside DrawButtons.
+      ImGuiStorage* storage = ImGui::GetStateStorage();
+      const ImGuiID footer_id = ImGui::GetID("footer_height");
+      if (ImGui::BeginChild("##settings", ImVec2(0, -storage->GetFloat(footer_id, 0.0f)), ImGuiChildFlags_None))
+        DrawSettings();
+      ImGui::EndChild();
+      const float footer_top = ImGui::GetCursorPosY();
       ImGui::Spacing();
       ImGui::Separator();
       ImGui::Spacing();
       DrawButtons();
+      storage->SetFloat(footer_id, ImGui::GetCursorPosY() - footer_top + ImGui::GetStyle().WindowPadding.y);
     }
     ImGui::End();
     ImGui::GetStyle() = unscaled_style;
