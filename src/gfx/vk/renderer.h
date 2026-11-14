@@ -75,7 +75,7 @@ class Renderer : public Pm4Sink {
               const Draw& draw) override;
   // Hybrid spike (hybrid_fill.cpp): the game's scene was suppressed at this point of the stream for camera `seq`;
   // the next colour draw first gets a host-drawn stand-in scene.
-  void QueueSceneFill(uint32_t seq);
+  void QueueSceneFill(uint32_t seq, const uint32_t* gamma_ramp);
   // B-220: the game is about to draw its own scene for a tree-capture frame (kHybridCaptureBegin). Until the scene's
   // marker (QueueSceneFill) its draws only feed the tree capture and its resolves are dropped (CaptureFrameDraw).
   void BeginCaptureFrame() { capture_frame_ = true; }
@@ -251,6 +251,7 @@ class Renderer : public Pm4Sink {
     VkImageView depth_view = VK_NULL_HANDLE, stencil_view = VK_NULL_HANDLE;  // depth surfaces, for sampling
     std::map<uint32_t, VkImageView> swizzled_views;  // sampled images: by host swizzle | other signedness << 12
     bool swapped = false;  // resolve destinations: red and blue swapped (RB_COPY_DEST_INFO copy_dest_swap)
+    bool hdr = false;  // n1 extended gamma, optional
     // Surfaces reach to the end of EDRAM (often 1328+ rows for a 720-row target), and on tiling GPUs every render
     // pass loads and stores its whole render area. used_*: the extent from the origin that anything has written
     // (format transfers copy only that). area_*: the same over viewport-bounded draws only, the render area a pass
@@ -335,13 +336,14 @@ class Renderer : public Pm4Sink {
   // Render scale (RenderScale()): a guest coordinate (in samples) -> host pixels. Edges map through the same
   // rounding everywhere, so rectangles that tile in guest pixels still tile on the host.
   float scale_ = 1.0f;
+  bool hdr_ = false;
   uint32_t Host(uint32_t v) const { return scale_ == 1.0f ? v : uint32_t(float(v) * scale_ + 0.5f); }
   int32_t Host(int32_t v) const { return int32_t(Host(uint32_t(std::max(v, 0)))); }
   bool ReadImage(const Image& image, std::vector<uint8_t>& rgb, uint32_t& width, uint32_t& height);
   void DumpResolve(const Image& image, uint32_t address);
   Image* Own(const SurfaceKey& key, Image* image);
   Image* ResolveTexture(uint32_t address, uint32_t format, uint32_t width, uint32_t height, bool depth_value = false,
-                        bool is_signed = false);
+                        bool is_signed = false, bool hdr = false);
   // depth_or_layers: Z size of 3D images, array layers otherwise (6 for cubes).
   bool CreateImage(Image& image, VkFormat format, uint32_t width, uint32_t height, bool depth,
                    VkImageViewType view_type = VK_IMAGE_VIEW_TYPE_2D, bool attachment = true,
@@ -500,6 +502,7 @@ class Renderer : public Pm4Sink {
   bool DrawSceneFill(Image& target);
   void DestroySceneFill();
   uint32_t scene_fill_seq_ = 0;
+  uint32_t scene_gamma_ramp_[256] = {};
   VkPipelineLayout fill_layout_ = VK_NULL_HANDLE;
   std::vector<VkShaderModule> fill_modules_;
   std::map<std::pair<uint32_t, VkFormat>, VkPipeline> fill_pipelines_;

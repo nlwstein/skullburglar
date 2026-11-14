@@ -16,6 +16,7 @@
 #include <rex/graphics/registers.h>
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
+#include <rex/ui/vulkan/presenter.h>
 
 namespace bots::gfx::vk {
 namespace {
@@ -178,6 +179,9 @@ std::string Renderer::DeviceDescription() const {
 
 Renderer::Renderer(const rex::ui::vulkan::VulkanDevice* device, PhysicalMemory memory)
     : device_(device), memory_(std::move(memory)) {
+#ifdef BOTS_N1FFI
+  hdr_ = rex::ui::vulkan::VulkanPresenter::GuestOutputFormat() == VK_FORMAT_R16G16B16A16_SFLOAT;
+#endif
   // BOTS_TEST_RENDERER_FAIL=1: fail as if the driver lacked dynamic rendering (checks the error box and the log).
   if (const char* v = std::getenv("BOTS_TEST_RENDERER_FAIL"); v && *v == '1') {
     Fail("test: pretending the GPU's Vulkan driver has no dynamic rendering");
@@ -998,7 +1002,12 @@ Renderer::Image* Renderer::Surface(const rg::RegisterFile& regs, bool depth, uin
   const uint32_t rows = std::max(1u, (kEdramTiles - base % kEdramTiles) / pitch_tiles);
   const uint32_t height = std::min(rows * kTileHeightSamples, kMaxSurfaceHeight);
   auto image = std::make_unique<Image>();
-  if (!CreateImage(*image, depth ? kDepthFormat : ColorTargetFormat(format), Host(pitch), Host(height), depth)) {
+  // n1 and HUD share an extended range gamma target.
+  // Preserve that through any sized 8888 surface.
+  const bool hdr = hdr_ && !depth && format == uint32_t(xe::ColorRenderTargetFormat::k_8_8_8_8);
+  const VkFormat host_format = hdr ? VK_FORMAT_R16G16B16A16_SFLOAT
+                                  : depth ? kDepthFormat : ColorTargetFormat(format);
+  if (!CreateImage(*image, host_format, Host(pitch), Host(height), depth)) {
     return nullptr;
   }
   slot = std::move(image);
@@ -1041,13 +1050,15 @@ Renderer::Image* Renderer::Own(const SurfaceKey& key, Image* image) {
 }
 
 Renderer::Image* Renderer::ResolveTexture(uint32_t address, uint32_t format, uint32_t width, uint32_t height,
-                                          bool depth_value, bool is_signed) {
-  const TextureKey key{address, format | (depth_value ? 0x100 : 0) | (is_signed ? 0x200 : 0), width, height};
+                                          bool depth_value, bool is_signed, bool hdr) {
+  const TextureKey key{address, format | (depth_value ? 0x100 : 0) | (is_signed ? 0x200 : 0) | (hdr ? 0x400 : 0),
+                       width, height};
   auto& slot = textures_[key];
   if (!slot) {
     auto image = std::make_unique<Image>();
     // Shaders sample 2D textures as arrays.
-    const VkFormat host_format = depth_value ? VK_FORMAT_R32_SFLOAT : TextureFormat(format, is_signed);
+    const VkFormat host_format = hdr ? VK_FORMAT_R16G16B16A16_SFLOAT
+                                    : depth_value ? VK_FORMAT_R32_SFLOAT : TextureFormat(format, is_signed);
     if (!CreateImage(*image, host_format, Host(width), Host(height), false, VK_IMAGE_VIEW_TYPE_2D_ARRAY)) {
       return nullptr;
     }
@@ -1056,6 +1067,7 @@ Renderer::Image* Renderer::ResolveTexture(uint32_t address, uint32_t format, uin
   if (depth_value) {
     depth_texture_at_[address] = slot.get();
   } else {
+    slot->hdr = hdr;
     texture_at_[address] = slot.get();
     depth_texture_at_.erase(address);
   }
@@ -1214,7 +1226,7 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
     const bool is_signed = number == xe::SurfaceNumberFormat::kSignedRepeatingFraction ||
                            number == xe::SurfaceNumberFormat::kSignedInteger;
     Image* dest = ResolveTexture(dest_address, format, dest_pitch.copy_dest_pitch, dest_pitch.copy_dest_height,
-                                 false, is_signed);
+                                 false, is_signed, source->hdr && format == uint32_t(xe::TextureFormat::k_8_8_8_8));
     int32_t w, h, dw, dh;
     if (dest && clamp_rect(*source, w, h) && clamp_rect(*dest, dw, dh)) {
       // The resolve converts through the shader into the destination's format and signedness, with the exponent
@@ -1296,6 +1308,7 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
     const VkClearRect rect{{{x0, y0}, {uint32_t(w), uint32_t(h)}}, 0, 1};
     vk_.vkCmdClearAttachments(cmd_, 1, &what, 1, &rect);
     vk_.vkCmdEndRendering(cmd_);
+    if (!depth && !x0 && !y0 && uint32_t(w) >= image.used_width && uint32_t(h) >= image.used_height) image.hdr = false;
     image.written = ++write_clock_;
     ++stats_.clears;
   };

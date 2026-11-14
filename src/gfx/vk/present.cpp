@@ -10,7 +10,10 @@
 #include <vector>
 
 #include <glslang/Public/ShaderLang.h>
+#include <rex/cvar.h>
 #include <rex/logging.h>
+#include <rex/math.h>
+#include <rex/ui/vulkan/presenter.h>
 
 #include "renderer.h"
 #include "draw_dump.h"
@@ -22,12 +25,22 @@ namespace {
 // std140 packs the 256 ramp entries as 64 uvec4s.
 constexpr const char* kPresentShader = R"(#version 450
 layout(set = 0, binding = 0) uniform sampler2DArray source;
-layout(set = 0, binding = 1) uniform Gamma { uvec4 ramp[64]; vec4 render_scale; };
+layout(set = 0, binding = 1) uniform Gamma { uvec4 ramp[64]; vec4 render_scale; vec4 hdr; };
 layout(location = 0) out vec4 result;
 
 uint Ramp(float v) {
   uint i = uint(round(clamp(v, 0.0, 1.0) * 255.0));
   return ramp[i >> 2][i & 3u];
+}
+
+// FP16 ramp interpolation, extending both ends at slope 1.
+// Neg values kept for n1 to compensate for a raised black level.
+float RampExtended(float v, uint shift) {
+  float x = clamp(v, 0.0, 1.0) * 255.0;
+  uint i0 = uint(x), i1 = min(i0 + 1u, 255u);
+  float a = float((ramp[i0 >> 2][i0 & 3u] >> shift) & 0x3FFu);
+  float b = float((ramp[i1 >> 2][i1 & 3u] >> shift) & 0x3FFu);
+  return mix(a, b, x - float(i0)) / 1023.0 + min(v, 0.0) + max(v - 1.0, 0.0);
 }
 
 vec3 Tap(vec2 texel, vec2 size) { return textureLod(source, vec3(texel / size, 0.0), 0.0).rgb; }
@@ -58,8 +71,28 @@ void main() {
   vec2 position = gl_FragCoord.xy * render_scale.x;
   vec3 c = render_scale.z != 0.0 ? CatmullRom(position, size)
                                  : textureLod(source, vec3(position / size, 0.0), 0.0).rgb;
-  result = vec4(float((Ramp(c.r) >> 20) & 0x3FFu), float((Ramp(c.g) >> 10) & 0x3FFu), float(Ramp(c.b) & 0x3FFu),
-                1023.0) / 1023.0;
+#if HDR_OUTPUT
+  if (render_scale.w < 0.5)
+#endif
+  {
+    c = vec3(float((Ramp(c.r) >> 20) & 0x3FFu), float((Ramp(c.g) >> 10) & 0x3FFu),
+             float(Ramp(c.b) & 0x3FFu)) / 1023.0;
+  }
+#if HDR_OUTPUT
+  else {
+    c = vec3(RampExtended(c.r, 20u), RampExtended(c.g, 10u), RampExtended(c.b, 0u));
+  }
+  {
+    // Decode after HUD has blended and convert to scRGB.
+    // Clamp before pow to keep the peak scaling finite.
+    c = pow(clamp(c, 0.0, 64.0), vec3(2.2)) * hdr.x / 80.0;
+    // Limit the frame. HUD and fades are added after n1's shoulder.
+    // All channels are scaled together to keep hue.
+    float m = max(max(c.r, c.g), c.b);
+    if (m > hdr.y) c *= hdr.y / m;
+  }
+#endif
+  result = vec4(c, 1.0);
 }
 )";
 
@@ -93,9 +126,21 @@ struct Burst {
   std::string lines;
 };
 
-void BurstToRgb(VkFormat f, const uint8_t* src, size_t texels, std::vector<uint8_t>& rgb) {
+float BurstToRgb(VkFormat f, const uint8_t* src, size_t texels, std::vector<uint8_t>& rgb) {
   rgb.resize(texels * 3);
+  float peak = 0.0f;
   for (size_t i = 0; i < texels; ++i) {
+    if (f == VK_FORMAT_R16G16B16A16_SFLOAT) {
+      uint16_t h[4];
+      std::memcpy(h, src + i * 8, sizeof(h));
+      for (int k = 0; k < 3; ++k) {
+        const float value = rex::xenos_half_to_float(h[k], true);
+        peak = std::max(peak, value);
+        const float c = std::clamp(value, 0.0f, 1.0f);
+        rgb[i * 3 + k] = uint8_t(std::lround(c * 255.0f));
+      }
+      continue;
+    }
     uint32_t p;
     std::memcpy(&p, src + i * 4, 4);
     uint8_t* o = &rgb[i * 3];
@@ -106,10 +151,10 @@ void BurstToRgb(VkFormat f, const uint8_t* src, size_t texels, std::vector<uint8
       if (f == VK_FORMAT_B8G8R8A8_UNORM) std::swap(o[0], o[2]);
     }
   }
+  return peak;
 }
 
-constexpr VkFormat kGuestOutputFormat = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
-constexpr VkDeviceSize kRampBytes = 256 * 4 + 16;  // + render_scale
+constexpr VkDeviceSize kRampBytes = 256 * 4 + 32;  // + render_scale and hdr luminance
 
 }  // namespace
 
@@ -132,8 +177,11 @@ bool Renderer::InitPresent() {
     layout_info.pSetLayouts = &present_set_layout_;
     if (vk_.vkCreatePipelineLayout(dev, &layout_info, nullptr, &present_layout_) != VK_SUCCESS) return false;
   }
-  const VkShaderModule fs = CreateShaderModule(EShLangFragment, kPresentShader);
-  if (fs) present_pipeline_ = FullscreenPipeline(fs, kGuestOutputFormat, present_layout_);
+  const bool hdr = rex::ui::vulkan::VulkanPresenter::GuestOutputFormat() == VK_FORMAT_R16G16B16A16_SFLOAT;
+  std::string source = kPresentShader;
+  source.insert(source.find('\n') + 1, hdr ? "#define HDR_OUTPUT 1\n" : "#define HDR_OUTPUT 0\n");
+  const VkShaderModule fs = CreateShaderModule(EShLangFragment, source);
+  if (fs) present_pipeline_ = FullscreenPipeline(fs, rex::ui::vulkan::VulkanPresenter::GuestOutputFormat(), present_layout_);
   return present_pipeline_ != VK_NULL_HANDLE;
 }
 
@@ -180,8 +228,15 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
     return v && std::strcmp(v, "bilinear") == 0;
   }();
   const float ratio = scale_ / output_scale();  // front buffer texels per output pixel
-  const float params[4] = {ratio, ratio, ratio < 1.0f && !bilinear ? 1.0f : 0.0f, 0.0f};
+  const float params[4] = {ratio, ratio, ratio < 1.0f && !bilinear ? 1.0f : 0.0f, source.hdr ? 1.0f : 0.0f};
   std::memcpy(ramp + 256 * 4, params, sizeof(params));
+  const float white = hdr_ ? float(std::clamp(rex::cvar::Query<double>("vulkan_hdr_ui_white"), 40.0, 500.0)) : 80.0f;
+  // Use the same peak as n1, raised to paper white when needed.
+  const float peak = hdr_ ? float(std::max(std::clamp(rex::cvar::Query<double>("vulkan_hdr_peak"), 200.0, 10000.0),
+                                           std::clamp(rex::cvar::Query<double>("vulkan_hdr_paper_white"), 80.0, 500.0)))
+                          : 80.0f;
+  const float luminance[4] = {white, peak / 80.0f, 0.0f, 0.0f};
+  std::memcpy(ramp + 256 * 4 + 16, luminance, sizeof(luminance));
   const VkDescriptorSet set = AllocateSet(present_set_layout_);
   if (!set) {
     static bool warned = false;
@@ -291,7 +346,7 @@ void Renderer::CaptureBurst(const Image& source) {
         std::chrono::duration<double>(now - b->start).count() < b->windows[b->next].at)
       return;
     if (source.format != VK_FORMAT_R8G8B8A8_UNORM && source.format != VK_FORMAT_B8G8R8A8_UNORM &&
-        source.format != VK_FORMAT_A2B10G10R10_UNORM_PACK32) {
+        source.format != VK_FORMAT_A2B10G10R10_UNORM_PACK32 && source.format != VK_FORMAT_R16G16B16A16_SFLOAT) {
       REXLOG_WARN("capture burst: front buffer format {} not supported", int(source.format));
       b->next = b->windows.size();
       return;
@@ -299,7 +354,7 @@ void Renderer::CaptureBurst(const Image& source) {
     b->every_ms = b->windows[b->next].every_ms;
     b->count = b->windows[b->next++].count;
     b->w = source.width, b->h = source.height, b->format = source.format;
-    b->frame_bytes = VkDeviceSize(b->w) * b->h * 4;
+    b->frame_bytes = VkDeviceSize(b->w) * b->h * (source.format == VK_FORMAT_R16G16B16A16_SFLOAT ? 8 : 4);
     VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     info.size = b->frame_bytes * b->count;
     info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -318,10 +373,11 @@ void Renderer::CaptureBurst(const Image& source) {
     // frame: the copy's index (-1: logged, not copied, trace only); gap_ms: since the previous present; phase: the
     // instrumentation's phase at that moment.
     b->lines = "frame\tms\tpresents\tn1_drawn\tmarker_seq\tview_seq\tscene_cam\tscene_frame\tgap_ms\tphase\n";
-    REXLOG_INFO("capture burst {}: {} frames of {}x{}{}", b->number, b->count, b->w, b->h,
-                b->every_ms ? ", one every " + std::to_string(b->every_ms) + " ms (trace)" : std::string());
+    REXLOG_INFO("capture burst {}: {} frames of {}x{}{} (format {}, HDR {})", b->number, b->count, b->w, b->h,
+                b->every_ms ? ", one every " + std::to_string(b->every_ms) + " ms (trace)" : std::string(),
+                uint32_t(source.format), source.hdr);
   }
-  if (source.width != b->w || source.height != b->h) return;  // a resize mid-burst: skip those frames
+  if (source.width != b->w || source.height != b->h || source.format != b->format) return;
   const double gap_ms = std::chrono::duration<double, std::milli>(now - b->last_present).count();
   b->last_present = now;
   char phase[9] = {};
@@ -370,7 +426,9 @@ void Renderer::CaptureBurst(const Image& source) {
                format = b->format] {
     std::vector<uint8_t> rgb;
     for (uint32_t i = 0; i < n; ++i) {
-      BurstToRgb(format, pixels.data() + size_t(w) * h * 4 * i, size_t(w) * h, rgb);
+      const size_t pixel_bytes = format == VK_FORMAT_R16G16B16A16_SFLOAT ? 8 : 4;
+      const float peak = BurstToRgb(format, pixels.data() + size_t(w) * h * pixel_bytes * i, size_t(w) * h, rgb);
+      if (format == VK_FORMAT_R16G16B16A16_SFLOAT) REXLOG_INFO("capture burst: frame {} FP16 gamma peak {:.4f}", i, peak);
       char name[32];
       std::snprintf(name, sizeof(name), "-%03u.ppm", i);
       if (FILE* f = std::fopen((stem + name).c_str(), "wb")) {

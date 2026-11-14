@@ -339,6 +339,7 @@ void Renderer::Transfer(Image& source, uint32_t source_format, Image& dest, uint
   vk_.vkCmdPushConstants(cmd_, transfer_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(constants), &constants);
   vk_.vkCmdDraw(cmd_, 3, 1, 0, 0);
   vk_.vkCmdEndRendering(cmd_);
+  dest.hdr = source.hdr && dest.format == VK_FORMAT_R16G16B16A16_SFLOAT && dest_format == 300;
   ++stats_.transfers;
 }
 

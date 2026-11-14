@@ -24,6 +24,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <imgui.h>
@@ -45,6 +46,46 @@
 #include "update_install.h"
 
 namespace bots::setup {
+
+inline bool DrawSetting(Setting& s, float item_width = 260.0f) {
+  bool changed = false;
+  ImGui::PushID(s.cvar.c_str());
+  ImGui::BeginDisabled(s.locked);
+  if (s.slider_max > 0) {
+    float v = float(std::strtod(s.value.c_str(), nullptr));
+    ImGui::SetNextItemWidth(item_width);
+    changed = ImGui::SliderFloat(s.label.c_str(), &v, float(s.slider_min), float(s.slider_max), s.slider_format.c_str(),
+                                 (s.slider_linear ? 0 : ImGuiSliderFlags_Logarithmic) | ImGuiSliderFlags_AlwaysClamp);
+    if (changed) {
+      char text[32];
+      std::snprintf(text, sizeof(text), s.cvar == "vulkan_hdr_middle_gray" ? "%.3f" : "%.2f", v);
+      s.value = text;
+    }
+  } else if (s.choices.empty()) {
+    bool on = s.value == "true";
+    changed = ImGui::Checkbox(s.label.c_str(), &on);
+    if (changed) s.value = on ? "true" : "false";
+  } else {
+    std::string preview = s.value;
+    for (const auto& c : s.choices) if (c.value == s.value) preview = c.label;
+    ImGui::SetNextItemWidth(item_width);
+    if (ImGui::BeginCombo(s.label.c_str(), preview.c_str())) {
+      for (const auto& c : s.choices) {
+        if (ImGui::Selectable(c.label.c_str(), c.value == s.value)) s.value = c.value, changed = true;
+      }
+      ImGui::EndCombo();
+    }
+  }
+  ImGui::EndDisabled();
+  if (s.locked) {
+    ImGui::SameLine();
+    ImGui::TextDisabled("(set by a launch option)");
+  } else if (!s.help.empty() && ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("%s", s.help.c_str());
+  }
+  ImGui::PopID();
+  return changed;
+}
 
 class SetupDialog : public rex::ui::ImGuiDialog {
  public:
@@ -496,48 +537,19 @@ class SetupDialog : public rex::ui::ImGuiDialog {
         ImGui::Spacing();
         ImGui::SeparatorText(s.section.c_str());
       }
-      ImGui::PushID(s.cvar.c_str());
       // The rest of the keyboard and mouse section only matters with it on.
       const bool kbm_off = s.cvar.starts_with("kbm_") && Value("kbm") == "false";
-      ImGui::BeginDisabled(s.locked || Extracting() || kbm_off);
-      if (s.slider_max > 0) {
-        float v = float(std::strtod(s.value.c_str(), nullptr));
-        ImGui::SetNextItemWidth(S(260.0f));
-        if (ImGui::SliderFloat(s.label.c_str(), &v, float(s.slider_min), float(s.slider_max), s.slider_format.c_str(),
-                               (s.slider_linear ? 0 : ImGuiSliderFlags_Logarithmic) | ImGuiSliderFlags_AlwaysClamp)) {
-          char text[32];
-          std::snprintf(text, sizeof(text), "%.2f", v);
-          s.value = text;
-        }
-      } else if (s.choices.empty()) {
-        bool on = s.value == "true";
-        if (ImGui::Checkbox(s.label.c_str(), &on)) s.value = on ? "true" : "false";
-      } else {
-        auto it = std::find_if(s.choices.begin(), s.choices.end(),
-                               [&](const Choice& c) { return c.value == s.value; });
-        std::string preview = it != s.choices.end() ? it->label : s.value;
-        ImGui::SetNextItemWidth(S(260.0f));
-        if (ImGui::BeginCombo(s.label.c_str(), preview.c_str())) {
-          for (const auto& c : s.choices) {
-            if (ImGui::Selectable(c.label.c_str(), c.value == s.value)) s.value = c.value;
-          }
-          ImGui::EndCombo();
-        }
-      }
+      ImGui::BeginDisabled(Extracting() || kbm_off);
+      DrawSetting(s, S(260.0f));
       ImGui::EndDisabled();
-      if (s.locked) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("(set by a launch option)");
-      } else if (!s.help.empty() && ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("%s", s.help.c_str());
-      }
+      if (s.cvar == "vulkan_hdr" && Value("renderer") == "pre1")
+        ImGui::TextDisabled("HDR requires the new renderer.");
       if (s.cvar == "user_signin_live" && s.value == "true") DrawFirewall();
       if (s.cvar == "diagnostic_logging") {
         ImGui::Indent();
         ImGui::TextDisabled("Logs are in %s", bots::PlainPathUtf8(LogFolder()).c_str());
         ImGui::Unindent();
       }
-      ImGui::PopID();
     }
     DrawBindings();
   }
@@ -834,6 +846,68 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   std::shared_ptr<FirewallWatch> firewall_;
   bool firewall_asked_ = false;
   bool update_logged_ = false;
+};
+
+// F6 display settings. Changes apply on the next frame and are saved when the window closes.
+class DisplayDialog : public rex::ui::ImGuiDialog {
+ public:
+  DisplayDialog(rex::ui::ImGuiDrawer* drawer, std::filesystem::path config_path, std::function<const char*()> status,
+                std::function<void()> closed)
+      : ImGuiDialog(drawer), config_path_(std::move(config_path)), status_(std::move(status)),
+        closed_(std::move(closed)), settings_(LoadSettings()) {
+    std::erase_if(settings_, [](const Setting& s) {
+      return !s.cvar.starts_with("vulkan_hdr");
+    });
+    original_settings_ = settings_;
+  }
+
+  void RequestClose() { close_ = true; }
+
+ protected:
+  void OnClose() override {
+    std::erase_if(settings_, [this](const Setting& s) {
+      return std::any_of(original_settings_.begin(), original_settings_.end(), [&](const Setting& original) {
+        return original.cvar == s.cvar && (original.value == s.value ||
+            (s.slider_max > 0 && std::strtod(original.value.c_str(), nullptr) == std::strtod(s.value.c_str(), nullptr)));
+      });
+    });
+    if (!settings_.empty()) SaveSettings(settings_, config_path_);
+    closed_();
+  }
+
+  void OnDraw(ImGuiIO& io) override {
+    ImGui::SetNextWindowSize(ImVec2(600, 0), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_FirstUseEver,
+                            ImVec2(0.5f, 0.5f));
+    bool open = !close_;
+    if (ImGui::Begin("Display settings (F6)", &open, ImGuiWindowFlags_AlwaysAutoResize)) {
+      ImGui::TextUnformatted(status_());
+      ImGui::TextDisabled("Enabling HDR requires a restart.");
+      ImGui::Separator();
+      for (auto& s : settings_) {
+        if (DrawSetting(s)) rex::cvar::SetFlagByName(s.cvar, s.value);
+      }
+      if (ImGui::Button("Reset brightness and grading")) {
+        for (auto& s : settings_) {
+          if (s.locked || s.cvar == "vulkan_hdr") continue;
+          s.value = s.default_value;
+          rex::cvar::SetFlagByName(s.cvar, s.value);
+        }
+      }
+      ImGui::SameLine();
+      if (ImGui::Button("Close")) open = false;
+    }
+    ImGui::End();
+    if (!open) Close();
+  }
+
+ private:
+  std::filesystem::path config_path_;
+  std::function<const char*()> status_;
+  std::function<void()> closed_;
+  std::vector<Setting> settings_;
+  std::vector<Setting> original_settings_;
+  bool close_ = false;
 };
 
 }  // namespace bots::setup

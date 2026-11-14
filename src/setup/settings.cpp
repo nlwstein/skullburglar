@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <system_error>
+#include <utility>
 
 #include <toml++/toml.hpp>
 
@@ -41,6 +42,12 @@ REXCVAR_DEFINE_BOOL(present_vsync, true, "bots",
 
 REXCVAR_DEFINE_BOOL(fps_counter, false, "bots",
                     "Show the frame rate, frame time and renderer in a corner of the screen (fps_counter.h)");
+REXCVAR_DEFINE_DOUBLE(vulkan_hdr_exposure, 0.0, "bots/HDR", "Scene exposure in stops");
+REXCVAR_DEFINE_DOUBLE(vulkan_hdr_middle_gray, 0.18, "bots/HDR", "Scene middle gray (0.18 preserves the original)");
+REXCVAR_DEFINE_DOUBLE(vulkan_hdr_contrast, 1.0, "bots/HDR", "Scene contrast around 18 percent gray");
+REXCVAR_DEFINE_DOUBLE(vulkan_hdr_highlights, 1.0, "bots/HDR", "Scene highlights");
+REXCVAR_DEFINE_DOUBLE(vulkan_hdr_shadows, 1.0, "bots/HDR", "Scene shadows");
+REXCVAR_DEFINE_DOUBLE(vulkan_hdr_saturation, 1.0, "bots/HDR", "Scene saturation");
 
 namespace bots::setup {
 namespace fs = std::filesystem;
@@ -67,9 +74,32 @@ std::vector<Setting> Catalog() {
                "Wider than 16:9 fills an ultrawide screen and shows more at the sides; the HUD and menus stretch. "
                "Automatic matches the screen in fullscreen, or the window.",
                {{"16:9", "16:9 (original)"}, {"auto", "Automatic"}, {"21:9", "21:9"}, {"32:9", "32:9"}}});
+  s.push_back({"vulkan_hdr", "", "Enable HDR (restart required)",
+               "Native scRGB output on an HDR display. Requires the new renderer. "
+               "Enable HDR in the operating system too. F6 opens the live display controls.", {}});
+  s.back().section = "HDR";
+  s.push_back({"vulkan_hdr_paper_white", "", "Game brightness (paper white)",
+               "The game's reference white in nits. Highlights can extend above it.", {}});
+  s.back().slider_min = 80, s.back().slider_max = 500, s.back().slider_linear = true, s.back().slider_format = "%.0f nits";
+  s.push_back({"vulkan_hdr_peak", "", "Peak brightness", "Set this to the display's peak brightness.", {}});
+  s.back().slider_min = 200, s.back().slider_max = 4000, s.back().slider_linear = true, s.back().slider_format = "%.0f nits";
+  s.push_back({"vulkan_hdr_ui_white", "", "UI brightness", "HUD, menus and host overlays in nits.", {}});
+  s.back().slider_min = 40, s.back().slider_max = 500, s.back().slider_linear = true, s.back().slider_format = "%.0f nits";
+  s.push_back({"vulkan_hdr_exposure", "", "Exposure", "Scene exposure in stops, before the HDR shoulder.", {}});
+  s.back().slider_min = -4, s.back().slider_max = 4, s.back().slider_linear = true, s.back().slider_format = "%.2f EV";
+  s.push_back({"vulkan_hdr_middle_gray", "", "Middle gray",
+               "Scene midtones. 0.18 keeps the original curve; black and reference white stay fixed.", {}});
+  s.back().slider_min = 0.05, s.back().slider_max = 0.5, s.back().slider_linear = true, s.back().slider_format = "%.3f";
+  for (const auto& [name, label] : std::vector<std::pair<const char*, const char*>>{
+         {"vulkan_hdr_contrast", "Contrast"}, {"vulkan_hdr_highlights", "Highlights"},
+         {"vulkan_hdr_shadows", "Shadows"}, {"vulkan_hdr_saturation", "Saturation"}}) {
+    s.push_back({name, "", label, "1.0 keeps the game's original grade. Adjusts the scene; the HUD is unchanged.", {}});
+    s.back().slider_min = 0.25, s.back().slider_max = 2, s.back().slider_linear = true;
+  }
   s.push_back({"motion_blur", "", "Motion blur",
                "The smear when the camera turns or things move fast. Off keeps every other effect.",
                {}});
+  s.back().section = "Game";
   s.push_back({"screen_shake", "", "Screen shake",
                "How much the camera shakes from explosions, gunfire and hits, as a share of the game's own. 100% is "
                "as shipped; 0% turns it off.",
@@ -83,6 +113,7 @@ std::vector<Setting> Catalog() {
                {{"30", "30 fps (steadier on weaker hardware)"}, {"60", "60 fps (original)"}, {"90", "90 fps"}, {"120", "120 fps"}, {"144", "144 fps"},
                 {"0", "Unlimited (experimental)"}}});
   s.push_back({"present_vsync", "", "VSync", "Off has the lowest latency but can tear.", {}});
+  s.back().section = "Display and launcher";
   s.push_back({"fps_counter", "", "Show FPS counter",
                "A small readout in the top-left corner: frames per second, milliseconds per frame, and which renderer "
                "is drawing. Handy for bug reports. Takes effect the next time the game starts.",
