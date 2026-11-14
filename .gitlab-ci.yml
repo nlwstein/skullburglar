@@ -141,7 +141,7 @@ codegen:
         echo "Nothing to release: no codegen needed."
         exit 0
       fi
-    - docker build -q -t skullburglar-ci-linux docker/linux-steamrt
+    - tools/ci/ci_image.sh linux-steamrt skullburglar-ci-linux
     - JOB=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.job.id=$CI_JOB_ID" --filter "label=com.gitlab.gitlab-runner.type=build")
     - test -n "$JOB"
     - >-
@@ -171,7 +171,7 @@ codegen:
         exit 0
       fi
       PACKAGE=${PACKAGE:-skullburglar}
-    - docker build -q -t "skullburglar-ci-$PLATFORM" "docker/$IMAGE"
+    - tools/ci/ci_image.sh "$IMAGE" "skullburglar-ci-$PLATFORM"
     # This job's container, whose volumes (the checkout) the build container shares.
     - JOB=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.job.id=$CI_JOB_ID" --filter "label=com.gitlab.gitlab-runner.type=build")
     - test -n "$JOB"
@@ -289,7 +289,7 @@ build:android:
         exit 0
       fi
       export PACKAGE=${PACKAGE:-skullburglar}
-    - docker build -q -t skullburglar-ci-android docker/android
+    - tools/ci/ci_image.sh android skullburglar-ci-android
     - JOB=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.job.id=$CI_JOB_ID" --filter "label=com.gitlab.gitlab-runner.type=build")
     - test -n "$JOB"
     - >-
