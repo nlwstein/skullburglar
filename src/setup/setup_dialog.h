@@ -644,6 +644,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       const bool kbm_off = s.cvar.starts_with("kbm_") && Value("kbm") == "false";
       // Anti-aliasing and sharpening are n1 passes: greyed out with the pre-1.0 renderer, like HDR.
       const bool n1_only = (s.cvar == "anti_aliasing" || s.cvar == "sharpening") && Value("renderer") == "pre1";
+      if (s.cvar == "ambient_occlusion") ImGui::SameLine(0.0f, S(28.0f));
       ImGui::BeginDisabled(Extracting() || kbm_off || n1_only);
       DrawSetting(s, S(260.0f));
       ImGui::EndDisabled();
@@ -1290,7 +1291,8 @@ class DisplayDialog : public rex::ui::ImGuiDialog {
       : ImGuiDialog(drawer), config_path_(std::move(config_path)), status_(std::move(status)),
         closed_(std::move(closed)), settings_(LoadSettings()) {
     std::erase_if(settings_, [](const Setting& s) {
-      return !s.cvar.starts_with("vulkan_hdr") && s.cvar != "fov_offset";
+      return !s.cvar.starts_with("vulkan_hdr") && s.cvar != "fov_offset" && s.cvar != "motion_blur" &&
+             s.cvar != "ambient_occlusion" && s.cvar != "ambient_occlusion_strength";
     });
     original_settings_ = settings_;
   }
@@ -1319,11 +1321,12 @@ class DisplayDialog : public rex::ui::ImGuiDialog {
       ImGui::TextDisabled("Enabling HDR requires a restart.");
       ImGui::Separator();
       for (auto& s : settings_) {
+        if (!s.section.empty()) ImGui::SeparatorText(s.section.c_str());
         if (DrawSetting(s)) rex::cvar::SetFlagByName(s.cvar, s.value);
       }
       if (ImGui::Button("Reset brightness and grading")) {
         for (auto& s : settings_) {
-          if (s.locked || s.cvar == "vulkan_hdr" || s.cvar == "fov_offset") continue;
+          if (s.locked || !s.cvar.starts_with("vulkan_hdr_")) continue;
           s.value = s.default_value;
           rex::cvar::SetFlagByName(s.cvar, s.value);
         }

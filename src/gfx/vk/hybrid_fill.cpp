@@ -878,6 +878,9 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   // UE3's infinite perspective: proj[14] = -near * proj[10].
   camera.near_plane = view_cam->proj[10] != 0 ? -view_cam->proj[14] / view_cam->proj[10] : 5.0f;
   N1Target t{};
+  t.ambient_occlusion_strength = rex::cvar::Query<bool>("ambient_occlusion")
+                                    ? float(std::clamp(rex::cvar::Query<double>("ambient_occlusion_strength"), 0.0, 6.0))
+                                    : 0.0f;
   t.view = target.view;
   t.layout = VK_IMAGE_LAYOUT_GENERAL;
   t.width = target.width, t.height = target.height;
