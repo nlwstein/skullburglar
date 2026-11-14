@@ -32,7 +32,11 @@ $SYNC --exclude out/ --exclude .git/ --exclude .claude/ --exclude game/ --exclud
 $SYNC "$GEN/" "$(dest bots/$N/game/generated/)"
 rsync -a tools/win-cross/win-clang.cmake tools/win-cross/casefix.py "$(dest bots/$N/)"
 
-on_host "CPUS=${CPUS:-} N=$N CMAKE_ARGS='${CMAKE_ARGS:-}'"'
+# xwin, the VS manifest and the CRT and SDK versions: docker/win-cross's pins (its comments say why).
+arg() { sed -n "s/^ARG $1=//p" docker/win-cross/Dockerfile; }
+XWIN_PINS="XWIN=$(arg XWIN) XWIN_SHA256=$(arg XWIN_SHA256) VSMAN=$(arg VSMAN) VSMAN_SHA256=$(arg VSMAN_SHA256) WIN_SDK=$(arg WIN_SDK) MSVC_CRT=$(arg MSVC_CRT)"
+
+on_host "CPUS=${CPUS:-} N=$N CMAKE_ARGS='${CMAKE_ARGS:-}' $XWIN_PINS"'
 set -e
 c=${CPUS:-$(nproc)}
 C=bots-$N
@@ -48,10 +52,12 @@ docker exec $C sh -c "command -v cargo >/dev/null || (curl -fsSL https://sh.rust
   CARGO_HOME=/opt/cargo sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.97.1 \
   -t x86_64-pc-windows-msvc >/dev/null 2>&1 && for t in cargo rustc rustup; do ln -sf /opt/cargo/bin/\$t /usr/local/bin/\$t; done \
   && ln -sf /usr/bin/clang /usr/local/bin/cc)"
-docker exec $C sh -c "command -v xwin >/dev/null || (cd /tmp && curl -sL \
-  https://github.com/Jake-Shadle/xwin/releases/download/0.6.6/xwin-0.6.6-x86_64-unknown-linux-musl.tar.gz \
-  | tar xz && cp xwin-*/xwin /usr/local/bin/)"
-docker exec $C sh -c "[ -d /w/xwin/sdk ] || xwin --accept-license splat --output /w/xwin"
+docker exec $C sh -c "command -v xwin >/dev/null || (cd /tmp && curl -fsSL -o xwin.tgz \
+  https://github.com/Jake-Shadle/xwin/releases/download/$XWIN/xwin-$XWIN-x86_64-unknown-linux-musl.tar.gz \
+  && echo \"$XWIN_SHA256  xwin.tgz\" | sha256sum -c --quiet && tar xzf xwin.tgz && cp xwin-*/xwin /usr/local/bin/)"
+docker exec $C sh -c "[ -d /w/xwin/sdk ] || (curl -fsSL -o /tmp/vs.vsman $VSMAN \
+  && echo \"$VSMAN_SHA256  /tmp/vs.vsman\" | sha256sum -c --quiet \
+  && xwin --accept-license --manifest /tmp/vs.vsman --sdk-version $WIN_SDK --crt-version $MSVC_CRT splat --output /w/xwin)"
 docker exec $C python3 /w/casefix.py /w/sdk /w/game/src
 # Sources are pre-generated on the host that ran codegen; the Windows rexglue.exe cannot run here. The sed covers a
 # rexglue.cmake rendered without SDK patch 0017; with it, REXGLUE_HOST_CLI=/bin/true (below) makes codegen a no-op.

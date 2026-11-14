@@ -3,10 +3,11 @@
 #   tools/ci/ci_image.sh <docker dir> <local tag>
 # The image is keyed by the content of its docker/<dir>: an unchanged Dockerfile reuses the image already on the runner's
 # Docker host, else the copy stored in this project's (private) package registry as ci-image/<key>/<dir>.tar.gz, and only
-# a changed Dockerfile builds a new one, which is then stored there too. A rebuild of an unchanged Dockerfile isn't the
-# same image: the Windows image's xwin downloads whatever CRT and SDK Microsoft publishes that day, and 0.6.6 stopped
-# reading the 10.0.26100 SDK's new packaging (2026-11), so a pruned build cache broke the Windows build. The stored copy
-# holds Microsoft's CRT and SDK: it stays in this private project for its own CI, never anywhere public.
+# a changed Dockerfile builds a new one, which is then stored there too. The Dockerfiles pin everything they download, so
+# a rebuild gives the same toolchain, but a pin can't bring back a file its server deleted (Microsoft drops old CRT and
+# SDK payloads): the stored copy is the backstop for that. Unpinned, a pruned build cache once rebuilt the Windows image
+# with that day's SDK, which xwin 0.6.6 couldn't read (2026-11). The stored copy holds Microsoft's CRT and SDK: it stays
+# in this private project for its own CI, never anywhere public.
 # Runs in docker:29-cli (Alpine). Env: the job's CI_JOB_TOKEN, CI_API_V4_URL, CI_PROJECT_ID.
 set -eu
 DIR=${1:?usage: tools/ci/ci_image.sh <docker dir> <local tag>}
