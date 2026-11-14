@@ -9,6 +9,9 @@ use ash::vk;
 use n1ffi::godref::{self, Mask, Params, GRID};
 use std::ffi::CStr;
 
+const POST_FLOATS: usize = n1ffi::light::POST_VECS * 4;
+const POST_BYTES: u64 = (POST_FLOATS * std::mem::size_of::<f32>()) as u64;
+
 struct Gpu {
     entry_keep: ash::Entry,
     instance: ash::Instance,
@@ -275,7 +278,7 @@ fn run_gpu(gpu: &Gpu, cases: &[(&Mask, &Params)], scale: u32) -> Vec<Vec<[f32; 3
             vk::ImageAspectFlags::COLOR,
         );
         let depth_stage = gpu.buffer((dim * dim * 4) as u64, vk::BufferUsageFlags::TRANSFER_SRC);
-        let ubo = gpu.buffer(256, vk::BufferUsageFlags::UNIFORM_BUFFER);
+        let ubo = gpu.buffer(POST_BYTES, vk::BufferUsageFlags::UNIFORM_BUFFER);
         let readback = gpu.buffer((GRID * GRID * 16) as u64, vk::BufferUsageFlags::TRANSFER_DST);
 
         let pool = d
@@ -289,7 +292,7 @@ fn run_gpu(gpu: &Gpu, cases: &[(&Mask, &Params)], scale: u32) -> Vec<Vec<[f32; 3
             )
             .unwrap();
         let set = d.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&dsls)).unwrap()[0];
-        let ub = [vk::DescriptorBufferInfo { buffer: ubo.buf, offset: 0, range: 256 }];
+        let ub = [vk::DescriptorBufferInfo { buffer: ubo.buf, offset: 0, range: POST_BYTES }];
         let sm = [vk::DescriptorImageInfo { sampler: smp, image_view: vk::ImageView::null(), image_layout: vk::ImageLayout::UNDEFINED }];
         let img = |v| [vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: v, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
         let (di, du) = (img(dummy.view), [vk::DescriptorImageInfo {
@@ -334,13 +337,13 @@ fn run_gpu(gpu: &Gpu, cases: &[(&Mask, &Params)], scale: u32) -> Vec<Vec<[f32; 3
             }
             d.unmap_memory(depth_stage.mem);
             // P: g0 = light, magnitude, decay; g1 = colour, exposure; dof2.z = near plane 1; comp.x = sky distance 5e4.
-            let mut blk = [0f32; 64];
+            let mut blk = [0f32; POST_FLOATS];
             blk[4 * 2 + 2] = 1.0; // dof2.z
             blk[4 * 4] = 5.0e4; // comp.x
             blk[4 * 5..4 * 5 + 4].copy_from_slice(&[p.light[0], p.light[1], p.magnitude, p.decay]);
             blk[4 * 6..4 * 6 + 4].copy_from_slice(&[p.color[0], p.color[1], p.color[2], p.exposure]);
             let up = d.map_memory(ubo.mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).unwrap() as *mut f32;
-            std::ptr::copy_nonoverlapping(blk.as_ptr(), up, 64);
+            std::ptr::copy_nonoverlapping(blk.as_ptr(), up, blk.len());
             d.unmap_memory(ubo.mem);
 
             d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).unwrap();

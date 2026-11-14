@@ -304,24 +304,29 @@ impl Default for PostParams {
     }
 }
 
-/// UE3's gaussian as bilinear pairs: texels -R..R+1 weighted exp(-2 x^2 / R^2), R = min(kernel size, 4) (the
-/// port's 5-tap BloomKernelSize 16 and 2-tap BlurKernelSize 1 kernels both match). Offsets scaled by `scale`.
-pub fn kernel_taps(size: f32, scale: f32) -> Vec<(f32, f32)> {
-    let r = size.round().clamp(1.0, 4.0) as i32;
-    let rf = r as f32;
-    let w = |x: i32| (-2.0 * (x * x) as f32 / (rf * rf)).exp();
+/// UE3's gaussian as bilinear pairs.
+/// min(size / 4, 16) * filter_width / 1280 for normal distribution variance.
+/// Rounded up support capped at 15 texels.
+pub fn kernel_taps(size: f32, filter_width: u32) -> Vec<(f32, f32)> {
+    let v =
+        ((size / 4.0).min(16.0) * filter_width as f32 / 1280.0).clamp(1e-5, 15.0);
+    let r = v.ceil() as i32;
+    let w = |x: i32| (-(x * x) as f32 / (2.0 * v)).exp();
     let mut taps = Vec::new();
     let mut x = -r;
     while x <= r {
         let (w0, w1) = (w(x), w(x + 1));
-        taps.push(((x as f32 + w1 / (w0 + w1)) * scale, w0 + w1));
+        taps.push((x as f32 + w1 / (w0 + w1), w0 + w1));
         x += 2;
     }
     let sum: f32 = taps.iter().map(|t| t.1).sum();
     taps.iter().map(|&(o, k)| (o, k / sum)).collect()
 }
 
-/// One post pass's uniform block (`P` in n1ffi/src/post.wgsl): 16 vec4.
+pub const POST_TAPS: usize = 16;
+pub const POST_VECS: usize = 10 + POST_TAPS;
+
+/// One post pass's uniform block (`P` in n1ffi/src/post.wgsl).
 pub struct PostBlock<'a> {
     pub texel: [f32; 2],
     pub dir: [f32; 2],
@@ -388,7 +393,7 @@ impl PostParams {
         }
     }
 
-    pub fn block(&self, b: &PostBlock) -> [[f32; 4]; 16] {
+    pub fn block(&self, b: &PostBlock) -> [[f32; 4]; POST_VECS] {
         let u = &self.uber;
         let g = self.grade.clone().unwrap_or(lightfeed::post::Grade {
             fg_desaturate: 0.0,
@@ -402,11 +407,11 @@ impl PostParams {
             blend_offset: -0.05,
             sky_clamp: 2.0,
         });
-        let mut o = [[0.0f32; 4]; 16];
+        let mut o = [[0.0f32; 4]; POST_VECS];
         o[0] = [u.bloom_scale, u.bloom_threshold, b.texel[0], b.texel[1]];
         o[1] = [u.focus_distance, 1.0 / u.focus_radius.max(1.0), u.falloff, b.offset[0]];
         o[2] = [u.max_near, u.max_far, b.near, b.offset[1]];
-        o[3] = [b.dir[0], b.dir[1], b.unorm as u32 as f32, b.taps.len().min(6) as f32];
+        o[3] = [b.dir[0], b.dir[1], b.unorm as u32 as f32, b.taps.len().min(POST_TAPS) as f32];
         let mix = if u.different_bloom_kernel { self.bloom_mix } else { 0.0 };
         o[4] = [mix, 1.0 / self.gamma.max(0.1), self.blurs() as u32 as f32, 0.0];
         o[5] = [g.fg_desaturate, g.fg_contrast, g.bk_brightness, g.bk_desaturate];
@@ -414,11 +419,11 @@ impl PostParams {
         o[7] = [g.fg_tint[0], g.fg_tint[1], g.fg_tint[2], 0.0];
         o[8] = [g.bk_tint[0], g.bk_tint[1], g.bk_tint[2], 0.0];
         o[9] = [self.inv_hi[0], self.inv_hi[1], self.inv_hi[2], 0.0];
-        for (k, t) in b.taps.iter().take(6).enumerate() {
+        for (k, t) in b.taps.iter().take(POST_TAPS).enumerate() {
             o[10 + k] = [t.0, t.1, 0.0, 0.0];
         }
-        // B-240: the composite and copy passes have no taps, so their last two slots carry the screen fade
-        // (`fade_scale`, `fade_overlay` in post.wgsl). The blurs (at most 5 taps) never read them.
+        // B-240: the composite and copy passes have no taps, so slots 4 and 5 carry the screen fade
+        // (`fade_scale`, `fade_overlay` in post.wgsl).
         if b.taps.is_empty() {
             let [sc, ov] = b.fade;
             o[14] = [sc[0], sc[1], sc[2], 0.0];
@@ -943,11 +948,11 @@ mod post_tests {
     /// The port's blur weights (W4 capture f4420, draws 945-948): BloomKernelSize 16 and BlurKernelSize 1.
     #[test]
     fn kernels_match_port() {
-        let w: Vec<f32> = kernel_taps(16.0, 1.0).iter().map(|t| t.1).collect();
+        let w: Vec<f32> = kernel_taps(16.0, 1280).iter().map(|t| t.1).collect();
         for (a, b) in w.iter().zip([0.093, 0.301, 0.381, 0.188, 0.036]) {
             assert!((a - b).abs() < 2e-3, "{w:?}");
         }
-        let w: Vec<f32> = kernel_taps(1.0, 1.0).iter().map(|t| t.1).collect();
+        let w: Vec<f32> = kernel_taps(1.0, 1280).iter().map(|t| t.1).collect();
         assert!((w[0] - 0.893).abs() < 2e-3 && (w[1] - 0.107).abs() < 2e-3, "{w:?}");
     }
 }
