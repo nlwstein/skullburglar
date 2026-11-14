@@ -34,7 +34,7 @@ rsync -a tools/win-cross/win-clang.cmake tools/win-cross/casefix.py "$(dest bots
 
 # xwin, the VS manifest and the CRT and SDK versions: docker/win-cross's pins (its comments say why).
 arg() { sed -n "s/^ARG $1=//p" docker/win-cross/Dockerfile; }
-XWIN_PINS="XWIN=$(arg XWIN) XWIN_SHA256=$(arg XWIN_SHA256) VSMAN=$(arg VSMAN) VSMAN_SHA256=$(arg VSMAN_SHA256) WIN_SDK=$(arg WIN_SDK) MSVC_CRT=$(arg MSVC_CRT)"
+XWIN_PINS=$(for a in XWIN XWIN_SHA256 MS_DL CHMAN CHMAN_SHA256 VSMAN_ID VSMAN_SHA256 WIN_SDK MSVC_CRT; do printf "%s=%s " $a "$(arg $a)"; done)
 
 on_host "CPUS=${CPUS:-} N=$N CMAKE_ARGS='${CMAKE_ARGS:-}' $XWIN_PINS"'
 set -e
@@ -55,9 +55,11 @@ docker exec $C sh -c "command -v cargo >/dev/null || (curl -fsSL https://sh.rust
 docker exec $C sh -c "command -v xwin >/dev/null || (cd /tmp && curl -fsSL -o xwin.tgz \
   https://github.com/Jake-Shadle/xwin/releases/download/$XWIN/xwin-$XWIN-x86_64-unknown-linux-musl.tar.gz \
   && echo \"$XWIN_SHA256  xwin.tgz\" | sha256sum -c --quiet && tar xzf xwin.tgz && cp xwin-*/xwin /usr/local/bin/)"
-docker exec $C sh -c "[ -d /w/xwin/sdk ] || (curl -fsSL -o /tmp/vs.vsman $VSMAN \
-  && echo \"$VSMAN_SHA256  /tmp/vs.vsman\" | sha256sum -c --quiet \
-  && xwin --accept-license --manifest /tmp/vs.vsman --sdk-version $WIN_SDK --crt-version $MSVC_CRT splat --output /w/xwin)"
+docker exec $C sh -c "[ -d /w/xwin/sdk ] || (V=/tmp/xwin-cache/dl/pkg_manifest_$VSMAN_ID.vsman && mkdir -p /tmp/xwin-cache/dl \
+  && curl -fsSL -o /tmp/vs.chman $MS_DL/$CHMAN && echo \"$CHMAN_SHA256  /tmp/vs.chman\" | sha256sum -c --quiet \
+  && curl -fsSL -o \$V $MS_DL/$VSMAN_ID/VisualStudio.vsman && echo \"$VSMAN_SHA256  \$V\" | sha256sum -c --quiet \
+  && xwin --accept-license --cache-dir /tmp/xwin-cache --manifest /tmp/vs.chman --sdk-version $WIN_SDK \
+     --crt-version $MSVC_CRT splat --output /w/xwin && rm -rf /tmp/xwin-cache /tmp/vs.chman)"
 docker exec $C python3 /w/casefix.py /w/sdk /w/game/src
 # Sources are pre-generated on the host that ran codegen; the Windows rexglue.exe cannot run here. The sed covers a
 # rexglue.cmake rendered without SDK patch 0017; with it, REXGLUE_HOST_CLI=/bin/true (below) makes codegen a no-op.
