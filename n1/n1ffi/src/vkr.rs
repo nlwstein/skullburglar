@@ -158,6 +158,21 @@ struct Slot {
     serial: u64,
 }
 
+/// What the game asks for: `[SystemSettings] MaxAnisotropy=4` in its cooked ini (`Xe-C1Engine.ini` inside
+/// `Coalesced.ini`). Its texture groups (`TEXTUREGROUP_*`) set no `MinMagFilter`/`MipFilter` of their own, so every
+/// group takes the engine default (anisotropic) and the same cap; no group is filtered differently.
+const GAME_MAX_ANISO: f32 = 4.0;
+
+/// Anisotropy for the material sampler: `BOTS_N1_ANISO` (`0`/`1` off, `2`..`16` the cap) or, unset or not a number,
+/// the game's own `GAME_MAX_ANISO`; limited to what the device offers. 0.0 means plain trilinear.
+fn aniso_level(requested: Option<&str>, supported: bool, device_max: f32) -> f32 {
+    let want = requested.and_then(|v| v.trim().parse::<f32>().ok()).unwrap_or(GAME_MAX_ANISO);
+    if !supported || want < 2.0 {
+        return 0.0;
+    }
+    want.min(16.0).min(device_max)
+}
+
 /// The host's Vulkan objects (it keeps ownership of all of them).
 pub struct VkContext {
     pub get_instance_proc_addr: vk::PFN_vkGetInstanceProcAddr,
@@ -718,22 +733,31 @@ impl Renderer {
             let words = shaders::spirv(&shaders::post_source())?;
             let post_module = device
                 .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)?;
-            let mk_sampler = |addr| {
-                device.create_sampler(
-                    &vk::SamplerCreateInfo::default()
-                        .mag_filter(vk::Filter::LINEAR)
-                        .min_filter(vk::Filter::LINEAR)
-                        .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-                        .address_mode_u(addr)
-                        .address_mode_v(addr)
-                        .address_mode_w(addr)
-                        .max_lod(vk::LOD_CLAMP_NONE),
-                    None,
-                )
+            // The material sampler filters anisotropically like the Pre-1.0 renderer, which takes the level from the
+            // game's fetch constants (`GAME_MAX_ANISO`); without it, ground seen at a grazing angle picks a blurry mip
+            // and smears along the view direction (GitHub #45, #24). Lightmap and post samplers stay trilinear.
+            let aniso = aniso_level(
+                std::env::var("BOTS_N1_ANISO").ok().as_deref(),
+                instance.get_physical_device_features(ctx.physical_device).sampler_anisotropy == vk::TRUE,
+                instance.get_physical_device_properties(ctx.physical_device).limits.max_sampler_anisotropy,
+            );
+            let mk_sampler = |addr, aniso: f32| {
+                let mut info = vk::SamplerCreateInfo::default()
+                    .mag_filter(vk::Filter::LINEAR)
+                    .min_filter(vk::Filter::LINEAR)
+                    .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+                    .address_mode_u(addr)
+                    .address_mode_v(addr)
+                    .address_mode_w(addr)
+                    .max_lod(vk::LOD_CLAMP_NONE);
+                if aniso > 1.0 {
+                    info = info.anisotropy_enable(true).max_anisotropy(aniso);
+                }
+                device.create_sampler(&info, None)
             };
-            let sampler = mk_sampler(vk::SamplerAddressMode::REPEAT)?;
-            let lm_sampler = mk_sampler(vk::SamplerAddressMode::CLAMP_TO_EDGE)?;
-            let post_sampler = mk_sampler(vk::SamplerAddressMode::CLAMP_TO_EDGE)?;
+            let sampler = mk_sampler(vk::SamplerAddressMode::REPEAT, aniso)?;
+            let lm_sampler = mk_sampler(vk::SamplerAddressMode::CLAMP_TO_EDGE, 0.0)?;
+            let post_sampler = mk_sampler(vk::SamplerAddressMode::CLAMP_TO_EDGE, 0.0)?;
             // B-332: one entry point per module on Adreno (`shaders::split_entries`); BOTS_N1_SPLIT_ENTRIES=1/0 forces it.
             let vendor = instance.get_physical_device_properties(ctx.physical_device).vendor_id;
             shaders::set_split_entries(match std::env::var("BOTS_N1_SPLIT_ENTRIES").as_deref() {
@@ -4084,5 +4108,41 @@ mod light_sync_tests {
     fn nothing_synced_yet_copies_nothing() {
         let p = light_sync_plan(5 << 18, 0, 4 << 20, true);
         assert_eq!(p, LightSyncPlan { grow_to: Some(8 << 20), gpu_copy_words: 0, cpu_from: 0 });
+    }
+}
+
+#[cfg(test)]
+mod aniso_tests {
+    use super::{GAME_MAX_ANISO, aniso_level};
+
+    #[test]
+    fn defaults_to_the_games_own_level() {
+        assert_eq!(GAME_MAX_ANISO, 4.0);
+        assert_eq!(aniso_level(None, true, 16.0), 4.0);
+        assert_eq!(aniso_level(Some("junk"), true, 16.0), 4.0);
+        assert_eq!(aniso_level(Some(""), true, 16.0), 4.0);
+    }
+
+    #[test]
+    fn override_sets_the_cap_up_to_16() {
+        assert_eq!(aniso_level(Some("2"), true, 16.0), 2.0);
+        assert_eq!(aniso_level(Some(" 8 "), true, 16.0), 8.0);
+        assert_eq!(aniso_level(Some("16"), true, 16.0), 16.0);
+        assert_eq!(aniso_level(Some("64"), true, 16.0), 16.0);
+    }
+
+    #[test]
+    fn zero_and_one_turn_it_off() {
+        assert_eq!(aniso_level(Some("0"), true, 16.0), 0.0);
+        assert_eq!(aniso_level(Some("1"), true, 16.0), 0.0);
+        assert_eq!(aniso_level(Some("-3"), true, 16.0), 0.0);
+    }
+
+    #[test]
+    fn never_above_what_the_device_offers() {
+        assert_eq!(aniso_level(None, true, 2.0), 2.0);
+        assert_eq!(aniso_level(Some("16"), true, 8.0), 8.0);
+        assert_eq!(aniso_level(None, false, 16.0), 0.0);
+        assert_eq!(aniso_level(Some("16"), false, 16.0), 0.0);
     }
 }
