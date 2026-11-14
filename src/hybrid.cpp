@@ -554,11 +554,12 @@ extern "C" void sub_82BB3230(PPCContext& __restrict ctx, uint8_t* base) {
           }
           // The frame's scene, published before the render command that draws it exists: the render thread can no
           // longer reach this camera's marker first and draw the previous frame's scene (doubling, stutter).
-          if (bots::scenefeed::LiveAtDraw()) bots::scenefeed::Live(base);
+          // B-345: the kill state first, so the feed's culling of a native kill frame uses this frame's.
           if (g_state.fill.load(std::memory_order_relaxed) == 4) {
             bots::scenefeed::UpdateStylizedKill(base);
-            g_port_scene[seq % g_port_scene.size()].store(bots::scenefeed::StylizedKill(), std::memory_order_release);
+            g_port_scene[seq % g_port_scene.size()].store(bots::scenefeed::StylizedKillToGame(), std::memory_order_release);
           }
+          if (bots::scenefeed::LiveAtDraw()) bots::scenefeed::Live(base);
         }
       }
     }
@@ -719,8 +720,8 @@ extern "C" void sub_82BB1E78(PPCContext& __restrict ctx, uint8_t* base) {
       !g_state.n1_ready.load(std::memory_order_acquire)) {
     suppress_now = 0;
   }
-  // B-323: a stylized counter-kill's frame (the white room, its lights and the parchment post chain, none of which n1
-  // draws): the game draws its own scene, as above. BOTS_N1_COUNTERKILL_PORT=0 keeps n1 (scene_feed.cpp).
+  // B-323: a stylized counter-kill's frame (the white room, its lights and the parchment post chain): the game draws its
+  // own scene, as above, unless BOTS_N1_COUNTERKILL=native (n1 draws it, B-345) or off (scene_feed.cpp).
   if (t_render_seq != 0 &&
       bots::counterkill::GameDrawsScene(suppress_now, g_state.fill.load(std::memory_order_relaxed),
                                         g_port_scene[t_render_seq % g_port_scene.size()].load(std::memory_order_acquire),

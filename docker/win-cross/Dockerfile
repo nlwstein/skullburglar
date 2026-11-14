@@ -1,7 +1,8 @@
 # Windows release build env (tools/ci/build.sh windows): clang + lld cross-compiling to x86_64 MSVC, with the MSVC
 # CRT and Windows SDK from xwin in /w/xwin (where tools/win-cross/win-clang.cmake looks). The same toolchain as
 # tools/win-cross/build.sh, as one image. Building it accepts the Microsoft license for the CRT and SDK (xwin
-# --accept-license); the image is built where it's used (locally, or on the CI runner's Docker host), never pushed.
+# --accept-license); the image is built where it's used (locally, or on the CI runner's Docker host). CI keeps a copy in
+# this private project's package registry (tools/ci/ci_image.sh), never anywhere public.
 FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive

@@ -33,6 +33,38 @@ int main() {
   CHECK(!GameDrawsScene(0, 4, true, true));   // already the game's scene (dual render, pre-1.0, n1 not ready)
   CHECK(!GameDrawsScene(2, 3, true, true));   // debug grid fills
   CHECK(!GameDrawsScene(2, 0, true, true));
+  // B-345: the switch.
+  CHECK(ParseMode(nullptr, nullptr) == Mode::kNative);  // default since 1.9.3
+  CHECK(ParseMode("native", nullptr) == Mode::kNative);
+  CHECK(ParseMode("Native", "0") == Mode::kNative);  // the new variable wins
+  CHECK(ParseMode("off", nullptr) == Mode::kOff);
+  CHECK(ParseMode("0", nullptr) == Mode::kOff);
+  CHECK(ParseMode("port", "0") == Mode::kPort);
+  CHECK(ParseMode("", "0") == Mode::kOff);            // empty = not set
+  CHECK(ParseMode("", nullptr) == Mode::kNative);
+  CHECK(ParseMode(nullptr, "") == Mode::kNative);
+  CHECK(ParseMode("bogus", nullptr) == Mode::kNative);
+  CHECK(ParseMode(nullptr, "0") == Mode::kOff);       // 1.9.1's BOTS_N1_COUNTERKILL_PORT=0
+  CHECK(ParseMode(nullptr, "1") == Mode::kPort);
+  CHECK(ParseMode(nullptr, "00") == Mode::kPort);
+  CHECK(NativePorted("FX_MerkYouSpaceRescource.BKGAndGhost_MIC"));
+  CHECK(NativePorted("FX_MerkYouSpaceRescource.FadeIn_MAT_MIC"));
+  CHECK(NativePorted("FX_MerkYouSpaceRescource.BurnOut_MIC"));
+  CHECK(!NativePorted("FX_MerkYouSpaceRescource.PosterAndGhost_MIC"));
+  CHECK(KillToGame(Mode::kPort, true, true));
+  CHECK(!KillToGame(Mode::kPort, false, true));
+  CHECK(!KillToGame(Mode::kOff, true, false));
+  CHECK(!KillToGame(Mode::kNative, true, true));
+  CHECK(KillToGame(Mode::kNative, true, false));     // an unported kill material: the game draws it
+  CHECK(KillCull(Mode::kNative, true, false));
+  CHECK(!KillCull(Mode::kNative, true, true));
+  CHECK(!KillCull(Mode::kPort, true, false));
+  CHECK(!KillCull(Mode::kNative, false, false));
+  CHECK(KeepInKill(52.5f, 52.5f));
+  CHECK(KeepInKill(52.4995f, 52.5f));
+  CHECK(KeepInKill(52.45f, 52.5f));   // one frame behind at 20 fps (the render thread mid-visibility): kept
+  CHECK(!KeepInKill(52.3f, 52.5f));   // last drawn 0.2 s earlier: culled by the kill's view
+  CHECK(!KeepInKill(0.0f, 52.5f));
   if (failures) return 1;
   std::printf("counterkill_port_test: ok\n");
   return 0;

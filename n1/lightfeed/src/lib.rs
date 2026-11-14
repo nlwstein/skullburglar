@@ -344,6 +344,13 @@ pub struct Frame {
     pub sky_dyn_up_ue3: [f32; 3],
     pub sky_dyn_down_ue3: [f32; 3],
     pub sky_dyn_count: u32,
+    /// B-345 (#32): skies that light only dynamic objects (`Dynamic` channel on, `Static` off), as the stylized
+    /// counter-kill's `SkyLightSpawnable` for its fighters: (up, down) sums plain and UE3-decoded, and how many.
+    pub sky_kill_up: [f32; 3],
+    pub sky_kill_down: [f32; 3],
+    pub sky_kill_up_ue3: [f32; 3],
+    pub sky_kill_down_ue3: [f32; 3],
+    pub sky_kill_count: u32,
     /// B-328: the sun reaches a lightless dynamic object ([`Light::reaches_dynamic`]); the port draws its directional pass
     /// for such an object (shadowed by a shadow map n1 doesn't have).
     pub sun_dyn: bool,
@@ -452,6 +459,15 @@ impl Frame {
                         for k in 0..3 {
                             fr.sky_up_ue3[k] += up[k];
                             fr.sky_down_ue3[k] += dn[k];
+                        }
+                        if l.affects_dynamic && !l.affects_static {
+                            fr.sky_kill_count += 1;
+                            for k in 0..3 {
+                                fr.sky_kill_up[k] += l.color[k];
+                                fr.sky_kill_down[k] += l.lower[k];
+                                fr.sky_kill_up_ue3[k] += up[k];
+                                fr.sky_kill_down_ue3[k] += dn[k];
+                            }
                         }
                         if l.reaches_dynamic() {
                             fr.sky_dyn_count += 1;
@@ -617,6 +633,28 @@ mod tests {
         let mut l = Light::parse(&serde_json::from_str::<Value>(r#"{"class":"SkyLightComponent","props":{"LightToWorld":[1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1],"Brightness":0.7,"LightColor":[128,149,159,0],"bEnabled":true}}"#).unwrap()).unwrap();
         l.raw = [0.0; 3];
         assert_eq!(l.ue3_sky().0, l.color);
+    }
+
+    #[test]
+    fn kill_lights_are_the_dynamic_only_ones() {
+        // B-345 (#32): the stylized counter-kill spawns spot lights and a sky light on the `Dynamic` channel only, for
+        // its fighters. They are packed only when asked (`dynamic_only`), and the dynamic-only sky is summed apart.
+        let spot = |x: f32, st: bool| {
+            format!(
+                r#"{{"class":"SpotLightComponent","props":{{"LightToWorld":[1,0,0,0, 0,1,0,0, 0,0,1,0, {x},0,0,1],"Brightness":5,"LightColor":[255,255,255,0],"bEnabled":true,"Radius":1000,"LightingChannels":{{"Static":{st},"Dynamic":true}}}}}}"#
+            )
+        };
+        let sky = r#"{"class":"SkyLightComponent","props":{"LightToWorld":[1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1],"Brightness":3,"LightColor":[255,255,255,0],"bEnabled":true,"LightingChannels":{"Static":false,"Dynamic":true}}}"#;
+        let fr = Frame::from_json(&format!(r#"{{"lights":[{},{},{}]}}"#, spot(0.0, true), spot(100.0, false), sky)).unwrap();
+        assert_eq!(fr.dynamic.len(), 2);
+        assert_eq!(pack::DynFrame::from_frame_env(&fr, 64, false, true, false).lights.len(), 1);
+        let k = pack::DynFrame::from_frame_opts(&fr, 64, false, true, false, Some(0.5));
+        assert_eq!(k.lights.len(), 2);
+        assert!((k.lights[1][4] - 0.5 * k.lights[0][4]).abs() < 1e-5, "{:?}", k.lights);
+        assert_eq!(pack::DynFrame::from_frame_opts(&fr, 64, false, true, false, Some(0.0)).lights.len(), 1);
+        assert_eq!(fr.sky_kill_count, 1);
+        assert!((fr.sky_kill_up[0] - 3.0).abs() < 1e-4, "{:?}", fr.sky_kill_up);
+        assert!(fr.sky_kill_up_ue3[0] > 0.0);
     }
 
     #[test]

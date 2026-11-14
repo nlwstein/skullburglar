@@ -56,6 +56,7 @@ checks:
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/mouse_gate_sim.cpp -o $d/t && $d/t --check
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/fps_math_test.cpp -o $d/t && $d/t
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/vehicle_fps_cap_test.cpp -o $d/t && $d/t
+    - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/ui_scale_test.cpp -o $d/t && $d/t
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/shake_math_test.cpp -o $d/t && $d/t
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/diag_test.cpp -o $d/t && $d/t
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/outline_flag_test.cpp -o $d/t && $d/t
@@ -140,7 +141,7 @@ codegen:
         echo "Nothing to release: no codegen needed."
         exit 0
       fi
-    - docker build -q -t skullburglar-ci-linux docker/linux-steamrt
+    - tools/ci/ci_image.sh linux-steamrt skullburglar-ci-linux
     - JOB=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.job.id=$CI_JOB_ID" --filter "label=com.gitlab.gitlab-runner.type=build")
     - test -n "$JOB"
     - >-
@@ -170,7 +171,7 @@ codegen:
         exit 0
       fi
       PACKAGE=${PACKAGE:-skullburglar}
-    - docker build -q -t "skullburglar-ci-$PLATFORM" "docker/$IMAGE"
+    - tools/ci/ci_image.sh "$IMAGE" "skullburglar-ci-$PLATFORM"
     # This job's container, whose volumes (the checkout) the build container shares.
     - JOB=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.job.id=$CI_JOB_ID" --filter "label=com.gitlab.gitlab-runner.type=build")
     - test -n "$JOB"
@@ -288,7 +289,7 @@ build:android:
         exit 0
       fi
       export PACKAGE=${PACKAGE:-skullburglar}
-    - docker build -q -t skullburglar-ci-android docker/android
+    - tools/ci/ci_image.sh android skullburglar-ci-android
     - JOB=$(docker ps -q --filter "label=com.gitlab.gitlab-runner.job.id=$CI_JOB_ID" --filter "label=com.gitlab.gitlab-runner.type=build")
     - test -n "$JOB"
     - >-

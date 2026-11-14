@@ -3090,19 +3090,30 @@ void LiveParticles(LiveState& st, HybridScene& out, const Camera& cam, bool max_
 // black fighters of #32, every time the kill camera can see past the fighters.
 // While a MerkYouSpace post material is in the player's chain, the game draws its own scene (as before n1 is ready,
 // B-243): the pre-1.0 renderer's picture of the moment, which is the game's. BOTS_N1_COUNTERKILL_PORT=0 turns it off.
+// B-345: BOTS_N1_COUNTERKILL=native has n1 draw them instead: their post materials ported to n1 (n1ffi postmat.rs), the
+// fighters lit by the kill's own lights (n1ffi light.rs), and the level culled to what the game's view of the kill
+// draws (Live, KeepInKill). A kill material n1 has no pass for still goes to the game.
 namespace {
 std::atomic<bool> g_stylized_kill{false};
-}
+std::atomic<bool> g_kill_to_game{false};
 
-bool StylizedKillPortOn() {
-  static const bool on = [] {
-    const char* v = std::getenv("BOTS_N1_COUNTERKILL_PORT");
-    return !v || std::atoi(v) != 0;
+bots::counterkill::Mode CounterKillMode() {
+  static const bots::counterkill::Mode m = [] {
+    const auto mode = bots::counterkill::ParseMode(std::getenv("BOTS_N1_COUNTERKILL"), std::getenv("BOTS_N1_COUNTERKILL_PORT"));
+    REXLOG_INFO("n1: stylized counter-kills drawn by {}",
+                mode == bots::counterkill::Mode::kNative ? "n1 (native)"
+                : mode == bots::counterkill::Mode::kPort ? "the game's renderer" : "n1 without the effect (off)");
+    return mode;
   }();
-  return on;
+  return m;
 }
+}  // namespace
+
+bool StylizedKillPortOn() { return CounterKillMode() != bots::counterkill::Mode::kOff; }
 
 bool StylizedKill() { return g_stylized_kill.load(std::memory_order_acquire); }
+
+bool StylizedKillToGame() { return g_kill_to_game.load(std::memory_order_acquire); }
 
 void UpdateStylizedKill(uint8_t* base) {
   if (!StylizedKillPortOn()) return;
@@ -3130,17 +3141,24 @@ void UpdateStylizedKill(uint8_t* base) {
   }
   if (key == last) return;
   last = key;
-  bool on = false;
+  bool on = false, all_ported = true;
   std::string which;
   for (uint32_t i = 0; i < n; ++i) {
     if (!IsObject(key[2 + i])) continue;
     std::string path = Path(key[2 + i]);
-    if (bots::counterkill::IsKillPostMaterial(path)) on = true, which = std::move(path);
+    if (bots::counterkill::IsKillPostMaterial(path)) {
+      on = true;
+      all_ported &= bots::counterkill::NativePorted(path);
+      which = std::move(path);
+    }
   }
-  if (on != g_stylized_kill.load(std::memory_order_relaxed)) {
-    if (on) REXLOG_INFO("n1: stylized counter-kill ({}): the game draws its own scene until it ends", which);
+  const bool to_game = bots::counterkill::KillToGame(CounterKillMode(), on, all_ported);
+  if (on != g_stylized_kill.load(std::memory_order_relaxed) || to_game != g_kill_to_game.load(std::memory_order_relaxed)) {
+    if (on && to_game) REXLOG_INFO("n1: stylized counter-kill ({}): the game draws its own scene until it ends", which);
+    else if (on) REXLOG_INFO("n1: stylized counter-kill ({}): n1 draws it (native)", which);
     else REXLOG_INFO("n1: stylized counter-kill over: n1 draws the scene again");
   }
+  g_kill_to_game.store(to_game, std::memory_order_release);
   g_stylized_kill.store(on, std::memory_order_release);
 }
 
@@ -3201,6 +3219,18 @@ void Live(uint8_t* base) {
     DropIf(st.tree_prims, gone, ahead);
   }
   lap(g_prof.track);
+  // B-345: in a stylized counter-kill n1 draws (native), only what the game's view of it draws: the primitives whose
+  // LastRenderTime is the newest any has (KeepInKill).
+  const bool kill_cull = bots::counterkill::KillCull(CounterKillMode(), StylizedKill(), StylizedKillToGame()) &&
+                         g_off.last_render_time.ok();
+  float kill_newest = -1e30f;
+  if (kill_cull) {
+    for (const auto* v : {&st.prims, &st.particle_prims, &st.tree_prims})
+      for (const Primitive& p : *v) kill_newest = std::max(kill_newest, F32(p.component + g_off.last_render_time.offset));
+  }
+  const auto kill_culled = [&](uint32_t c) {
+    return kill_cull && !bots::counterkill::KeepInKill(F32(c + g_off.last_render_time.offset), kill_newest);
+  };
   HybridScene& out = st.building;
   out.instances.clear();
   if (st.legacy) st.inst_of.clear();
@@ -3239,6 +3269,7 @@ void Live(uint8_t* base) {
       NoteSkip(c, hidden_comp ? kHiddenComponent : kHiddenOwner, cam);
       continue;
     }
+    if (kill_culled(c)) continue;
     if (BeyondDrawDistance(c, cam)) {
       NoteSkip(c, kBeyondDistance, cam);
       continue;
@@ -3361,7 +3392,7 @@ void Live(uint8_t* base) {
   lap(g_prof.loop);
   out.decals.clear();
   out.decal_receivers.clear();
-  if (st.decals_on) LiveDecals(st, out);
+  if (st.decals_on && !kill_cull) LiveDecals(st, out);
   lap(g_prof.decals);
   g_prof.instances += out.instances.size(), g_prof.decal_count += st.decals.size(), g_prof.receivers += out.decal_receivers.size();
   // SpeedTree placements (B-187): the component's LocalToWorld (scale + translation), its tree asset and the actor's
@@ -3378,7 +3409,7 @@ void Live(uint8_t* base) {
       }
       if (g_off.actor_hidden.ok()) hidden |= (U32(owner + g_off.actor_hidden.offset) & g_off.actor_hidden.mask) != 0;
     }
-    if (hidden) continue;
+    if (hidden || kill_culled(c)) continue;
     static PropSite tree_site;
     const uint32_t tree = PropU32(tree_site, c, "SpeedTree");
     if (!Readable(tree)) continue;
@@ -3407,7 +3438,13 @@ void Live(uint8_t* base) {
   out.particles_ms = 0;
   if (st.particles && !st.particle_prims.empty()) {
     const auto tp = std::chrono::steady_clock::now();
+    std::vector<Primitive> all_particles;
+    if (kill_cull) {  // B-345: the kill's view draws its own particle systems only
+      all_particles = st.particle_prims;
+      std::erase_if(st.particle_prims, [&](const Primitive& p) { return kill_culled(p.component); });
+    }
     LiveParticles(st, out, cam, hs->max_draw.load(std::memory_order_relaxed) != 0);
+    if (kill_cull) st.particle_prims = std::move(all_particles);
     out.particles_ms = float(Ms(tp, std::chrono::steady_clock::now()));
   }
   // Lights, fog and post for n1 (properties read live; the component list comes from the last walk). Binary records

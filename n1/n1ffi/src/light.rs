@@ -587,6 +587,44 @@ impl Knobs {
     }
 }
 
+/// B-345 (#32): during a stylized counter-kill the game lights its fighters with the lights it spawned for them, on the
+/// `Dynamic` channel only (three spot lights and a sky light), and their light environments are empty. Here the skinned
+/// meshes are drawn as lightless dynamic objects (B-328's path, `vkr.rs`), so the lightless sky becomes the kill's sky
+/// alone (no level sky or sun), and the spot lights join the dynamic lights (`DynFrame::from_frame_opts`). A kill with
+/// no such sky keeps the frame's own.
+pub fn kill_lighting(env: &mut Env, fr: &lightfeed::Frame, ue3_gamma: bool) {
+    kill_lighting_scaled(env, fr, ue3_gamma, kill_scales().0);
+}
+
+/// [`kill_lighting`] with the sky times `k`.
+pub fn kill_lighting_scaled(env: &mut Env, fr: &lightfeed::Frame, ue3_gamma: bool, k: f32) {
+    if fr.sky_kill_count == 0 {
+        return;
+    }
+    let (u, d) = if ue3_gamma { (fr.sky_kill_up_ue3, fr.sky_kill_down_ue3) } else { (fr.sky_kill_up, fr.sky_kill_down) };
+    env.dyn_sky = Some((u.map(|c| c * k), d.map(|c| c * k)));
+    env.dyn_sun = false;
+}
+
+/// B-345: (sky, spot) scales of the kill's lights, `BOTS_N1_MERK_SKY` and `BOTS_N1_MERK_SPOTS` (tuning; see
+/// `KILL_SKY` / `KILL_SPOTS` for the defaults).
+pub fn kill_scales() -> (f32, f32) {
+    use std::sync::OnceLock;
+    static S: OnceLock<(f32, f32)> = OnceLock::new();
+    *S.get_or_init(|| {
+        let f = |n: &str, d: f32| std::env::var(n).ok().and_then(|v| v.parse::<f32>().ok()).filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(d);
+        (f("BOTS_N1_MERK_SKY", KILL_SKY), f("BOTS_N1_MERK_SPOTS", KILL_SPOTS))
+    })
+}
+
+/// Default scales of the kill's sky and spot lights (B-345). Measured against the game's own renderer on the same
+/// moves and cameras (median brightness of the fighters over the parchment, and the share of them clipped to black):
+/// the sky alone matches it, while the spot lights at full strength make the fighters about twice as bright and leave
+/// almost no black shadow side, and at a quarter strength they are still a little too bright. So the spots are off
+/// by default; `BOTS_N1_MERK_SPOTS` brings them back for tuning.
+pub const KILL_SKY: f32 = 1.0;
+pub const KILL_SPOTS: f32 = 0.0;
+
 /// The latest feed frame, digested.
 pub struct Lighting {
     pub base_env: Env,
@@ -608,6 +646,10 @@ pub struct Lighting {
     /// B-310: fog volumes from the feed, `FOG_VOL_F32` floats each (Y-up world).
     pub fog_vols: Vec<f32>,
     pub frames: u64,
+    /// B-345 (#32): this frame is a stylized counter-kill n1 draws itself (`BOTS_N1_COUNTERKILL=native`). The fighters
+    /// are lit as the game lights them then: their (empty) light environments set aside, the kill's dynamic-only spot
+    /// lights and sky light instead (`kill_lighting`).
+    pub merk: bool,
 }
 
 /// One composite light of a light environment, as the suspect detector's log line shows it: present, enabled, radius,
@@ -674,6 +716,7 @@ impl Lighting {
             zero_envs: Vec::new(),
             fog_vols: vec![],
             frames: 0,
+            merk: false,
         }
     }
 
@@ -682,6 +725,11 @@ impl Lighting {
         // B-249 debug A/B (`n1_set_debug_bits` bit 11): the sun, fills and sky in the other colour mode.
         self.env_alt = Env::from_feed(fr, &self.base_env, !k.sky_gamma);
         self.post = self.base_post.clone().with_feed(&fr.post);
+        self.merk = crate::postmat::merk_native_on() && crate::postmat::in_merk_kill(&fr.post);
+        if self.merk {
+            kill_lighting(&mut self.env, fr, k.sky_gamma);
+            kill_lighting(&mut self.env_alt, fr, !k.sky_gamma);
+        }
         if !k.post_mats {
             self.post.mats.clear();
         }
@@ -694,7 +742,7 @@ impl Lighting {
             self.post.apply(&s);
         }
         let max_lights = if k.dyn_lights { lightfeed::pack::MAX_LIGHTS } else { 0 };
-        self.dyn_frame = DynFrame::from_frame_env(fr, max_lights, k.envs, k.light_gamma, k.env_gamma);
+        self.dyn_frame = DynFrame::from_frame_opts(fr, max_lights, k.envs, k.light_gamma, k.env_gamma, self.merk.then(|| kill_scales().1));
         self.dyn_lights_alt = DynFrame::from_frame_with(fr, max_lights, false, !k.light_gamma).lights;
         self.envs_alt = if k.envs {
             fr.envs.iter().take(lightfeed::pack::MAX_ENVS).map(|e| lightfeed::pack::pack_env_with(e, !k.env_gamma)).collect()
@@ -757,6 +805,24 @@ mod dyn_sky_tests {
         // The plain-colour mode (BOTS_N1_SKY_GAMMA=0) uses the plain sums.
         let g = Env::from_feed(&fr, &base, false).globals([0.0; 16], [0.0; 3], 0.0);
         assert_eq!(g.dsky_up, [0.5, 0.4, 0.3, 1.0]);
+    }
+
+    #[test]
+    fn kill_lighting_uses_the_kill_sky_without_the_sun() {
+        let base = Env::default();
+        let mut fr = lightfeed::Frame { sky_dyn_count: 1, sky_dyn_up_ue3: [0.2; 3], sun_dyn: true, ..Default::default() };
+        // No dynamic-only sky: the frame's own lightless sky stays.
+        let mut e = Env::from_feed(&fr, &base, true);
+        kill_lighting_scaled(&mut e, &fr, true, 1.0);
+        assert_eq!(e.dyn_sky.unwrap().0, [0.2; 3]);
+        assert!(e.dyn_sun);
+        fr.sky_kill_count = 1;
+        fr.sky_kill_up_ue3 = [1.5, 1.4, 1.3];
+        fr.sky_kill_down_ue3 = [0.5; 3];
+        kill_lighting_scaled(&mut e, &fr, true, 1.0);
+        let g = e.globals([0.0; 16], [0.0; 3], 0.0);
+        assert_eq!(g.dsky_up, [1.5, 1.4, 1.3, 1.0]);
+        assert_eq!(g.dsky_dn, [0.5, 0.5, 0.5, 0.0]);
     }
 }
 
