@@ -27,7 +27,7 @@ struct P {
     fg_tint: vec4<f32>,
     bk_tint: vec4<f32>,
     inv_hi: vec4<f32>,  // composite multiplier before saturate (1 / Scene_HighLights in UE3)
-    taps: array<vec4<f32>, 6>,  // x offset (texels along c.xy), y weight; composite/copy: [4] fade scale, [5] overlay (B-240)
+    taps: array<vec4<f32>, 16>, // x offset (texels along c.xy), y weight; composite/copy: [4] fade scale, [5] overlay (B-240)
 };
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var smp: sampler;
@@ -265,7 +265,9 @@ fn composite(px: vec2<i32>, uv: vec2<f32>) -> vec3<f32> {
         let u = blur_amount(view_z(px));
         let a = textureSample(bloom, smp, uv);
         c = (c * (1.0 - u) + a.rgb) / max(a.a + (1.0 - u), 1e-4);
-        c = mix(c, textureSample(bloom2, smp, uv).rgb, p.comp.x);
+        if (p.comp.x != 0.0) {
+            c = mix(c, textureSample(bloom2, smp, uv).rgb, p.comp.x);
+        }
     }
     if (p.taps[4].w > 0.5) {
         var g = vec3<f32>(0.0);
