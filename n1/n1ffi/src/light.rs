@@ -304,13 +304,18 @@ impl Default for PostParams {
     }
 }
 
-/// UE3's gaussian as bilinear pairs.
-/// min(size / 4, 16) * filter_width / 1280 for normal distribution variance.
-/// Rounded up support capped at 15 texels.
+/// UE3's gaussian as bilinear pairs, in texels of the quarter-resolution blur targets.
+///
+/// At the game's 1280 width the variance is `min(size / 4, 16)` texels (size 16 gives 4, size 1 gives 0.25: the port's
+/// measured weights) and the support is `ceil(variance)` texels each side. The game's CPU code works at 1280 whatever
+/// the render scale, so the blur must cover the same part of the screen at any width: the standard deviation and the
+/// support grow with `filter_width / 1280` (variance with its square). Scaling the variance only linearly would make
+/// the bloom narrower the higher the render scale. At most `POST_TAPS` pairs; wider kernels are cut short.
 pub fn kernel_taps(size: f32, filter_width: u32) -> Vec<(f32, f32)> {
-    let v =
-        ((size / 4.0).min(16.0) * filter_width as f32 / 1280.0).clamp(1e-5, 15.0);
-    let r = v.ceil() as i32;
+    let k = filter_width as f32 / 1280.0;
+    let v0 = (size / 4.0).clamp(1e-5, 15.0);
+    let v = v0 * k * k;
+    let r = ((v0.ceil() * k).ceil() as i32).clamp(1, POST_TAPS as i32 - 1);
     let w = |x: i32| (-(x * x) as f32 / (2.0 * v)).exp();
     let mut taps = Vec::new();
     let mut x = -r;
@@ -326,7 +331,7 @@ pub fn kernel_taps(size: f32, filter_width: u32) -> Vec<(f32, f32)> {
     taps.iter().map(|&(o, k)| (o, k / sum)).collect()
 }
 
-pub const POST_TAPS: usize = 16;
+pub const POST_TAPS: usize = 32;
 pub const POST_VECS: usize = 10 + POST_TAPS;
 
 /// One post pass's uniform block (`P` in n1ffi/src/post.wgsl).
@@ -947,7 +952,7 @@ mod texprobe {
 
 #[cfg(test)]
 mod post_tests {
-    use super::{PostBlock, PostParams, kernel_taps};
+    use super::{POST_TAPS, PostBlock, PostParams, kernel_taps};
 
     /// The port's blur weights (W4 capture f4420, draws 945-948): BloomKernelSize 16 and BlurKernelSize 1.
     #[test]
@@ -978,6 +983,28 @@ mod post_tests {
         assert_eq!(p.block(&b)[4][0], p.bloom_mix);
         p.uber.bloom_kernel = p.uber.blur_kernel;
         assert_eq!(p.block(&b)[4][0], 0.0);
+    }
+
+    /// The blur covers the same part of the screen at every render width (the standard deviation in screen fractions
+    /// stays put), and the tap count fits the uniform block.
+    #[test]
+    fn kernels_keep_their_screen_width() {
+        let sigma = |size: f32, fw: u32| {
+            // Weighted spread of the sample positions, in texels of a fw / 4 wide target, as a fraction of the width.
+            let taps = kernel_taps(size, fw);
+            assert!(taps.len() <= POST_TAPS);
+            let m: f32 = taps.iter().map(|t| t.0 * t.1).sum();
+            let var: f32 = taps.iter().map(|t| t.1 * (t.0 - m) * (t.0 - m)).sum();
+            var.sqrt() / (fw as f32 / 4.0)
+        };
+        // Kernels of a texel or more; a sub-texel one (size 1) is only roughly resolved by bilinear pairs.
+        for size in [8.0, 16.0, 32.0] {
+            let base = sigma(size, 1280);
+            for fw in [1920, 2560, 3840] {
+                let r = sigma(size, fw) / base;
+                assert!((r - 1.0).abs() < 0.12, "size {size} width {fw}: ratio {r}");
+            }
+        }
     }
 }
 
