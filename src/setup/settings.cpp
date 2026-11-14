@@ -80,7 +80,7 @@ std::vector<Setting> Catalog() {
                "60 is what the game was made for. 90, 120 and 144 run smoother on a high-refresh screen; the game "
                "holds 60 while you drive and while an AI-driven vehicle is in play, because vehicles drive slower at "
                "higher frame rates. Unlimited is experimental.",
-               {{"30", "30 fps (steadier on slow laptops)"}, {"60", "60 fps (original)"}, {"90", "90 fps"}, {"120", "120 fps"}, {"144", "144 fps"},
+               {{"30", "30 fps (steadier on weaker hardware)"}, {"60", "60 fps (original)"}, {"90", "90 fps"}, {"120", "120 fps"}, {"144", "144 fps"},
                 {"0", "Unlimited (experimental)"}}});
   s.push_back({"present_vsync", "", "VSync", "Off has the lowest latency but can tear.", {}});
   s.push_back({"fps_counter", "", "Show FPS counter",
