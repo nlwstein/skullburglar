@@ -34,3 +34,20 @@ The mirror then shows it as merged here. Fixes on top of your PR are added as ne
 aren't rewritten.
 
 Please don't expect a PR to be merged with GitHub's merge button: the mirror would overwrite it.
+
+## What to expect after you open a PR
+
+1. **A first reply within a few days** saying we've seen it.
+2. **We test it against the real game** on our own machines: we reproduce the bug first, then check your fix, and for
+   anything visual we compare it with the game's original renderer. We post what we found on your PR, with
+   before/after screenshots.
+3. **If it needs changes**, we either ask you or add our own commits on top. Your commits stay exactly as you wrote
+   them, so they keep your name and link to your GitHub account.
+4. **It ships in the next release** that bundles it, and the release notes thank you. When that release reaches
+   GitHub, your PR shows as merged.
+5. **If we can't take it**, we explain why on the PR. If we reuse part of your idea or code in our own commit, that
+   commit credits you as a co-author.
+
+**What helps a PR go faster:** say what you saw (a screenshot of the bug, where in the game, your GPU, the render scale
+or resolution), how you tested the fix, and keep each PR to one change.
+
