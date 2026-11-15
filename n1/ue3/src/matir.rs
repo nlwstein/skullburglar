@@ -225,8 +225,8 @@ const BLEND_NOT_STARTED: f32 = 1.0e9;
 
 /// B-349: a `MaterialBlended` (a licensee class: the burning characters' `TemplateBody_OnFire_Mat` and
 /// `TemplateHead_OnFire_Mat`) is a set of `BlendMaterials` the engine fades between by time, `BlendTimes[i]` giving each
-/// one's `StartTime`/`EndTime` in seconds after the instance's `StartTime` parameter (the game writes the world time
-/// when a character catches fire). Compiles every material with the same instance parameters and merges them.
+/// one's `StartTime`/`EndTime` in seconds since the fire began. The instance's `StartTime` parameter is that moment plus
+/// the length of the sequence (the game writes the world time when a character catches fire, plus 6 s: B-355). Compiles every material with the same instance parameters and merges them.
 fn blend_by<P: std::ops::Deref<Target = Package>>(
     p: &Package,
     ei: i32,
@@ -252,14 +252,33 @@ fn blend_by<P: std::ops::Deref<Target = Package>>(
     }
     let start = params.scalar.get("starttime").copied().unwrap_or(BLEND_NOT_STARTED);
     if std::env::var("BOTS_N1_BLEND_LOG").is_ok_and(|v| v == "1") {
-        eprintln!("n1: blended material {} StartTime {} ({} materials, windows {:?})", p.obj_path(ei), if start == BLEND_NOT_STARTED { "unset".to_string() } else { start.to_string() }, parts.len(), times);
+        eprintln!(
+            "n1: blended material {} StartTime {} ({} materials, windows {:?}, lead {})",
+            p.obj_path(ei),
+            if start == BLEND_NOT_STARTED { "unset".to_string() } else { start.to_string() },
+            parts.len(),
+            times,
+            blend_lead(&times, start)
+        );
     }
     merge_blend(parts, &times, start)
 }
 
+/// Seconds between the game's StartTime and the fire beginning: the end of the last window (6 s for the burn materials).
+/// `BOTS_N1_BLEND_OFFSET=<s>` overrides it (debug). A material that was never started (`BLEND_NOT_STARTED`) has none.
+fn blend_lead(times: &[(f32, f32)], start: f32) -> f32 {
+    if start >= BLEND_NOT_STARTED {
+        return 0.0;
+    }
+    if let Some(v) = std::env::var("BOTS_N1_BLEND_OFFSET").ok().and_then(|v| v.parse::<f32>().ok()) {
+        return v;
+    }
+    times.iter().fold(0.0f32, |m, &(_, hi)| m.max(hi))
+}
+
 /// Merges the graphs of a blended material into one: each material's nodes appended in turn, then the weights (from the
-/// seconds since `start`) and, for every output, the weighted sum of the materials' values. Material i+1 fades in over
-/// `times[i]` on top of the earlier ones (chained lerps), so the weights always add up to 1. With no usable windows the
+/// seconds since the fire began, `Time - start + lead`) and, for every output, the weighted sum of the materials' values.
+/// Material i fades in over `times[i]` on top of the earlier ones (chained lerps), so the weights always add up to 1. With no usable windows the
 /// first material stands alone.
 pub fn merge_blend(parts: Vec<MatDef>, times: &[(f32, f32)], start: f32) -> Option<MatDef> {
     let first = parts.first()?;
@@ -312,7 +331,12 @@ pub fn merge_blend(parts: Vec<MatDef>, times: &[(f32, f32)], start: f32) -> Opti
     let k = |out: &mut MatDef, v: f32| push(out, Node::Const { v: [v; 4], n: 1 });
     let time = push(&mut out, Node::Time);
     let st = k(&mut out, start);
-    let t = push(&mut out, Node::Sub { a: time, b: st });
+    // The game writes StartTime as the world time of ignition plus the length of the whole sequence (measured: 6.0 s,
+    // the end of the last window), so the seconds since the fire began are `Time - StartTime + lead`. Without the lead a
+    // corpse that is already burning is drawn as the body until the clock passes StartTime (B-355).
+    let lead_n = k(&mut out, blend_lead(times, start));
+    let since = push(&mut out, Node::Sub { a: time, b: st });
+    let t = push(&mut out, Node::Add { a: since, b: lead_n });
     // ramp(i): 0 before the window, 1 after it
     let mut ramps = Vec::new();
     for &(lo, hi) in times {
@@ -324,17 +348,20 @@ pub fn merge_blend(parts: Vec<MatDef>, times: &[(f32, f32)], start: f32) -> Opti
     }
     // BOTS_N1_BLEND_FORCE=<i>: debug aid, shows material i alone (to compare one stage with the game's picture)
     let force: Option<usize> = std::env::var("BOTS_N1_BLEND_FORCE").ok().and_then(|v| v.parse().ok()).filter(|&i| i < parts.len());
-    // Chained fades: material i+1 fades in over window i (`times[i]`) on top of what the earlier ones made, so
-    // w0 = (1-r0)(1-r1).., w1 = r0 (1-r1).., w2 = r1: with the burn windows (0-1 s, 0-1 s) the surface goes body -> charred in
-    // about a second, as the game's own picture does. The last window has no later material and is not used.
-    let one_minus: Vec<u32> = (0..parts.len() - 1).map(|i| push(&mut out, Node::Un { f: "oneminus".into(), x: ramps[i] })).collect();
+    // Chained fades: material i fades in over its own window `times[i]` on top of what the earlier ones made, so
+    // w0 = (1-r1)(1-r2).., w1 = r1 (1-r2).., w2 = r2 (the body, material 0, is the base layer: its window is not used).
+    // With the burn windows (flame 0-1 s, char 1-6 s) the surface goes body -> flame in the first second, then chars over
+    // the next five.
+    let fades: Vec<Option<u32>> = (0..parts.len()).map(|i| if i == 0 { None } else { Some(ramps[i]) }).collect();
+    let one_minus: Vec<Option<u32>> =
+        fades.iter().map(|f| f.map(|r| push(&mut out, Node::Un { f: "oneminus".into(), x: r }))).collect();
     let mut weights = Vec::new();
     for i in 0..parts.len() {
-        let mut w: Option<u32> = if i == 0 { None } else { Some(ramps[i - 1]) };
-        for &om in &one_minus[i..] {
+        let mut w: Option<u32> = fades[i];
+        for om in one_minus[i + 1..].iter().flatten() {
             w = Some(match w {
-                Some(x) => push(&mut out, Node::Mul { a: x, b: om }),
-                None => om,
+                Some(x) => push(&mut out, Node::Mul { a: x, b: *om }),
+                None => *om,
             });
         }
         weights.push(w.unwrap_or_else(|| k(&mut out, 1.0)));
@@ -792,11 +819,14 @@ mod blend_tests {
         }
     }
 
-    // chained fades: flame over body during 0..1 s, then char over that during 0..1 s (the third window is unused)
+    // The burn windows: flame over the body during 0-1 s, char over that during 1-6 s (the body's own window is unused).
     const TIMES: [(f32, f32); 3] = [(0.0, 1.0), (0.0, 1.0), (1.0, 6.0)];
+    // The game writes StartTime = ignition + 6 s (the end of the last window), so ignition is at 94 for StartTime 100.
+    const START: f32 = 100.0;
+    const IGNITION: f32 = 94.0;
 
     fn merged() -> MatDef {
-        merge_blend(vec![part("Body", 0.0), part("Flame", 4.0), part("Char", 0.0)], &TIMES, 100.0).unwrap()
+        merge_blend(vec![part("Body", 0.0), part("Flame", 4.0), part("Char", 0.0)], &TIMES, START).unwrap()
     }
 
     #[test]
@@ -818,22 +848,49 @@ mod blend_tests {
     }
 
     #[test]
-    fn weights_follow_the_clock_and_sum_to_one() {
+    fn weights_follow_the_seconds_since_ignition_and_sum_to_one() {
         let m = merged();
         // diffuse = w0*body + w1*flame + w2*char with each texture sampled as 1, 10, 100
         let tv = |t: u32| [1.0, 10.0, 100.0][t as usize];
-        let at = |sec: f32| eval(&m, m.diffuse.unwrap(), 100.0 + sec, &tv);
-        assert_eq!(at(-5.0), 1.0, "before the start: the body alone");
+        let at = |sec: f32| eval(&m, m.diffuse.unwrap(), IGNITION + sec, &tv);
+        assert_eq!(at(-5.0), 1.0, "before the fire: the body alone");
         assert!((at(0.0) - 1.0).abs() < 1e-4);
-        // t = 0.5: r = 0.5 for both fades: w0 = .25, w1 = .25, w2 = .5
-        assert!((at(0.5) - (0.25 * 1.0 + 0.25 * 10.0 + 0.5 * 100.0)).abs() < 1e-3, "{}", at(0.5));
-        assert!((at(1.0) - 100.0).abs() < 1e-3, "charred after a second");
+        // 0.5 s: flame r1 = .5, char r2 = 0: w0 = .5, w1 = .5
+        assert!((at(0.5) - (0.5 * 1.0 + 0.5 * 10.0)).abs() < 1e-3, "{}", at(0.5));
+        assert!((at(1.0) - 10.0).abs() < 1e-3, "flame alone after a second");
+        // 3 s: char r2 = (3 - 1) / 5 = .4 over the flame: w1 = .6, w2 = .4
+        assert!((at(3.0) - (0.6 * 10.0 + 0.4 * 100.0)).abs() < 1e-3, "{}", at(3.0));
+        assert!((at(6.0) - 100.0).abs() < 1e-3, "charred after six seconds");
         assert!((at(60.0) - 100.0).abs() < 1e-3);
-        // the emissive follows the flame only: w1 = r0 (1 - r1) peaks at 0.25 and is gone by 1 s
-        let em = |sec: f32| eval(&m, m.emissive.unwrap(), 100.0 + sec, &tv);
+        // the emissive follows the flame only: w1 = r1 (1 - r2), full at 1 s, gone by 6 s
+        let em = |sec: f32| eval(&m, m.emissive.unwrap(), IGNITION + sec, &tv);
         assert_eq!(em(-5.0), 0.0);
-        assert!((em(0.5) - 0.25 * 4.0).abs() < 1e-4);
-        assert!(em(1.0).abs() < 1e-4);
+        assert!((em(0.5) - 0.5 * 4.0).abs() < 1e-4);
+        assert!((em(1.0) - 4.0).abs() < 1e-4);
+        assert!((em(3.0) - 0.6 * 4.0).abs() < 1e-4);
+        assert!(em(6.0).abs() < 1e-4);
+    }
+
+    /// B-355: a corpse 1.6-3 s after ignition has a StartTime that is still ahead of the world clock (the game writes
+    /// ignition + 6 s). It is already flame/char there, not the body.
+    #[test]
+    fn a_corpse_that_burned_for_a_few_seconds_is_not_the_body() {
+        let m = merged();
+        let tv = |t: u32| [1.0, 10.0, 100.0][t as usize];
+        for sec in [1.0f32, 1.6, 2.4, 3.0] {
+            let time = IGNITION + sec;
+            assert!(time < START, "the clock has not reached StartTime");
+            let v = eval(&m, m.diffuse.unwrap(), time, &tv);
+            assert!(v > 9.0, "{sec} s after ignition drew {v}, the body is 1");
+        }
+    }
+
+    #[test]
+    fn the_lead_is_the_end_of_the_last_window() {
+        assert_eq!(blend_lead(&TIMES, START), 6.0);
+        assert_eq!(blend_lead(&[(0.0, 2.0), (0.0, 1.0)], START), 2.0);
+        assert_eq!(blend_lead(&TIMES, BLEND_NOT_STARTED), 0.0, "never started: no lead");
+        assert_eq!(blend_lead(&[], START), 0.0);
     }
 
     #[test]
