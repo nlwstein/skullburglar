@@ -1,0 +1,5 @@
+[
+  "Flat ground and surfaces seen at an angle no longer look smeared or soft in the New renderer.",
+  "Enemies that burn to death no longer look unburnt for the first seconds: their bodies now glow and char right away, like in the Pre-1.0 renderer.",
+  "Bloom no longer leaves ghost copies around small bright spots at high render scales in the New renderer, and keeps the same glow at every scale. Thanks to goldislead for the fix (GitHub PR #42)."
+]
