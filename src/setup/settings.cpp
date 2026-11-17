@@ -3,6 +3,7 @@
 #include "settings.h"
 
 #include "../renderer_choice.h"
+#include "settings_logic.h"
 #include "update_check.h"
 
 #include <algorithm>
@@ -189,6 +190,23 @@ std::vector<std::string>& AppDefaults() {
   return names;
 }
 
+std::vector<std::pair<std::string, std::string>>& AppDefaultValues() {
+  static std::vector<std::pair<std::string, std::string>> values;
+  return values;
+}
+
+// Text as the window holds it: the renderer is "new" unless pre1, and a double reads back as "1.000000", so show it as
+// the choice it matches.
+std::string Normalize(const Setting& s, const rex::cvar::FlagEntry* info, std::string text) {
+  if (s.cvar == "renderer" && text != "pre1") return "new";
+  if (info && info->type == rex::cvar::FlagType::Double) {
+    for (const auto& choice : s.choices) {
+      if (SameValue(choice.value, text)) return choice.value;
+    }
+  }
+  return text;
+}
+
 bool IsLocked(const std::string& cvar) {
   if (std::find(AppDefaults().begin(), AppDefaults().end(), cvar) != AppDefaults().end()) {
     return false;
@@ -201,6 +219,10 @@ bool IsLocked(const std::string& cvar) {
 
 void MarkAppDefault(const std::string& cvar) { AppDefaults().push_back(cvar); }
 
+void RegisterAppDefault(const std::string& cvar, const std::string& value) {
+  AppDefaultValues().emplace_back(cvar, value);
+}
+
 std::vector<Setting> LoadSettings() {
   auto settings = Catalog();
   // Settings whose cvar the GPU plugin didn't register aren't shown; the renderer choice needs a build with n1.
@@ -209,19 +231,14 @@ std::vector<Setting> LoadSettings() {
            (s.cvar == "renderer" && !bots::kHasN1);
   });
   for (auto& s : settings) {
-    s.value = rex::cvar::GetFlagByName(s.cvar);
-    if (s.cvar == "renderer" && s.value != "pre1") s.value = "new";  // anything but pre1 is the new renderer
-    s.locked = IsLocked(s.cvar);
     const auto* info = rex::cvar::GetFlagInfo(s.cvar);
+    s.value = Normalize(s, info, rex::cvar::GetFlagByName(s.cvar));
+    s.locked = IsLocked(s.cvar);
     s.default_value = info->default_value;
-    // A double reads back as "1.000000": show it as the matching choice.
-    if (info->type == rex::cvar::FlagType::Double) {
-      for (const auto& choice : s.choices) {
-        if (std::abs(std::strtod(choice.value.c_str(), nullptr) - std::strtod(s.value.c_str(), nullptr)) < 1e-6) {
-          s.value = choice.value;
-        }
-      }
+    for (const auto& [cvar, value] : AppDefaultValues()) {
+      if (cvar == s.cvar) s.default_value = value;
     }
+    s.default_value = Normalize(s, info, s.default_value);
   }
   return settings;
 }
@@ -272,6 +289,7 @@ std::string SaveSettings(const std::vector<Setting>& settings, const fs::path& c
       if (!rex::cvar::SetFlagByName(name, s.value)) {
         REXLOG_WARN("setup: can't set {} = {}", name, s.value);
       }
+      if (!ShouldWriteKey(table, name, s.value, s.default_value)) continue;
       const auto* info = rex::cvar::GetFlagInfo(name);
       auto type = info ? info->type : rex::cvar::FlagType::String;
       if (type == rex::cvar::FlagType::Boolean) {
@@ -289,6 +307,25 @@ std::string SaveSettings(const std::vector<Setting>& settings, const fs::path& c
   if (const auto* old = table.get("gpu_plugin"); old && old->is_string()) table.erase("gpu_plugin");
   std::string err = WriteConfig(table, config_path);
   if (err.empty()) REXLOG_INFO("setup: settings saved to {}", bots::PathUtf8(config_path));
+  return err;
+}
+
+std::string ResetSettings(std::vector<Setting>& settings, const fs::path& config_path, int* changed) {
+  toml::table table = ReadConfig(config_path);
+  int count = 0;
+  for (auto& s : settings) {
+    if (s.locked || ResetKeeps(s.cvar)) continue;
+    if (!SameValue(s.value, s.default_value)) ++count;
+    s.value = s.default_value;
+    for (const std::string& name : {s.cvar, s.also_cvar}) {
+      if (name.empty()) continue;
+      if (!rex::cvar::SetFlagByName(name, s.value)) REXLOG_WARN("setup: can't set {} = {}", name, s.value);
+      table.erase(name);
+    }
+  }
+  if (changed) *changed = count;
+  std::string err = WriteConfig(table, config_path);
+  if (err.empty()) REXLOG_INFO("setup: {} settings reset to this version's defaults in {}", count, bots::PathUtf8(config_path));
   return err;
 }
 

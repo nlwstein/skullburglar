@@ -41,6 +41,15 @@ std::vector<Setting> LoadSettings();
 std::string SaveSettings(const std::vector<Setting>& settings,
                          const std::filesystem::path& config_path);
 
+// Puts every setting except the kept ones (settings_logic.h: ResetKeeps) back to this version's default: the value in
+// `settings` (the window shows it at once), the running value, and the key is removed from `config_path`, so a future
+// version's new default applies. Locked settings (a launch option set them) are left alone. `changed` gets how many
+// values differed from their default. Returns an error message, empty on success.
+std::string ResetSettings(std::vector<Setting>& settings, const std::filesystem::path& config_path, int* changed);
+
+// The app's built-in value for a cvar it overrides at startup (BotsApp::SetCvarDefault), so Reset knows the real default.
+void RegisterAppDefault(const std::string& cvar, const std::string& value);
+
 // Marks a cvar whose REX_* env value is the app's own built-in default (BotsApp::SetCvarDefault),
 // not a launch option, so the window still lets the player change it.
 void MarkAppDefault(const std::string& cvar);
