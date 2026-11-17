@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <mutex>
+#include <string>
 
 namespace bots {
 
@@ -27,6 +28,23 @@ bool g_blocked = false;        // the shortcuts are off right now (so the saved 
 STICKYKEYS g_sticky = {sizeof(STICKYKEYS), 0};
 TOGGLEKEYS g_toggle = {sizeof(TOGGLEKEYS), 0};
 FILTERKEYS g_filter = {sizeof(FILTERKEYS), 0};
+
+// The flags Windows stores for the player (the registry holds them as decimal text). The system's live value is not
+// trustworthy as the baseline: a game that was killed while the shortcuts were off leaves them off until the player logs
+// out, and a copy of that would be "restored" as off. We only ever change the live value (SPI_SET without
+// SPIF_UPDATEINIFILE), never the registry, so the registry is always the player's own setting. Returns false if unreadable.
+bool RegistryFlags(const wchar_t* key, DWORD* flags) {
+  wchar_t text[32] = {};
+  DWORD size = sizeof(text) - sizeof(wchar_t);
+  const std::wstring path = std::wstring(L"Control Panel\\Accessibility\\") + key;
+  if (RegGetValueW(HKEY_CURRENT_USER, path.c_str(), L"Flags", RRF_RT_REG_SZ, nullptr, text, &size) != ERROR_SUCCESS)
+    return false;
+  wchar_t* end = nullptr;
+  const unsigned long value = std::wcstoul(text, &end, 10);
+  if (end == text) return false;
+  *flags = DWORD(value);
+  return true;
+}
 
 void Apply(bool blocked) {
   STICKYKEYS sticky = g_sticky;
@@ -64,6 +82,10 @@ void SetAccessibilityShortcutsBlocked(bool blocked) {
         !SystemParametersInfoW(SPI_GETFILTERKEYS, sizeof(FILTERKEYS), &g_filter, 0)) {
       return;  // can't read the player's settings, so change nothing
     }
+    DWORD from_registry = 0;  // the player's own value wins over the live one (see RegistryFlags)
+    if (RegistryFlags(L"StickyKeys", &from_registry)) g_sticky.dwFlags = from_registry;
+    if (RegistryFlags(L"ToggleKeys", &from_registry)) g_toggle.dwFlags = from_registry;
+    if (RegistryFlags(L"Keyboard Response", &from_registry)) g_filter.dwFlags = from_registry;
     g_saved = true;
     std::atexit(RestoreAccessibilityShortcuts);
   }

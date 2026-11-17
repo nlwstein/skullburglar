@@ -161,7 +161,7 @@ elseif(APPLE)
 elseif(ANDROID)
     target_link_libraries(bots PRIVATE android log)
 elseif(WIN32)
-    target_link_libraries(bots PRIVATE ole32 oleaut32 shell32 winhttp ws2_32)
+    target_link_libraries(bots PRIVATE ole32 oleaut32 shell32 winhttp ws2_32 advapi32)
     # winsock2.h has to come before windows.h, which the precompiled header pulls in.
     set_source_files_properties(src/setup/firewall_win.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 endif()
