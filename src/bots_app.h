@@ -675,7 +675,10 @@ class BotsApp : public rex::ReXApp {
 #if defined(REX_HAS_VULKAN)
         if (bots::UseN1()) {
           using Presenter = rex::ui::vulkan::VulkanPresenter;
-          if (Presenter::GuestOutputFormat() != VK_FORMAT_R16G16B16A16_SFLOAT) return "Output: SDR (HDR is off for this run).";
+          if (Presenter::GuestOutputFormat() != VK_FORMAT_R16G16B16A16_SFLOAT) {
+            return Presenter::HdrRequested() ? "Output: SDR (HDR unavailable on this display)."
+                                             : "Output: SDR (HDR is off for this run).";
+          }
           auto* p = runtime() && runtime()->graphics_system() ? runtime()->graphics_system()->presenter() : nullptr;
           return p && static_cast<Presenter*>(p)->is_hdr_output() ? "Output: HDR scRGB (linear Rec.709)"
                                                                 : "Output: SDR fallback (no HDR surface available)";
