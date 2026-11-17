@@ -54,13 +54,13 @@ Playing
 A controller works as on the Xbox. With a DualShock 4 or DualSense the prompts show PlayStation buttons; the
 launcher's "Controller button prompts" setting can pick Xbox or PlayStation instead. Keyboard and mouse:
 
-  Move          W A S D              Fire / aim        Left / right mouse button
+  Move          W A S D              Fire              Left mouse button
   Cover, run    Space                Reload, pick up   R
   Special move  E or F               Gangsta Fury      Q
   Grenade       G or middle button   Next grenade      T
   Taunt         C                    Weapons           1-4, arrows, mouse wheel
   Objectives    Tab                  Pause             Escape
-  Fullscreen    F11
+  Aim           Right button, Shift  Fullscreen        F11
 
 Menus work with the mouse. Button prompts follow the device you last used. Keys can be changed in the launcher.
 To quit, choose Quit on the main menu or close the window.

@@ -62,6 +62,7 @@
 #include "setup/app_paths.h"
 #include "setup/update_check.h"
 #include "setup/settings.h"
+#include "setup/config_migrate.h"
 #include "setup/setup_dialog.h"
 #include "fps_counter.h"
 #include "shader_progress.h"
@@ -212,6 +213,7 @@ class BotsApp : public rex::ReXApp {
     paths.config_path = bots::LongPath(paths.config_path);
     if (!fs::exists(paths.config_path, ec)) paths.config_path = paths.user_data_root / "bots.toml";
     config_path_ = paths.config_path;
+    bots::setup::MigrateOldDefaults(config_path_);  // before the SDK reads the file (B-360)
     UseBundleLogDir();
     game_root_given_ = !paths.game_data_root.empty();
     if (paths.game_data_root.empty()) {
