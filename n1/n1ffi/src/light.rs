@@ -332,7 +332,7 @@ pub fn kernel_taps(size: f32, filter_width: u32) -> Vec<(f32, f32)> {
 }
 
 pub const POST_TAPS: usize = 32;
-pub const POST_VECS: usize = 10 + POST_TAPS;
+pub const POST_VECS: usize = 10 + POST_TAPS + 3;
 
 /// One post pass's uniform block (`P` in n1ffi/src/post.wgsl).
 pub struct PostBlock<'a> {

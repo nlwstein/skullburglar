@@ -147,7 +147,7 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
           [&](rex::ui::Presenter::GuestOutputRefreshContext& context) -> bool {
             auto& vulkan_context =
                 static_cast<rex::ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext&>(context);
-            context.SetIs8bpc(true);
+            context.SetIs8bpc(rex::ui::vulkan::VulkanPresenter::GuestOutputFormat() != VK_FORMAT_R16G16B16A16_SFLOAT);
             bots::FrameTrace::Get().Mark('p');
             return renderer_->Present(frontbuffer_ptr & 0x1FFFFFFF, vulkan_context.image(),
                                       vulkan_context.image_view(), out_width, out_height, ramp);
@@ -642,7 +642,9 @@ class NativeCommandProcessor final : public rg::CommandProcessor {
       }
       if (bots::HybridState* state = bots::FindHybridState()) {
         state->markers_seen.fetch_add(1, std::memory_order_relaxed);
-        if (renderer_) renderer_->QueueSceneFill(value);
+        if (renderer_) {
+          renderer_->QueueSceneFill(value, reinterpret_cast<const uint32_t*>(gamma_ramp_256_entry_table()));
+        }
       }
       return;
     }

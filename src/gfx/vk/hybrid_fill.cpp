@@ -110,7 +110,8 @@ struct FillConstants {
 
 }  // namespace
 
-void Renderer::QueueSceneFill(uint32_t seq) {
+void Renderer::QueueSceneFill(uint32_t seq, const uint32_t* gamma_ramp) {
+  if (hdr_) std::memcpy(scene_gamma_ramp_, gamma_ramp, sizeof(scene_gamma_ramp_));
   capture_frame_ = false;  // B-220: the scene's marker ends a capture frame's scene
   // B-210 diagnostics (BOTS_HYBRID_DROP_LOG=<n>): a marker replaced before any draw reached it drew no scene.
   static int drop_log = [] { const char* v = std::getenv("BOTS_HYBRID_DROP_LOG"); return v ? std::atoi(v) : 0; }();
@@ -246,6 +247,7 @@ void* Renderer::EnsureN1(VkFormat format) {
   init.cooked_dir = EnvOr("BOTS_N1_COOKED", n1_cooked_dir_.empty() ? "game/C1Game/CookedXenon" : n1_cooked_dir_.c_str());
   init.cache_dir = EnvOr("BOTS_N1_CACHE", n1_cache_dir_.empty() ? "cache/n1" : n1_cache_dir_.c_str());
   init.loader_threads = uint32_t(std::atoi(EnvOr("BOTS_N1_THREADS", "2")));
+  init.hdr = hdr_ && format == VK_FORMAT_R16G16B16A16_SFLOAT;
   const auto t0 = std::chrono::steady_clock::now();
   // The new renderer has no fallback: a start failure ends in the renderer start-failure box (native.cpp), whose text
   // points the player at the pre-1.0 renderer in the launcher. BOTS_TEST_N1_FAIL=1 forces it (tests).
@@ -312,7 +314,7 @@ void Renderer::PumpN1Warmup() {
     HybridState* state = FindHybridState();
     if (!state || state->fill.load(std::memory_order_relaxed) != 4) return;
     n1_warm_started_ = true;
-    auto* host = static_cast<N1Host*>(EnsureN1(VK_FORMAT_R8G8B8A8_UNORM));
+    auto* host = static_cast<N1Host*>(EnsureN1(hdr_ ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM));
     if (host && host->r) {
       if (n1_precompile_start(host->r) != 0) REXLOG_WARN("hybrid n1: startup step failed to start: {}", n1_last_error());
       host->precompile_started = std::chrono::steady_clock::now();
@@ -901,6 +903,21 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   if (gpu_timing_) GpuLabel(kGpuDraw, "hybrid n1");
   const auto t1 = std::chrono::steady_clock::now();
   N1Stats st{};
+  if (hdr_) {
+    N1Hdr hdr{
+        float(std::clamp(rex::cvar::Query<double>("vulkan_hdr_paper_white"), 80.0, 500.0)),
+        float(std::clamp(rex::cvar::Query<double>("vulkan_hdr_peak"), 200.0, 10000.0)),
+        float(std::clamp(rex::cvar::Query<double>("vulkan_hdr_ui_white"), 40.0, 500.0)),
+        float(std::clamp(rex::cvar::Query<double>("vulkan_hdr_exposure"), -4.0, 4.0)),
+        float(std::clamp(rex::cvar::Query<double>("vulkan_hdr_contrast"), 0.25, 2.0)),
+        float(std::clamp(rex::cvar::Query<double>("vulkan_hdr_highlights"), 0.25, 2.0)),
+        float(std::clamp(rex::cvar::Query<double>("vulkan_hdr_shadows"), 0.25, 2.0)),
+        float(std::clamp(rex::cvar::Query<double>("vulkan_hdr_saturation"), 0.25, 2.0)),
+        float(std::clamp(rex::cvar::Query<double>("vulkan_hdr_middle_gray"), 0.05, 0.5))};
+    hdr.peak = std::max(hdr.peak, hdr.paper_white);
+    std::memcpy(hdr.gamma_ramp, scene_gamma_ramp_, sizeof(hdr.gamma_ramp));
+    n1_set_hdr(host->r, &hdr);
+  }
   const int32_t rc = n1_record(host->r, cmd_, &t, &camera, host->instances.data(), uint32_t(host->instances.size()),
                                host->material_handles.data(), uint32_t(host->material_handles.size()),
                                stats_.flushes + 1, completed, host->budget, &st);
@@ -914,6 +931,7 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     return false;
   }
   target.Use(uint32_t(t.x) + t.w, uint32_t(t.y) + t.h);
+  target.hdr = hdr_ && target.format == VK_FORMAT_R16G16B16A16_SFLOAT;
   {
     const uint32_t cap = n1_tree_end_frame(host->r);
     n1_tree_active_ = cap > 0;

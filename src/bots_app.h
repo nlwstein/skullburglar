@@ -48,6 +48,7 @@
 #include <rex/cvar.h>
 #include <rex/ui/keybinds.h>
 #include <rex/ui/overlay/achievement_notification.h>
+#include <rex/ui/vulkan/presenter.h>
 #include <rex/runtime.h>
 
 #include "app_quit.h"
@@ -100,6 +101,7 @@ class BotsApp : public rex::ReXApp {
  private:
   std::filesystem::path config_path_;  // bots.toml (OnConfigurePaths)
   bool game_root_given_ = false;       // --game_data_root on the command line: skip the launcher
+  bots::setup::DisplayDialog* display_dialog_ = nullptr;
 
  public:
 
@@ -594,6 +596,7 @@ class BotsApp : public rex::ReXApp {
       }
     }
     SetCvarDefault("depth_float24_convert_in_pixel_shader", "REX_DEPTH_FLOAT24_CONVERT_IN_PIXEL_SHADER", "true");
+    if (!bots::UseN1()) rex::cvar::SetFlagByName("vulkan_hdr", "false");
     // MoltenVK: plain Metal binding instead of Metal3 argument buffers for descriptor sets —
     // gameplay 18.4 → 22.1 fps on M2 Pro (B-032, run 38). Read at VkInstance creation, which
     // happens in the GPU plugin after this hook.
@@ -662,6 +665,30 @@ class BotsApp : public rex::ReXApp {
     });
   }
 
+  void RegisterDisplayBind() {
+    rex::ui::RegisterBind("bind_display_settings", "F6", "Display settings", [this] {
+      if (display_dialog_) {
+        display_dialog_->RequestClose();
+        return;
+      }
+      display_dialog_ = new bots::setup::DisplayDialog(runtime()->imgui_drawer(), config_path_, [this] {
+#if defined(REX_HAS_VULKAN)
+        if (bots::UseN1()) {
+          using Presenter = rex::ui::vulkan::VulkanPresenter;
+          if (Presenter::GuestOutputFormat() != VK_FORMAT_R16G16B16A16_SFLOAT) {
+            return Presenter::HdrRequested() ? "Output: SDR (HDR unavailable on this display)."
+                                             : "Output: SDR (HDR is off for this run).";
+          }
+          auto* p = runtime() && runtime()->graphics_system() ? runtime()->graphics_system()->presenter() : nullptr;
+          return p && static_cast<Presenter*>(p)->is_hdr_output() ? "Output: HDR scRGB (linear Rec.709)"
+                                                                : "Output: SDR fallback (no HDR surface available)";
+        }
+#endif
+        return "HDR requires the new renderer.";
+      }, [this] { display_dialog_ = nullptr; });
+    });
+  }
+
   // Keyboard and mouse (mnk_input.h), and BOTS_INPUT=<script>: scripted controller as guest user 0
   // (script_input.h). --pad=N: only pad N drives this instance; --coop: player 1 starts player 2 here,
   // once the launcher (if any) has settled the game files and before the shader cache opens (coop.h).
@@ -669,6 +696,7 @@ class BotsApp : public rex::ReXApp {
     bots::StartThreadStats();
     SetLaunchCommandLine();
     RegisterFullscreenBind();
+    RegisterDisplayBind();
     bots::SpawnPlayerTwo(game_data_root(), user_data_root(), cache_root());
     bots::levelstream::Start(user_data_root());  // level_stream.cpp: level-start prefetch (B-226)
     if (runtime()) bots::SetWidescreenWindow(runtime()->display_window());

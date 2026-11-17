@@ -37,7 +37,17 @@ typedef struct N1Init {
   const char* cooked_dir;  /* game/C1Game/CookedXenon */
   const char* cache_dir;   /* writable: asset index and extracted meshes/textures/light */
   uint32_t loader_threads; /* background loaders; 0 = load synchronously inside n1_record (stalls) */
+  uint32_t hdr;            /* optional extended FP16 output */
 } N1Init;
+
+typedef struct N1Hdr {
+  float paper_white, peak, ui_white;
+  float exposure;
+  float contrast, highlights, shadows, saturation;
+  float middle_gray;          /* 18 percent gray output. 0.18 keeps SDR look */
+  uint32_t gamma_ramp[256];   /* Xenos DC_LUT_30_COLOR used during present */
+} N1Hdr;
+void n1_set_hdr(N1Renderer* r, const N1Hdr* hdr);
 
 typedef struct N1Camera {
   float view[16]; /* FSceneView ViewMatrix */
