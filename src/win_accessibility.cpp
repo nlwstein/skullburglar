@@ -3,6 +3,8 @@
 
 #include <windows.h>
 
+#include <rex/logging.h>
+
 #include <atomic>
 #include <cstdlib>
 #include <mutex>
@@ -43,6 +45,9 @@ void Apply(bool blocked) {
   if (g_filter.dwFlags != access::BlockedFlags(g_filter.dwFlags))
     SystemParametersInfoW(SPI_SETFILTERKEYS, sizeof(FILTERKEYS), &filter, 0);
   g_blocked = blocked;
+  REXLOG_INFO("accessibility shortcuts {}: sticky {:#x}, toggle {:#x}, filter {:#x}", blocked ? "off (game has focus)" : "put back",
+              blocked ? sticky.dwFlags : g_sticky.dwFlags, blocked ? toggle.dwFlags : g_toggle.dwFlags,
+              blocked ? filter.dwFlags : g_filter.dwFlags);
 }
 
 }  // namespace

@@ -330,11 +330,13 @@ void MouseKeyboardDriver::OnMouseWheel(rex::ui::MouseEvent& e) {
 
 void MouseKeyboardDriver::OnGotFocus(rex::ui::UISetupEvent&) {
   has_focus_ = true;
+  REXLOG_INFO("keyboard/mouse: window focus gained");
   SetAccessibilityShortcutsBlocked(Enabled() && REXCVAR_GET(windows_block_accessibility_shortcuts));
 }
 
 void MouseKeyboardDriver::OnLostFocus(rex::ui::UISetupEvent&) {
   has_focus_ = false;
+  REXLOG_INFO("keyboard/mouse: window focus lost");
   SetAccessibilityShortcutsBlocked(false);  // the player's own settings back while another window has focus
   capture_wanted_ = false;
   {
