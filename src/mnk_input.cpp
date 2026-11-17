@@ -1,5 +1,6 @@
 // Keyboard and mouse driver (backlog B-104); see mnk_input.h.
 #include "mnk_input.h"
+#include "win_accessibility.h"
 #include "input_math.h"
 
 #include "prompt_state.h"
@@ -30,6 +31,12 @@ REXCVAR_DEFINE_STRING(pad_prompts, "auto", "bots/Input",
                       "Controller button prompts: auto (match the controller used last: PlayStation buttons for a "
                       "DualShock 4 or DualSense), xbox, ps4 or ps5. Native renderer only");
 
+REXCVAR_DEFINE_BOOL(windows_block_accessibility_shortcuts, true, "bots/Input",
+                    "Windows: while the game has focus, turn off the Sticky Keys / Toggle Keys / Filter Keys keyboard "
+                    "shortcuts (five quick Shift presses and so on), which would steal focus mid-game now that Shift aims. "
+                    "Only for players who haven't turned those features on; the player's settings are put back when the "
+                    "game loses focus or exits");
+
 // Default layout follows Gears of War on PC, adapted to this game's actions. Each value is a
 // comma-separated list of key names (rex/ui/keybinds.cpp; LMB RMB MMB, plus WheelUp WheelDown).
 #define BOTS_KBM_BIND(name, keys, what) \
@@ -39,7 +46,10 @@ BOTS_KBM_BIND(move_back, "S", "Move back (left stick)");
 BOTS_KBM_BIND(move_left, "A", "Move left (left stick)");
 BOTS_KBM_BIND(move_right, "D", "Move right (left stick)");
 BOTS_KBM_BIND(right_trigger, "LMB", "Fire (RT)");
-BOTS_KBM_BIND(left_trigger, "RMB", "Aim (LT)");
+// Shift as well as the right button, for laptop players who can't comfortably hold a trackpad right-click (either Shift
+// key). RMB stays first: the on-screen prompt shows the first key. On Windows, five quick Shift presses would open the
+// Sticky Keys prompt, so the game turns that shortcut off while it has focus (win_accessibility.h).
+BOTS_KBM_BIND(left_trigger, "RMB,Shift", "Aim (LT)");
 // In a vehicle the triggers are the throttle (RT) and brake / reverse (LT) and you can't shoot: PC driving games put
 // those on W / S (GTA IV, Saints Row 2), so while driving these replace the trigger keys and the stick's forward/back.
 BOTS_KBM_BIND(accelerate, "W", "Accelerate while driving (RT)");
@@ -162,6 +172,7 @@ void MouseKeyboardDriver::OnWindowAvailable(rex::ui::Window* window) {
   }
   window->AddInputListener(this, window_z_order());
   window->AddListener(this);
+  SetAccessibilityShortcutsBlocked(Enabled() && REXCVAR_GET(windows_block_accessibility_shortcuts));
   REXLOG_INFO("keyboard/mouse: attached (kbm={}, sensitivity {}, aiming {})", Enabled(), REXCVAR_GET(kbm_sensitivity),
               REXCVAR_GET(kbm_aim_sensitivity));
 }
@@ -317,8 +328,14 @@ void MouseKeyboardDriver::OnMouseWheel(rex::ui::MouseEvent& e) {
   SetPromptMode(true);
 }
 
+void MouseKeyboardDriver::OnGotFocus(rex::ui::UISetupEvent&) {
+  has_focus_ = true;
+  SetAccessibilityShortcutsBlocked(Enabled() && REXCVAR_GET(windows_block_accessibility_shortcuts));
+}
+
 void MouseKeyboardDriver::OnLostFocus(rex::ui::UISetupEvent&) {
   has_focus_ = false;
+  SetAccessibilityShortcutsBlocked(false);  // the player's own settings back while another window has focus
   capture_wanted_ = false;
   {
     std::lock_guard lock(mutex_);
@@ -486,6 +503,12 @@ X_RESULT MouseKeyboardDriver::GetDeviceState(rex::input::DeviceId id, rex::input
     const std::string& lt = driving ? REXCVAR_GET(kbm_brake) : REXCVAR_GET(kbm_left_trigger);
     const std::string& rt = driving ? REXCVAR_GET(kbm_accelerate) : REXCVAR_GET(kbm_right_trigger);
     out->gamepad.left_trigger = Pressed(lt) ? 0xFF : 0;
+    // BOTS_KBM_TRACE=1 (test only): log each change of the left trigger (Aim, or Brake while driving).
+    static const bool trace_lt = [] { const char* v = std::getenv("BOTS_KBM_TRACE"); return v && *v == '1'; }();
+    if (trace_lt && (out->gamepad.left_trigger != 0) != trace_lt_down_) {
+      trace_lt_down_ = out->gamepad.left_trigger != 0;
+      REXLOG_INFO("keyboard/mouse: left trigger ({}) {}", driving ? "brake" : "aim", trace_lt_down_ ? "down" : "up");
+    }
     out->gamepad.right_trigger = Pressed(rt) ? 0xFF : 0;
     int32_t lx = 0, ly = 0;
     if (Pressed(REXCVAR_GET(kbm_move_left))) lx -= 32767;

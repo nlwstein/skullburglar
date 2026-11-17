@@ -125,7 +125,7 @@ else()
 endif()
 
 if(WIN32)
-    list(APPEND BOTS_SOURCES src/crash_win.cpp src/cpu_sampler_win.cpp src/display_awake_win.cpp)
+    list(APPEND BOTS_SOURCES src/crash_win.cpp src/win_accessibility.cpp src/cpu_sampler_win.cpp src/display_awake_win.cpp)
     add_executable(bots WIN32 ${BOTS_SOURCES})
 elseif(ANDROID)
     # SDL's Java activity (tools/android) loads the game as libmain.so and calls its SDL_main.

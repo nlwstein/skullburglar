@@ -137,7 +137,7 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
 
   void OnClosing(rex::ui::UIEvent&) override { Detach(); }
   void OnLostFocus(rex::ui::UISetupEvent&) override;
-  void OnGotFocus(rex::ui::UISetupEvent&) override { has_focus_ = true; }
+  void OnGotFocus(rex::ui::UISetupEvent&) override;
 
  private:
   static constexpr auto kDevice = static_cast<rex::input::DeviceId>(0x4B424D00);  // 'KBM'
@@ -197,6 +197,7 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   int32_t prev_x_ = 0, prev_y_ = 0;           // UI thread
   rex::ui::Window::CursorVisibility saved_cursor_ = rex::ui::Window::CursorVisibility::kVisible;
   std::atomic<bool> has_focus_{true};
+  bool trace_lt_down_ = false;  // BOTS_KBM_TRACE: last logged left trigger state
   std::atomic<bool> capture_wanted_{false}, capture_queued_{false};
 };
 

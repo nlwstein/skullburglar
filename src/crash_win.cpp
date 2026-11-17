@@ -17,6 +17,7 @@
 
 #include "path_utf8.h"
 #include "save_backup.h"
+#include "win_accessibility.h"
 
 namespace {
 
@@ -79,6 +80,7 @@ std::filesystem::path WriteMinidump(EXCEPTION_POINTERS* ep) {
 }
 
 LONG WINAPI UnhandledFilter(EXCEPTION_POINTERS* ep) {
+  bots::RestoreAccessibilityShortcuts();  // the player's Sticky Keys settings, first (win_accessibility.h)
   const EXCEPTION_RECORD* er = ep->ExceptionRecord;
   std::fprintf(stderr, "\n=== bots crash: exception 0x%08lx at %p", er->ExceptionCode,
                er->ExceptionAddress);
