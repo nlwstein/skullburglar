@@ -73,7 +73,7 @@ checks:
     - >-
       for f in tools/ci/*.sh tools/rust_env.sh tools/ios/build.sh tools/android/build.sh packaging/linux/AppRun;
       do sh -n "$f"; done
-    - python3 -m py_compile tools/ci/gitlab_release.py tools/ci/publish_downloads.py tools/ci/check_signing_key.py tools/ci/update_signing.py
+    - python3 -m py_compile tools/ci/gitlab_release.py tools/ci/publish_downloads.py tools/ci/check_signing_key.py tools/ci/update_signing.py tools/ci/release_archive.py
     - SUBMODULES=0 tools/ci/sdk.sh "$(mktemp -d)/sdk"
 
 .main:
@@ -318,10 +318,12 @@ release:
         echo "Built as $VERSION, but the next release is now $next (a release was made meanwhile)."
         exit 1
       fi
-    # Before anything is tagged: a missing or mismatched signing key must not leave a release without its downloads.
+    # Before anything is tagged: a missing or mismatched signing key, or an unusable archive token, must not leave a
+    # release without its downloads.
     - |
       if [ -n "${DOWNLOADS_BUCKET:-}" ]; then
         python3 tools/ci/check_signing_key.py
+        python3 tools/ci/release_archive.py check
       fi
     - python3 tools/ci/gitlab_release.py
     - |
