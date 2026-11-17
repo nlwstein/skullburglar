@@ -40,6 +40,7 @@
 #include "iso_extract.h"
 #include "pad_nav.h"
 #include "settings.h"
+#include "settings_logic.h"
 #include "ui_scale.h"
 #include "firewall.h"
 #include "update_check.h"
@@ -113,6 +114,12 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       UseGameDir(ChosenGameDir(folder, folder_error_));
     }
 #endif
+    // Test runs: press "Reset to defaults" as the window opens (the window can't be clicked from a script).
+    if (const char* reset = std::getenv("BOTS_SETUP_RESET"); reset && std::strcmp(reset, "1") == 0) {
+      int changed = 0;
+      std::string err = ResetSettings(settings_, config_path_, &changed);
+      REXLOG_INFO("setup: BOTS_SETUP_RESET: {} settings changed{}{}", changed, err.empty() ? "" : ", error: ", err);
+    }
     const char* autorun = std::getenv("BOTS_SETUP_AUTO");
     auto_ = autorun && std::strcmp(autorun, "1") == 0;
     // Test runs: auto mode reinstalls over a game that's already there.
@@ -531,6 +538,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   void DrawSettings() {
     ImGui::TextUnformatted("Settings");
     ImGui::TextDisabled("Saved in %s", bots::PlainPathUtf8(config_path_).c_str());
+    DrawReset();
     for (auto& s : settings_) {
       if (s.binding) continue;  // DrawBindings
       if (!s.section.empty()) {
@@ -552,6 +560,40 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       }
     }
     DrawBindings();
+  }
+
+  // "Reset to defaults" with a confirmation that says what it does and doesn't touch (B-359).
+  void DrawReset() {
+    ImGui::BeginDisabled(Extracting());
+    if (ImGui::SmallButton("Reset to defaults...")) ImGui::OpenPopup("Reset to defaults?");
+    ImGui::EndDisabled();
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(S(520.0f), 0.0f));
+    if (!ImGui::BeginPopupModal("Reset to defaults?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    int differ = 0;
+    for (const auto& s : settings_)
+      if (!s.locked && !ResetKeeps(s.cvar) && !SameValue(s.value, s.default_value)) ++differ;
+    ImGui::TextWrapped("This puts every setting in this window back to the defaults of version %s: the display and "
+                       "graphics options, the controller and co-op options, and the keyboard and mouse options "
+                       "including every key binding.",
+                       AppVersion());
+    ImGui::Spacing();
+    ImGui::TextWrapped("It does not change the game files folder or where your data is kept, \"Check for new versions\", "
+                       "or anything a launch option has set. Your saves are not touched.");
+    ImGui::Spacing();
+    ImGui::TextWrapped("The reset keys are removed from the settings file, so a later version's new defaults apply to "
+                       "you. %d of the settings here differ from the defaults now.",
+                       differ);
+    ImGui::Spacing();
+    if (ImGui::Button("Reset settings", ImVec2(S(160), 0))) {
+      std::string err = ResetSettings(settings_, config_path_, nullptr);
+      if (!err.empty()) error_ = err;
+      capture_ = -1;
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(S(120), 0))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
   }
 
   // Where this run's log goes: next to --log_file when one is set (the Linux AppImage's launcher script and the macOS

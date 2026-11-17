@@ -486,6 +486,7 @@ class BotsApp : public rex::ReXApp {
   // A built-in default for an SDK cvar, as REX_<NAME> (see OnPreSetup): skipped when bots.toml
   // sets the cvar, since env outranks config and would otherwise hide the player's setting.
   void SetCvarDefault(const char* cvar, const char* env, const char* value) {
+    bots::setup::RegisterAppDefault(cvar, value);
     if (bots::setup::ConfigHasKey(config_path_, cvar)) return;
     if (std::getenv(env)) return;  // a real launch option
     SetEnvDefault(env, value);
@@ -495,6 +496,7 @@ class BotsApp : public rex::ReXApp {
   // The same for a cvar the SDK registered before this hook (REX_* is not replayed for those): set it unless the
   // command line, the environment or bots.toml chose a value.
   void SetCoreCvarDefault(const char* cvar, const char* value) {
+    bots::setup::RegisterAppDefault(cvar, value);
     if (bots::setup::ConfigHasKey(config_path_, cvar)) return;
     if (rex::cvar::GetFlagSource(cvar) != rex::cvar::Source::kDefault) return;
     rex::cvar::SetFlagByName(cvar, value);
