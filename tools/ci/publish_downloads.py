@@ -9,7 +9,9 @@ and the releases file (version.json) to anyone; the launcher reads that file (sr
 
 The packages come from this project's package registry (skullburglar/<VERSION>); the experimental iOS and tvOS IPAs
 and Android APK are published when their jobs built them. Only the newest KEEP versions stay
-downloadable: older packages are deleted from the bucket, but every version stays in the file's history.
+in the bucket. Every release is also copied to the public archive project on GitLab.com (ARCHIVE_*, below) when
+GITLAB_COM_TOKEN is set; a version that leaves the bucket keeps its downloads there ("archived": true, absolute URLs),
+and one that isn't in the archive is marked "No longer available" as before. Every version stays in the file's history.
 
 version.json:
     {"latest": "0.4.0", "page": "https://<site>/", "updated": "...",
@@ -28,6 +30,11 @@ branch (the release job) a missing key stops the run before anything is uploaded
 unsigned there. Anywhere else (a hand run, another branch) a missing key just leaves the entry unsigned, and players
 get only the "Download it" link. The key is never written anywhere or printed, and a key whose public half isn't the
 one in packaging/update-pubkey.txt is refused (it would silently turn "Update now" off for everyone).
+
+Archive: GITLAB_COM_TOKEN (an api-scope token of the archive project's account; a masked, hidden, protected CI
+variable). On the default branch (the release job) it is required and checked before anything is uploaded, and every
+archive upload must succeed and be downloadable anonymously with the same sha256, or the job fails. Anywhere else (a
+hand run, another branch) a missing token just skips the archive copy. The token is never printed.
 
 Env: VERSION, LAST (optional), UPDATE_SIGNING_KEY (optional, see above), DOWNLOADS_BUCKET, DOWNLOADS_PAGE (the site's address), CF_API_TOKEN (with R2 edit),
 CF_ACCOUNT_ID; the registry is read with CI_JOB_TOKEN in CI, else GITLAB_TOKEN; CI_API_V4_URL and CI_PROJECT_ID.
@@ -53,6 +60,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ed25519_sign  # noqa: E402
 import update_signing  # noqa: E402
 from update_signing import signing_message, signing_seed  # noqa: E402,F401
+from release_archive import archive_entry, archive_put, archive_token  # noqa: E402
 
 VERSION = os.environ["VERSION"]
 if not update_signing.plain_version(VERSION):
@@ -160,6 +168,7 @@ def main():
     ap.add_argument("--notes-file")
     args = ap.parse_args()
     seed = signing_seed()  # before anything is uploaded
+    archive = archive_token()  # likewise
     s3 = r2()
     ref = release_ref()
     notes_file = args.notes_file
@@ -186,6 +195,11 @@ def main():
             s3.upload_file(path, BUCKET, key, ExtraArgs={"ContentType": "application/octet-stream"})
             downloads[platform] = {"file": name, "size": size, "sha256": sha, "url": f"/dl/{VERSION}/{name}"}
             print(f"uploaded {key} ({size / 1e6:.1f} MB)")
+            if archive:
+                archive_put(archive, VERSION, path, name, sha)
+                print(f"archived {name}")
+        if not archive:
+            print("no GITLAB_COM_TOKEN: not copied to the archive")
 
     try:
         doc = json.load(s3.get_object(Bucket=BUCKET, Key="version.json")["Body"])
@@ -212,7 +226,9 @@ def main():
                 s3.delete_object(Bucket=BUCKET, Key=f"releases/{v['version']}/{d['file']}")
             v["available"] = False
             v.pop("signature", None)  # a pruned entry can't be replayed as a signed release
-            print(f"no longer downloadable: {v['version']}")
+            print(f"no longer in the bucket: {v['version']}")
+        if i >= KEEP:
+            archive_entry(v)  # also picks up versions pruned before the archive existed
     doc.update({
         "latest": versions[0]["version"],
         "page": PAGE,
