@@ -64,6 +64,7 @@ set(BOTS_SOURCES
     src/gfx/shadow.cpp
     src/setup/iso_extract.cpp
     src/setup/settings.cpp
+    src/setup/config_migrate.cpp
     src/setup/update_check.cpp
     src/setup/ed25519.cpp
     src/setup/update_logic.cpp
