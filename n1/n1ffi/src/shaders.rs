@@ -323,7 +323,7 @@ mod tests {
             "expressions": {"1": {"class": "MaterialExpressionParticleSubUV", "props": {"Texture": {"path": "Pkg.Fire"}}}}
         });
         for raw in [true, false] {
-            let c = matprog::compile_with(&mat, &|_| matprog::TexInfo { unpack: None, pwl: true, raw });
+            let c = matprog::compile_with(&mat, &|_| matprog::TexInfo { unpack: None, pwl: true, raw, clamp: 0 });
             for mesh in [false, true] {
                 let src = shader::module_source(&c, mesh);
                 assert_eq!(src.contains("xe_pwl_raw(textureSample"), raw);

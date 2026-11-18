@@ -233,7 +233,7 @@ pub fn tex_raw(t: &TextureAsset) -> bool {
 pub fn tex_info(db: &AssetDb, t: &str) -> matprog::TexInfo {
     let pwl = particle_pwl();
     match db.texture_meta(t) {
-        Some(m) => matprog::TexInfo { unpack: m.unpack, pwl: pwl && m.srgb && !m.normal, raw: pwl_raw() },
+        Some(m) => matprog::TexInfo { unpack: m.unpack, pwl: pwl && m.srgb && !m.normal, raw: pwl_raw(), clamp: assetdb::clamp_bits(m.addr) },
         None => matprog::TexInfo::default(),
     }
 }
