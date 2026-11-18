@@ -64,6 +64,7 @@ set(BOTS_SOURCES
     src/gfx/shadow.cpp
     src/setup/iso_extract.cpp
     src/setup/settings.cpp
+    src/setup/config_migrate.cpp
     src/setup/update_check.cpp
     src/setup/ed25519.cpp
     src/setup/update_logic.cpp
@@ -125,7 +126,7 @@ else()
 endif()
 
 if(WIN32)
-    list(APPEND BOTS_SOURCES src/crash_win.cpp src/cpu_sampler_win.cpp src/display_awake_win.cpp)
+    list(APPEND BOTS_SOURCES src/crash_win.cpp src/win_accessibility.cpp src/cpu_sampler_win.cpp src/display_awake_win.cpp)
     add_executable(bots WIN32 ${BOTS_SOURCES})
 elseif(ANDROID)
     # SDL's Java activity (tools/android) loads the game as libmain.so and calls its SDL_main.
@@ -160,7 +161,7 @@ elseif(APPLE)
 elseif(ANDROID)
     target_link_libraries(bots PRIVATE android log)
 elseif(WIN32)
-    target_link_libraries(bots PRIVATE ole32 oleaut32 shell32 winhttp ws2_32)
+    target_link_libraries(bots PRIVATE ole32 oleaut32 shell32 winhttp ws2_32 advapi32)
     # winsock2.h has to come before windows.h, which the precompiled header pulls in.
     set_source_files_properties(src/setup/firewall_win.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 endif()

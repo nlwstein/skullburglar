@@ -350,6 +350,7 @@ Renderer::Image* Renderer::Crop(Image& image, uint32_t width, uint32_t height) {
     crop.written = image.written;
   }
   crop.swapped = image.swapped;
+  crop.hdr = image.hdr;
   return &crop;
 }
 

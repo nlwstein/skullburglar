@@ -1,6 +1,6 @@
 // The game's own post chain, decoded from the port's draws.
 // Plain WGSL (naga -> SPIR-V). Colour here is display-linear: the port's scene texture value, which its composite
-// turns into the output with pow(saturate(c), 1/2.2). No exposure, no filmic curve.
+// turns into SDR with pow(saturate(c), 1/2.2). HDR keeps above white and applies scene controls here.
 //
 // Passes:
 //   fs_grade  scene + depth -> graded scene (GenericOutdoor_MAT01's foreground / background grade; skipped when
@@ -21,13 +21,16 @@ struct P {
     dof: vec4<f32>,     // x focus distance, y 1 / focus inner radius, z falloff exponent, w target x offset
     dof2: vec4<f32>,    // x max near blur, y max far blur, z near plane (reverse-Z infinite depth), w target y offset
     c: vec4<f32>,       // x/y blur direction, z 1 = UNORM target (write gamma), 0 = sRGB target, w tap count
-    comp: vec4<f32>,    // x mix of the bloom-kernel blur, y 1 / gamma, z 1 = DOF/bloom on
+    comp: vec4<f32>,    // x bloom kernel mix, y 1 / gamma, z DOFAndBloom on, w last material pass (1 SDR, 2 HDR)
     g0: vec4<f32>,      // x fg desaturate, y fg contrast, z bk brightness, w bk desaturate
     g1: vec4<f32>,      // x bk contrast, y fg-bg blend, z fg-bg blend offset, w sky clamp distance
     fg_tint: vec4<f32>,
     bk_tint: vec4<f32>,
     inv_hi: vec4<f32>,  // composite multiplier before saturate (1 / Scene_HighLights in UE3)
     taps: array<vec4<f32>, 32>, // x offset (texels along c.xy), y weight; composite/copy: [4] fade scale, [5] overlay (B-240)
+    hdr: vec4<f32>,     // game white, peak, UI white (nits), exposure multiplier
+    grade: vec4<f32>,   // contrast, highlights, shadows, saturation. 1 = unchanged
+    gray: vec4<f32>,    // x output for 18% gray
 };
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var smp: sampler;
@@ -38,6 +41,7 @@ struct P {
 @group(0) @binding(6) var wrap: sampler;   // repeat addressing, for post-material textures
 @group(0) @binding(7) var omask: texture_2d<f32>;   // B-277(e): enemy outline mask (R8), read when taps[5].w > 0
 @group(0) @binding(8) var gods: texture_2d<f32>;    // B-307: god-rays texture (128x128), read when taps[4].w > 0
+@group(0) @binding(9) var<uniform> gamma_ramp: array<vec4<u32>, 64>;
 
 struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
@@ -157,12 +161,76 @@ fn with_outline(c: vec3<f32>, frag: vec4<f32>) -> vec3<f32> {
     return mix(c, OUTLINE_COLOR, t);
 }
 
+fn ramp_entry(i: u32, shift: u32) -> f32 {
+    return f32((gamma_ramp[i >> 2u][i & 3u] >> shift) & 1023u) / 1023.0;
+}
+
+fn ramp_extended(v: f32, shift: u32) -> f32 {
+    let x = clamp(v, 0.0, 1.0) * 255.0;
+    let i = u32(x);
+    return mix(ramp_entry(i, shift), ramp_entry(min(i + 1u, 255u), shift), fract(x))
+        + min(v, 0.0) + max(v - 1.0, 0.0);
+}
+
+// Endpoint checks leave a < v <= b.
+// Eight bisections reaching adjacent entries including across flat sections.
+fn ramp_inverse(v: f32, shift: u32) -> f32 {
+    let first = ramp_entry(0u, shift);
+    let last = ramp_entry(255u, shift);
+    if (v <= first) { return v - first; }
+    if (v >= last) { return 1.0 + v - last; }
+    var lo = 0u;
+    var hi = 255u;
+    for (var k = 0u; k < 8u; k++) {
+        let mid = (lo + hi) >> 1u;
+        if (ramp_entry(mid, shift) < v) { lo = mid; } else { hi = mid; }
+    }
+    let a = ramp_entry(lo, shift);
+    let b = ramp_entry(hi, shift);
+    return (f32(lo) + (v - a) / (b - a)) / 255.0;
+}
+
 fn gamma_out(c0: vec3<f32>, frag: vec4<f32>) -> vec4<f32> {
     let c = with_outline(c0, frag);
+    if (p.comp.w > 1.5) {
+        // Apply the scene controls before HUD.
+        // 2.2 output kept for HUD blending.
+        var h = max(c * p.taps[4].xyz, vec3<f32>(0.0)) * p.hdr.w;
+        let y = dot(h, vec3<f32>(0.2126, 0.7152, 0.0722));
+        if (y > 0.0 && (any(p.grade != vec4<f32>(1.0)) || p.gray.x != 0.18)) {
+            var g = 0.18 * pow(y / 0.18, p.grade.x);
+            if (g < 1.0 && p.gray.x != 0.18) {
+                g = pow(g, log(p.gray.x) / log(0.18));
+            }
+            if (g > 0.18) {
+                g = 0.18 * pow(g / 0.18, p.grade.y);
+            } else {
+                g = 0.18 * pow(g / 0.18, 1.0 / p.grade.z);
+            }
+            h *= g / y;
+            h = max(mix(vec3<f32>(g), h, p.grade.w), vec3<f32>(0.0));
+        }
+        // Roll off the highlights beyond ref white toward the peak.
+        let m = max(max(h.r, h.g), h.b);
+        let headroom = max(p.hdr.y / p.hdr.x - 1.0, 0.001);
+        if (m > 1.0) {
+            h *= (1.0 + headroom * (1.0 - exp(-(m - 1.0) / headroom))) / m;
+        }
+        var g = max(pow(h, vec3<f32>(p.comp.y)) + p.taps[5].xyz, vec3<f32>(0.0));
+        if (p.hdr.x != p.hdr.z) {
+            // Scene white is scaled after the gamma ramp then encoded through its inverse for the HUD.
+            // Present then applies the ramp again since scaling before makes the UI slider changes the scene too.
+            let r = vec3<f32>(ramp_extended(g.r, 20u), ramp_extended(g.g, 10u), ramp_extended(g.b, 0u))
+                * pow(p.hdr.x / p.hdr.z, 1.0 / 2.2);
+            g = vec3<f32>(ramp_inverse(r.r, 20u), ramp_inverse(r.g, 10u), ramp_inverse(r.b, 0u));
+        }
+        // Keeping neg values needed for black level compensation.
+        return vec4<f32>(g, 1.0);
+    }
     var g = pow(clamp(c * p.taps[4].xyz, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(p.comp.y));
     g = min(g + p.taps[5].xyz, vec3<f32>(1.0));
     if (p.c.z < 0.5) {
-        // sRGB target: the hardware encodes, so hand it the linear value whose encoding is g
+        // sRGB targets encode on write, so convert g back to linear.
         g = select(pow((g + 0.055) / 1.055, vec3<f32>(2.4)), g / 12.92, g <= vec3<f32>(0.04045));
     }
     return vec4<f32>(g, 1.0);
@@ -409,7 +477,8 @@ fn fs_scope(i: VOut) -> @location(0) vec4<f32> {
     let ret = mat_tex0_clamp(rc);
     let lines = clamp(1.0 + 4.0 * (ret.r - 0.5), clamp(r2, 0.0, 1.0), 1.0);
     let lit = vec3<f32>(ret.g);
-    return mat_out(clamp(lens * lines, lit, vec3<f32>(1.0)), i.pos);
+    let scoped = max(lens * lines, lit);
+    return mat_out(select(min(scoped, vec3<f32>(1.0)), scoped, p.hdr.x > 0.0), i.pos);
 }
 
 @fragment
@@ -443,7 +512,8 @@ fn fs_death(i: VOut) -> @location(0) vec4<f32> {
     let s = textureSample(src, smp, coord).rgb * (1.0 - q);
     let d = desat(s, clamp(k, 0.0, 0.8), vec3<f32>(0.3, 0.59, 0.11));
     let out_max = 1.0 - 2.0 * clamp(k - 0.5, 0.0, 1.0);
-    return mat_out(clamp(d, vec3<f32>(0.0), vec3<f32>(1.0)) * out_max, i.pos);
+    let dead = max(d, vec3<f32>(0.0));
+    return mat_out(select(min(dead, vec3<f32>(1.0)), dead, p.hdr.x > 0.0) * out_max, i.pos);
 }
 
 // ---- B-345 (#32): the stylized counter-kill ("Merk You Space"), FX_MerkYouSpaceRescource. Decoded node by node from

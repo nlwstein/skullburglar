@@ -62,6 +62,7 @@ pub struct N1Init {
     pub cache_dir: *const c_char,
     /// Background loader threads; 0 loads synchronously inside `n1_record` (offline tools only: it stalls).
     pub loader_threads: u32,
+    pub hdr: u32,
 }
 
 #[repr(C)]
@@ -72,6 +73,38 @@ pub struct N1Camera {
     pub location: [f32; 3],
     /// Near plane (UE3: 5 in this game's FSceneView).
     pub near_plane: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct N1Hdr {
+    pub paper_white: f32,
+    pub peak: f32,
+    pub ui_white: f32,
+    pub exposure: f32,
+    pub contrast: f32,
+    pub highlights: f32,
+    pub shadows: f32,
+    pub saturation: f32,
+    pub middle_gray: f32,
+    pub gamma_ramp: [u32; 256],
+}
+impl Default for N1Hdr {
+    fn default() -> Self {
+        Self { paper_white: 203.0, peak: 1000.0, ui_white: 203.0, exposure: 0.0,
+               contrast: 1.0, highlights: 1.0, shadows: 1.0, saturation: 1.0, middle_gray: 0.18,
+               gamma_ramp: std::array::from_fn(|i| {
+                   let v = i as u32 * 1023 / 255;
+                   v << 20 | v << 10 | v
+               }) }
+    }
+}
+/// Safety
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn n1_set_hdr(r: *const N1Renderer, hdr: *const N1Hdr) {
+    if let Some(hdr) = unsafe { hdr.as_ref() } {
+        with(r, (), |i| i.renderer.hdr_settings = *hdr);
+    }
 }
 
 #[repr(C)]
@@ -625,7 +658,8 @@ pub unsafe extern "C" fn n1_create(init: *const N1Init) -> *mut N1Renderer {
             physical_device: init.physical_device,
             device: init.device,
         };
-        let renderer = unsafe { Renderer::new(&ctx, init.color_format, Some(cache.to_path_buf()))? };
+        let mut renderer = unsafe { Renderer::new(&ctx, init.color_format, Some(cache.to_path_buf()))? };
+        renderer.hdr_output = init.hdr != 0;
         let db_ps = db.clone();
         let db_tr = db.clone();
         let particles_on = renderer.knobs.particles;

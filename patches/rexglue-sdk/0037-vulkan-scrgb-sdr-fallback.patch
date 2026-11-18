@@ -1,0 +1,183 @@
+diff --git a/include/rex/ui/vulkan/presenter.h b/include/rex/ui/vulkan/presenter.h
+--- a/include/rex/ui/vulkan/presenter.h
++++ b/include/rex/ui/vulkan/presenter.h
+@@ -71,7 +71,11 @@ class VulkanPresenter final : public Presenter {
+ 
+   static constexpr VkFormat kGuestOutputFormat = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+   // scRGB output is linear Rec.709 with 1.0 = 80 nits.
++  // GuestOutputFormat() is FP16 only when HDR was requested (vulkan_hdr, read once) and the window's first swapchain
++  // got an scRGB surface; otherwise it is kGuestOutputFormat, so HDR on an SDR display costs nothing. It is decided
++  // once per run: if something asks before the first swapchain exists, FP16 is kept for the run.
+   static VkFormat GuestOutputFormat();
++  static bool HdrRequested();
+   bool is_hdr_output() const { return hdr_output_.load(std::memory_order_relaxed); }
+   // The guest output is expected to be acquired and released in this state by
+   // the refresher. The exception is the first write to the current guest output
+@@ -460,6 +464,8 @@ class VulkanPresenter final : public Presenter {
+       guest_output_paint_pipeline_layouts_ = {};
+   VkShaderModule guest_output_paint_vs_ = VK_NULL_HANDLE;
+   std::array<VkShaderModule, size_t(GuestOutputPaintEffect::kCount)> guest_output_paint_fs_ = {};
++  // The kBilinear swapchain shader when the guest output is FP16 (created only if HDR was requested).
++  VkShaderModule guest_output_scrgb_fs_ = VK_NULL_HANDLE;
+   // Not compatible with the swapchain render pass even if the format is the
+   // same due to different dependencies (this is shader read > color
+   // attachment > shader read).
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -14,6 +14,7 @@
+ #include <chrono>
+ #include <cstddef>
+ #include <cstdint>
++#include <cstdlib>
+ #include <cmath>
+ #include <cstring>
+ #include <memory>
+@@ -67,10 +68,39 @@ namespace rex {
+ namespace ui {
+ namespace vulkan {
+ 
++namespace {
++// HDR requested: whether the guest output is FP16, fixed once per run. 0: not decided yet, 1: FP16 (scRGB),
++// 2: kGuestOutputFormat (no scRGB surface: exactly the HDR-off path).
++std::atomic<int> guest_output_hdr_state{0};
++
++// BOTS_TEST_NO_SCRGB=1: treat every surface as offering no scRGB (tests the SDR fallback on an HDR-capable surface).
++bool TestNoScrgb() {
++  static const bool no_scrgb = [] {
++    const char* v = std::getenv("BOTS_TEST_NO_SCRGB");
++    return v && *v == '1';
++  }();
++  return no_scrgb;
++}
++}  // namespace
++
++bool VulkanPresenter::HdrRequested() {
++  // Read once (restart required): the presenter's objects are created for it.
++  static const bool requested = REXCVAR_GET(vulkan_hdr);
++  return requested;
++}
++
+ VkFormat VulkanPresenter::GuestOutputFormat() {
+-  // Keep the guest output format fixed until restart.
+-  static const VkFormat format = REXCVAR_GET(vulkan_hdr) ? VK_FORMAT_R16G16B16A16_SFLOAT : kGuestOutputFormat;
+-  return format;
++  if (!HdrRequested()) return kGuestOutputFormat;
++  int state = guest_output_hdr_state.load(std::memory_order_acquire);
++  if (state == 0) {
++    // Asked before the first swapchain (normally the window connects first): keep FP16 for this run.
++    if (guest_output_hdr_state.compare_exchange_strong(state, 1, std::memory_order_acq_rel)) {
++      REXLOG_WARN("VulkanPresenter: HDR output fixed to FP16 before the first swapchain; on a display without scRGB "
++                  "the run keeps the FP16 path");
++      state = 1;
++    }
++  }
++  return state == 1 ? VK_FORMAT_R16G16B16A16_SFLOAT : kGuestOutputFormat;
+ }
+ 
+ // B-111: one Windows startup sat 5 min between device creation and the swapchain with nothing logged. Warn about any
+@@ -266,6 +296,7 @@ VulkanPresenter::~VulkanPresenter() {
+   for (VkShaderModule& shader_module : guest_output_paint_fs_) {
+     util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device, shader_module);
+   }
++  util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device, guest_output_scrgb_fs_);
+   util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device, guest_output_paint_vs_);
+   for (VkPipelineLayout& pipeline_layout : guest_output_paint_pipeline_layouts_) {
+     util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device, pipeline_layout);
+@@ -929,6 +960,20 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+   // paint_context_.DestroySwapchainAndVulkanSurface must be called before
+   // returning.
+ 
++  // HDR requested: the first swapchain decides the guest output format for the run (before the guest GPU starts).
++  if (HdrRequested()) {
++    int undecided = 0;
++    if (guest_output_hdr_state.compare_exchange_strong(undecided, new_swapchain_hdr ? 1 : 2,
++                                                       std::memory_order_acq_rel)) {
++      if (new_swapchain_hdr) {
++        REXLOG_INFO("VulkanPresenter: HDR output: scRGB surface, FP16 guest output");
++      } else {
++        REXLOG_WARN("VulkanPresenter: HDR unavailable on this display: SDR guest output for this run (as with HDR "
++                    "off; restart on an HDR display to use HDR)");
++      }
++    }
++  }
++
+   // Update the render pass to the new format.
+   hdr_output_.store(new_swapchain_hdr, std::memory_order_relaxed);
+   if (paint_context_.swapchain_render_pass_format != new_swapchain_format) {
+@@ -1332,11 +1377,12 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
+     }
+   }
+ 
+-  if (GuestOutputFormat() == VK_FORMAT_R16G16B16A16_SFLOAT) {
++  if (HdrRequested() && guest_output_hdr_state.load(std::memory_order_acquire) != 2) {
+     auto hdr_format_it = std::find_if(surface_formats.begin(), surface_formats.end(), [](const auto& f) {
+       return f.format == VK_FORMAT_R16G16B16A16_SFLOAT &&
+              f.colorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
+     });
++    if (TestNoScrgb()) hdr_format_it = surface_formats.end();
+     if (hdr_format_it != surface_formats.end()) {
+       image_format = *hdr_format_it;
+     } else {
+@@ -2423,7 +2469,7 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
+     switch (GuestOutputPaintPipelineLayoutIndex(i)) {
+       case kGuestOutputPaintPipelineLayoutIndexBilinear:
+         guest_output_paint_push_constant_range_ffx.size = sizeof(BilinearConstants) +
+-            (GuestOutputFormat() == VK_FORMAT_R16G16B16A16_SFLOAT ? sizeof(float) : 0);
++            (HdrRequested() ? sizeof(float) : 0);
+         break;
+ #if defined(REX_HAS_FIDELITYFX_SDK)
+       case kGuestOutputPaintPipelineLayoutIndexCasSharpen:
+@@ -2473,13 +2519,8 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
+     GuestOutputPaintEffect guest_output_paint_effect = GuestOutputPaintEffect(i);
+     switch (guest_output_paint_effect) {
+       case GuestOutputPaintEffect::kBilinear:
+-        if (GuestOutputFormat() == VK_FORMAT_R16G16B16A16_SFLOAT) {
+-          shader_module_create_info.codeSize = sizeof(shaders::guest_output_scrgb_ps);
+-          shader_module_create_info.pCode = shaders::guest_output_scrgb_ps;
+-        } else {
+-          shader_module_create_info.codeSize = sizeof(shaders::guest_output_bilinear_ps);
+-          shader_module_create_info.pCode = shaders::guest_output_bilinear_ps;
+-        }
++        shader_module_create_info.codeSize = sizeof(shaders::guest_output_bilinear_ps);
++        shader_module_create_info.pCode = shaders::guest_output_bilinear_ps;
+         break;
+       case GuestOutputPaintEffect::kBilinearDither:
+         shader_module_create_info.codeSize = sizeof(shaders::guest_output_bilinear_dither_ps);
+@@ -2531,9 +2572,21 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
+     }
+   }
+ 
++  if (HdrRequested()) {
++    shader_module_create_info.codeSize = sizeof(shaders::guest_output_scrgb_ps);
++    shader_module_create_info.pCode = shaders::guest_output_scrgb_ps;
++    if (dfn.vkCreateShaderModule(device, &shader_module_create_info, nullptr, &guest_output_scrgb_fs_) !=
++        VK_SUCCESS) {
++      REXLOG_ERROR("VulkanPresenter: Failed to create the scRGB guest output painting shader module");
++      return false;
++    }
++  }
++
++  // Intermediate images exist only for the FidelityFX effects, which the FP16 path never uses (it paints with
++  // bilinear only), so they stay in the SDR format.
+   VkAttachmentDescription intermediate_render_pass_attachment;
+   intermediate_render_pass_attachment.flags = 0;
+-  intermediate_render_pass_attachment.format = GuestOutputFormat();
++  intermediate_render_pass_attachment.format = kGuestOutputFormat;
+   intermediate_render_pass_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+   intermediate_render_pass_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+   intermediate_render_pass_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+@@ -2680,7 +2733,12 @@ VkPipeline VulkanPresenter::CreateGuestOutputPaintPipeline(GuestOutputPaintEffec
+   const VkBool32 scrgb = render_pass != paint_context_.swapchain_render_pass || is_hdr_output();
+   const VkSpecializationMapEntry hdr_entry{0, 0, sizeof(scrgb)};
+   const VkSpecializationInfo hdr_info{1, &hdr_entry, sizeof(scrgb), &scrgb};
+-  if (GuestOutputFormat() == VK_FORMAT_R16G16B16A16_SFLOAT) stages[1].pSpecializationInfo = &hdr_info;
++  // Swapchain pipelines are created while painting, after the first swapchain decided the format.
++  if (effect == GuestOutputPaintEffect::kBilinear && render_pass != guest_output_intermediate_render_pass_ &&
++      GuestOutputFormat() == VK_FORMAT_R16G16B16A16_SFLOAT) {
++    stages[1].module = guest_output_scrgb_fs_;
++    stages[1].pSpecializationInfo = &hdr_info;
++  }
+   assert_true(stages[1].module != VK_NULL_HANDLE);
+ 
+   VkPipelineVertexInputStateCreateInfo vertex_input_state = {};

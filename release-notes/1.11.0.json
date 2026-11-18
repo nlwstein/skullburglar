@@ -1,0 +1,6 @@
+[
+ "HDR output on the new renderer, thanks to @goldislead (GitHub PR #46). Turn it on in the launcher's HDR section (it needs a restart); brightness, peak, menu brightness, contrast and grading are adjustable there and in the F6 panel. It's off by default. On a display that can't show HDR the game says so and runs exactly as with HDR off.",
+ "Keyboard players can now hold Shift to aim as well as the right mouse button, handy on a laptop. Right mouse still works, and you can change the keys in the launcher. Players who never changed Aim get Shift automatically. On Windows the game turns off the Sticky Keys shortcut while it has focus, and turns it back on when you switch away or quit.",
+ "The launcher has a new \"Reset to defaults\" button. It asks first, then puts your display, controller and keyboard settings (including key bindings) back to this version's defaults. Your game folder and update preference stay as they are.",
+ "The launcher now saves only the settings you changed, so future improvements to the defaults reach you automatically."
+]

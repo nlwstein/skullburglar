@@ -3,6 +3,7 @@
 #include "settings.h"
 
 #include "../renderer_choice.h"
+#include "settings_logic.h"
 #include "update_check.h"
 
 #include <algorithm>
@@ -11,6 +12,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <system_error>
+#include <utility>
 
 #include <toml++/toml.hpp>
 
@@ -41,6 +43,12 @@ REXCVAR_DEFINE_BOOL(present_vsync, true, "bots",
 
 REXCVAR_DEFINE_BOOL(fps_counter, false, "bots",
                     "Show the frame rate, frame time and renderer in a corner of the screen (fps_counter.h)");
+REXCVAR_DEFINE_DOUBLE(vulkan_hdr_exposure, 0.0, "bots/HDR", "Scene exposure in stops");
+REXCVAR_DEFINE_DOUBLE(vulkan_hdr_middle_gray, 0.18, "bots/HDR", "Scene middle gray (0.18 preserves the original)");
+REXCVAR_DEFINE_DOUBLE(vulkan_hdr_contrast, 1.0, "bots/HDR", "Scene contrast around 18 percent gray");
+REXCVAR_DEFINE_DOUBLE(vulkan_hdr_highlights, 1.0, "bots/HDR", "Scene highlights");
+REXCVAR_DEFINE_DOUBLE(vulkan_hdr_shadows, 1.0, "bots/HDR", "Scene shadows");
+REXCVAR_DEFINE_DOUBLE(vulkan_hdr_saturation, 1.0, "bots/HDR", "Scene saturation");
 
 namespace bots::setup {
 namespace fs = std::filesystem;
@@ -67,9 +75,32 @@ std::vector<Setting> Catalog() {
                "Wider than 16:9 fills an ultrawide screen and shows more at the sides; the HUD and menus stretch. "
                "Automatic matches the screen in fullscreen, or the window.",
                {{"16:9", "16:9 (original)"}, {"auto", "Automatic"}, {"21:9", "21:9"}, {"32:9", "32:9"}}});
+  s.push_back({"vulkan_hdr", "", "Enable HDR (restart required)",
+               "Native scRGB output on an HDR display. Requires the new renderer. "
+               "Enable HDR in the operating system too. F6 opens the live display controls.", {}});
+  s.back().section = "HDR";
+  s.push_back({"vulkan_hdr_paper_white", "", "Game brightness (paper white)",
+               "The game's reference white in nits. Highlights can extend above it.", {}});
+  s.back().slider_min = 80, s.back().slider_max = 500, s.back().slider_linear = true, s.back().slider_format = "%.0f nits";
+  s.push_back({"vulkan_hdr_peak", "", "Peak brightness", "Set this to the display's peak brightness.", {}});
+  s.back().slider_min = 200, s.back().slider_max = 4000, s.back().slider_linear = true, s.back().slider_format = "%.0f nits";
+  s.push_back({"vulkan_hdr_ui_white", "", "UI brightness", "HUD, menus and host overlays in nits.", {}});
+  s.back().slider_min = 40, s.back().slider_max = 500, s.back().slider_linear = true, s.back().slider_format = "%.0f nits";
+  s.push_back({"vulkan_hdr_exposure", "", "Exposure", "Scene exposure in stops, before the HDR shoulder.", {}});
+  s.back().slider_min = -4, s.back().slider_max = 4, s.back().slider_linear = true, s.back().slider_format = "%.2f EV";
+  s.push_back({"vulkan_hdr_middle_gray", "", "Middle gray",
+               "Scene midtones. 0.18 keeps the original curve; black and reference white stay fixed.", {}});
+  s.back().slider_min = 0.05, s.back().slider_max = 0.5, s.back().slider_linear = true, s.back().slider_format = "%.3f";
+  for (const auto& [name, label] : std::vector<std::pair<const char*, const char*>>{
+         {"vulkan_hdr_contrast", "Contrast"}, {"vulkan_hdr_highlights", "Highlights"},
+         {"vulkan_hdr_shadows", "Shadows"}, {"vulkan_hdr_saturation", "Saturation"}}) {
+    s.push_back({name, "", label, "1.0 keeps the game's original grade. Adjusts the scene; the HUD is unchanged.", {}});
+    s.back().slider_min = 0.25, s.back().slider_max = 2, s.back().slider_linear = true;
+  }
   s.push_back({"motion_blur", "", "Motion blur",
                "The smear when the camera turns or things move fast. Off keeps every other effect.",
                {}});
+  s.back().section = "Game";
   s.push_back({"screen_shake", "", "Screen shake",
                "How much the camera shakes from explosions, gunfire and hits, as a share of the game's own. 100% is "
                "as shipped; 0% turns it off.",
@@ -83,6 +114,7 @@ std::vector<Setting> Catalog() {
                {{"30", "30 fps (steadier on weaker hardware)"}, {"60", "60 fps (original)"}, {"90", "90 fps"}, {"120", "120 fps"}, {"144", "144 fps"},
                 {"0", "Unlimited (experimental)"}}});
   s.push_back({"present_vsync", "", "VSync", "Off has the lowest latency but can tear.", {}});
+  s.back().section = "Display and launcher";
   s.push_back({"fps_counter", "", "Show FPS counter",
                "A small readout in the top-left corner: frames per second, milliseconds per frame, and which renderer "
                "is drawing. Handy for bug reports. Takes effect the next time the game starts.",
@@ -189,6 +221,23 @@ std::vector<std::string>& AppDefaults() {
   return names;
 }
 
+std::vector<std::pair<std::string, std::string>>& AppDefaultValues() {
+  static std::vector<std::pair<std::string, std::string>> values;
+  return values;
+}
+
+// Text as the window holds it: the renderer is "new" unless pre1, and a double reads back as "1.000000", so show it as
+// the choice it matches.
+std::string Normalize(const Setting& s, const rex::cvar::FlagEntry* info, std::string text) {
+  if (s.cvar == "renderer" && text != "pre1") return "new";
+  if (info && info->type == rex::cvar::FlagType::Double) {
+    for (const auto& choice : s.choices) {
+      if (SameValue(choice.value, text)) return choice.value;
+    }
+  }
+  return text;
+}
+
 bool IsLocked(const std::string& cvar) {
   if (std::find(AppDefaults().begin(), AppDefaults().end(), cvar) != AppDefaults().end()) {
     return false;
@@ -201,6 +250,10 @@ bool IsLocked(const std::string& cvar) {
 
 void MarkAppDefault(const std::string& cvar) { AppDefaults().push_back(cvar); }
 
+void RegisterAppDefault(const std::string& cvar, const std::string& value) {
+  AppDefaultValues().emplace_back(cvar, value);
+}
+
 std::vector<Setting> LoadSettings() {
   auto settings = Catalog();
   // Settings whose cvar the GPU plugin didn't register aren't shown; the renderer choice needs a build with n1.
@@ -209,19 +262,14 @@ std::vector<Setting> LoadSettings() {
            (s.cvar == "renderer" && !bots::kHasN1);
   });
   for (auto& s : settings) {
-    s.value = rex::cvar::GetFlagByName(s.cvar);
-    if (s.cvar == "renderer" && s.value != "pre1") s.value = "new";  // anything but pre1 is the new renderer
-    s.locked = IsLocked(s.cvar);
     const auto* info = rex::cvar::GetFlagInfo(s.cvar);
+    s.value = Normalize(s, info, rex::cvar::GetFlagByName(s.cvar));
+    s.locked = IsLocked(s.cvar);
     s.default_value = info->default_value;
-    // A double reads back as "1.000000": show it as the matching choice.
-    if (info->type == rex::cvar::FlagType::Double) {
-      for (const auto& choice : s.choices) {
-        if (std::abs(std::strtod(choice.value.c_str(), nullptr) - std::strtod(s.value.c_str(), nullptr)) < 1e-6) {
-          s.value = choice.value;
-        }
-      }
+    for (const auto& [cvar, value] : AppDefaultValues()) {
+      if (cvar == s.cvar) s.default_value = value;
     }
+    s.default_value = Normalize(s, info, s.default_value);
   }
   return settings;
 }
@@ -272,6 +320,7 @@ std::string SaveSettings(const std::vector<Setting>& settings, const fs::path& c
       if (!rex::cvar::SetFlagByName(name, s.value)) {
         REXLOG_WARN("setup: can't set {} = {}", name, s.value);
       }
+      if (!ShouldWriteKey(table, name, s.value, s.default_value)) continue;
       const auto* info = rex::cvar::GetFlagInfo(name);
       auto type = info ? info->type : rex::cvar::FlagType::String;
       if (type == rex::cvar::FlagType::Boolean) {
@@ -289,6 +338,25 @@ std::string SaveSettings(const std::vector<Setting>& settings, const fs::path& c
   if (const auto* old = table.get("gpu_plugin"); old && old->is_string()) table.erase("gpu_plugin");
   std::string err = WriteConfig(table, config_path);
   if (err.empty()) REXLOG_INFO("setup: settings saved to {}", bots::PathUtf8(config_path));
+  return err;
+}
+
+std::string ResetSettings(std::vector<Setting>& settings, const fs::path& config_path, int* changed) {
+  toml::table table = ReadConfig(config_path);
+  int count = 0;
+  for (auto& s : settings) {
+    if (s.locked || ResetKeeps(s.cvar)) continue;
+    if (!SameValue(s.value, s.default_value)) ++count;
+    s.value = s.default_value;
+    for (const std::string& name : {s.cvar, s.also_cvar}) {
+      if (name.empty()) continue;
+      if (!rex::cvar::SetFlagByName(name, s.value)) REXLOG_WARN("setup: can't set {} = {}", name, s.value);
+      table.erase(name);
+    }
+  }
+  if (changed) *changed = count;
+  std::string err = WriteConfig(table, config_path);
+  if (err.empty()) REXLOG_INFO("setup: {} settings reset to this version's defaults in {}", count, bots::PathUtf8(config_path));
   return err;
 }
 

@@ -15,7 +15,7 @@
 //! are host-visible; textures and render targets are device-local (textures uploaded through staging buffers
 //! recorded at the start of the next `record`).
 
-use crate::light::{Globals, Knobs, Lighting, POST_VECS};
+use crate::light::{Globals, Knobs, Lighting, POST_TAPS, POST_VECS};
 use crate::shaders;
 use crate::store::{NO_SHADER, SceneKey, Store};
 use anyhow::{Result, anyhow, bail};
@@ -83,7 +83,8 @@ fn god_fade() -> [f32; 4] {
 }
 /// B-320: view distances (UE units) over which the rays fade in.
 const GOD_FADE: (f32, f32) = (2000.0, 8000.0);
-const DYN_AT: u64 = POST_AT + POST_STRIDE * POST_PASSES as u64;
+const GAMMA_AT: u64 = POST_AT + POST_STRIDE * POST_PASSES as u64;
+const DYN_AT: u64 = GAMMA_AT + 1024;
 
 /// Texture ids of the built-in 1x1 textures.
 pub const TEX_GREY: u32 = 0;
@@ -438,6 +439,8 @@ pub struct Renderer {
     allocator: Option<Allocator>,
     color_format: vk::Format,
     encode_srgb: bool,
+    pub hdr_output: bool,
+    pub hdr_settings: crate::N1Hdr,
     pub knobs: Knobs,
     set0_layout: vk::DescriptorSetLayout,
     lm_layout: vk::DescriptorSetLayout,
@@ -722,6 +725,7 @@ impl Renderer {
                 b(6, vk::DescriptorType::SAMPLER, fr),
                 b(7, vk::DescriptorType::SAMPLED_IMAGE, fr),
                 b(8, vk::DescriptorType::SAMPLED_IMAGE, fr),
+                b(9, vk::DescriptorType::UNIFORM_BUFFER, fr),
             ];
             let post_layout = device.create_descriptor_set_layout(
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&post),
@@ -799,6 +803,8 @@ impl Renderer {
                 allocator: Some(allocator),
                 color_format,
                 encode_srgb: !is_srgb(color_format),
+                hdr_output: false,
+                hdr_settings: crate::N1Hdr::default(),
                 knobs,
                 set0_layout,
                 lm_layout,
@@ -2485,15 +2491,25 @@ impl Renderer {
             blk(ft, [0.0, 0.0], &[], off),        // copy
             blk(ft, [0.0, 0.0], &[], [0.0, 0.0]), // linear composite
         ];
+        blocks[5][4][3] = if self.hdr_output { 2.0 } else { 0.0 };
+        blocks[6][4][3] = blocks[5][4][3];
         for (j, (_, params, _, pwl)) in mats.iter().enumerate() {
             let last = j + 1 == mats.len();
             let mut o = blk(ft, [0.0, 0.0], &[], if last { off } else { [0.0, 0.0] });
-            o[4][3] = last as u32 as f32;
+            o[4][3] = if last && self.hdr_output { 2.0 } else { last as u32 as f32 };
             o[5] = *params;
             // g1.w: real time (wraps hourly, keeping f32 precision), for animation that runs while paused
             let real = (self.post_real0.elapsed().as_secs_f64() % 3600.0) as f32;
             o[6] = [time, pwl[0] as u32 as f32, pwl[1] as u32 as f32, real];
             blocks.push(o);
+        }
+        if self.hdr_output {
+            let hdr_at = 10 + POST_TAPS;
+            for o in &mut blocks {
+                o[hdr_at] = [self.hdr_settings.paper_white, self.hdr_settings.peak, self.hdr_settings.ui_white, self.hdr_settings.exposure.exp2()];
+                o[hdr_at + 1] = [self.hdr_settings.contrast, self.hdr_settings.highlights, self.hdr_settings.shadows, self.hdr_settings.saturation];
+                o[hdr_at + 2][0] = self.hdr_settings.middle_gray;
+            }
         }
         if let Some((_, params, _, pwl)) = &damage_pre {
             let mut o = blk(ft, [0.0, 0.0], &[], [0.0, 0.0]);
@@ -2603,6 +2619,9 @@ impl Renderer {
             put(b, GLOBALS_AT, bytemuck::bytes_of(&globals));
             for (k, blk) in blocks.iter().enumerate() {
                 put(b, POST_AT + POST_STRIDE * k as u64, bytemuck::cast_slice(blk));
+            }
+            if self.hdr_output {
+                put(b, GAMMA_AT, bytemuck::cast_slice(&self.hdr_settings.gamma_ramp));
             }
             put(b, inst_at, &inst);
             put(b, idyn_at, &iw);
@@ -2739,6 +2758,11 @@ impl Renderer {
             }
             srcs.push((scene, q0, q0));
             let s = &self.slots[si];
+            let gamma = [vk::DescriptorBufferInfo {
+                buffer: s.buf.buffer,
+                offset: GAMMA_AT,
+                range: 1024,
+            }];
             for (k, (src, bl, bl2)) in srcs.iter().enumerate() {
                 let ub = [vk::DescriptorBufferInfo {
                     buffer: s.buf.buffer,
@@ -2772,6 +2796,11 @@ impl Renderer {
                 let i5 = img(self.outline_mask.as_ref().map_or(*src, |m| m.view));
                 let i6 = img(if k == POST_PASSES - 1 { q0 } else { gv });
                 let writes = [
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(9)
+                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                        .buffer_info(&gamma),
                     vk::WriteDescriptorSet::default()
                         .dst_set(set)
                         .dst_binding(8)

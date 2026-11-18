@@ -1,0 +1,549 @@
+diff --git a/include/rex/ui/vulkan/immediate_drawer.h b/include/rex/ui/vulkan/immediate_drawer.h
+--- a/include/rex/ui/vulkan/immediate_drawer.h
++++ b/include/rex/ui/vulkan/immediate_drawer.h
+@@ -50,6 +50,7 @@
+     struct Vertex {
+       float coordinate_space_size_inv[2];
+     } vertex;
++    float ui_white;
+   };
+ 
+   class VulkanImmediateTexture : public ImmediateTexture {
+diff --git a/include/rex/ui/vulkan/instance.h b/include/rex/ui/vulkan/instance.h
+--- a/include/rex/ui/vulkan/instance.h
++++ b/include/rex/ui/vulkan/instance.h
+@@ -90,6 +90,7 @@
+   // Also set to true if the version of the Vulkan API they were promoted to it
+   // supported (with the `ext_major_minor_` prefix rather than `ext_`).
+   struct Extensions {
++    bool ext_EXT_swapchain_colorspace = false;
+     bool ext_KHR_surface = false;  // #1
+ #ifdef VK_USE_PLATFORM_XCB_KHR
+     bool ext_KHR_xcb_surface = false;  // #6
+diff --git a/include/rex/ui/vulkan/presenter.h b/include/rex/ui/vulkan/presenter.h
+--- a/include/rex/ui/vulkan/presenter.h
++++ b/include/rex/ui/vulkan/presenter.h
+@@ -12,6 +12,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <atomic>
+ #include <cstddef>
+ #include <cstdint>
+ #include <memory>
+@@ -69,6 +70,9 @@
+   static constexpr size_t kMaxActiveGuestOutputImageVersions = kGuestOutputMailboxSize;
+ 
+   static constexpr VkFormat kGuestOutputFormat = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
++  // scRGB output is linear Rec.709 with 1.0 = 80 nits.
++  static VkFormat GuestOutputFormat();
++  bool is_hdr_output() const { return hdr_output_.load(std::memory_order_relaxed); }
+   // The guest output is expected to be acquired and released in this state by
+   // the refresher. The exception is the first write to the current guest output
+   // image - in this case, a barrier is only needed from
+@@ -93,7 +97,7 @@
+           image_version_(image_version),
+           image_ever_written_previously_(image_ever_written_previously) {}
+ 
+-    // The format is kGuestOutputFormat.
++    // The format is GuestOutputFormat().
+     // Supports usage as a color attachment and as a sampled image, as well as
+     // transfer source (but the reason of that is guest output capturing).
+     VkImage image() const { return image_; }
+@@ -352,7 +356,7 @@
+     static VkSwapchainKHR CreateSwapchainForVulkanSurface(
+         const VulkanDevice* vulkan_device, VkSurfaceKHR surface, uint32_t width, uint32_t height,
+         VkSwapchainKHR old_swapchain, uint32_t& present_queue_family_out,
+-        VkFormat& image_format_out, VkExtent2D& image_extent_out, bool& is_fifo_out,
++        VkFormat& image_format_out, bool& hdr_out, VkExtent2D& image_extent_out, bool& is_fifo_out,
+         bool& ui_surface_unusable_out);
+ 
+     // Destroys the swapchain and its derivatives, nulls `swapchain` and returns
+@@ -480,6 +484,7 @@
+   // DisconnectPaintingFromSurfaceFromUIThreadImpl) by the thread doing it, as
+   // well as by presenter initialization and shutdown.
+   PaintContext paint_context_;
++  std::atomic<bool> hdr_output_{false};
+ 
+ #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
+   void* temporal_upscaler_context_ = nullptr;
+diff --git a/src/ui/shaders/guest_output_scrgb.frag b/src/ui/shaders/guest_output_scrgb.frag
+new file mode 100644
+--- /dev/null
++++ b/src/ui/shaders/guest_output_scrgb.frag
+@@ -0,0 +1,23 @@
++#version 450
++// glslangValidator -V -Os --vn guest_output_scrgb_ps guest_output_scrgb.frag -o vulkan_spirv/guest_output_scrgb_ps.h
++layout(constant_id = 0) const bool scrgb = true;
++layout(set = 0, binding = 0) uniform texture2D source;
++layout(set = 0, binding = 1) uniform sampler smp;
++layout(push_constant) uniform Constants {
++  layout(offset = 16) ivec2 output_offset;
++  vec2 output_size_inv;
++  float ui_white;
++};
++layout(location = 0) out vec4 result;
++void main() {
++  vec2 uv = (gl_FragCoord.xy - vec2(output_offset)) * output_size_inv;
++  vec3 c = textureLod(sampler2D(source, smp), uv, 0.0).rgb;
++  if (!scrgb) {
++    c = max(c / ui_white, 0.0);
++    float m = max(max(c.r, c.g), c.b);
++    // UI white used as SDR white then highlights scaled to fit.
++    if (m > 1.0) c /= m;
++    c = pow(c, vec3(1.0 / 2.2));
++  }
++  result = vec4(c, 1.0);
++}
+diff --git a/src/ui/shaders/immediate_scrgb.frag b/src/ui/shaders/immediate_scrgb.frag
+new file mode 100644
+--- /dev/null
++++ b/src/ui/shaders/immediate_scrgb.frag
+@@ -0,0 +1,13 @@
++#version 450
++// glslangValidator -V -Os --vn immediate_scrgb_ps immediate_scrgb.frag -o vulkan_spirv/immediate_scrgb_ps.h
++layout(push_constant) uniform Constants { layout(offset = 8) float ui_white; };
++layout(set = 0, binding = 0) uniform sampler2D source;
++layout(location = 0) in vec2 uv;
++layout(location = 1) in vec4 color;
++layout(location = 0) out vec4 result;
++void main() {
++  vec4 c = color * textureLod(source, uv, 0.0);
++  c.rgb = mix(pow((c.rgb + 0.055) / 1.055, vec3(2.4)), c.rgb / 12.92,
++              lessThanEqual(c.rgb, vec3(0.04045))) * ui_white;
++  result = c;
++}
+diff --git a/src/ui/shaders/vulkan_spirv/guest_output_scrgb_ps.h b/src/ui/shaders/vulkan_spirv/guest_output_scrgb_ps.h
+new file mode 100644
+--- /dev/null
++++ b/src/ui/shaders/vulkan_spirv/guest_output_scrgb_ps.h
+@@ -0,0 +1,67 @@
++	// 1116.2.0
++	 #pragma once
++const uint32_t guest_output_scrgb_ps[] = {
++	0x07230203,0x00010000,0x0008000b,0x00000066,0x00000000,0x00020011,0x00000001,0x0006000b,
++	0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
++	0x0007000f,0x00000004,0x00000004,0x6e69616d,0x00000000,0x0000000c,0x0000005a,0x00030010,
++	0x00000004,0x00000007,0x00030003,0x00000002,0x000001c2,0x00040005,0x00000004,0x6e69616d,
++	0x00000000,0x00060005,0x0000000c,0x465f6c67,0x43676172,0x64726f6f,0x00000000,0x00050005,
++	0x00000011,0x736e6f43,0x746e6174,0x00000073,0x00070006,0x00000011,0x00000000,0x7074756f,
++	0x6f5f7475,0x65736666,0x00000074,0x00070006,0x00000011,0x00000001,0x7074756f,0x735f7475,
++	0x5f657a69,0x00766e69,0x00060006,0x00000011,0x00000002,0x775f6975,0x65746968,0x00000000,
++	0x00030005,0x00000013,0x00000000,0x00040005,0x00000024,0x72756f73,0x00006563,0x00030005,
++	0x00000028,0x00706d73,0x00040005,0x00000031,0x67726373,0x00000062,0x00040005,0x0000005a,
++	0x75736572,0x0000746c,0x00040047,0x0000000c,0x0000000b,0x0000000f,0x00030047,0x00000011,
++	0x00000002,0x00050048,0x00000011,0x00000000,0x00000023,0x00000010,0x00050048,0x00000011,
++	0x00000001,0x00000023,0x00000018,0x00050048,0x00000011,0x00000002,0x00000023,0x00000020,
++	0x00040047,0x00000024,0x00000021,0x00000000,0x00040047,0x00000024,0x00000022,0x00000000,
++	0x00040047,0x00000028,0x00000021,0x00000001,0x00040047,0x00000028,0x00000022,0x00000000,
++	0x00040047,0x00000031,0x00000001,0x00000000,0x00040047,0x0000005a,0x0000001e,0x00000000,
++	0x00020013,0x00000002,0x00030021,0x00000003,0x00000002,0x00030016,0x00000006,0x00000020,
++	0x00040017,0x00000007,0x00000006,0x00000002,0x00040017,0x0000000a,0x00000006,0x00000004,
++	0x00040020,0x0000000b,0x00000001,0x0000000a,0x0004003b,0x0000000b,0x0000000c,0x00000001,
++	0x00040015,0x0000000f,0x00000020,0x00000001,0x00040017,0x00000010,0x0000000f,0x00000002,
++	0x0005001e,0x00000011,0x00000010,0x00000007,0x00000006,0x00040020,0x00000012,0x00000009,
++	0x00000011,0x0004003b,0x00000012,0x00000013,0x00000009,0x0004002b,0x0000000f,0x00000014,
++	0x00000000,0x00040020,0x00000015,0x00000009,0x00000010,0x0004002b,0x0000000f,0x0000001a,
++	0x00000001,0x00040020,0x0000001b,0x00000009,0x00000007,0x00040017,0x0000001f,0x00000006,
++	0x00000003,0x00090019,0x00000022,0x00000006,0x00000001,0x00000000,0x00000000,0x00000000,
++	0x00000001,0x00000000,0x00040020,0x00000023,0x00000000,0x00000022,0x0004003b,0x00000023,
++	0x00000024,0x00000000,0x0002001a,0x00000026,0x00040020,0x00000027,0x00000000,0x00000026,
++	0x0004003b,0x00000027,0x00000028,0x00000000,0x0003001b,0x0000002a,0x00000022,0x0004002b,
++	0x00000006,0x0000002d,0x00000000,0x00020014,0x00000030,0x00030030,0x00000030,0x00000031,
++	0x00050034,0x00000030,0x00000032,0x000000a8,0x00000031,0x0004002b,0x0000000f,0x00000036,
++	0x00000002,0x00040020,0x00000037,0x00000009,0x00000006,0x0004002b,0x00000006,0x0000004d,
++	0x3f800000,0x0004002b,0x00000006,0x00000056,0x3ee8ba2f,0x0006002c,0x0000001f,0x00000057,
++	0x00000056,0x00000056,0x00000056,0x00040020,0x00000059,0x00000003,0x0000000a,0x0004003b,
++	0x00000059,0x0000005a,0x00000003,0x0006002c,0x0000001f,0x00000063,0x0000002d,0x0000002d,
++	0x0000002d,0x00050036,0x00000002,0x00000004,0x00000000,0x00000003,0x000200f8,0x00000005,
++	0x0004003d,0x0000000a,0x0000000d,0x0000000c,0x0007004f,0x00000007,0x0000000e,0x0000000d,
++	0x0000000d,0x00000000,0x00000001,0x00050041,0x00000015,0x00000016,0x00000013,0x00000014,
++	0x0004003d,0x00000010,0x00000017,0x00000016,0x0004006f,0x00000007,0x00000018,0x00000017,
++	0x00050083,0x00000007,0x00000019,0x0000000e,0x00000018,0x00050041,0x0000001b,0x0000001c,
++	0x00000013,0x0000001a,0x0004003d,0x00000007,0x0000001d,0x0000001c,0x00050085,0x00000007,
++	0x0000001e,0x00000019,0x0000001d,0x0004003d,0x00000022,0x00000025,0x00000024,0x0004003d,
++	0x00000026,0x00000029,0x00000028,0x00050056,0x0000002a,0x0000002b,0x00000025,0x00000029,
++	0x00070058,0x0000000a,0x0000002e,0x0000002b,0x0000001e,0x00000002,0x0000002d,0x0008004f,
++	0x0000001f,0x0000002f,0x0000002e,0x0000002e,0x00000000,0x00000001,0x00000002,0x000300f7,
++	0x00000034,0x00000000,0x000400fa,0x00000032,0x00000033,0x00000034,0x000200f8,0x00000033,
++	0x00050041,0x00000037,0x00000038,0x00000013,0x00000036,0x0004003d,0x00000006,0x00000039,
++	0x00000038,0x00060050,0x0000001f,0x0000003a,0x00000039,0x00000039,0x00000039,0x00050088,
++	0x0000001f,0x0000003b,0x0000002f,0x0000003a,0x0007000c,0x0000001f,0x0000003d,0x00000001,
++	0x00000028,0x0000003b,0x00000063,0x00050051,0x00000006,0x00000043,0x0000003d,0x00000000,
++	0x00050051,0x00000006,0x00000046,0x0000003d,0x00000001,0x0007000c,0x00000006,0x00000047,
++	0x00000001,0x00000028,0x00000043,0x00000046,0x00050051,0x00000006,0x0000004a,0x0000003d,
++	0x00000002,0x0007000c,0x00000006,0x0000004b,0x00000001,0x00000028,0x00000047,0x0000004a,
++	0x000500ba,0x00000030,0x0000004e,0x0000004b,0x0000004d,0x000300f7,0x00000050,0x00000000,
++	0x000400fa,0x0000004e,0x0000004f,0x00000050,0x000200f8,0x0000004f,0x00060050,0x0000001f,
++	0x00000053,0x0000004b,0x0000004b,0x0000004b,0x00050088,0x0000001f,0x00000054,0x0000003d,
++	0x00000053,0x000200f9,0x00000050,0x000200f8,0x00000050,0x000700f5,0x0000001f,0x00000064,
++	0x0000003d,0x00000033,0x00000054,0x0000004f,0x0007000c,0x0000001f,0x00000058,0x00000001,
++	0x0000001a,0x00000064,0x00000057,0x000200f9,0x00000034,0x000200f8,0x00000034,0x000700f5,
++	0x0000001f,0x00000065,0x0000002f,0x00000005,0x00000058,0x00000050,0x00050051,0x00000006,
++	0x0000005c,0x00000065,0x00000000,0x00050051,0x00000006,0x0000005d,0x00000065,0x00000001,
++	0x00050051,0x00000006,0x0000005e,0x00000065,0x00000002,0x00070050,0x0000000a,0x0000005f,
++	0x0000005c,0x0000005d,0x0000005e,0x0000004d,0x0003003e,0x0000005a,0x0000005f,0x000100fd,
++	0x00010038
++};
+diff --git a/src/ui/shaders/vulkan_spirv/immediate_scrgb_ps.h b/src/ui/shaders/vulkan_spirv/immediate_scrgb_ps.h
+new file mode 100644
+--- /dev/null
++++ b/src/ui/shaders/vulkan_spirv/immediate_scrgb_ps.h
+@@ -0,0 +1,50 @@
++	// 1116.2.0
++	 #pragma once
++const uint32_t immediate_scrgb_ps[] = {
++	0x07230203,0x00010000,0x0008000b,0x00000056,0x00000000,0x00020011,0x00000001,0x0006000b,
++	0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
++	0x0008000f,0x00000004,0x00000004,0x6e69616d,0x00000000,0x0000000b,0x00000014,0x00000047,
++	0x00030010,0x00000004,0x00000007,0x00030003,0x00000002,0x000001c2,0x00040005,0x00000004,
++	0x6e69616d,0x00000000,0x00040005,0x0000000b,0x6f6c6f63,0x00000072,0x00040005,0x00000010,
++	0x72756f73,0x00006563,0x00030005,0x00000014,0x00007675,0x00050005,0x00000032,0x736e6f43,
++	0x746e6174,0x00000073,0x00060006,0x00000032,0x00000000,0x775f6975,0x65746968,0x00000000,
++	0x00030005,0x00000034,0x00000000,0x00040005,0x00000047,0x75736572,0x0000746c,0x00040047,
++	0x0000000b,0x0000001e,0x00000001,0x00040047,0x00000010,0x00000021,0x00000000,0x00040047,
++	0x00000010,0x00000022,0x00000000,0x00040047,0x00000014,0x0000001e,0x00000000,0x00030047,
++	0x00000032,0x00000002,0x00050048,0x00000032,0x00000000,0x00000023,0x00000008,0x00040047,
++	0x00000047,0x0000001e,0x00000000,0x00020013,0x00000002,0x00030021,0x00000003,0x00000002,
++	0x00030016,0x00000006,0x00000020,0x00040017,0x00000007,0x00000006,0x00000004,0x00040020,
++	0x0000000a,0x00000001,0x00000007,0x0004003b,0x0000000a,0x0000000b,0x00000001,0x00090019,
++	0x0000000d,0x00000006,0x00000001,0x00000000,0x00000000,0x00000000,0x00000001,0x00000000,
++	0x0003001b,0x0000000e,0x0000000d,0x00040020,0x0000000f,0x00000000,0x0000000e,0x0004003b,
++	0x0000000f,0x00000010,0x00000000,0x00040017,0x00000012,0x00000006,0x00000002,0x00040020,
++	0x00000013,0x00000001,0x00000012,0x0004003b,0x00000013,0x00000014,0x00000001,0x0004002b,
++	0x00000006,0x00000016,0x00000000,0x00040017,0x00000019,0x00000006,0x00000003,0x0004002b,
++	0x00000006,0x0000001c,0x3d6147ae,0x0004002b,0x00000006,0x00000022,0x4019999a,0x0006002c,
++	0x00000019,0x00000023,0x00000022,0x00000022,0x00000022,0x0004002b,0x00000006,0x0000002c,
++	0x3d25aee6,0x0006002c,0x00000019,0x0000002d,0x0000002c,0x0000002c,0x0000002c,0x00020014,
++	0x0000002e,0x00040017,0x0000002f,0x0000002e,0x00000003,0x0003001e,0x00000032,0x00000006,
++	0x00040020,0x00000033,0x00000009,0x00000032,0x0004003b,0x00000033,0x00000034,0x00000009,
++	0x00040015,0x00000035,0x00000020,0x00000001,0x0004002b,0x00000035,0x00000036,0x00000000,
++	0x00040020,0x00000037,0x00000009,0x00000006,0x00040020,0x00000046,0x00000003,0x00000007,
++	0x0004003b,0x00000046,0x00000047,0x00000003,0x0006002c,0x00000019,0x0000004f,0x0000001c,
++	0x0000001c,0x0000001c,0x0004002b,0x00000006,0x00000051,0x3f72a76f,0x0006002c,0x00000019,
++	0x00000052,0x00000051,0x00000051,0x00000051,0x0004002b,0x00000006,0x00000054,0x3d9e8391,
++	0x0006002c,0x00000019,0x00000055,0x00000054,0x00000054,0x00000054,0x00050036,0x00000002,
++	0x00000004,0x00000000,0x00000003,0x000200f8,0x00000005,0x0004003d,0x00000007,0x0000000c,
++	0x0000000b,0x0004003d,0x0000000e,0x00000011,0x00000010,0x0004003d,0x00000012,0x00000015,
++	0x00000014,0x00070058,0x00000007,0x00000017,0x00000011,0x00000015,0x00000002,0x00000016,
++	0x00050085,0x00000007,0x00000018,0x0000000c,0x00000017,0x0008004f,0x00000019,0x0000001b,
++	0x00000018,0x00000018,0x00000000,0x00000001,0x00000002,0x00050081,0x00000019,0x0000001e,
++	0x0000001b,0x0000004f,0x00050085,0x00000019,0x00000021,0x0000001e,0x00000052,0x0007000c,
++	0x00000019,0x00000024,0x00000001,0x0000001a,0x00000021,0x00000023,0x00050085,0x00000019,
++	0x00000029,0x0000001b,0x00000055,0x000500bc,0x0000002f,0x00000030,0x0000001b,0x0000002d,
++	0x000600a9,0x00000019,0x00000031,0x00000030,0x00000029,0x00000024,0x00050041,0x00000037,
++	0x00000038,0x00000034,0x00000036,0x0004003d,0x00000006,0x00000039,0x00000038,0x0005008e,
++	0x00000019,0x0000003a,0x00000031,0x00000039,0x00050051,0x00000006,0x0000003f,0x0000003a,
++	0x00000000,0x00060052,0x00000007,0x0000004a,0x0000003f,0x00000018,0x00000000,0x00050051,
++	0x00000006,0x00000042,0x0000003a,0x00000001,0x00060052,0x00000007,0x0000004c,0x00000042,
++	0x0000004a,0x00000001,0x00050051,0x00000006,0x00000045,0x0000003a,0x00000002,0x00060052,
++	0x00000007,0x0000004e,0x00000045,0x0000004c,0x00000002,0x0003003e,0x00000047,0x0000004e,
++	0x000100fd,0x00010038
++};
+diff --git a/src/ui/vulkan/vulkan_immediate_drawer.cpp b/src/ui/vulkan/vulkan_immediate_drawer.cpp
+--- a/src/ui/vulkan/vulkan_immediate_drawer.cpp
++++ b/src/ui/vulkan/vulkan_immediate_drawer.cpp
+@@ -15,6 +15,7 @@
+ #include <utility>
+ 
+ #include <rex/assert.h>
++#include <rex/cvar.h>
+ #include <rex/logging.h>
+ #include <rex/math.h>
+ #include <rex/ui/vulkan/immediate_drawer.h>
+@@ -28,6 +29,7 @@
+ // Generated with `xb buildshaders`.
+ namespace shaders {
+ #include "../shaders/vulkan_spirv/immediate_ps.h"
++#include "../shaders/vulkan_spirv/immediate_scrgb_ps.h"
+ #include "../shaders/vulkan_spirv/immediate_vs.h"
+ }  // namespace shaders
+ 
+@@ -141,10 +143,11 @@
+   vertex_buffer_pool_ = std::make_unique<VulkanUploadBufferPool>(
+       vulkan_device_, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+ 
+-  VkPushConstantRange push_constant_ranges[1];
++  VkPushConstantRange push_constant_ranges[2];
+   push_constant_ranges[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+   push_constant_ranges[0].offset = offsetof(PushConstants, vertex);
+   push_constant_ranges[0].size = sizeof(PushConstants::Vertex);
++  push_constant_ranges[1] = {VK_SHADER_STAGE_FRAGMENT_BIT, offsetof(PushConstants, ui_white), sizeof(float)};
+   VkPipelineLayoutCreateInfo pipeline_layout_create_info;
+   pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+   pipeline_layout_create_info.pNext = nullptr;
+@@ -253,6 +256,13 @@
+   dfn.vkCmdPushConstants(draw_command_buffer, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT,
+                          offsetof(PushConstants, vertex), sizeof(PushConstants::Vertex),
+                          &push_constants_vertex);
++  if (vulkan_ui_draw_context.render_pass_format() == VK_FORMAT_R16G16B16A16_SFLOAT) {
++    const double peak = std::max(std::clamp(cvar::Query<double>("vulkan_hdr_peak"), 200.0, 10000.0),
++                                 std::clamp(cvar::Query<double>("vulkan_hdr_paper_white"), 80.0, 500.0));
++    const float white = float(std::min(std::clamp(cvar::Query<double>("vulkan_hdr_ui_white"), 40.0, 500.0), peak)) / 80.0f;
++    dfn.vkCmdPushConstants(draw_command_buffer, pipeline_layout_, VK_SHADER_STAGE_FRAGMENT_BIT,
++                           offsetof(PushConstants, ui_white), sizeof(white), &white);
++  }
+   current_scissor_.offset.x = 0;
+   current_scissor_.offset.y = 0;
+   current_scissor_.extent.width = 0;
+@@ -562,8 +572,9 @@
+   stages[0].pName = "main";
+   stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+   stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+-  stages[1].module = util::CreateShaderModule(vulkan_device_, shaders::immediate_ps,
+-                                              sizeof(shaders::immediate_ps));
++  stages[1].module = render_pass_format == VK_FORMAT_R16G16B16A16_SFLOAT
++      ? util::CreateShaderModule(vulkan_device_, shaders::immediate_scrgb_ps, sizeof(shaders::immediate_scrgb_ps))
++      : util::CreateShaderModule(vulkan_device_, shaders::immediate_ps, sizeof(shaders::immediate_ps));
+   if (stages[1].module == VK_NULL_HANDLE) {
+     REXLOG_ERROR("VulkanImmediateDrawer: Failed to create the fragment shader module");
+     dfn.vkDestroyShaderModule(device, stages[0].module, nullptr);
+diff --git a/src/ui/vulkan/vulkan_instance.cpp b/src/ui/vulkan/vulkan_instance.cpp
+--- a/src/ui/vulkan/vulkan_instance.cpp
++++ b/src/ui/vulkan/vulkan_instance.cpp
+@@ -148,6 +148,8 @@
+   requested_extensions.emplace("VK_KHR_portability_enumeration",
+                                &vulkan_instance->extensions_.ext_KHR_portability_enumeration);
+   if (with_surface) {
++    requested_extensions.emplace("VK_EXT_swapchain_colorspace",
++                                 &vulkan_instance->extensions_.ext_EXT_swapchain_colorspace);
+     // #1.
+     requested_extensions.emplace("VK_KHR_surface", &vulkan_instance->extensions_.ext_KHR_surface);
+ #ifdef VK_USE_PLATFORM_XCB_KHR
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -49,6 +49,10 @@
+ 
+ REXCVAR_DEFINE_BOOL(present_render_pass_clear, true, "UI/Presenter",
+                     "Clear render pass during presentation");
++REXCVAR_DEFINE_BOOL(vulkan_hdr, false, "UI/Vulkan", "Present native HDR as scRGB (restart required)");
++REXCVAR_DEFINE_DOUBLE(vulkan_hdr_paper_white, 203.0, "UI/Vulkan", "Scene reference white in nits");
++REXCVAR_DEFINE_DOUBLE(vulkan_hdr_peak, 1000.0, "UI/Vulkan", "HDR highlight peak in nits");
++REXCVAR_DEFINE_DOUBLE(vulkan_hdr_ui_white, 203.0, "UI/Vulkan", "HUD, menus and host overlay white in nits");
+ 
+ REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_immediate, true, "UI/Vulkan",
+                     "Allow immediate present mode (no vsync)");
+@@ -62,6 +66,12 @@
+ namespace rex {
+ namespace ui {
+ namespace vulkan {
++
++VkFormat VulkanPresenter::GuestOutputFormat() {
++  // Keep the guest output format fixed until restart.
++  static const VkFormat format = REXCVAR_GET(vulkan_hdr) ? VK_FORMAT_R16G16B16A16_SFLOAT : kGuestOutputFormat;
++  return format;
++}
+ 
+ // B-111: one Windows startup sat 5 min between device creation and the swapchain with nothing logged. Warn about any
+ // surface / swapchain step that takes over half a second, so the next stall says where it was.
+@@ -123,6 +133,7 @@
+ namespace shaders {
+ #include "../shaders/vulkan_spirv/guest_output_bilinear_dither_ps.h"
+ #include "../shaders/vulkan_spirv/guest_output_bilinear_ps.h"
++#include "../shaders/vulkan_spirv/guest_output_scrgb_ps.h"
+ #if defined(REX_HAS_FIDELITYFX_SDK)
+ #include "../shaders/vulkan_spirv/guest_output_ffx_cas_resample_dither_ps.h"
+ #include "../shaders/vulkan_spirv/guest_output_ffx_cas_resample_ps.h"
+@@ -360,7 +371,7 @@
+   VkImageCreateInfo source_image_create_info = {};
+   source_image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+   source_image_create_info.imageType = VK_IMAGE_TYPE_2D;
+-  source_image_create_info.format = kGuestOutputFormat;
++  source_image_create_info.format = GuestOutputFormat();
+   source_image_create_info.extent.width = input_width;
+   source_image_create_info.extent.height = input_height;
+   source_image_create_info.extent.depth = 1;
+@@ -489,7 +500,8 @@
+ 
+   VkExtent2D image_extent = guest_output_image->extent();
+   size_t pixel_count = size_t(image_extent.width) * image_extent.height;
+-  VkDeviceSize buffer_size = VkDeviceSize(sizeof(uint32_t) * pixel_count);
++  const bool hdr = GuestOutputFormat() == VK_FORMAT_R16G16B16A16_SFLOAT;
++  VkDeviceSize buffer_size = VkDeviceSize((hdr ? 8 : 4) * pixel_count);
+   VkBuffer buffer;
+   VkDeviceMemory buffer_memory;
+   if (!util::CreateDedicatedAllocationBuffer(
+@@ -663,10 +675,22 @@
+   image_out.width = image_extent.width;
+   image_out.height = image_extent.height;
+   image_out.stride = sizeof(uint32_t) * image_extent.width;
+-  image_out.data.resize(size_t(buffer_size));
++  image_out.data.resize(pixel_count * sizeof(uint32_t));
+   uint32_t* image_out_pixels = reinterpret_cast<uint32_t*>(image_out.data.data());
++  const float white = float(std::clamp(REXCVAR_GET(vulkan_hdr_ui_white), 40.0, 500.0)) / 80.0f;
+   for (size_t i = 0; i < pixel_count; ++i) {
+-    image_out_pixels[i] = Packed10bpcRGBTo8bpcBytes(reinterpret_cast<const uint32_t*>(mapping)[i]);
++    if (hdr) {
++      const auto* pixel = reinterpret_cast<const uint16_t*>(mapping) + i * 4;
++      uint32_t rgba = 0xff000000u;
++      for (uint32_t k = 0; k < 3; ++k) {
++        const float c = std::clamp(rex::xenos_half_to_float(pixel[k], true) / white, 0.0f, 1.0f);
++        const float g = std::pow(c, 1.0f / 2.2f);
++        rgba |= uint32_t(std::lround(g * 255.0f)) << (k * 8);
++      }
++      image_out_pixels[i] = rgba;
++    } else {
++      image_out_pixels[i] = Packed10bpcRGBTo8bpcBytes(reinterpret_cast<const uint32_t*>(mapping)[i]);
++    }
+   }
+ 
+   // Unmapping will be done by freeing.
+@@ -768,6 +792,7 @@
+   const VkDevice device = vulkan_device_->device();
+ 
+   VkFormat new_swapchain_format;
++  bool new_swapchain_hdr = false;
+ 
+   // ConnectOrReconnectToSurfaceFromUIThread may be called only for the
+   // ui::Surface of the current swapchain or when the old swapchain and
+@@ -782,7 +807,7 @@
+     bool surface_unusable;
+     paint_context_.swapchain = PaintContext::CreateSwapchainForVulkanSurface(
+         vulkan_device_, paint_context_.vulkan_surface, new_surface_width, new_surface_height,
+-        old_swapchain, paint_context_.present_queue_family, new_swapchain_format,
++        old_swapchain, paint_context_.present_queue_family, new_swapchain_format, new_swapchain_hdr,
+         paint_context_.swapchain_extent, paint_context_.swapchain_is_fifo, surface_unusable);
+     // Destroy the old swapchain that may be retired now.
+     if (old_swapchain != VK_NULL_HANDLE) {
+@@ -887,7 +912,7 @@
+     bool surface_unusable;
+     paint_context_.swapchain = PaintContext::CreateSwapchainForVulkanSurface(
+         vulkan_device_, paint_context_.vulkan_surface, new_surface_width, new_surface_height,
+-        VK_NULL_HANDLE, paint_context_.present_queue_family, new_swapchain_format,
++        VK_NULL_HANDLE, paint_context_.present_queue_family, new_swapchain_format, new_swapchain_hdr,
+         paint_context_.swapchain_extent, paint_context_.swapchain_is_fifo, surface_unusable);
+     if (paint_context_.swapchain == VK_NULL_HANDLE) {
+       // Failed to create the swapchain for the new Vulkan surface - destroy the
+@@ -905,6 +930,7 @@
+   // returning.
+ 
+   // Update the render pass to the new format.
++  hdr_output_.store(new_swapchain_hdr, std::memory_order_relaxed);
+   if (paint_context_.swapchain_render_pass_format != new_swapchain_format) {
+     util::DestroyAndNullHandle(dfn.vkDestroyRenderPass, device,
+                                paint_context_.swapchain_render_pass);
+@@ -1123,7 +1149,7 @@
+ 
+ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
+     const VulkanDevice* vulkan_device, VkSurfaceKHR surface, uint32_t width, uint32_t height,
+-    VkSwapchainKHR old_swapchain, uint32_t& present_queue_family_out, VkFormat& image_format_out,
++    VkSwapchainKHR old_swapchain, uint32_t& present_queue_family_out, VkFormat& image_format_out, bool& hdr_out,
+     VkExtent2D& image_extent_out, bool& is_fifo_out, bool& ui_surface_unusable_out) {
+   ui_surface_unusable_out = false;
+   SlowStepLog slow_total("swapchain setup (surface queries + vkCreateSwapchainKHR)");
+@@ -1306,6 +1332,18 @@
+     }
+   }
+ 
++  if (GuestOutputFormat() == VK_FORMAT_R16G16B16A16_SFLOAT) {
++    auto hdr_format_it = std::find_if(surface_formats.begin(), surface_formats.end(), [](const auto& f) {
++      return f.format == VK_FORMAT_R16G16B16A16_SFLOAT &&
++             f.colorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
++    });
++    if (hdr_format_it != surface_formats.end()) {
++      image_format = *hdr_format_it;
++    } else {
++      REXLOG_WARN("VulkanPresenter: scRGB unavailable on this surface, using SDR output");
++    }
++  }
++
+   // Get presentation modes.
+   std::vector<VkPresentModeKHR> present_modes;
+   VkResult present_modes_get_result;
+@@ -1440,6 +1478,8 @@
+ 
+   present_queue_family_out = queue_family_index_present;
+   image_format_out = swapchain_create_info.imageFormat;
++  hdr_out = image_format.colorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT &&
++            image_format.format == VK_FORMAT_R16G16B16A16_SFLOAT;
+   image_extent_out = swapchain_create_info.imageExtent;
+   is_fifo_out = swapchain_create_info.presentMode == VK_PRESENT_MODE_FIFO_KHR ||
+                 swapchain_create_info.presentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+@@ -1501,7 +1541,7 @@
+   image_create_info.pNext = nullptr;
+   image_create_info.flags = 0;
+   image_create_info.imageType = VK_IMAGE_TYPE_2D;
+-  image_create_info.format = kGuestOutputFormat;
++  image_create_info.format = GuestOutputFormat();
+   image_create_info.extent.width = extent_.width;
+   image_create_info.extent.height = extent_.height;
+   image_create_info.extent.depth = 1;
+@@ -1531,7 +1571,7 @@
+   image_view_create_info.flags = 0;
+   image_view_create_info.image = image_;
+   image_view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+-  image_view_create_info.format = kGuestOutputFormat;
++  image_view_create_info.format = GuestOutputFormat();
+   image_view_create_info.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+   image_view_create_info.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+   image_view_create_info.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+@@ -1667,6 +1707,10 @@
+   }
+ 
+   if (guest_output_image) {
++    if (GuestOutputFormat() == VK_FORMAT_R16G16B16A16_SFLOAT) {
++      guest_output_paint_config.SetEffect(GuestOutputPaintConfig::Effect::kBilinear);
++      guest_output_paint_config.SetDither(false);
++    }
+     VkExtent2D max_framebuffer_extent =
+         util::GetMax2DFramebufferExtent(vulkan_device_->properties());
+     GuestOutputPaintFlow guest_output_flow = GetGuestOutputPaintFlow(
+@@ -2108,6 +2152,11 @@
+                                    VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(effect_rect_constants),
+                                    effect_constants_size, &effect_constants);
+           }
++          if (GuestOutputFormat() == VK_FORMAT_R16G16B16A16_SFLOAT) {
++            const float white = float(std::clamp(REXCVAR_GET(vulkan_hdr_ui_white), 40.0, 500.0)) / 80.0f;
++            dfn.vkCmdPushConstants(draw_command_buffer, guest_output_paint_pipeline_layout,
++                                   VK_SHADER_STAGE_FRAGMENT_BIT, 32, sizeof(white), &white);
++          }
+ 
+           dfn.vkCmdDraw(draw_command_buffer, 4, 1, 0, 0);
+ 
+@@ -2373,7 +2422,8 @@
+   for (size_t i = 0; i < size_t(kGuestOutputPaintPipelineLayoutCount); ++i) {
+     switch (GuestOutputPaintPipelineLayoutIndex(i)) {
+       case kGuestOutputPaintPipelineLayoutIndexBilinear:
+-        guest_output_paint_push_constant_range_ffx.size = sizeof(BilinearConstants);
++        guest_output_paint_push_constant_range_ffx.size = sizeof(BilinearConstants) +
++            (GuestOutputFormat() == VK_FORMAT_R16G16B16A16_SFLOAT ? sizeof(float) : 0);
+         break;
+ #if defined(REX_HAS_FIDELITYFX_SDK)
+       case kGuestOutputPaintPipelineLayoutIndexCasSharpen:
+@@ -2423,8 +2473,13 @@
+     GuestOutputPaintEffect guest_output_paint_effect = GuestOutputPaintEffect(i);
+     switch (guest_output_paint_effect) {
+       case GuestOutputPaintEffect::kBilinear:
+-        shader_module_create_info.codeSize = sizeof(shaders::guest_output_bilinear_ps);
+-        shader_module_create_info.pCode = shaders::guest_output_bilinear_ps;
++        if (GuestOutputFormat() == VK_FORMAT_R16G16B16A16_SFLOAT) {
++          shader_module_create_info.codeSize = sizeof(shaders::guest_output_scrgb_ps);
++          shader_module_create_info.pCode = shaders::guest_output_scrgb_ps;
++        } else {
++          shader_module_create_info.codeSize = sizeof(shaders::guest_output_bilinear_ps);
++          shader_module_create_info.pCode = shaders::guest_output_bilinear_ps;
++        }
+         break;
+       case GuestOutputPaintEffect::kBilinearDither:
+         shader_module_create_info.codeSize = sizeof(shaders::guest_output_bilinear_dither_ps);
+@@ -2478,7 +2533,7 @@
+ 
+   VkAttachmentDescription intermediate_render_pass_attachment;
+   intermediate_render_pass_attachment.flags = 0;
+-  intermediate_render_pass_attachment.format = kGuestOutputFormat;
++  intermediate_render_pass_attachment.format = GuestOutputFormat();
+   intermediate_render_pass_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+   intermediate_render_pass_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+   intermediate_render_pass_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+@@ -2622,6 +2677,10 @@
+   }
+   stages[0].module = guest_output_paint_vs_;
+   stages[1].module = guest_output_paint_fs_[size_t(effect)];
++  const VkBool32 scrgb = render_pass != paint_context_.swapchain_render_pass || is_hdr_output();
++  const VkSpecializationMapEntry hdr_entry{0, 0, sizeof(scrgb)};
++  const VkSpecializationInfo hdr_info{1, &hdr_entry, sizeof(scrgb), &scrgb};
++  if (GuestOutputFormat() == VK_FORMAT_R16G16B16A16_SFLOAT) stages[1].pSpecializationInfo = &hdr_info;
+   assert_true(stages[1].module != VK_NULL_HANDLE);
+ 
+   VkPipelineVertexInputStateCreateInfo vertex_input_state = {};
