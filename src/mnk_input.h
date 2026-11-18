@@ -40,6 +40,7 @@ REXCVAR_DECLARE(bool, kbm);
 REXCVAR_DECLARE(double, kbm_sensitivity);
 REXCVAR_DECLARE(double, kbm_aim_sensitivity);
 REXCVAR_DECLARE(bool, kbm_invert_y);
+REXCVAR_DECLARE(bool, aim_toggle);
 REXCVAR_DECLARE(double, kbm_noise_gate);
 REXCVAR_DECLARE(bool, kbm_prompts);
 REXCVAR_DECLARE(std::string, pad_prompts);
@@ -95,6 +96,10 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   // The player is driving (their pawn is a C1DrivingVehicleBase; set from the HUD tick): the triggers come from
   // kbm_accelerate / kbm_brake instead of the mouse buttons, and those keys stop moving the left stick.
   void SetDriving(bool driving) { driving_.store(driving, std::memory_order_relaxed); }
+  // Toggle aim (aim_toggle, aim_toggle.h): on foot in play, i.e. not in a menu, paused, loading, in a cutscene or driving.
+  bool OnFootInPlay() const { return !MenuMode() && !driving_.load(std::memory_order_relaxed); }
+  // Aiming is latched on by Toggle aim; mouse look then uses the aiming sensitivity as if Aim were held.
+  void SetAimLatched(bool latched) { aim_latched_.store(latched, std::memory_order_relaxed); }
   // Engine Enter key edges (true = pressed) since the last call, oldest first. Game thread.
   void TakeEnterEvents(std::vector<bool>& out);
 
@@ -197,6 +202,7 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   int32_t prev_x_ = 0, prev_y_ = 0;           // UI thread
   rex::ui::Window::CursorVisibility saved_cursor_ = rex::ui::Window::CursorVisibility::kVisible;
   std::atomic<bool> has_focus_{true};
+  std::atomic<bool> aim_latched_{false};
   bool trace_lt_down_ = false;  // BOTS_KBM_TRACE: last logged left trigger state
   std::atomic<bool> capture_wanted_{false}, capture_queued_{false};
 };

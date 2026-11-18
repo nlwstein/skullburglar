@@ -134,6 +134,11 @@ std::vector<Setting> Catalog() {
                "The game slows the crosshair and pulls it toward enemies near it while you move (even through walls, "
                "as on the Xbox 360). Turn off for raw aiming. Applies to the mouse too.",
                {}});
+  s.push_back({"aim_toggle", "", "Toggle aim",
+               "Press Aim once to start aiming and again to stop, instead of holding it. Works with a controller and "
+               "with keyboard and mouse (every key bound to Aim, such as right mouse button or Shift). Taking cover "
+               "or running (A) also ends it; menus, pause and vehicles reset it.",
+               {}});
   s.push_back({"right_stick_deadzone", "", "Right stick dead zone",
                "How far you push the right stick before the camera moves. 20% is the game's own, applied to each "
                "direction separately; lower values use a smaller round dead zone, so small and diagonal movements "
