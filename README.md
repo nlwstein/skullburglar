@@ -88,6 +88,9 @@ and that is where most of the work in this port has gone.
 - **Resolution and display options.** Render at the original 720p or at 900p, 1080p, 1440p or 4K, or below 720p for weak
   GPUs (Intel graphics picks a lower scale automatically). VSync, frame-rate cap, fullscreen and windowed, all from
   the launcher.
+- **Anti-aliasing and sharpening (new renderer).** The launcher's "Anti-aliasing" setting smooths jagged edges with FXAA or
+  SMAA 1x, and "Sharpening" (0 to 1) restores crispness afterwards. Both apply to the 3D scene only (the HUD and text are
+  untouched), are off by default, and cost under a millisecond of GPU time at 720p.
 - **Ultrawide.** The launcher's "Aspect ratio" setting renders 21:9, 32:9 or the shape of your screen (Automatic)
   instead of a pillarboxed 16:9 picture, showing more at the sides with the original vertical view. Menus and the
   HUD stretch, the story cutscenes (pre-rendered 16:9 videos) keep side bars, and the Music Player's bottom row is
