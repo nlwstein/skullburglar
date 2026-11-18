@@ -49,6 +49,7 @@ set(BOTS_SOURCES
     src/mnk_input.cpp
     src/motion_blur.cpp
     src/screen_shake.cpp
+    src/movie_volume.cpp
     src/hybrid.cpp
     src/instr.cpp
     src/test_range.cpp
