@@ -75,6 +75,12 @@ std::vector<Setting> Catalog() {
                "Wider than 16:9 fills an ultrawide screen and shows more at the sides; the HUD and menus stretch. "
                "Automatic matches the screen in fullscreen, or the window.",
                {{"16:9", "16:9 (original)"}, {"auto", "Automatic"}, {"21:9", "21:9"}, {"32:9", "32:9"}}});
+  s.push_back({"fov_offset", "", "Field of view",
+               "Degrees added to the game's horizontal view. 0 is as shipped; more shows more of the scene and makes "
+               "things look smaller. Aiming zoom and vehicles widen in the same proportion; the pre-rendered story "
+               "cutscenes are unchanged. F6 changes it live. Ctrl-click to type a value.",
+               {}});
+  s.back().slider_min = 0, s.back().slider_max = 40, s.back().slider_linear = true, s.back().slider_format = "+%.0f degrees";
   s.push_back({"vulkan_hdr", "", "Enable HDR (restart required)",
                "Native scRGB output on an HDR display. Requires the new renderer. "
                "Enable HDR in the operating system too. F6 opens the live display controls.", {}});
