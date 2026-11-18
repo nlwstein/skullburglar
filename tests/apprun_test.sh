@@ -27,4 +27,18 @@ case "$first" in
   *) fail "first argument was '$first'" ;;
 esac
 [ "$(sed -n 2p "$t/args")" = "--some_flag" ] && [ "$(sed -n 3p "$t/args")" = "--log_file=/x/mine.log" ] || fail "player arguments changed"
+
+# Portable mode: no --log_file of ours (the game logs into its data folder), and no state-dir logging.
+cd "$t"  # the stub bots creates a file named after its first argument
+mkdir -p "$t/ai"
+touch "$t/ai/portable.txt"
+rm -f "$t/args"
+APPIMAGE="$t/ai/Skullburglar.AppImage" XDG_STATE_HOME="$t/state with space" "$t/app/AppRun" --some_flag 2>/dev/null || true
+[ "$(cat "$t/args")" = "--some_flag" ] || fail "portable.txt: arguments were '$(cat "$t/args")'"
+rm -f "$t/args" "$t/ai/portable.txt"
+BOTS_DATA_DIR="$t/d" XDG_STATE_HOME="$t/state with space" "$t/app/AppRun" --some_flag 2>/dev/null || true
+[ "$(cat "$t/args")" = "--some_flag" ] || fail "BOTS_DATA_DIR: arguments were '$(cat "$t/args")'"
+rm -f "$t/args"
+APPIMAGE="$t/ai/Skullburglar.AppImage" XDG_STATE_HOME="$t/state with space" "$t/app/AppRun" --some_flag
+case "$(sed -n 1p "$t/args")" in "--log_file="*) ;; *) fail "no portable.txt: --log_file missing" ;; esac
 echo "apprun_test: ok"

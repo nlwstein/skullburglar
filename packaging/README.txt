@@ -116,6 +116,33 @@ Logs
   Linux    logs/ next to bots; the AppImage writes ~/.local/state/bots-recomp/logs, one bots-<time>.log per
            launch (newest 10 kept)
 
+Portable mode (keep everything in one folder)
+  Create an empty file named portable.txt and the game keeps its saves, settings (bots.toml), shader cache and logs
+  in a folder named bots-data next to it, instead of your user folders above. Delete the file and it goes back.
+  The game looks for the file next to the program you start, not in the folder a shortcut or Steam starts it in,
+  so shortcuts and Steam entries keep working. Where to put it:
+
+  Download            Put portable.txt next to          Data goes in
+  Windows             bots.exe (the install folder)     bots-data in the install folder
+  Linux .tar.xz       bots                              bots-data in the unpacked folder
+  Linux .AppImage     the .AppImage file itself         bots-data next to the .AppImage
+  (and Steam Deck)
+  macOS               Skullburglar.app, same folder     bots-data next to the app (never inside it)
+
+  bots-data holds user (saves and bots.toml), cache (shader cache), logs, and the save-backups and crashes folders.
+  The game files stay where the launcher put them; a game folder next to bots is still found on its own (not on
+  macOS or the AppImage: choose a folder in the launcher).
+
+  To use a folder of your choice instead (for scripts, or Steam's Launch Options), set the environment variable
+  BOTS_DATA_DIR to it, for example BOTS_DATA_DIR=/mnt/games/bots %command% in Steam. It beats portable.txt, and it
+  holds the same layout (user, cache, logs). Command-line options like --user_data_root still win for what they name.
+
+  The folder must be writable. If it isn't, the game says so and doesn't start; it never saves somewhere else
+  quietly. Existing saves don't move by themselves: to take them along, copy the contents of your current saves
+  folder (listed under "Saves, settings") into bots-data\user before you first start in portable mode. On macOS, an app opened straight
+  from the Downloads folder may run from a temporary read-only copy that can't see portable.txt: drag it somewhere
+  first. The Windows setup, the launcher's updates and the Linux updater all leave portable.txt and bots-data alone.
+
 Updating: the launcher's "Update now" button does it for the Windows setup, the macOS app, the Linux AppImage and an
 unpacked Linux .tar.xz (the folder is swapped as a whole; the game folder, logs and any files you added stay). Otherwise,
 or if you prefer, replace the AppImage, folder or app with the new version from https://skullburglar.stz.sh. Game
