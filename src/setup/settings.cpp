@@ -106,6 +106,12 @@ std::vector<Setting> Catalog() {
                "as shipped; 0% turns it off.",
                {}});
   s.back().slider_min = 0, s.back().slider_max = 100, s.back().slider_linear = true, s.back().slider_format = "%.0f%%";
+  s.push_back({"movie_volume", "", "Movie volume",
+               "How loud the pre-rendered movies (story cutscenes, music videos, the title screen movie) are, as a "
+               "share of their own level. 100% is as the game plays them; the slider goes up to 200%, with a soft "
+               "limiter so loud parts don't distort. Game sound and music are not affected.",
+               {}});
+  s.back().slider_min = 0, s.back().slider_max = 200, s.back().slider_linear = true, s.back().slider_format = "%.0f%%";
   s.push_back({"framerate_limit", "", "Frame rate limit",
                "30 plays at a steady 30 fps: choose it if the game feels jumpy because your computer can't hold 60. "
                "60 is what the game was made for. 90, 120 and 144 run smoother on a high-refresh screen; the game "
