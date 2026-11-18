@@ -904,7 +904,7 @@ class DisplayDialog : public rex::ui::ImGuiDialog {
       : ImGuiDialog(drawer), config_path_(std::move(config_path)), status_(std::move(status)),
         closed_(std::move(closed)), settings_(LoadSettings()) {
     std::erase_if(settings_, [](const Setting& s) {
-      return !s.cvar.starts_with("vulkan_hdr");
+      return !s.cvar.starts_with("vulkan_hdr") && s.cvar != "fov_offset";
     });
     original_settings_ = settings_;
   }
@@ -937,7 +937,7 @@ class DisplayDialog : public rex::ui::ImGuiDialog {
       }
       if (ImGui::Button("Reset brightness and grading")) {
         for (auto& s : settings_) {
-          if (s.locked || s.cvar == "vulkan_hdr") continue;
+          if (s.locked || s.cvar == "vulkan_hdr" || s.cvar == "fov_offset") continue;
           s.value = s.default_value;
           rex::cvar::SetFlagByName(s.cvar, s.value);
         }
