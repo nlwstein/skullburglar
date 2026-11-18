@@ -547,11 +547,15 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       }
       // The rest of the keyboard and mouse section only matters with it on.
       const bool kbm_off = s.cvar.starts_with("kbm_") && Value("kbm") == "false";
-      ImGui::BeginDisabled(Extracting() || kbm_off);
+      // Anti-aliasing and sharpening are n1 passes: greyed out with the pre-1.0 renderer, like HDR.
+      const bool n1_only = (s.cvar == "anti_aliasing" || s.cvar == "sharpening") && Value("renderer") == "pre1";
+      ImGui::BeginDisabled(Extracting() || kbm_off || n1_only);
       DrawSetting(s, S(260.0f));
       ImGui::EndDisabled();
       if (s.cvar == "vulkan_hdr" && Value("renderer") == "pre1")
         ImGui::TextDisabled("HDR requires the new renderer.");
+      if (s.cvar == "sharpening" && Value("renderer") == "pre1")
+        ImGui::TextDisabled("Anti-aliasing and sharpening require the new renderer.");
       if (s.cvar == "user_signin_live" && s.value == "true") DrawFirewall();
       if (s.cvar == "diagnostic_logging") {
         ImGui::Indent();

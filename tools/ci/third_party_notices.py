@@ -146,6 +146,9 @@ def main() -> int:
     kenney = repo / "assets/prompts/LICENSE-kenney.txt"
     if kenney.is_file():
         parts.append(section("Kenney Input Prompts (button prompt icons)", kenney.read_text()))
+    smaa = repo / "n1/n1ffi/src/aa/LICENSE-SMAA.txt"
+    if smaa.is_file():
+        parts.append(section("SMAA (anti-aliasing, n1's SMAA 1x mode: shader port and lookup textures)", smaa.read_text()))
     if len(sys.argv) == 4:
         parts.append(rust_notices(Path(sys.argv[3])))
     if missing:

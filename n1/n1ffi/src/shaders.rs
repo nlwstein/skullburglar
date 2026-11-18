@@ -209,7 +209,7 @@ fn insts(words: &[u32]) -> impl Iterator<Item = (usize, usize, u32)> + '_ {
 }
 
 /// The entry points of a SPIR-V module: (function id, name, interface ids).
-fn entry_points(words: &[u32]) -> Vec<(u32, String, Vec<u32>)> {
+pub(crate) fn entry_points(words: &[u32]) -> Vec<(u32, String, Vec<u32>)> {
     let mut out = Vec::new();
     for (i, n, op) in insts(words) {
         if op == 15 && n >= 4 {
