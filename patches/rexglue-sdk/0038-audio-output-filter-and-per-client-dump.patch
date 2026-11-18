@@ -73,7 +73,7 @@ index c7b7173..cac7071 100644
  #include <algorithm>
  #include <array>
  #include <atomic>
-@@ -164,15 +168,41 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
+@@ -164,15 +168,45 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
  
    std::memcpy(output_frame, input_frame, frame_samples_ * sizeof(float));
  
@@ -115,7 +115,11 @@ index c7b7173..cac7071 100644
 +      const auto now = std::chrono::system_clock::now();
 +      const std::time_t t = std::chrono::system_clock::to_time_t(now);
 +      std::tm tm{};
++#ifdef _WIN32
++      localtime_s(&tm, &t);
++#else
 +      localtime_r(&t, &tm);
++#endif
 +      const int ms = int(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000);
 +      std::fprintf(d.idx, "%02d:%02d:%02d.%03d %llu\n", tm.tm_hour, tm.tm_min, tm.tm_sec, ms,
 +                   (unsigned long long)(d.frames - 1));
@@ -124,7 +128,7 @@ index c7b7173..cac7071 100644
    }
  
    static uint32_t sdl_submit_count = 0;
-@@ -276,6 +306,9 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+@@ -276,6 +310,9 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
              break;
          }
        }
