@@ -62,6 +62,11 @@ pub struct TexInfo {
     /// re-encode in the shader, and the filtering happens on the stored values, as in the port (G6: the re-encode cost
     /// a low-end laptop about 1 ms of GPU per frame in 71515's explosions).
     pub raw: bool,
+    /// B-325: bit 0 = the texture clamps on U, bit 1 on V (UE3 `TA_Clamp`). The particle sampler repeats, so a clamped
+    /// texture's sample takes its coordinate clamped to the edge texels' centres (see `Cg::sample`). A smoke puff
+    /// whose material rotates the UVs of a Clamp mask otherwise read the opposite edge at the quad's corners and drew
+    /// hard triangles and squares around the smoke.
+    pub clamp: u8,
 }
 
 struct Cg<'a> {
@@ -118,6 +123,19 @@ impl<'a> Cg<'a> {
         self.n += 1;
         self.out.push_str(&format!("    let {id}: vec4<f32> = {expr};\n"));
         id
+    }
+    /// A fetch of texture slot `s` (path `tex`) at `uv` (a vec2 expression): the plain sample, or with the texture's
+    /// clamp addressing applied to the coordinate (derivatives stay those of the unclamped coordinate).
+    fn sample(&self, tex: &str, s: usize, uv: &str) -> String {
+        match (self.tex_info)(tex).clamp & 3 {
+            0 => format!("textureSample(tex{s}, samp, {uv})"),
+            m => {
+                let half = format!("(vec2<f32>(0.5) / vec2<f32>(textureDimensions(tex{s})))");
+                let both = format!("clamp({uv}, {half}, vec2<f32>(1.0) - {half})");
+                let c = if m == 3 { both } else { format!("select({uv}, {both}, vec2<bool>({}, {}))", m & 1 != 0, m & 2 != 0) };
+                format!("textureSampleGrad(tex{s}, samp, {c}, dpdx({uv}), dpdy({uv}))")
+            }
+        }
     }
     /// `sample` (a vec4 expression read from texture `tex`) with the texture's unpack range applied, as UE3's
     /// TextureSample does: FakeLit_Bumpy_NORM, the normal map of the fake-lit smoke (AcridSmokeLit_SubUV and others),
@@ -368,7 +386,8 @@ impl<'a> Cg<'a> {
                 let tex = self.param(e, "texture").and_then(Value::as_str).unwrap_or_else(|| e["props"]["Texture"]["path"].as_str().unwrap_or("")).to_string();
                 let s = self.slot(&tex);
                 let (c, _) = self.input(e, "Coordinates").unwrap_or_else(|| (self.let_(format!("vec4<f32>({uv_default}, 0.0, 0.0)")), 2));
-                let e = self.unpacked(&tex, format!("textureSample(tex{s}, samp, {c}.xy)"));
+                let fetch = self.sample(&tex, s, &format!("{c}.xy"));
+                let e = self.unpacked(&tex, fetch);
                 (self.let_(e), 4)
             }
             "ParticleSubUV" | "MeshSubUV" | "TextureSampleParameterSubUV" | "TextureSampleParameterMeshSubUV" => {
@@ -527,10 +546,10 @@ mod tests {
         });
         let plain = compile(&mat);
         assert!(!plain.wgsl.contains("vec4<f32>(2.0, 2.0, 2.0, 1.0)"), "{}", plain.wgsl);
-        let c = compile_with(&mat, &|t| TexInfo { unpack: (t == "Pkg.Bumpy_NORM").then_some(([-1.0; 3], [1.0; 3])), pwl: false, raw: false });
+        let c = compile_with(&mat, &|t| TexInfo { unpack: (t == "Pkg.Bumpy_NORM").then_some(([-1.0; 3], [1.0; 3])), pwl: false, raw: false, clamp: 0 });
         assert!(c.wgsl.contains("* vec4<f32>(2.0, 2.0, 2.0, 1.0) + vec4<f32>(-1.0, -1.0, -1.0, 0.0))"), "{}", c.wgsl);
         assert_eq!(c.textures, vec!["Pkg.Bumpy_NORM".to_string()]);
-        let g = compile_with(&mat, &|_| TexInfo { unpack: None, pwl: true, raw: false });
+        let g = compile_with(&mat, &|_| TexInfo { unpack: None, pwl: true, raw: false, clamp: 0 });
         assert!(g.wgsl.contains("xe_pwl(textureSample(tex0"), "{}", g.wgsl);
     }
 
@@ -541,13 +560,13 @@ mod tests {
             "props": {"BlendMode": "BLEND_Translucent", "EmissiveColor": {"Expression": {"obj": 1}}},
             "expressions": {"1": {"class": "MaterialExpressionParticleSubUV", "props": {"Texture": {"path": "Pkg.Fire"}}}}
         });
-        let g = compile_with(&mat, &|_| TexInfo { unpack: None, pwl: true, raw: false });
+        let g = compile_with(&mat, &|_| TexInfo { unpack: None, pwl: true, raw: false, clamp: 0 });
         assert!(
             g.wgsl.contains("mix(xe_pwl(textureSample(tex0, samp, i.uv)), xe_pwl(textureSample(tex0, samp, i.uv2)), i.interp)"),
             "{}",
             g.wgsl
         );
-        let r = compile_with(&mat, &|_| TexInfo { unpack: None, pwl: true, raw: true });
+        let r = compile_with(&mat, &|_| TexInfo { unpack: None, pwl: true, raw: true, clamp: 0 });
         assert!(
             r.wgsl.contains("mix(xe_pwl_raw(textureSample(tex0, samp, i.uv)), xe_pwl_raw(textureSample(tex0, samp, i.uv2)), i.interp)"),
             "{}",
@@ -638,5 +657,23 @@ mod tests {
         let c = compile(&mat);
         assert!(c.unknown.is_empty(), "{:?}", c.unknown);
         assert!(c.wgsl.contains("clamp(") && c.wgsl.contains("vec4<f32>(0.2)") && c.wgsl.contains("vec4<f32>(0.9)"), "{}", c.wgsl);
+    }
+
+    #[test]
+    fn clamped_texture_clamps_its_rotated_uv() {
+        // B-325: a Clamp texture sampled through a Rotator must not read past its edge (the sampler repeats).
+        let mat = serde_json::json!({
+            "props": {"BlendMode": "BLEND_Translucent", "Opacity": {"Expression": {"obj": 3}}},
+            "expressions": {
+                "1": {"class": "MaterialExpressionRotator", "props": {"Speed": 0.06}},
+                "3": {"class": "MaterialExpressionTextureSample", "props": {"Texture": {"path": "Pkg.Mask"}, "Coordinates": {"Expression": {"obj": 1}}}}
+            }
+        });
+        let on = compile_with(&mat, &|_| TexInfo { clamp: 3, ..TexInfo::default() });
+        assert!(on.wgsl.contains("textureSampleGrad(tex0, samp, clamp("), "{}", on.wgsl);
+        let u_only = compile_with(&mat, &|_| TexInfo { clamp: 1, ..TexInfo::default() });
+        assert!(u_only.wgsl.contains("vec2<bool>(true, false)"), "{}", u_only.wgsl);
+        let off = compile_with(&mat, &|_| TexInfo::default());
+        assert!(off.wgsl.contains("textureSample(tex0, samp, ") && !off.wgsl.contains("textureSampleGrad"), "{}", off.wgsl);
     }
 }
