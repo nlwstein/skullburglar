@@ -8,6 +8,10 @@
 
 #include <cstdint>
 
+#include <rex/cvar.h>
+
+REXCVAR_DECLARE(double, fov_offset);
+
 namespace rex::ui {
 class Window;
 }

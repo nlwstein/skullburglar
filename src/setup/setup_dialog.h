@@ -36,6 +36,7 @@
 #include <rex/ui/window.h>
 
 #include "app_paths.h"
+#include "portable.h"
 #include "file_picker.h"
 #include "iso_extract.h"
 #include "pad_nav.h"
@@ -538,6 +539,11 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   void DrawSettings() {
     ImGui::TextUnformatted("Settings");
     ImGui::TextDisabled("Saved in %s", bots::PlainPathUtf8(config_path_).c_str());
+    if (const DataRoot& data = ActiveDataRoot(); data.source != DataSource::kDefault) {
+      ImGui::TextDisabled("Portable mode (%s): saves, settings, shader cache and logs are in %s",
+                          data.source == DataSource::kEnv ? "BOTS_DATA_DIR" : "portable.txt",
+                          bots::PlainPathUtf8(data.root).c_str());
+    }
     DrawReset();
     for (auto& s : settings_) {
       if (s.binding) continue;  // DrawBindings
@@ -898,7 +904,7 @@ class DisplayDialog : public rex::ui::ImGuiDialog {
       : ImGuiDialog(drawer), config_path_(std::move(config_path)), status_(std::move(status)),
         closed_(std::move(closed)), settings_(LoadSettings()) {
     std::erase_if(settings_, [](const Setting& s) {
-      return !s.cvar.starts_with("vulkan_hdr");
+      return !s.cvar.starts_with("vulkan_hdr") && s.cvar != "fov_offset";
     });
     original_settings_ = settings_;
   }
@@ -931,7 +937,7 @@ class DisplayDialog : public rex::ui::ImGuiDialog {
       }
       if (ImGui::Button("Reset brightness and grading")) {
         for (auto& s : settings_) {
-          if (s.locked || s.cvar == "vulkan_hdr") continue;
+          if (s.locked || s.cvar == "vulkan_hdr" || s.cvar == "fov_offset") continue;
           s.value = s.default_value;
           rex::cvar::SetFlagByName(s.cvar, s.value);
         }

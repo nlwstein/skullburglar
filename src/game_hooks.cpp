@@ -40,6 +40,7 @@
 
 #include "app_quit.h"
 #include "coop.h"
+#include "fov_math.h"
 #include "widescreen.h"
 #include "gfx/capture.h"
 #include "instr.h"
@@ -2770,6 +2771,39 @@ static uint32_t FieldOffset(uint8_t* base, uint32_t cls, const char* name) {
   return 0;
 }
 
+// Field of view (B-371): the hook in widescreen.cpp widens the camera's own FOV (walking and running; it also reaches the
+// camera's cached view). The vehicle camera sets its own 75 degrees elsewhere and is left as shipped. The view is drawn with the player controller's m_FOV (+0x5B0, used when m_UseFOV, +0x5B4 bit
+// 31), which the game sets itself: from that same hooked value while walking, but from the weapon's aiming value
+// while aiming (and scoped), so the zoom stayed as shipped while the camera said otherwise. Each frame, with the setting
+// on, m_FOV follows the camera's FOV when it is in use. BOTS_FOV_SYNC=0 (test only) turns this off.
+static void FovSync(uint8_t* base) {
+  using menu_pointer::Readable;
+  static const bool enabled = [] { const char* v = std::getenv("BOTS_FOV_SYNC"); return !(v && *v == '0'); }();
+  if (!enabled || REXCVAR_GET(fov_offset) <= 0.0) return;
+  const uint32_t engine = LoadU32(base, kGEngine);
+  if (!Readable(engine) || !LoadU32(base, engine + 0x2D8 + 4)) return;
+  const uint32_t players = LoadU32(base, engine + 0x2D8);
+  const uint32_t player = Readable(players) ? LoadU32(base, players) : 0;
+  const uint32_t pc = Readable(player) ? LoadU32(base, player + 0x40) : 0;
+  if (!Readable(pc)) return;
+  auto prop = [&](uint32_t object, const char* name) {
+    return Readable(object) ? FieldOffset(base, LoadU32(base, object + 0x34), name) : 0u;
+  };
+  static uint32_t m_fov = 0, m_use = 0, last_cam = 0;
+  if (!m_fov) m_fov = prop(pc, "m_FOV"), m_use = prop(pc, "m_UseFOV");
+  const uint32_t camera_at = prop(pc, "PlayerCamera");
+  const uint32_t camera = camera_at ? LoadU32(base, pc + camera_at) : 0;
+  if (!last_cam && Readable(camera)) last_cam = prop(camera, "LastCamFOV");
+  if (!m_fov || !m_use || !last_cam || !Readable(camera)) return;
+  if (!(LoadU32(base, pc + m_use) & 0x80000000u)) return;
+  const float want = menu_pointer::LoadF32(base, camera + last_cam);
+  const float now = menu_pointer::LoadF32(base, pc + m_fov);
+  if (!(want > 1.0f && want < 170.0f) || want == now) return;
+  StoreU32(base, pc + m_fov, std::bit_cast<uint32_t>(want));
+  static std::atomic<int> logged{0};
+  if (std::getenv("BOTS_FOV_TRACE") && logged.fetch_add(1) < 40) REXLOG_INFO("fov sync: m_FOV {:.2f} -> {:.2f}", now, want);
+}
+
 static uint32_t LiveAiVehicles(uint8_t* base) {
   using menu_pointer::Readable;
   static uint32_t world_info = 0, pawn_list = 0, next_pawn = 0, health = 0;
@@ -2824,6 +2858,7 @@ extern "C" void sub_82E2E860(PPCContext& __restrict ctx, uint8_t* base) {
   bots::instr::HudTick();
   split_screen::Tick(base);
   const bool driving = Driving(base);
+  FovSync(base);
   VehicleFpsCap(base, driving);
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) {
     kbm->NoteHudTick();

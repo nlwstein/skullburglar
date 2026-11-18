@@ -2,6 +2,8 @@
 // Xenia game patch for this title changes, with the aspect ratio worked out at run time instead of fixed at 21:9.
 #include "widescreen.h"
 
+#include "fov_math.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -19,6 +21,12 @@ REXCVAR_DEFINE_STRING(aspect_ratio, "16:9", "bots/Display",
                       "Shape of the picture: 16:9 (the original), auto (match the window or screen), or a wider "
                       "ratio such as 21:9 or 32:9. Wider than 16:9 shows more at the sides; the HUD and menus "
                       "stretch. Applies when the game starts. Native renderer only");
+
+REXCVAR_DEFINE_DOUBLE(fov_offset, 0.0, "bots/Display",
+                      "Field of view: degrees added to the game's horizontal view (0 is as shipped, up to 40). Wider "
+                      "shows more of the scene and makes things look smaller; the aiming zoom and scopes widen in the "
+                      "same proportion. Applies live. Cutscenes and vehicle cameras keep the original view")
+    .range(0.0, 40.0);
 
 namespace bots {
 namespace {
@@ -114,11 +122,22 @@ void BotsWideAspect(PPCRegister& f0) {
 bool BotsWideSkipConstrainedCamera() { return bots::Wide(); }
 
 // 0x82F62E5C: the end of the player's FOV function (sub_82F62DA0, degrees in f1; it already adapts the FOV to a
-// split-screen viewport). Keep the vertical FOV of 16:9 and widen the horizontal one (Hor+).
+// split-screen viewport). Keep the vertical FOV of 16:9 and widen the horizontal one (Hor+), then apply the player's
+// fov_offset (fov_math.h) the same way: a factor on tan(half angle), so the aiming zoom keeps its proportion.
+// BOTS_FOV_TRACE=1 logs every distinct value the game asks for and what it became.
 void BotsWideFov(PPCRegister& f1) {
-  if (!bots::Wide()) return;
-  constexpr double kPi = 3.14159265358979323846;
-  const double half = f1.f64 * kPi / 360.0;
-  if (!(half > 0.0 && half < kPi / 2)) return;
-  f1.f64 = std::atan(std::tan(half) * double(bots::FovScale())) * 360.0 / kPi;
+  const double scale = (bots::Wide() ? double(bots::FovScale()) : 1.0) * bots::fov::Scale(REXCVAR_GET(fov_offset));
+  const double before = f1.f64;
+  if (scale != 1.0) f1.f64 = bots::fov::Apply(before, scale);
+  static const bool trace = std::getenv("BOTS_FOV_TRACE") != nullptr;
+  if (trace) {
+    static std::atomic<double> last{-1.0};
+    static std::atomic<int> lines{0};
+    if (std::fabs(last.load() - before) > 0.01 && lines.fetch_add(1) < 4000) {
+      last.store(before);
+      REXLOG_INFO("fov: game {:.3f} -> {:.3f} (offset {:.1f}, wide {})", before, f1.f64, REXCVAR_GET(fov_offset),
+                  bots::Wide());
+    }
+  }
 }
+

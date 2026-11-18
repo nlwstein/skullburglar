@@ -38,6 +38,7 @@
 #include <rex/filesystem.h>
 #include <rex/logging.h>
 #include <rex/rex_app.h>
+#include <rex/system.h>
 #include <rex/system/xmemory.h>
 
 #include "thread_stats.h"
@@ -58,6 +59,7 @@
 #include "hybrid_state.h"
 #include "renderer_choice.h"
 #include "script_input.h"
+#include "setup/portable.h"
 #include "save_backup.h"
 #include "setup/app_paths.h"
 #include "setup/update_check.h"
@@ -206,6 +208,7 @@ class BotsApp : public rex::ReXApp {
       return;
     }
 #endif
+    ApplyPortableMode(paths);
     // A folder 260+ characters deep only works in the extended-length form (path_utf8.h; B-291): the settings and
     // saves under the user data root, the shader cache, and the game files below. Short paths are left as they are.
     paths.user_data_root = bots::LongPath(paths.user_data_root);
@@ -224,11 +227,55 @@ class BotsApp : public rex::ReXApp {
     paths.game_data_root = bots::LongPath(paths.game_data_root);
   }
 
+  // Portable mode (B-357, setup/portable.h): BOTS_DATA_DIR, else a portable.txt next to the program, moves the saves and
+  // settings (user/), the shader cache (cache/) and the logs (logs/) into one folder. A flag on the command line
+  // (--user_data_root, --cache_root, --log_file) still wins for the thing it names. The folder must be writable: if it
+  // isn't, say so and quit, rather than save somewhere the player didn't pick. Runs before the SDK reads anything.
+  static void ApplyPortableMode(rex::PathConfig& paths) {
+    namespace fs = std::filesystem;
+    namespace su = bots::setup;
+    std::error_code ec;
+    const char* appimage = std::getenv("APPIMAGE");
+    su::DataRoot data = su::ResolveDataRoot(
+        bots::PathUtf8(bots::EnvPath("BOTS_DATA_DIR")), rex::filesystem::GetExecutableFolder(),
+        appimage ? appimage : "", fs::current_path(ec), [](const fs::path& p) {
+          std::error_code e;
+          return fs::is_regular_file(p, e);
+        });
+    su::ActiveDataRoot() = data;
+    if (data.source == su::DataSource::kDefault) return;
+    const su::DataLayout layout = su::LayoutFor(data.root);
+    const bool user_given = !rex::cvar::Query<std::string>("user_data_root").empty();
+    const bool cache_given = !rex::cvar::Query<std::string>("cache_root").empty();
+    const bool log_given = !rex::cvar::Query<std::string>("log_file").empty();
+    std::string why;
+    for (const auto& [given, dir] : {std::pair{user_given, layout.user}, std::pair{cache_given, layout.cache},
+                                     std::pair{log_given, layout.logs}}) {
+      if (!given && why.empty()) why = su::CheckWritable(dir);
+    }
+    if (!why.empty()) {
+      const std::string message = su::PortableErrorMessage(data, why);
+      std::fprintf(stderr, "%s\n", message.c_str());
+      rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, message);
+      std::exit(2);
+    }
+    if (!user_given) {
+      paths.user_data_root = layout.user;
+      paths.config_path = layout.user / "bots.toml";
+    }
+    if (!cache_given) paths.cache_root = layout.cache;
+    if (!log_given) UseLogDir(layout.logs);
+  }
+
   // In the macOS app bundle, log to ~/Library/Logs/Skullburglar/bots-<time>.log (newest 10 kept) unless --log_file
   // is given. Runs before the SDK opens the log file.
   static void UseBundleLogDir() {
+    UseLogDir(bots::setup::BundleLogDir(rex::filesystem::GetExecutableFolder()));
+  }
+
+  // One bots-<time>.log per launch in `dir`, newest 10 kept, unless --log_file is given (or `dir` is empty).
+  static void UseLogDir(const std::filesystem::path& dir) {
     namespace fs = std::filesystem;
-    const fs::path dir = bots::setup::BundleLogDir(rex::filesystem::GetExecutableFolder());
     if (dir.empty() || !rex::cvar::Query<std::string>("log_file").empty()) return;
     std::error_code ec;
     fs::create_directories(dir, ec);
@@ -274,6 +321,10 @@ class BotsApp : public rex::ReXApp {
   // The first lines of the log: which build this is (B-125). On the desktop, also say where a crash will be archived.
   void LogBuildInfo() {
     REXLOG_INFO("Skullburglar {} (commit {})", bots::setup::AppVersion(), bots::setup::AppCommit());
+    if (const auto& data = bots::setup::ActiveDataRoot(); data.source != bots::setup::DataSource::kDefault) {
+      REXLOG_INFO("data folder: {} ({})", bots::PathUtf8(data.root),
+                  data.source == bots::setup::DataSource::kEnv ? "BOTS_DATA_DIR" : "portable.txt");
+    }
 #if !TARGET_OS_IPHONE && !defined(__ANDROID__)
     try {
       if (user_data_root().empty()) return;

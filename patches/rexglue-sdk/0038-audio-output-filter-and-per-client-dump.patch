@@ -1,0 +1,140 @@
+diff --git a/include/rex/audio/downmix.h b/include/rex/audio/downmix.h
+index e91cc1e..b9766f7 100644
+--- a/include/rex/audio/downmix.h
++++ b/include/rex/audio/downmix.h
+@@ -10,6 +10,9 @@
+  */
+ #pragma once
+ 
++#include <cstddef>
++#include <cstdint>
++
+ namespace rex::audio {
+ 
+ /**
+@@ -62,4 +65,12 @@ SurroundMix GetSurroundMix();
+ void SetOutputGain(float linear);
+ float GetOutputGain();
+ 
++/// Optional host hook on the final mix. The output stage calls it from the device callback, once per guest frame
++/// (256 samples per channel), on the interleaved float samples it is about to hand to the device (after the stereo
++/// fold or 5.1 passthrough and the master gain); `samples` is the count of floats (frames x device channels). It runs
++/// on the audio thread every 5.33 ms: no locks or allocation. Set it once at startup, nullptr removes it.
++using OutputFilter = void (*)(float* interleaved, size_t samples, uint32_t channels);
++void SetOutputFilter(OutputFilter filter);
++OutputFilter GetOutputFilter();
++
+ }  // namespace rex::audio
+diff --git a/src/audio/downmix.cpp b/src/audio/downmix.cpp
+index 6d88b68..668fb9e 100644
+--- a/src/audio/downmix.cpp
++++ b/src/audio/downmix.cpp
+@@ -8,6 +8,7 @@
+  * @license     BSD 3-Clause License
+  *              See LICENSE file in the project root for full license text.
+  */
++#include <atomic>
+ #include <mutex>
+ 
+ #include <rex/audio/downmix.h>
+@@ -22,6 +23,7 @@ std::mutex g_mutex;
+ StereoFold g_fold = {};
+ SurroundMix g_mix = {};
+ float g_gain = 1.0f;
++std::atomic<OutputFilter> g_filter{nullptr};
+ 
+ }  // namespace
+ 
+@@ -55,4 +57,12 @@ float GetOutputGain() {
+   return g_gain;
+ }
+ 
++void SetOutputFilter(OutputFilter filter) {
++  g_filter.store(filter, std::memory_order_release);
++}
++
++OutputFilter GetOutputFilter() {
++  return g_filter.load(std::memory_order_acquire);
++}
++
+ }  // namespace rex::audio
+diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
+index c7b7173..cac7071 100644
+--- a/src/audio/sdl/sdl_audio_driver.cpp
++++ b/src/audio/sdl/sdl_audio_driver.cpp
+@@ -11,6 +11,10 @@
+ 
+ #include <cstdio>
+ #include <cstdlib>
++#include <ctime>
++#include <map>
++#include <mutex>
++#include <string>
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
+@@ -164,15 +168,45 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
+ 
+   std::memcpy(output_frame, input_frame, frame_samples_ * sizeof(float));
+ 
+-  // Debug: REX_AUDIO_DUMP=<path> appends every guest frame verbatim (6 ch sequential,
+-  // 256 samples each, big-endian float32) so output can be checked without a speaker.
+-  static FILE* dump = [] {
+-    const char* p = std::getenv("REX_AUDIO_DUMP");
+-    return p && *p ? std::fopen(p, "wb") : nullptr;
+-  }();
+-  if (dump) {
+-    std::fwrite(input_frame, sizeof(float), frame_samples_, dump);
+-    std::fflush(dump);
++  // Debug: REX_AUDIO_DUMP=<path> writes every guest frame verbatim (6 ch sequential, 256 samples each, big-endian
++  // float32) so output can be checked without a speaker. Every audio client (driver) gets its own file,
++  // <path>.<n> numbered in the order the clients first submit, because the guest runs several (the game's mixer,
++  // the movie player) and their frames can't be told apart in one stream. <path>.<n>.idx gets a "HH:MM:SS.mmm
++  // frames" line every 1.5 s so the file's time axis can be lined up with the log.
++  if (const char* dump_path = std::getenv("REX_AUDIO_DUMP"); dump_path && *dump_path) {
++    struct Dump {
++      FILE* f = nullptr;
++      FILE* idx = nullptr;
++      uint64_t frames = 0;
++    };
++    static std::mutex dump_mutex;
++    static std::map<const void*, Dump> dumps;
++    std::lock_guard<std::mutex> lock(dump_mutex);
++    auto it = dumps.find(this);
++    if (it == dumps.end()) {
++      const std::string path = std::string(dump_path) + "." + std::to_string(dumps.size());
++      it = dumps.emplace(this, Dump{std::fopen(path.c_str(), "wb"), std::fopen((path + ".idx").c_str(), "w"), 0}).first;
++      REXAPU_INFO("audio dump: client {} -> {}", dumps.size() - 1, path);
++    }
++    Dump& d = it->second;
++    if (d.f) {
++      std::fwrite(input_frame, sizeof(float), frame_samples_, d.f);
++      std::fflush(d.f);
++    }
++    if (d.idx && d.frames++ % 281 == 0) {
++      const auto now = std::chrono::system_clock::now();
++      const std::time_t t = std::chrono::system_clock::to_time_t(now);
++      std::tm tm{};
++#ifdef _WIN32
++      localtime_s(&tm, &t);
++#else
++      localtime_r(&t, &tm);
++#endif
++      const int ms = int(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000);
++      std::fprintf(d.idx, "%02d:%02d:%02d.%03d %llu\n", tm.tm_hour, tm.tm_min, tm.tm_sec, ms,
++                   (unsigned long long)(d.frames - 1));
++      std::fflush(d.idx);
++    }
+   }
+ 
+   static uint32_t sdl_submit_count = 0;
+@@ -276,6 +310,9 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+             break;
+         }
+       }
++      if (const OutputFilter filter = GetOutputFilter()) {
++        filter(data, static_cast<size_t>(sample_count), driver->sdl_device_channels_);
++      }
+       if (!SDL_PutAudioStreamData(stream, data, len)) {
+         REXAPU_ERROR("SDL_PutAudioStreamData() failed: {}", SDL_GetError());
+         driver->frames_unused_.push(buffer);

@@ -1,0 +1,7 @@
+[
+ "Field of view slider in the launcher (and live in the F6 panel): widen the view by up to 40 degrees. It also widens aiming and sniper scopes in proportion; vehicle cameras and cutscenes keep the original view. The default is unchanged.",
+ "Portable mode: put an empty file named portable.txt next to the game (next to bots.exe, the bots program, the .AppImage file, or the folder holding the macOS app) and it keeps saves, settings, the shader cache and logs in a bots-data folder there. You can also set the BOTS_DATA_DIR environment variable, for example in Steam launch options. Existing saves don't move by themselves.",
+ "Movie volume slider in the launcher (0-200%, default 100%): the pre-rendered movies keep the original game's mix, where dialogue sits low under the music, so you can now turn them up. Above 100% a limiter keeps them from clipping.",
+ "New renderer: the red smoke from flares no longer shows hard-edged triangles.",
+ "Linux AppImage: starting it with your own --log_file option no longer makes it quit right away."
+]
