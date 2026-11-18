@@ -93,8 +93,8 @@ and that is where most of the work in this port has gone.
   HUD stretch, the story cutscenes (pre-rendered 16:9 videos) keep side bars, and the Music Player's bottom row is
   cut off at wide ratios ([#1](https://github.com/nlwstein/skullburglar/issues/1)).
 - **Field of view.** The launcher's "Field of view" slider adds up to 40 degrees to the game's horizontal view (80 degrees as
-  shipped); the aiming zoom and scoped views widen in the same proportion, and F6 changes it live. It is 0 (as shipped)
-  unless you move it. The pre-rendered story cutscenes are unchanged.
+  shipped); the aiming zoom and scopes widen in the same proportion, and F6 changes it live. It is 0 (as shipped)
+  unless you move it. Cutscenes and vehicle cameras keep the original view.
 
 ## Status
 

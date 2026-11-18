@@ -24,8 +24,8 @@ REXCVAR_DEFINE_STRING(aspect_ratio, "16:9", "bots/Display",
 
 REXCVAR_DEFINE_DOUBLE(fov_offset, 0.0, "bots/Display",
                       "Field of view: degrees added to the game's horizontal view (0 is as shipped, up to 40). Wider "
-                      "shows more of the scene and makes things look smaller; aiming zoom and vehicles widen in the "
-                      "same proportion. Applies live; pre-rendered cutscenes are unchanged")
+                      "shows more of the scene and makes things look smaller; the aiming zoom and scopes widen in the "
+                      "same proportion. Applies live. Cutscenes and vehicle cameras keep the original view")
     .range(0.0, 40.0);
 
 namespace bots {
@@ -140,3 +140,4 @@ void BotsWideFov(PPCRegister& f1) {
     }
   }
 }
+
