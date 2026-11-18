@@ -1,11 +1,19 @@
 #!/bin/sh
 # AppImage entry point. The game is the same build as the tarball, laid out flat in the AppImage.
 # The AppImage is mounted read-only and the game logs next to its executable by default, so logs go to the
-# per-user state directory instead (a --log_file given on the command line still wins).
+# per-user state directory instead (a --log_file given on the command line, as "--log_file X" or "--log_file=X",
+# is used as is: our own is then left out, since the game aborts on a duplicated option).
 # One log per launch, bots-<yyyymmdd-HHMMSS>.log, newest 10 kept (the macOS app does the same). A single shared file
 # made every launch append to it, so a crash archive (crashes/<stamp>/) copied every earlier session along with the
 # one that crashed, and a bug report's "newest log" held several sessions.
 HERE=$(dirname "$(readlink -f "$0")")
+# A --log_file of the user's own suppresses ours (matched by option name only); then the log directory is left alone too.
+for arg in "$@"; do
+  case $arg in
+    --) break ;;
+    --log_file | --log_file=*) exec "$HERE/bots" "$@" ;;
+  esac
+done
 LOGS=${XDG_STATE_HOME:-$HOME/.local/state}/bots-recomp/logs
 mkdir -p "$LOGS"
 # Names sort by time; the one about to be made is the 10th. Only our own bots-*.log names are touched.
