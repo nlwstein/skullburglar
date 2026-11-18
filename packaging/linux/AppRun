@@ -14,6 +14,11 @@ for arg in "$@"; do
     --log_file | --log_file=*) exec "$HERE/bots" "$@" ;;
   esac
 done
+# Portable mode (BOTS_DATA_DIR, or a portable.txt next to the .AppImage file): the game puts its logs in the data
+# folder itself, so no --log_file here (the game reads $APPIMAGE to find portable.txt).
+if [ -n "${BOTS_DATA_DIR:-}" ] || { [ -n "${APPIMAGE:-}" ] && [ -f "$(dirname "$APPIMAGE")/portable.txt" ]; }; then
+  exec "$HERE/bots" "$@"
+fi
 LOGS=${XDG_STATE_HOME:-$HOME/.local/state}/bots-recomp/logs
 mkdir -p "$LOGS"
 # Names sort by time; the one about to be made is the 10th. Only our own bots-*.log names are touched.

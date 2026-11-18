@@ -37,4 +37,18 @@ for spelling in "--log_file=$t/mine.log" "--log_file $t/mine.log"; do
   [ "$(sed -n 1p "$t/args")" = "--a" ] && [ "$(tail -n 1 "$t/args")" = "--b" ] || fail "argument order changed for '$spelling'"
   [ "$(ls "$L"/bots-*.log | wc -l | tr -d ' ')" = 10 ] || fail "session logs pruned with a player log"
 done
+
+# Portable mode: no --log_file of ours (the game logs into its data folder), and no state-dir logging.
+cd "$t"  # the stub bots creates a file named after its first argument
+mkdir -p "$t/ai"
+touch "$t/ai/portable.txt"
+rm -f "$t/args"
+APPIMAGE="$t/ai/Skullburglar.AppImage" XDG_STATE_HOME="$t/state with space" "$t/app/AppRun" --some_flag 2>/dev/null || true
+[ "$(cat "$t/args")" = "--some_flag" ] || fail "portable.txt: arguments were '$(cat "$t/args")'"
+rm -f "$t/args" "$t/ai/portable.txt"
+BOTS_DATA_DIR="$t/d" XDG_STATE_HOME="$t/state with space" "$t/app/AppRun" --some_flag 2>/dev/null || true
+[ "$(cat "$t/args")" = "--some_flag" ] || fail "BOTS_DATA_DIR: arguments were '$(cat "$t/args")'"
+rm -f "$t/args"
+APPIMAGE="$t/ai/Skullburglar.AppImage" XDG_STATE_HOME="$t/state with space" "$t/app/AppRun" --some_flag
+case "$(sed -n 1p "$t/args")" in "--log_file="*) ;; *) fail "no portable.txt: --log_file missing" ;; esac
 echo "apprun_test: ok"

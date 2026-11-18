@@ -36,6 +36,7 @@
 #include <rex/ui/window.h>
 
 #include "app_paths.h"
+#include "portable.h"
 #include "file_picker.h"
 #include "iso_extract.h"
 #include "pad_nav.h"
@@ -538,6 +539,11 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   void DrawSettings() {
     ImGui::TextUnformatted("Settings");
     ImGui::TextDisabled("Saved in %s", bots::PlainPathUtf8(config_path_).c_str());
+    if (const DataRoot& data = ActiveDataRoot(); data.source != DataSource::kDefault) {
+      ImGui::TextDisabled("Portable mode (%s): saves, settings, shader cache and logs are in %s",
+                          data.source == DataSource::kEnv ? "BOTS_DATA_DIR" : "portable.txt",
+                          bots::PlainPathUtf8(data.root).c_str());
+    }
     DrawReset();
     for (auto& s : settings_) {
       if (s.binding) continue;  // DrawBindings
