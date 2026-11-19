@@ -2,6 +2,8 @@
 use crate::codegen::Compiled;
 
 pub const SCENE_WGSL: &str = include_str!("scene.wgsl");
+pub const GLOBALS_WGSL: &str = include_str!("globals.wgsl");
+pub const FOG_WGSL: &str = include_str!("fog.wgsl");
 pub const ENVLIGHT_WGSL: &str = include_str!("envlight.wgsl");
 pub const POST_WGSL: &str = include_str!("post.wgsl");
 /// B-189: the scene shader's shadow hook. The ash renderer (n1ffi) replaces this stub with real modulated shadows.
@@ -57,6 +59,8 @@ pub fn assemble(c: &Compiled, f: ShaderFlags) -> String {
         ""
     };
     SCENE_WGSL
+        .replace("{{GLOBALS}}", GLOBALS_WGSL)
+        .replace("{{FOG}}", FOG_WGSL)
         .replace("{{SCENE_DEPTH}}", scene_depth)
         .replace("SCENE_W_EXPR", if soft { "select(1.0e9, scene_view_w(i.pos.xy), g.vol_n.z > 0.5)" } else { "1.0e9" })
         .replace("{{MP_N}}", &c.params.len().max(1).to_string())
@@ -71,8 +75,7 @@ pub fn assemble(c: &Compiled, f: ShaderFlags) -> String {
         .replace("SPEC_ON", if f.spec { "true" } else { "false" })
         .replace("DYN_ON", if f.dynl { "true" } else { "false" })
         .replace("USES_LIGHTVEC", if body.contains("fi.light_ts") { "true" } else { "false" })
-        .replace("FOG_TARGET", match f.fog_mode { 1 => "vec3<f32>(0.0)", 2 => "vec3<f32>(1.0)", _ => "g.fog_col.rgb" })
-        .replace("VOL_TARGET", match f.fog_mode { 1 => "vec3<f32>(0.0)", 2 => "vec3<f32>(1.0)", _ => "vc" })
+        .replace("FOG_MODE", match f.fog_mode { 1 => "1u", 2 => "2u", _ => "0u" })
         .replace("FOG_ON", if f.fog { "true" } else { "false" })
         .replace("MASKED", if f.masked { "true" } else { "false" })
         .replace("UNLIT", if f.unlit { "true" } else { "false" })

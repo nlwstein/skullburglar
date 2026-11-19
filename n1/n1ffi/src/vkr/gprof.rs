@@ -3,15 +3,16 @@
 //! Each `record` writes `MARKS` timestamps into one ring entry of a query pool; the entry is read back (without
 //! waiting) the next time the ring comes round, `RING` frames later, and skipped if the GPU has not finished it.
 //! Every `REPORT` read frames it prints the mean ms per segment to stderr (the host's run log):
-//! `n1 gpu prof: N frames: shadows a, opaque b, trees+mesh particles c, sprites d, post e, post mats g (B-266), total f ms`.
+//! `n1 gpu prof: N frames: shadows, opaque, ambient occlusion, trees+mesh particles, sprites, post, post mats, total ms`.
 use ash::vk;
 
-pub const MARKS: u32 = 7;
+pub const MARKS: u32 = 8;
 const RING: u32 = 4;
 const REPORT: u32 = 300;
 const NAMES: [&str; MARKS as usize - 1] = [
     "shadows",
     "opaque",
+    "ambient occlusion",
     "trees+mesh particles",
     "sprites",
     "post",

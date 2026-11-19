@@ -49,6 +49,8 @@ REXCVAR_DEFINE_DOUBLE(vulkan_hdr_contrast, 1.0, "bots/HDR", "Scene contrast arou
 REXCVAR_DEFINE_DOUBLE(vulkan_hdr_highlights, 1.0, "bots/HDR", "Scene highlights");
 REXCVAR_DEFINE_DOUBLE(vulkan_hdr_shadows, 1.0, "bots/HDR", "Scene shadows");
 REXCVAR_DEFINE_DOUBLE(vulkan_hdr_saturation, 1.0, "bots/HDR", "Scene saturation");
+REXCVAR_DEFINE_BOOL(ambient_occlusion, false, "bots/Display", "Soft contact shading with the new renderer");
+REXCVAR_DEFINE_DOUBLE(ambient_occlusion_strength, 4.25, "bots/Display", "Ambient occlusion strength");
 
 namespace bots::setup {
 namespace fs = std::filesystem;
@@ -107,6 +109,11 @@ std::vector<Setting> Catalog() {
                "The smear when the camera turns or things move fast. Off keeps every other effect.",
                {}});
   s.back().section = "Game";
+  s.push_back({"ambient_occlusion", "", "Ambient occlusion",
+               "Soft contact shading around nearby surfaces. New renderer only.", {}});
+  s.push_back({"ambient_occlusion_strength", "", "AO strength",
+               "Darkens contact shading without changing its radius. 4.25 is the default.", {}});
+  s.back().slider_min = 0, s.back().slider_max = 6, s.back().slider_linear = true;
   s.push_back({"screen_shake", "", "Screen shake",
                "How much the camera shakes from explosions, gunfire and hits, as a share of the game's own. 100% is "
                "as shipped; 0% turns it off.",
