@@ -5,6 +5,7 @@
 #include <fstream>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "setup/portable.h"
 
@@ -106,6 +107,64 @@ int main() {
     fs::permissions(t / "ro", fs::perms::owner_all, ec);
 #endif
     fs::remove_all(t, ec);
+  }
+  // Misplaced data (B-386): saves and bots.toml copied into bots-data instead of bots-data/user.
+  {
+    using V = std::vector<std::string>;
+    CHECK(su::IsGameDataName("bots.toml"));
+    CHECK(su::IsGameDataName("5451083B") && su::IsGameDataName("B13EBABEBABEBABE") && su::IsGameDataName("5451083b"));
+    CHECK(!su::IsGameDataName("cache") && !su::IsGameDataName("logs") && !su::IsGameDataName("user"));
+    CHECK(!su::IsGameDataName("save-backups") && !su::IsGameDataName("crashes"));
+    CHECK(!su::IsGameDataName("5451083") && !su::IsGameDataName("5451083G") && !su::IsGameDataName("B13EBABEBABEBABE0"));
+    CHECK(!su::IsGameDataName("") && !su::IsGameDataName("Bots.toml"));
+    // The reported case: a copy of Documents\bots put in bots-data, with user/ empty or missing.
+    const V copied = {"bots.toml", "5451083B", "B13EBABEBABEBABE", "cache", "logs", "user"};
+    CHECK((su::MisplacedGameData(copied, {}) == V{"bots.toml", "5451083B", "B13EBABEBABEBABE"}));
+    CHECK((su::MisplacedGameData(copied, V{}) == V{"bots.toml", "5451083B", "B13EBABEBABEBABE"}));
+    // user/ holds only things that aren't game data (a probe file, an empty folder): still flagged.
+    CHECK(su::MisplacedGameData(copied, {".bots-write-test", "other"}).size() == 3);
+    // user/ already has saves or settings: the player plays from there; nothing is flagged.
+    CHECK(su::MisplacedGameData(copied, {"bots.toml"}).empty());
+    CHECK(su::MisplacedGameData(copied, {"5451083B"}).empty());
+    // A healthy portable folder, and an empty one.
+    CHECK(su::MisplacedGameData({"user", "cache", "logs", "save-backups", "crashes"}, {"bots.toml", "5451083B"}).empty());
+    CHECK(su::MisplacedGameData({}, {}).empty());
+    // Only some of the entries are there.
+    CHECK((su::MisplacedGameData({"5451083B", "logs"}, {}) == V{"5451083B"}));
+    // The message names the folders and the entries.
+    su::DataRoot d;
+    d.source = su::DataSource::kPortableFile;
+    d.root = "/g/bots-data";
+    const std::string m = su::MisplacedMessage(d, {"bots.toml", "5451083B"});
+    CHECK(m.find("bots.toml, 5451083B") != std::string::npos && m.find("user") != std::string::npos);
+    // Probe and move on a real folder: the entries go into user/, nothing else moves, nothing is overwritten.
+    std::error_code ec;
+    const fs::path t = fs::temp_directory_path() / ("bots_misplaced_test_" + std::to_string(std::rand()));
+    fs::create_directories(t / "bots-data" / "5451083B" / "profile", ec);
+    fs::create_directories(t / "bots-data" / "cache", ec);
+    std::ofstream(t / "bots-data" / "bots.toml") << "fullscreen = false\n";
+    std::ofstream(t / "bots-data" / "5451083B" / "profile" / "p") << "save";
+    d.root = t / "bots-data";
+    CHECK((su::FindMisplacedGameData(d) == V{"bots.toml", "5451083B"} ||
+           su::FindMisplacedGameData(d) == V{"5451083B", "bots.toml"}));
+    std::string err;
+    const V moved = su::MoveMisplacedGameData(d, su::FindMisplacedGameData(d), err);
+    CHECK(moved.size() == 2 && err.empty());
+    CHECK(fs::is_regular_file(t / "bots-data" / "user" / "bots.toml"));
+    CHECK(fs::is_regular_file(t / "bots-data" / "user" / "5451083B" / "profile" / "p"));
+    CHECK(!fs::exists(t / "bots-data" / "bots.toml") && !fs::exists(t / "bots-data" / "5451083B"));
+    CHECK(fs::is_directory(t / "bots-data" / "cache"));
+    CHECK(su::FindMisplacedGameData(d).empty());  // now healthy
+    // A name already in user/ is not overwritten; a name that isn't game data is never moved.
+    std::ofstream(t / "bots-data" / "bots.toml") << "new";
+    std::ofstream(t / "bots-data" / "notes.txt") << "mine";
+    err.clear();
+    const V moved2 = su::MoveMisplacedGameData(d, {"bots.toml", "notes.txt"}, err);
+    CHECK(moved2.empty() && !err.empty());
+    CHECK(fs::exists(t / "bots-data" / "bots.toml") && fs::exists(t / "bots-data" / "notes.txt"));
+    fs::remove_all(t, ec);
+    // The default data location has no data folder to check.
+    CHECK(su::FindMisplacedGameData(su::DataRoot{}).empty());
   }
   std::printf(failures ? "portable_test: %d FAILED\n" : "portable_test: ok\n", failures);
   return failures ? 1 : 0;

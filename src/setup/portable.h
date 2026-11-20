@@ -27,6 +27,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 #include "../path_utf8.h"
 
@@ -117,6 +118,90 @@ inline std::string CheckWritable(const std::filesystem::path& dir) {
 inline DataRoot& ActiveDataRoot() {
   static DataRoot active;
   return active;
+}
+
+// Misplaced data (B-386). The saves and bots.toml live in bots-data\user, not in bots-data itself, but "copy your
+// Documents\bots folder into bots-data" is an easy thing to do. These are the entries of the bots-data folder that are
+// the game's own data: bots.toml, and the folders named like the console's ids (8 or 16 hex digits: 5451083B is the
+// game, B13EBABEBABEBABE the profile). Names compare as written; hex is case-insensitive.
+inline bool IsGameDataName(std::string_view name) {
+  if (name == "bots.toml") return true;
+  if (name.size() != 8 && name.size() != 16) return false;
+  for (const char c : name) {
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+  }
+  return true;
+}
+
+// Which entries of the data folder (`root_entries`: names in bots-data) belong in user/ (`user_entries`: names in
+// bots-data/user, empty when it doesn't exist). Only when user/ has no game data of its own: if it does, the player
+// already plays from there and a second copy next to it is theirs to sort out, so nothing is flagged. Pure: the callers
+// list the folders.
+inline std::vector<std::string> MisplacedGameData(const std::vector<std::string>& root_entries,
+                                                  const std::vector<std::string>& user_entries) {
+  for (const auto& name : user_entries) {
+    if (IsGameDataName(name)) return {};
+  }
+  std::vector<std::string> out;
+  for (const auto& name : root_entries) {
+    if (IsGameDataName(name)) out.push_back(name);
+  }
+  return out;
+}
+
+namespace detail {
+inline std::vector<std::string> ListNames(const std::filesystem::path& dir) {
+  std::vector<std::string> names;
+  std::error_code ec;
+  for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+    names.push_back(bots::PathUtf8(it->path().filename()));
+  }
+  return names;
+}
+}  // namespace detail
+
+// The probe: lists bots-data and bots-data/user. Empty when nothing is misplaced (or the folders can't be read).
+inline std::vector<std::string> FindMisplacedGameData(const DataRoot& data) {
+  if (data.source == DataSource::kDefault || data.root.empty()) return {};
+  return MisplacedGameData(detail::ListNames(data.root), detail::ListNames(LayoutFor(data.root).user));
+}
+
+// Moves the named entries from the data folder into user/ (a rename within the same folder tree: nothing is copied or
+// deleted, and it can't run out of space). An entry that already exists in user/ is left where it is. Returns the
+// entries moved and, in `error`, a sentence for the player if any couldn't be (the rest still move).
+inline std::vector<std::string> MoveMisplacedGameData(const DataRoot& data, const std::vector<std::string>& names,
+                                                      std::string& error) {
+  namespace fs = std::filesystem;
+  std::vector<std::string> moved;
+  const fs::path user = LayoutFor(data.root).user;
+  std::error_code ec;
+  fs::create_directories(user, ec);
+  for (const auto& name : names) {
+    if (!IsGameDataName(name)) continue;  // only ever the game's own entries, whatever the caller passes
+    const fs::path from = data.root / bots::PathFromUtf8(name);
+    const fs::path to = user / bots::PathFromUtf8(name);
+    if (fs::exists(fs::symlink_status(to, ec))) {
+      error += (error.empty() ? "" : " ") + name + " is already in the user folder, so it was left where it is.";
+      continue;
+    }
+    fs::rename(from, to, ec);
+    if (ec) {
+      error += (error.empty() ? "" : " ") + std::string("Couldn't move ") + name + " (" + ec.message() + ").";
+      ec.clear();
+    } else {
+      moved.push_back(name);
+    }
+  }
+  return moved;
+}
+
+// The message for the player when saves or settings sit in the data folder instead of user/.
+inline std::string MisplacedMessage(const DataRoot& data, const std::vector<std::string>& names) {
+  std::string list;
+  for (const auto& n : names) list += (list.empty() ? "" : ", ") + n;
+  return "Your saves or settings are in " + bots::PlainPathUtf8(data.root) + " (" + list +
+         "), but the game looks for them in " + bots::PlainPathUtf8(LayoutFor(data.root).user) +
+         ". Until they are moved there, the game starts without them.";
 }
 
 // The message for the player when portable mode can't be used. `why` is CheckWritable's text.

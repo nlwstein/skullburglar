@@ -130,6 +130,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
                 installed_ ? "installed" : "missing", bots::PathUtf8(game_dir_), bots::PathUtf8(config_path_));
     if (UpdateCheckAvailable() && Value("check_updates") == "true") StartUpdateCheck();
     StartFirewallWatch();
+    misplaced_ = FindMisplacedGameData(ActiveDataRoot());
+    if (!misplaced_.empty()) REXLOG_WARN("setup: {}", MisplacedMessage(ActiveDataRoot(), misplaced_));
   }
 
   ~SetupDialog() override {
@@ -166,6 +168,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                          ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
       LogUiScale(io);  // before the draw calls: Play can delete this dialog
+      DrawMisplaced();
       DrawGameFiles();
       ImGui::Spacing();
       ImGui::Separator();
@@ -267,7 +270,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       state->install_error.clear();
     }
     state->progress.cancel = false;
-    SaveSettings(settings_, config_path_);  // what was changed in this window survives the restart
+    if (!settings_file_moved_) SaveSettings(settings_, config_path_);  // what was changed in this window survives the restart
     std::thread([state] {
       std::string error;
       bool ok = InstallUpdate(state->kind, state->asset, state->progress, error);
@@ -568,6 +571,57 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     DrawBindings();
   }
 
+  // Portable mode (B-386): saves or bots.toml sitting in the data folder instead of its user/ folder. Say where they
+  // belong and offer to move them, after a confirmation that says what happens. Never moves anything by itself.
+  void DrawMisplaced() {
+    if (misplaced_.empty() && misplaced_note_.empty()) return;
+    const ImVec4 warn(1.0f, 0.75f, 0.3f, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_Text, warn);
+    if (!misplaced_.empty()) ImGui::TextWrapped("%s", MisplacedMessage(ActiveDataRoot(), misplaced_).c_str());
+    else ImGui::TextWrapped("%s", misplaced_note_.c_str());
+    ImGui::PopStyleColor();
+    if (!misplaced_.empty()) {
+      ImGui::BeginDisabled(Extracting());
+      if (ImGui::Button("Move them to the user folder...")) ImGui::OpenPopup("Move your saves and settings?");
+      ImGui::EndDisabled();
+      ImGui::SameLine();
+      if (ImGui::Button("Not now")) misplaced_.clear();
+    }
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(S(520.0f), 0.0f));
+    if (!ImGui::BeginPopupModal("Move your saves and settings?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    std::string list;
+    for (const auto& n : misplaced_) list += (list.empty() ? "" : ", ") + n;
+    ImGui::TextWrapped("This moves %s from %s into %s, where the game looks for them. Nothing is copied or deleted, and "
+                       "nothing already in the user folder is replaced.",
+                       list.c_str(), bots::PlainPathUtf8(ActiveDataRoot().root).c_str(),
+                       bots::PlainPathUtf8(LayoutFor(ActiveDataRoot().root).user).c_str());
+    ImGui::Spacing();
+    if (ImGui::Button("Move them", ImVec2(S(160), 0))) {
+      std::string err;
+      const auto moved = MoveMisplacedGameData(ActiveDataRoot(), misplaced_, err);
+      REXLOG_INFO("setup: moved {} of {} entries from the data folder into user/{}{}", moved.size(), misplaced_.size(),
+                  err.empty() ? "" : ": ", err);
+      const bool toml_moved = std::find(moved.begin(), moved.end(), "bots.toml") != moved.end();
+      if (toml_moved) settings_file_moved_ = true;
+      misplaced_note_ = err;
+      if (!moved.empty()) {
+        misplaced_note_ += (err.empty() ? "" : " ") + std::string("Moved. Your saves are used from now on.");
+        if (toml_moved)
+          misplaced_note_ += " Your settings file moved too: it takes effect the next time you start Skullburglar "
+                             "(this session uses the defaults, and changes made now aren't saved).";
+      }
+      misplaced_.clear();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(S(120), 0))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+  }
+
   // "Reset to defaults" with a confirmation that says what it does and doesn't touch (B-359).
   void DrawReset() {
     ImGui::BeginDisabled(Extracting());
@@ -854,7 +908,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   }
 
   void Play() {
-    std::string err = SaveSettings(settings_, config_path_);
+    std::string err = settings_file_moved_ ? std::string() : SaveSettings(settings_, config_path_);
     if (!err.empty()) REXLOG_WARN("setup: {}", err);
     REXLOG_INFO("setup: play with game files in {}", bots::PathUtf8(game_dir_));
     auto play = play_;
@@ -879,6 +933,9 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   bool installed_ = false;
   bool quit_requested_ = false;  // an installed update asked the program to quit
   bool show_reinstall_ = false;
+  std::vector<std::string> misplaced_;  // game data in the portable data folder that belongs in user/ (portable.h)
+  std::string misplaced_note_;          // what moving them did, shown in place of the offer
+  bool settings_file_moved_ = false;    // bots.toml was moved in: saving this window's settings would overwrite it
   bool auto_ = false;
   bool auto_reinstall_ = false;
   int capture_ = -1;  // settings_ index of the binding waiting for a key, or -1
