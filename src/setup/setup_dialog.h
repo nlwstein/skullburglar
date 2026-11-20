@@ -547,6 +547,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     DrawReset();
     for (auto& s : settings_) {
       if (s.binding) continue;  // DrawBindings
+      if (s.cvar == "pre1_occlusion" && Value("renderer") != "pre1") continue;  // only the pre-1.0 renderer has it
       if (!s.section.empty()) {
         ImGui::Spacing();
         ImGui::SeparatorText(s.section.c_str());

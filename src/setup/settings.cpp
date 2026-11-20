@@ -34,6 +34,10 @@ REXCVAR_DEFINE_BOOL(diagnostic_logging, false, "bots",
 REXCVAR_DEFINE_STRING(renderer, bots::kDefaultRenderer, "bots",
                       "Which renderer draws the game: new (the default; on tvOS pre1 is) or pre1, the pre-1.0 renderer "
                       "(deprecated). Only pre1 selects the old one; any other value is the new renderer");
+REXCVAR_DEFINE_STRING(pre1_occlusion, "auto", "bots",
+                      "Pre-1.0 renderer only: skip objects the graphics card says are hidden behind walls (auto, on, "
+                      "off). auto is on, except on Intel graphics. Off draws everything in view (a BOTS_GFX_OCCLUSION "
+                      "in the environment wins)");
 REXCVAR_DEFINE_STRING(render_scale, "auto", "bots",
                       "Render resolution as a multiple of 720p (auto, 3, 2, 1.5, 1.25, 1, 0.75, "
                       "0.667, 0.5); auto is 2/3 on Intel GPUs, else 1");
@@ -66,6 +70,11 @@ std::vector<Setting> Catalog() {
                "the one earlier versions used; it stays for now in case the new one doesn't work on your PC, and will "
                "be removed. Takes effect the next time the game starts.",
                {{"new", "New renderer (recommended)"}, {"pre1", "Pre-1.0 renderer (deprecated)"}}});
+  s.push_back({"pre1_occlusion", "", "Pre-1.0 renderer: hide objects behind walls",
+               "Only the pre-1.0 renderer uses this. It asks the graphics card which objects are hidden behind walls "
+               "and doesn't draw them. On some cards that makes posters, blood and trash on the ground flicker in "
+               "sunny areas: choose Off to draw them every frame. Takes effect the next time the game starts.",
+               {{"auto", "Automatic"}, {"on", "On"}, {"off", "Off (try this if decals flicker)"}}});
   s.push_back({"render_scale", "", "Render resolution",
                "Higher is sharper and costs GPU time; lower is faster on weak GPUs. Automatic is 720p, or 67% on "
                "Intel graphics.",
