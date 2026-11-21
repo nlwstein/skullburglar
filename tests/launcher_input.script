@@ -88,7 +88,12 @@ pad:Start
 expect-action:play
 key:Ctrl+Enter
 expect-action:play
-# Reset to defaults: confirm with the keyboard
+# The update switch (development builds of the game don't have it)
+focus:check_updates
+expect-page:updates
+key:Enter
+expect:check_updates=false
+# Reset to defaults: confirm with the keyboard (it keeps the update switch)
 page:about
 reset-confirm
 key:Left
@@ -96,3 +101,4 @@ key:Enter
 expect-action:reset
 expect:kbm_move_forward=W
 expect:intro_movies=false
+expect:check_updates=false

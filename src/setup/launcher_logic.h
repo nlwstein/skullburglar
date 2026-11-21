@@ -83,6 +83,10 @@ inline LauncherPage PageOf(const Setting& s, std::string_view section) {
       {"motion_blur", LauncherPage::kGame},        {"screen_shake", LauncherPage::kGame},
       {"movie_volume", LauncherPage::kGame},       {"check_updates", LauncherPage::kUpdates},
       {"diagnostic_logging", LauncherPage::kAbout},
+      // Settings from open merge requests (anti-aliasing, the pre-1.0 renderer's visibility test, toggle aim): placed
+      // here so they land on the right page whichever merges first.
+      {"anti_aliasing", LauncherPage::kGraphics},  {"sharpening", LauncherPage::kGraphics},
+      {"pre1_occlusion", LauncherPage::kGraphics}, {"aim_toggle", LauncherPage::kControls},
   };
   for (const auto& [cvar, page] : kByCvar)
     if (s.cvar == cvar) return page;

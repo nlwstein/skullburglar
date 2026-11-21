@@ -332,6 +332,8 @@ LauncherAction LauncherMenu::Draw(std::vector<Setting>& settings, const Launcher
   sections_ = SectionsOf(settings);
   // FocusSetting: open the setting's page; its row is selected while the page draws.
   if (!focus_cvar_.empty()) {
+    if (std::none_of(settings.begin(), settings.end(), [&](const Setting& s) { return s.cvar == focus_cvar_; }))
+      focus_cvar_.clear();  // not in this build
     for (size_t i = 0; i < settings.size(); ++i)
       if (settings[i].cvar == focus_cvar_ && PageOf(settings[i], sections_[i]) != page_)
         GoTo(PageOf(settings[i], sections_[i]));
@@ -492,7 +494,8 @@ void LauncherMenu::DrawMain(std::vector<Setting>& settings, const LauncherStatus
     if (in.back) main_focus_ = n - 1, in.nav_moved = true, in.back = false;  // B / Esc: to Quit, as consoles do
     if (in.prev_page) GoTo(LauncherPage::kAbout), in.prev_page = false;
     if (in.next_page) GoTo(LauncherPage::kGraphics), in.next_page = false;
-    if (in.y && st.update_newer && st.update_can_install && !st.update_busy) action_ = LauncherAction::kUpdateNow;
+    if ((in.y || Pressed(ImGuiKey_U)) && st.update_newer && st.update_can_install && !st.update_busy)
+      action_ = LauncherAction::kUpdateNow;
   }
   if (in.nav_moved) scroll_to_focus_ = true;
   if (page_ != LauncherPage::kMain) return;
@@ -1446,15 +1449,18 @@ void LauncherMenu::DrawFooter(const LauncherStatus& st, Intent& in, float top) {
     prompts.push_back({kB, "Esc", kbm ? "Hold to cancel" : "Cancel", 0});
   } else if (on_main) {
     prompts.push_back({kA, "Enter", "Select", 2});
-    if (st.update_newer && st.update_can_install && !st.update_busy) prompts.push_back({kY, "Del", "Update now", 7});
+    if (st.update_newer && st.update_can_install && !st.update_busy) prompts.push_back({kY, "U", "Update now", 7});
     if (!kbm) prompts.push_back({kStart, "", "Play", 0});
     prompts.push_back({kRB, "E", "Settings", 6});
   } else {
     prompts.push_back({kB, "Esc", "Back", 1});
     prompts.push_back({kA, "Enter", "Select", 2});
-    prompts.push_back({kDpadLR, "\xE2\x86\x90 \xE2\x86\x92", "Change", 0});
-    if (page_ == LauncherPage::kBindings) prompts.push_back({kX, "Ins", "Add key", 4});
-    prompts.push_back({kY, "Del", "Default", 3});
+    // Change and Default only on a setting (its help has a default); Add key on a key binding.
+    const bool on_setting = !help_default_.empty();
+    if (on_setting && page_ != LauncherPage::kBindings)
+      prompts.push_back({kDpadLR, "\xE2\x86\x90 \xE2\x86\x92", "Change", 0});
+    if (on_setting && page_ == LauncherPage::kBindings) prompts.push_back({kX, "Ins", "Add key", 4});
+    if (on_setting) prompts.push_back({kY, "Del", "Default", 3});
     prompts.push_back({kLB, "Q", "Section", 6, kRB, "E"});
   }
   float x = size.x - mx;

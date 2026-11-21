@@ -6,7 +6,7 @@
 // Input:
 //   mouse      hover selects, click activates, wheel scrolls, drag a slider; the prompts at the bottom are buttons too
 //   keyboard   arrows / Tab move, Enter or Space activates, Left / Right change a value (Shift: bigger steps), Esc goes
-//              back, Q / E (or Page Up / Page Down) switch sections, Delete restores a setting's default, Ctrl+Enter
+//              back, Q / E (or Page Up / Page Down) switch sections, Delete restores a setting's default, U updates, Ctrl+Enter
 //              plays from anywhere
 //   controller d-pad or left stick move, A activates, B goes back, Left / Right change a value, LT / RT bigger
 //              slider steps, LB / RB switch sections, Y restores the default, X adds a key binding, Start plays

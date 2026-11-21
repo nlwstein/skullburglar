@@ -182,9 +182,13 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     if (pad_) pad_->Update(io);
     PollWorker();
     if (auto_) RunAuto();
-    if (!shots_done_) {
-      RunShots(io);
-      if (quit_requested_) return;  // BOTS_SETUP_SHOT_QUIT: the program is closing
+    if (!shots_done_) RunShots(io);
+    // BOTS_SETUP_SHOT_QUIT: close a few frames after the shots, as the Quit entry would.
+    if (shot_quit_frames_ > 0 && --shot_quit_frames_ == 0 && !quit_requested_) {
+      quit_requested_ = true;
+      pad_.reset();
+      quit_();
+      return;
     }
     // An installed update restarts the program.
     if (update_ && update_->finished.load() && !quit_requested_) {
@@ -393,7 +397,13 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       LauncherStatus st = base;
       st.dpi_scale = shot_dpi;
       if (pad != PadKind::kXbox || st.pad == PadKind::kNone) st.pad = pad;
-      return menu.Draw(copy, st, fonts);  // what it asks for is only logged: the shots never act
+      // What the menu asks for is only logged: the shots never install, update or play. Reset to defaults applies to the
+      // copy, as the window's would, so a script can check it.
+      const LauncherAction a = menu.Draw(copy, st, fonts);
+      if (a == LauncherAction::kResetAll)
+        for (auto& s : copy)
+          if (!s.locked && !ResetKeeps(s.cvar)) s.value = s.default_value;
+      return a;
     };
     host.value_of = [&](const std::string& cvar) {
       for (const auto& s : copy)
@@ -412,11 +422,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     }
     REXLOG_INFO("setup: BOTS_SETUP_SHOT: {} size(s) written to {}, {} failure(s)", sizes.size(), bots::PathUtf8(dir),
                 failures);
-    if (const char* q = std::getenv("BOTS_SETUP_SHOT_QUIT"); q && std::strcmp(q, "1") == 0 && !quit_requested_) {
-      quit_requested_ = true;
-      pad_.reset();
-      quit_();
-    }
+    if (const char* q = std::getenv("BOTS_SETUP_SHOT_QUIT"); q && std::strcmp(q, "1") == 0) shot_quit_frames_ = 10;
   }
 
   void SetIsoPath(const std::string& path) {
@@ -643,6 +649,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   std::string reset_note_;
   bool update_logged_ = false;
   bool shots_done_ = false;
+  int shot_quit_frames_ = 0;
   bool installed_ = false;
   bool quit_requested_ = false;  // an installed update asked the program to quit
   bool show_reinstall_ = false;

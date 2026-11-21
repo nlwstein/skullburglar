@@ -171,6 +171,15 @@ int main(int argc, char** argv) {
   std::filesystem::remove(out / "shots.txt", ec);
   ImGui::CreateContext();  // RunShotScript makes its own per size and puts this one back
   const int failures = RunShotScript(host, out, ParseShotSizes(sizes), ParseShotScript(script));
+  int changed = 0;
+  std::string unchanged;
+  for (const auto& s : settings) {
+    if (!ValuesEqual(s.value, s.default_value)) ++changed;
+    else unchanged += " " + s.cvar;
+  }
+  std::printf("launcher_preview: %d of %zu settings differ from their defaults after the script (last size)%s%s\n",
+              changed, settings.size(), unchanged.empty() || changed * 2 < int(settings.size()) ? "" : "; unchanged:",
+              changed * 2 < int(settings.size()) ? "" : unchanged.c_str());
   std::printf("launcher_preview: %d layout problem(s), %d failure(s)\n", problems, failures);
   return (failures || (check && problems)) ? 1 : 0;
 }

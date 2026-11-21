@@ -48,10 +48,19 @@ std::vector<ScriptStep> ParseShotScript(const std::string& text) {
     ss << f.rdbuf();
     body = ss.str();
   }
-  for (char& c : body)
-    if (c == '\n' || c == '\r') c = ';';
+  // Comment lines go first (they may hold ';'), then lines and ';' both separate steps.
+  std::string steps;
+  std::stringstream lines(body);
+  std::string line;
+  while (std::getline(lines, line)) {
+    const size_t first = line.find_first_not_of(" \t\r");
+    if (first != std::string::npos && line[first] == '#') continue;
+    steps += line + ";";
+  }
+  for (char& c : steps)
+    if (c == '\r') c = ';';
   std::vector<ScriptStep> out;
-  std::stringstream in(body);
+  std::stringstream in(steps);
   std::string item;
   while (std::getline(in, item, ';')) {
     item.erase(0, item.find_first_not_of(" \t"));
