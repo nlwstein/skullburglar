@@ -79,9 +79,9 @@ std::vector<Setting> Catalog() {
                {{"new", "New renderer (recommended)"}, {"pre1", "Pre-1.0 renderer (deprecated)"}}});
   s.push_back({"pre1_occlusion", "", "Pre-1.0 renderer: hide objects behind walls",
                "Only the pre-1.0 renderer uses this. It asks the graphics card which objects are hidden behind walls "
-               "and doesn't draw them. On some cards that makes posters, blood and trash on the ground flicker in "
-               "sunny areas: choose Off to draw them every frame. Takes effect the next time the game starts.",
-               {{"auto", "Automatic"}, {"on", "On"}, {"off", "Off (try this if decals flicker)"}}});
+               "and doesn't draw them. Off draws everything in view every frame, which can help if the pre-1.0 "
+               "renderer shows objects popping in or out wrongly. Takes effect the next time the game starts.",
+               {{"auto", "Automatic"}, {"on", "On"}, {"off", "Off (troubleshooting)"}}});
   s.push_back({"render_scale", "", "Render resolution",
                "Higher is sharper and costs GPU time; lower is faster on weak GPUs. Automatic is 720p, or 67% on "
                "Intel graphics.",
