@@ -49,6 +49,10 @@ typedef struct N1Hdr {
 } N1Hdr;
 void n1_set_hdr(N1Renderer* r, const N1Hdr* hdr);
 
+/* Anti-aliasing and sharpening of the final image, before the host draws its HUD: mode 0 off, 1 FXAA, 2 SMAA 1x;
+ * sharpen 0 (off) to 1. May be called every frame; takes effect at the next n1_record. */
+void n1_set_aa(N1Renderer* r, uint32_t mode, float sharpen);
+
 typedef struct N1Camera {
   float view[16]; /* FSceneView ViewMatrix */
   float proj[16]; /* FSceneView ProjectionMatrix (x/y scales used) */

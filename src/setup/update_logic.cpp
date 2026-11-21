@@ -428,6 +428,24 @@ std::string CheckTarMembers(const std::string& names, const std::string& verbose
   return {};
 }
 
+std::string UpdateCheckUrl(const std::string& base, const std::string& version, const std::string& platform) {
+  auto clean = [](const std::string& in) {
+    std::string out;
+    for (char c : in) {
+      if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '.' || c == '-' || c == '_')
+        out += c;
+    }
+    return out;
+  };
+  std::string url = base, sep = base.find('?') == std::string::npos ? "?" : "&";
+  if (std::string v = clean(version); !v.empty()) {
+    url += sep + "v=" + v;
+    sep = "&";
+  }
+  if (std::string p = clean(platform); !p.empty()) url += sep + "p=" + p;
+  return url;
+}
+
 const char* AssetKey(InstallKind kind) {
   switch (kind) {
     case InstallKind::kWindowsSetup: return "windows";

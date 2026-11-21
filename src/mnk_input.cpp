@@ -24,6 +24,10 @@ REXCVAR_DEFINE_DOUBLE(kbm_noise_gate, 0.0, "bots/Input",
                       "creep is dropped, and +1/-1 jitter cancels. BOTS_MOUSE_GATE=<px> overrides, BOTS_MOUSE_TRACE=1 "
                       "logs what it sees and passes.")
     .range(0.0, 8.0);
+REXCVAR_DEFINE_BOOL(aim_toggle, false, "bots/Input",
+                    "Toggle aim: press Aim once to start aiming and again to stop, instead of holding it. Works with a "
+                    "controller and with keyboard and mouse (aim_toggle.h). Taking cover or running (A) also ends it; menus, "
+                    "pause and vehicles reset it");
 REXCVAR_DEFINE_BOOL(kbm_invert_y, false, "bots/Input", "Invert mouse look up/down");
 REXCVAR_DEFINE_BOOL(kbm_prompts, true, "bots/Input",
                     "Show keyboard/mouse button prompts while keyboard/mouse is the last device used");
@@ -359,7 +363,8 @@ bool MouseKeyboardDriver::SetFeed(const std::string& spec) {
 
 void MouseKeyboardDriver::TakeMouseDelta(float& dx, float& dy) {
   std::lock_guard lock(mutex_);
-  const bool aiming = !driving_.load(std::memory_order_relaxed) && Pressed(REXCVAR_GET(kbm_left_trigger));
+  const bool aiming = !driving_.load(std::memory_order_relaxed) &&
+                      (Pressed(REXCVAR_GET(kbm_left_trigger)) || aim_latched_.load(std::memory_order_relaxed));
   const float s = float(aiming ? REXCVAR_GET(kbm_aim_sensitivity) : REXCVAR_GET(kbm_sensitivity));
   static const double env_gate = [] {
     const char* v = std::getenv("BOTS_MOUSE_GATE");

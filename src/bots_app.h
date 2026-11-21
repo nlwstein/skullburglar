@@ -60,6 +60,7 @@
 #include "renderer_choice.h"
 #include "script_input.h"
 #include "setup/portable.h"
+#include "setup/occlusion_choice.h"
 #include "save_backup.h"
 #include "setup/app_paths.h"
 #include "setup/update_check.h"
@@ -243,7 +244,11 @@ class BotsApp : public rex::ReXApp {
           return fs::is_regular_file(p, e);
         });
     su::ActiveDataRoot() = data;
-    if (data.source == su::DataSource::kDefault) return;
+    if (data.source == su::DataSource::kDefault) {  // B-389: a portable.txt that Windows named portable.txt.txt, say
+      su::ActiveMarkerHint() = su::FindMarkerHint(data, rex::filesystem::GetExecutableFolder(), appimage ? appimage : "",
+                                                  paths.user_data_root);
+      return;
+    }
     const su::DataLayout layout = su::LayoutFor(data.root);
     const bool user_given = !rex::cvar::Query<std::string>("user_data_root").empty();
     const bool cache_given = !rex::cvar::Query<std::string>("cache_root").empty();
@@ -324,6 +329,13 @@ class BotsApp : public rex::ReXApp {
     if (const auto& data = bots::setup::ActiveDataRoot(); data.source != bots::setup::DataSource::kDefault) {
       REXLOG_INFO("data folder: {} ({})", bots::PathUtf8(data.root),
                   data.source == bots::setup::DataSource::kEnv ? "BOTS_DATA_DIR" : "portable.txt");
+      if (const auto misplaced = bots::setup::FindMisplacedGameData(data); !misplaced.empty())
+        REXLOG_WARN("{}", bots::setup::MisplacedMessage(data, misplaced));  // B-386; the launcher offers to move them
+    }
+    if (!bots::setup::ActiveMarkerHint().empty()) REXLOG_WARN("{}", bots::setup::ActiveMarkerHint());  // B-389
+    if (!user_data_root().empty()) {  // B-389: which folder the saves are read from and whether any are there
+      REXLOG_INFO("saves: {} ({} saved game(s) found)", bots::PathUtf8(user_data_root()),
+                  bots::setup::CountSaves(user_data_root()));
     }
 #if !TARGET_OS_IPHONE && !defined(__ANDROID__)
     try {
@@ -388,6 +400,7 @@ class BotsApp : public rex::ReXApp {
           }
           ApplyVsync();  // the game's swapchain doesn't exist yet
           ApplyDiagnosticLogging();  // switched on or off in the launcher
+          ApplyPre1Occlusion();
           bots::ApplyCoopDefaults();  // co-op may have been switched on in the launcher
           rex::PathConfig paths = defaults;
           paths.game_data_root = dir;
@@ -590,6 +603,27 @@ class BotsApp : public rex::ReXApp {
     }
   }
 
+  // The launcher's "Pre-1.0 renderer: hide objects behind walls" setting (B-333) becomes BOTS_GFX_OCCLUSION for this process,
+  // which the renderer reads when it starts (gfx/native.cpp). One already in the environment is the player's own and stays.
+  static void ApplyPre1Occlusion() {
+    static bool set_here = false;
+    const char* value = bots::setup::Pre1OcclusionEnv(rex::cvar::GetFlagByName("pre1_occlusion"));
+    if (value && !std::getenv("BOTS_GFX_OCCLUSION")) {
+      SetEnvDefault("BOTS_GFX_OCCLUSION", value);
+      set_here = true;
+    } else if (!value && set_here) {
+#if defined(_WIN32)
+      _putenv_s("BOTS_GFX_OCCLUSION", "");  // removes it
+#else
+      unsetenv("BOTS_GFX_OCCLUSION");
+#endif
+      set_here = false;
+    }
+    if (const char* env = std::getenv("BOTS_GFX_OCCLUSION"))
+      REXLOG_INFO("pre-1.0 renderer: occlusion setting {} (BOTS_GFX_OCCLUSION={}{})",
+                  rex::cvar::GetFlagByName("pre1_occlusion"), env, set_here ? ", set from the setting" : ", from the environment");
+  }
+
   // setenv(name, value, 0): set only if not already set.
   static void SetEnvDefault(const char* name, const char* value) {
     if (std::getenv(name)) return;
@@ -666,6 +700,7 @@ class BotsApp : public rex::ReXApp {
     SetCoreCvarDefault("user_signin_live", "true");
     ApplyVsync();
     ApplyDiagnosticLogging();
+    ApplyPre1Occlusion();
     // D3D12 (Windows): the ROV render-target path does exact 24-bit float depth in the shader, the
     // D3D12 counterpart of the float24 fix above. The default host-RTV path renders characters black
     // like B-035. RTX 3090: locked 60 fps either way (2026-10-01).

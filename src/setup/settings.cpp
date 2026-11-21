@@ -34,9 +34,20 @@ REXCVAR_DEFINE_BOOL(diagnostic_logging, false, "bots",
 REXCVAR_DEFINE_STRING(renderer, bots::kDefaultRenderer, "bots",
                       "Which renderer draws the game: new (the default; on tvOS pre1 is) or pre1, the pre-1.0 renderer "
                       "(deprecated). Only pre1 selects the old one; any other value is the new renderer");
+REXCVAR_DEFINE_STRING(pre1_occlusion, "auto", "bots",
+                      "Pre-1.0 renderer only: skip objects the graphics card says are hidden behind walls (auto, on, "
+                      "off). auto is on, except on Intel graphics. Off draws everything in view (a BOTS_GFX_OCCLUSION "
+                      "in the environment wins)");
 REXCVAR_DEFINE_STRING(render_scale, "auto", "bots",
                       "Render resolution as a multiple of 720p (auto, 3, 2, 1.5, 1.25, 1, 0.75, "
                       "0.667, 0.5); auto is 2/3 on Intel GPUs, else 1");
+REXCVAR_DEFINE_STRING(anti_aliasing, "smaa", "bots",
+                      "Smooths jagged edges in the new renderer (off, fxaa, smaa). Read by the renderer every frame; "
+                      "the pre-1.0 renderer ignores it");
+REXCVAR_DEFINE_DOUBLE(sharpening, 0.0, "bots",
+                      "Sharpens the picture after anti-aliasing in the new renderer (0 off to 1). The HUD is not "
+                      "sharpened")
+    .range(0.0, 1.0);
 REXCVAR_DEFINE_BOOL(present_vsync, true, "bots",
                     "Wait for the display's refresh to show each frame (Vulkan presentation): no tearing. Off presents "
                     "immediately, with the lowest latency, and can tear. (Not `vsync`, the emulated console's vblank.)");
@@ -66,6 +77,11 @@ std::vector<Setting> Catalog() {
                "the one earlier versions used; it stays for now in case the new one doesn't work on your PC, and will "
                "be removed. Takes effect the next time the game starts.",
                {{"new", "New renderer (recommended)"}, {"pre1", "Pre-1.0 renderer (deprecated)"}}});
+  s.push_back({"pre1_occlusion", "", "Pre-1.0 renderer: hide objects behind walls",
+               "Only the pre-1.0 renderer uses this. It asks the graphics card which objects are hidden behind walls "
+               "and doesn't draw them. Off draws everything in view every frame, which can help if the pre-1.0 "
+               "renderer shows objects popping in or out wrongly. Takes effect the next time the game starts.",
+               {{"auto", "Automatic"}, {"on", "On"}, {"off", "Off (troubleshooting)"}}});
   s.push_back({"render_scale", "", "Render resolution",
                "Higher is sharper and costs GPU time; lower is faster on weak GPUs. Automatic is 720p, or 67% on "
                "Intel graphics.",
@@ -81,6 +97,14 @@ std::vector<Setting> Catalog() {
                "cameras keep the original view. F6 changes it live. Ctrl-click to type a value.",
                {}});
   s.back().slider_min = 0, s.back().slider_max = 40, s.back().slider_linear = true, s.back().slider_format = "+%.0f degrees";
+  s.push_back({"anti_aliasing", "", "Anti-aliasing",
+               "Smooths jagged edges on the 3D scene; the HUD and text are not touched. SMAA is the cleanest; FXAA is "
+               "the cheapest and a little softer. Requires the new renderer.",
+               {{"off", "Off"}, {"fxaa", "FXAA (fast)"}, {"smaa", "SMAA (cleaner)"}}});
+  s.push_back({"sharpening", "", "Sharpening",
+               "Brings back the crispness that anti-aliasing and a lower resolution take away. 0 is off. Edges that "
+               "are already sharp change little. Requires the new renderer.", {}});
+  s.back().slider_min = 0, s.back().slider_max = 1, s.back().slider_linear = true, s.back().slider_format = "%.2f";
   s.push_back({"vulkan_hdr", "", "Enable HDR (restart required)",
                "Native scRGB output on an HDR display. Requires the new renderer. "
                "Enable HDR in the operating system too. F6 opens the live display controls.", {}});
@@ -145,6 +169,11 @@ std::vector<Setting> Catalog() {
   s.push_back({"aim_assist", "", "Aim assist",
                "The game slows the crosshair and pulls it toward enemies near it while you move (even through walls, "
                "as on the Xbox 360). Turn off for raw aiming. Applies to the mouse too.",
+               {}});
+  s.push_back({"aim_toggle", "", "Toggle aim",
+               "Press Aim once to start aiming and again to stop, instead of holding it. Works with a controller and "
+               "with keyboard and mouse (every key bound to Aim, such as right mouse button or Shift). Taking cover "
+               "or running (A) also ends it; menus, pause and vehicles reset it.",
                {}});
   s.push_back({"right_stick_deadzone", "", "Right stick dead zone",
                "How far you push the right stick before the camera moves. 20% is the game's own, applied to each "

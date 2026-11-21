@@ -34,6 +34,7 @@ use scenekit::{
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+mod aa;
 mod gprof;
 mod outline;
 mod pgpu;
@@ -441,6 +442,11 @@ pub struct Renderer {
     encode_srgb: bool,
     pub hdr_output: bool,
     pub hdr_settings: crate::N1Hdr,
+    /// B-054: the anti-aliasing filter (`aa::Mode::from_setting`) and the sharpening strength, 0 to 1.
+    pub aa_mode: u32,
+    pub aa_sharpen: f32,
+    aa: Option<aa::Aa>,
+    aa_logged: aa::Plan,
     pub knobs: Knobs,
     set0_layout: vk::DescriptorSetLayout,
     lm_layout: vk::DescriptorSetLayout,
@@ -805,6 +811,10 @@ impl Renderer {
                 encode_srgb: !is_srgb(color_format),
                 hdr_output: false,
                 hdr_settings: crate::N1Hdr::default(),
+                aa_mode: 0,
+                aa_sharpen: 0.0,
+                aa: None,
+                aa_logged: aa::Plan::new(aa::Mode::Off, 0.0),
                 knobs,
                 set0_layout,
                 lm_layout,
@@ -1133,6 +1143,7 @@ impl Renderer {
             | vk::Format::BC3_SRGB_BLOCK
             | vk::Format::BC5_UNORM_BLOCK => (4, 16),
             vk::Format::R8G8_UNORM => (1, 2),
+            vk::Format::R8_UNORM => (1, 1),
             _ => (1, 4),
         };
         let complete = mips
@@ -2415,6 +2426,14 @@ impl Renderer {
         self.laps.lap("slot");
 
         self.ensure_targets(rw, rh)?;
+        // B-054: with anti-aliasing or sharpening on, the post chain writes `aa_ldr` and `aa_record` filters it into the target.
+        let aa_plan = self.aa_plan();
+        if aa_plan != self.aa_logged {
+            eprintln!("n1ffi: aa plan {:?} at {rw}x{rh}", aa_plan);
+            self.aa_logged = aa_plan;
+        }
+        self.aa_ensure(rw, rh, aa_plan)?;
+        let aa_ldr = if aa_plan.active() { self.aa_ldr() } else { None };
         self.laps.lap("ensure_targets");
         let eye_y = lightfeed::swz(eye);
         let env = if self.debug_bits & 2048 != 0 { &self.lighting.env_alt } else { &self.lighting.env };
@@ -2444,7 +2463,11 @@ impl Renderer {
         let filter_width = bw * 4;
         let ka = if blur_on { crate::light::kernel_taps(pp.uber.blur_kernel, filter_width) } else { Vec::new() };
         let kb = if bloom_blur_on { crate::light::kernel_taps(pp.uber.bloom_kernel, filter_width) } else { Vec::new() };
-        let off = [target.rect.offset.x as f32, target.rect.offset.y as f32];
+        let off = if aa_ldr.is_some() {
+            [0.0, 0.0]
+        } else {
+            [target.rect.offset.x as f32, target.rect.offset.y as f32]
+        };
         let blk = |texel, dir, taps: &[(f32, f32)], offset| {
             pp.block(&crate::light::PostBlock {
                 texel,
@@ -3319,6 +3342,14 @@ impl Renderer {
             };
             let ps = self.slots[si].post_sets;
             let catt_layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
+            // The post chain's last pass: the host's target, or the intermediate the filters read (B-054).
+            let (dst_view, dst_layout, dst_rect) = match aa_ldr {
+                Some((_, v)) => (v, catt_layout, full(rw, rh)),
+                None => (target.view, target.layout, target.rect),
+            };
+            if let Some((img, _)) = aa_ldr {
+                barrier(frag, cao, &[to_att(img)]);
+            }
             let bq = full(bloom[0].width, bloom[0].height);
             // Depth: attachment (or read-only after the sprite pass) -> sampled by the post chain.
             let dep = layout_barrier(
@@ -3403,7 +3434,7 @@ impl Renderer {
                     }
                 }
                 if mats.is_empty() {
-                    pass(target.view, target.layout, target.rect, p_comp, ps[5]);
+                    pass(dst_view, dst_layout, dst_rect, p_comp, ps[5]);
                     if let Some(g) = &self.gprof {
                         g.mark(d, cmd, 5);
                     }
@@ -3420,7 +3451,7 @@ impl Renderer {
                     for j in 0..mats.len() {
                         let (pipe, set) = (p_mats[j + 1], ps[8 + j]);
                         if j + 1 == mats.len() {
-                            pass(target.view, target.layout, target.rect, pipe, set);
+                            pass(dst_view, dst_layout, dst_rect, pipe, set);
                         } else {
                             barrier(frag, cao, &[to_att(next.image)]);
                             pass(next.view, catt_layout, full(rw, rh), pipe, set);
@@ -3430,13 +3461,20 @@ impl Renderer {
                     }
                 }
             } else {
-                pass(target.view, target.layout, target.rect, p_copy, ps[6]);
+                pass(dst_view, dst_layout, dst_rect, p_copy, ps[6]);
                 if let Some(g) = &self.gprof {
                     g.mark(d, cmd, 5);
                 }
             }
             if let Some(g) = &self.gprof {
                 g.mark(d, cmd, 6);
+            }
+            if let Some((img, _)) = aa_ldr {
+                barrier(cao, frag, &[to_read(img)]);
+                self.aa_record(cmd, target, aa_plan);
+            }
+            if let Some(g) = &self.gprof {
+                g.mark(d, cmd, 7);
             }
         }
         self.laps.lap("post_pass");
@@ -4008,6 +4046,12 @@ impl Drop for Renderer {
             }
             for r in rts {
                 self.free(Garbage::Image(r.image, r.view, r.alloc));
+            }
+            if let Some(mut a) = self.aa.take() {
+                for r in a.take_targets() {
+                    self.free(Garbage::Image(r.image, r.view, r.alloc));
+                }
+                a.destroy(&self.device);
             }
             // Workers first: a startup step still running then gives up instead of saving half a manifest (B-223).
             self.store.shutdown();

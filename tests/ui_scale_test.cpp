@@ -6,6 +6,7 @@
 #include <cstdio>
 
 using bots::setup::LauncherUiScale;
+using bots::setup::LauncherWindowWidth;
 
 static bool Near(float a, float b) { return std::fabs(a - b) < 1e-4f; }
 
@@ -31,6 +32,17 @@ int main() {
   assert(Near(LauncherUiScale(1080.0f, "abc"), 1.8f));
   assert(Near(LauncherUiScale(1080.0f, "0"), 1.8f));
   assert(Near(LauncherUiScale(1080.0f, ""), 1.8f));
+  // Window width (B-387): 90 % of a 1920x1080 display (it was 1296 of 1920), capped at 1000 designed pixels, never wider
+  // than the display minus margins, never narrower than the designed 720 when the display has the room.
+  assert(Near(LauncherWindowWidth(1920.0f, 1.8f), 1728.0f));
+  assert(Near(LauncherWindowWidth(1280.0f, 1.2f), 1152.0f));  // 1280x720
+  assert(Near(LauncherWindowWidth(3440.0f, 2.4f), 2400.0f));  // ultrawide: 1000 * scale
+  assert(Near(LauncherWindowWidth(800.0f, 1.0f), 720.0f));    // the designed width when it fits
+  assert(Near(LauncherWindowWidth(1000.0f, 1.0f), 900.0f));
+  assert(Near(LauncherWindowWidth(600.0f, 1.0f), 560.0f));    // narrower than designed: the display minus 40
+  assert(LauncherWindowWidth(10.0f, 1.0f) >= 1.0f);
+  for (float w : {640.0f, 1024.0f, 1366.0f, 1440.0f, 1920.0f, 2560.0f, 3840.0f})
+    assert(LauncherWindowWidth(w, LauncherUiScale(w * 9.0f / 16.0f)) <= w - 40.0f + 1e-3f);
   std::puts("ui_scale_test ok");
   return 0;
 }

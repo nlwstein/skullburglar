@@ -27,6 +27,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 #include "../path_utf8.h"
 
@@ -117,6 +118,174 @@ inline std::string CheckWritable(const std::filesystem::path& dir) {
 inline DataRoot& ActiveDataRoot() {
   static DataRoot active;
   return active;
+}
+
+// Misplaced data (B-386). The saves and bots.toml live in bots-data\user, not in bots-data itself, but "copy your
+// Documents\bots folder into bots-data" is an easy thing to do. These are the entries of the bots-data folder that are
+// the game's own data: bots.toml, and the folders named like the console's ids (8 or 16 hex digits: 5451083B is the
+// game, B13EBABEBABEBABE the profile). Names compare as written; hex is case-insensitive.
+inline bool IsGameDataName(std::string_view name) {
+  if (name == "bots.toml") return true;
+  if (name.size() != 8 && name.size() != 16) return false;
+  for (const char c : name) {
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+  }
+  return true;
+}
+
+// Which entries of the data folder (`root_entries`: names in bots-data) belong in user/ (`user_entries`: names in
+// bots-data/user, empty when it doesn't exist). Only when user/ has no game data of its own: if it does, the player
+// already plays from there and a second copy next to it is theirs to sort out, so nothing is flagged. Pure: the callers
+// list the folders.
+inline std::vector<std::string> MisplacedGameData(const std::vector<std::string>& root_entries,
+                                                  const std::vector<std::string>& user_entries) {
+  for (const auto& name : user_entries) {
+    if (IsGameDataName(name)) return {};
+  }
+  std::vector<std::string> out;
+  for (const auto& name : root_entries) {
+    if (IsGameDataName(name)) out.push_back(name);
+  }
+  return out;
+}
+
+namespace detail {
+inline std::vector<std::string> ListNames(const std::filesystem::path& dir) {
+  std::vector<std::string> names;
+  std::error_code ec;
+  for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+    names.push_back(bots::PathUtf8(it->path().filename()));
+  }
+  return names;
+}
+}  // namespace detail
+
+// The probe: lists bots-data and bots-data/user. Empty when nothing is misplaced (or the folders can't be read).
+inline std::vector<std::string> FindMisplacedGameData(const DataRoot& data) {
+  if (data.source == DataSource::kDefault || data.root.empty()) return {};
+  return MisplacedGameData(detail::ListNames(data.root), detail::ListNames(LayoutFor(data.root).user));
+}
+
+// Moves the named entries from the data folder into user/ (a rename within the same folder tree: nothing is copied or
+// deleted, and it can't run out of space). An entry that already exists in user/ is left where it is. Returns the
+// entries moved and, in `error`, a sentence for the player if any couldn't be (the rest still move).
+inline std::vector<std::string> MoveMisplacedGameData(const DataRoot& data, const std::vector<std::string>& names,
+                                                      std::string& error) {
+  namespace fs = std::filesystem;
+  std::vector<std::string> moved;
+  const fs::path user = LayoutFor(data.root).user;
+  std::error_code ec;
+  fs::create_directories(user, ec);
+  for (const auto& name : names) {
+    if (!IsGameDataName(name)) continue;  // only ever the game's own entries, whatever the caller passes
+    const fs::path from = data.root / bots::PathFromUtf8(name);
+    const fs::path to = user / bots::PathFromUtf8(name);
+    if (fs::exists(fs::symlink_status(to, ec))) {
+      error += (error.empty() ? "" : " ") + name + " is already in the user folder, so it was left where it is.";
+      continue;
+    }
+    fs::rename(from, to, ec);
+    if (ec) {
+      error += (error.empty() ? "" : " ") + std::string("Couldn't move ") + name + " (" + ec.message() + ").";
+      ec.clear();
+    } else {
+      moved.push_back(name);
+    }
+  }
+  return moved;
+}
+
+// The message for the player when saves or settings sit in the data folder instead of user/.
+inline std::string MisplacedMessage(const DataRoot& data, const std::vector<std::string>& names) {
+  std::string list;
+  for (const auto& n : names) list += (list.empty() ? "" : ", ") + n;
+  return "Your saves or settings are in " + bots::PlainPathUtf8(data.root) + " (" + list +
+         "), but the game looks for them in " + bots::PlainPathUtf8(LayoutFor(data.root).user) +
+         ". Until they are moved there, the game starts without them.";
+}
+
+// Portable mode that isn't on (B-389). The switch is a file named exactly portable.txt next to the program. Windows
+// hides ".txt" by default, so "New > Text Document" named portable.txt is really portable.txt.txt, and the game then
+// quietly uses the user folder: the saves put in bots-data are never read. `names` are the files next to the program
+// (names only). Returns the file that is almost the marker (empty when none): same name ignoring case, or with a
+// second extension or none ("portable", "portable.txt.txt", "Portable.TXT" on a case-sensitive file system).
+inline std::string MarkerLookalike(const std::vector<std::string>& names) {
+  auto lower = [](std::string v) {
+    for (char& c : v) c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    return v;
+  };
+  for (const auto& n : names) {
+    if (n == kPortableMarker) return {};  // the real one is there
+  }
+  for (const auto& n : names) {
+    const std::string l = lower(n);
+    if (l == "portable" || l == "portable.txt" || l == "portable.txt.txt" || l == "portable.text" ||
+        l == "portable.txt.rtf" || l == "portable.txt.lnk")
+      return n;
+  }
+  return {};
+}
+
+// The sentence for the player when portable mode is off but there is a sign they wanted it: a lookalike of portable.txt
+// or a bots-data folder (`has_data_dir`) next to the program. `lookalike` is MarkerLookalike's answer, `base` the folder
+// portable.txt belongs in, `saves` where the game reads its saves instead. Empty when there is nothing to say.
+inline std::string MarkerHint(const std::string& lookalike, bool has_data_dir, const std::filesystem::path& base,
+                              const std::filesystem::path& saves) {
+  if (lookalike.empty() && !has_data_dir) return {};
+  std::string m = "Portable mode is off, so " + std::string(has_data_dir ? "the bots-data folder is ignored and " : "") +
+                  "the game uses " + bots::PlainPathUtf8(saves) + " for saves and settings. ";
+  if (!lookalike.empty())
+    m += "The file next to the game is named \"" + lookalike + "\", but it must be named exactly " + kPortableMarker +
+         " (Windows hides the .txt ending: in File Explorer choose View > Show > File name extensions, then rename it).";
+  else
+    m += "To use it, create an empty file named exactly " + std::string(kPortableMarker) + " in " +
+         bots::PlainPathUtf8(base) + ".";
+  return m;
+}
+
+// The probe for MarkerHint: lists the files and folders next to the program.
+inline std::string FindMarkerHint(const DataRoot& data, const std::filesystem::path& exe_dir, std::string_view appimage,
+                                  const std::filesystem::path& saves) {
+  if (data.source != DataSource::kDefault) return {};
+  if (exe_dir.empty() && appimage.empty()) return {};
+  const std::filesystem::path base = PortableBaseDir(exe_dir, appimage);
+  std::vector<std::string> files;
+  std::error_code ec;
+  for (std::filesystem::directory_iterator it(base, ec), end; !ec && it != end; it.increment(ec)) {
+    std::error_code e2;
+    if (it->is_regular_file(e2)) files.push_back(bots::PathUtf8(it->path().filename()));
+  }
+  const bool has_data_dir = std::filesystem::is_directory(base / kPortableDirName, ec);
+  return MarkerHint(MarkerLookalike(files), has_data_dir, base, saves);
+}
+
+// What this run found out about a portable.txt that isn't (set once by OnConfigurePaths; the launcher and the log read it).
+inline std::string& ActiveMarkerHint() {
+  static std::string hint;
+  return hint;
+}
+
+// How many saves the folder holds, for the log: the .header files under <user>/<profile id>/<game id>/Headers (one per
+// saved game, next to its content folder). 0 for a folder with none or one that can't be read.
+inline int CountSaves(const std::filesystem::path& user_root) {
+  namespace fs = std::filesystem;
+  int n = 0;
+  std::error_code ec;
+  for (fs::directory_iterator prof(user_root, ec), end; !ec && prof != end; prof.increment(ec)) {
+    std::error_code e;
+    const std::string pn = bots::PathUtf8(prof->path().filename());
+    if (pn.size() != 16 || !IsGameDataName(pn) || !prof->is_directory(e)) continue;
+    for (fs::directory_iterator game(prof->path(), e), end2; !e && game != end2; game.increment(e)) {
+      std::error_code e3;
+      const fs::path headers = game->path() / "Headers";
+      if (!fs::is_directory(headers, e3)) continue;
+      for (fs::recursive_directory_iterator h(headers, e3), end3; !e3 && h != end3; h.increment(e3)) {
+        std::error_code e4;
+        if (h->is_regular_file(e4) && h->path().extension() == ".header") ++n;
+      }
+    }
+  }
+  return n;
 }
 
 // The message for the player when portable mode can't be used. `why` is CheckWritable's text.

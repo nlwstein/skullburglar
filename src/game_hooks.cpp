@@ -38,6 +38,7 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
 
+#include "aim_toggle.h"
 #include "app_quit.h"
 #include "coop.h"
 #include "fov_math.h"
@@ -404,6 +405,28 @@ void FilterPad(uint8_t* base, uint32_t state);
 }
 }  // namespace
 
+// Toggle aim (aim_toggle.h): rewrites the left trigger in the controller state the game is about to read. That state
+// already merges a real pad with the keyboard and mouse, so one rule covers both. BOTS_KBM_TRACE=1 logs the latch and
+// the left trigger the game sees.
+static void ToggleAim(uint8_t* base, uint32_t user, uint32_t state) {
+  static bots::aim::Toggle toggles[4];
+  static bool seen[4] = {};
+  static const bool trace = [] { const char* v = std::getenv("BOTS_KBM_TRACE"); return v && *v == '1'; }();
+  if (user >= 4) return;
+  auto* kbm = bots::MouseKeyboardDriver::instance();
+  uint8_t* s = Raw(base, state);  // big-endian XINPUT_STATE: packet, buttons (u16 at +4), LT +6, RT +7
+  const bool enabled = REXCVAR_GET(aim_toggle);
+  const bool was = toggles[user].latched;
+  const uint8_t lt = bots::aim::Update(toggles[user], enabled, kbm && kbm->OnFootInPlay(), s[6], (s[4] & 0x10) != 0);
+  if (user == 0 && kbm) kbm->SetAimLatched(toggles[user].latched);
+  if (trace && (was != toggles[user].latched || !seen[user])) {
+    seen[user] = true;
+    REXLOG_INFO("aim toggle: player {} {} (raw trigger {}, game sees {})", user + 1,
+                toggles[user].latched ? "latched on" : "off", s[6], lt);
+  }
+  s[6] = lt;
+}
+
 extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
   const uint32_t user = ctx.r3.u32, state = ctx.r4.u32;  // XInputGetState(user, XINPUT_STATE*)
   __imp__sub_823598E0(ctx, base);
@@ -417,6 +440,7 @@ extern "C" void sub_823598E0(PPCContext& __restrict ctx, uint8_t* base) {
   }
   if (state && ctx.r3.u32 == 0) {
     quit_option::FilterPad(base, state);
+    ToggleAim(base, user, state);
     // Right stick dead zone setting: below the game's own 20% we re-map the stick (input_math.h). Every user.
     const double dz = REXCVAR_GET(right_stick_deadzone) / 100.0;
     if (dz < bots::input::kGameStickDeadZone - 1e-9) {

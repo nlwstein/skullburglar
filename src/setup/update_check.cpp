@@ -2,6 +2,7 @@
 #include "update_check.h"
 
 #include "ed25519.h"
+#include "update_install.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -152,7 +153,17 @@ bool SelfUpdateKeyConfigured() {
 
 UpdateInfo FetchUpdateInfo() {
   std::string error;
-  std::string body = Fetch(kUpdateUrl, error);
+  // The platform is the releases file's download key for this install (windows, macos, linux_appimage, linux_tar); a
+  // build that can't update itself reports just the operating system.
+#if defined(_WIN32)
+  const char* os = "windows";
+#elif defined(__APPLE__)
+  const char* os = "macos";
+#else
+  const char* os = "linux";
+#endif
+  const char* key = AssetKey(CurrentInstallKind());
+  std::string body = Fetch(UpdateCheckUrl(kUpdateUrl, BOTS_VERSION, *key ? key : os), error);
   if (!error.empty()) {
     UpdateInfo info;
     info.error = error;

@@ -46,6 +46,13 @@ pub enum Kind {
     /// B-345, the kill's end (`BurnOut_MIC`, chain `MerkEnd_PP`): scalars `StartTime`, `EffectLength` (1.5). The scene
     /// burnt to white (levels with input max 0.1, 40% desaturated) easing back to normal over EffectLength / 1.5.
     MerkBurnOut,
+    /// B-384 (#24), a fire's heat glow: `FX_EnvironmentLibrary.Fire.PostProcessIntensity_MIC` (an instance of
+    /// `PostProcessIntensity_MAT`, additive), in the player's chain while near a fire. Scalar `Fade` (0..1) in g0.x. The
+    /// scene sampled through a slight horizontal shimmer (`SmokeLayer2NormalMap`'s red, at most 0.0025 of the width),
+    /// times 1.5 times (2, 1, 0.5) times (`Wobble_DIF` + 0.4, panned) times `Fade`, added to the scene: a warm, flickering
+    /// lift of everything on screen in proportion to its own brightness. n1 left it out (drawn as constant 0), so
+    /// characters and the street beside a fire were 30 to 50% darker than in the Pre-1.0 renderer.
+    FireHeat,
 }
 
 impl Kind {
@@ -59,6 +66,7 @@ impl Kind {
             Kind::MerkBkg => &["FX_MerkYouSpaceRescource.BKGAndGhost_MIC", "FX_MerkYouSpaceRescource.BKGAndGhost_MAT"],
             Kind::MerkFadeIn => &["FX_MerkYouSpaceRescource.FadeIn_MAT_MIC", "FX_MerkYouSpaceRescource.FadeIn_MAT"],
             Kind::MerkBurnOut => &["FX_MerkYouSpaceRescource.BurnOut_MIC", "FX_MerkYouSpaceRescource.BurnOut_MAT"],
+            Kind::FireHeat => &["FX_EnvironmentLibrary.Fire.PostProcessIntensity_MIC", "FX_EnvironmentLibrary.Fire.PostProcessIntensity_MAT"],
         }
     }
 
@@ -72,6 +80,7 @@ impl Kind {
             Kind::MerkBkg => "fs_merk_bkg",
             Kind::MerkFadeIn => "fs_merk_fadein",
             Kind::MerkBurnOut => "fs_merk_burnout",
+            Kind::FireHeat => "fs_fireheat",
         }
     }
 
@@ -85,11 +94,12 @@ impl Kind {
             Kind::MerkBkg => ["FX_MerkYouSpaceRescource.Wall", ""],
             Kind::MerkFadeIn => ["FX_MerkYouSpaceRescource.GLogo_02", ""],
             Kind::MerkBurnOut => ["", ""],
+            Kind::FireHeat => ["FX_Blood.Wobble_DIF", "FX_Smoke.SmokeLayer2NormalMap"],
         }
     }
 
-    pub const ALL: [Kind; 7] =
-        [Kind::Gangsta, Kind::Death, Kind::Damage, Kind::Scope, Kind::MerkBkg, Kind::MerkFadeIn, Kind::MerkBurnOut];
+    pub const ALL: [Kind; 8] =
+        [Kind::Gangsta, Kind::Death, Kind::Damage, Kind::Scope, Kind::MerkBkg, Kind::MerkFadeIn, Kind::MerkBurnOut, Kind::FireHeat];
 
     /// The stylized counter-kill's effects (B-345), drawn only with `BOTS_N1_COUNTERKILL=native`.
     pub const fn is_merk(self) -> bool {
@@ -146,6 +156,13 @@ fn damage_fx_on() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("BOTS_N1_DAMAGE_FX").map_or(true, |v| v != "0"))
+}
+
+/// `BOTS_N1_FIRE_HEAT=0` leaves the fire's heat glow out (the pre-B-384 path: nothing drawn for it).
+fn fire_heat_on() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BOTS_N1_FIRE_HEAT").map_or(true, |v| v != "0"))
 }
 
 /// `BOTS_N1_SCOPE_FX=0` leaves the sniper scope overlay out (the pre-B-295 path: the scene is shown unmasked).
@@ -209,6 +226,9 @@ pub fn effects_with(p: &PostFeed, merk: bool) -> Vec<Effect> {
         if kind == Kind::Scope && !scope_fx_on() {
             continue;
         }
+        if kind == Kind::FireHeat && !fire_heat_on() {
+            continue;
+        }
         if kind.is_merk() && !merk {
             continue;
         }
@@ -221,6 +241,15 @@ pub fn effects_with(p: &PostFeed, merk: bool) -> Vec<Effect> {
                 let a = p.param(m, "PARAMAmount").unwrap_or(1.0);
                 if a.is_finite() && a > 0.0 {
                     Some(Effect { kind, params: [a.min(1.0), 0.0, 0.0, 0.0] })
+                } else {
+                    None
+                }
+            }
+            Kind::FireHeat => {
+                // The game drives `Fade` from the player's distance to the fire; without it (or at zero) nothing is added.
+                let a = p.param(m, "Fade").unwrap_or(0.0);
+                if a.is_finite() && a > 0.0 {
+                    Some(Effect { kind, params: [a, 0.0, 0.0, 0.0] })
                 } else {
                     None
                 }
@@ -295,6 +324,17 @@ mod tests {
         p.material_effects = mats.iter().map(|s| s.to_string()).collect();
         p.material_params = params.iter().map(|(m, n, v)| (m.to_string(), n.to_string(), *v)).collect();
         p
+    }
+
+    #[test]
+    fn fire_heat_fade() {
+        let m = "FX_EnvironmentLibrary.Fire.PostProcessIntensity_MIC";
+        let e = effects(&feed(&["GEN_PostProcess.AmbushPP_MAT01", m], &[(m, "Fade", 0.6)]));
+        assert_eq!(e, [Effect { kind: Kind::FireHeat, params: [0.6, 0.0, 0.0, 0.0] }]);
+        // Off at zero and without the parameter (a feed that doesn't carry it).
+        assert!(effects(&feed(&[m], &[(m, "Fade", 0.0)])).is_empty());
+        assert!(effects(&feed(&[m], &[])).is_empty());
+        assert!(effects(&feed(&[m], &[(m, "Fade", f32::NAN)])).is_empty());
     }
 
     #[test]
