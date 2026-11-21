@@ -1,0 +1,6 @@
+[
+ "In portable mode, if your saves or settings ended up in the bots-data folder instead of bots-data/user, the launcher now tells you where they belong and offers to move them.",
+ "New launcher setting, \"Pre-1.0 renderer: hide objects behind walls\" (Auto, On, Off). Off turns the renderer's visibility test off, which you can try if objects on the ground look wrong with the pre-1.0 renderer.",
+ "The launcher no longer cuts off long lines (folders, notes) on a Full HD screen: they wrap, and the window is wider on large displays.",
+ "The launcher's update check now sends the game's version and platform (nothing else), so we can see which versions are in use."
+]
