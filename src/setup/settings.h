@@ -33,6 +33,9 @@ struct Setting {
   bool locked = false;            // set by env or command line: shown, not editable
 };
 
+// The curated list as data, without values (settings_catalog.cpp; no SDK needed).
+std::vector<Setting> SettingsCatalog();
+
 // The curated list, with current values read from the cvar registry.
 std::vector<Setting> LoadSettings();
 

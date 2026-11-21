@@ -143,6 +143,10 @@ def main() -> int:
             body = (f"Statically linked into the runtime library. Its source: {where}. The rest of the program's "
                     "source is public too (above), so you can modify this library and rebuild or relink.\n\n" + body)
         parts.append(section(d.name, body))
+    for name, title in (("Inter", "Inter (launcher font)"), ("Oswald", "Oswald (launcher font)")):
+        ofl = repo / f"assets/fonts/OFL-{name}.txt"
+        if ofl.is_file():
+            parts.append(section(f"{title}, SIL Open Font License 1.1", ofl.read_text()))
     kenney = repo / "assets/prompts/LICENSE-kenney.txt"
     if kenney.is_file():
         parts.append(section("Kenney Input Prompts (button prompt icons)", kenney.read_text()))
