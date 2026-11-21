@@ -38,6 +38,12 @@ pub fn fog_volumes_on() -> bool {
     *ON.get_or_init(|| std::env::var("BOTS_N1_FOGVOL").map_or(true, |v| v != "0"))
 }
 
+/// B-392: `BOTS_N1_FOG_COLOR=old` restores the 1.13 height-fog colour, `LightColor^2.2` with the brightness ignored.
+fn fog_color_old() -> bool {
+    static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *S.get_or_init(|| std::env::var("BOTS_N1_FOG_COLOR").is_ok_and(|v| v == "old"))
+}
+
 /// Multiplier on every fog volume's density. The port's apply shader multiplies the integrated density by a
 /// texture-modulated factor; 0.22 is the value that matched the port's mean brightness and error in chapter 33250
 /// (`BOTS_N1_FOGVOL_SCALE` overrides it).
@@ -182,7 +188,25 @@ impl Env {
             e.dyn_sun = fr.sun_dyn;
         }
         // W4: as the port's fog pass (draw 911 of capture f4420): colour LightColor^2.2, extinction distance in w.
-        e.fog = fr.fog.as_ref().map(|f| (f.light_color.map(|c| c.powf(2.2)), f.density, f.height, f.start, f.extinction));
+        // B-392: the colour of the port's fog pass (`Fog::pass_color`: LightColor^2.2 x LightBrightness x log2(e)).
+        // `BOTS_N1_FOG_COLOR=old` keeps the 1.13 model (LightColor^2.2 alone).
+        e.fog = fr.fog.as_ref().map(|f| {
+            let c = if fog_color_old() { f.light_color.map(|c| c.powf(2.2)) } else { f.pass_color() };
+            (c, f.density, f.height, f.start, f.extinction)
+        });
+        if let Some(f) = &fr.fog {
+            // B-392 diagnostics: the fog the feed carries, printed when it changes (`BOTS_N1_PWL_LOG=1`).
+            static LAST: std::sync::Mutex<Option<[f32; 10]>> = std::sync::Mutex::new(None);
+            let v = [f.light_color[0], f.light_color[1], f.light_color[2], f.color[0], f.color[1], f.color[2], f.density, f.height, f.start, f.extinction];
+            if std::env::var_os("BOTS_N1_PWL_LOG").is_some() {
+                if let Ok(mut l) = LAST.lock() {
+                    if *l != Some(v) {
+                        eprintln!("n1 fog light_color {:?} color(x brightness) {:?} density {} height {} start {} extinction {}", &v[0..3], &v[3..6], v[6], v[7], v[8], v[9]);
+                        *l = Some(v);
+                    }
+                }
+            }
+        }
         e
     }
 
@@ -221,6 +245,11 @@ impl Env {
                 "fogd" => {
                     if let Some(x) = self.fog.as_mut() {
                         x.1 = f;
+                    }
+                }
+                "fogc" => {
+                    if let Some(x) = self.fog.as_mut() {
+                        x.0 = x.0.map(|c| c * f);
                     }
                 }
                 "fogs" => {

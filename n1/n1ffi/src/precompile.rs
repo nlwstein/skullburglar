@@ -58,12 +58,19 @@ fn header(db: &AssetDb, o: &Opts) -> String {
         ^ fnv(include_str!("../../scenefmt/src/particles/shader.rs").as_bytes()).rotate_left(8);
     // B-235: the PWL switches change which shaders the materials ask for.
     format!(
-        "v1 index={:016x} features={} bc5={} pwl={}{} code={code:016x}",
+        "v1 index={:016x} features={} bc5={} pwl={}{}{}{}{} code={code:016x}",
         db.index_stamp(),
         o.features,
         o.bc5_ok as u8,
         scenekit::scene_pwl() as u8,
-        scenekit::lm_linear() as u8
+        scenekit::lm_linear() as u8,
+        scenekit::tex_pwl() as u8,
+        scenekit::lm_pwl() as u8,
+        // B-392 diagnostics: the per-texture overrides change which materials ask for which shader.
+        ["BOTS_N1_PWL_PLAIN", "BOTS_N1_PWL_SRGB", "BOTS_N1_PWL_PWL"]
+            .iter()
+            .map(|k| std::env::var(k).map(|v| format!("-{:x}", fnv(v.as_bytes()))).unwrap_or_default())
+            .collect::<String>()
     )
 }
 
