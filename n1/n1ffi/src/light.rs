@@ -284,6 +284,10 @@ impl Env {
     }
 }
 
+/// B-330: weight of the bloom-kernel blur in the composite. A fitted value: 0.075 puts the mean luma of the five scenes
+/// that use the blur within 0.2 to 1.6% of the port's (0.15: 2.7 to 10.4% under, 0: 3.3 to 4.6% over; 0.05: 1.2 to 1.7% over).
+pub const BLOOM_MIX: f32 = 0.075;
+
 /// W4: the game's post chain (MaterialEffect grade, uber DOF + bloom, gamma 2.2), driven by the feed.
 #[derive(Clone, Debug)]
 pub struct PostParams {
@@ -293,7 +297,11 @@ pub struct PostParams {
     pub gamma: f32,
     /// Composite multiplier before saturate (1 / Scene_HighLights in UE3; white in every capture so far).
     pub inv_hi: [f32; 3],
-    /// Mix of the bloom-kernel blur into the composite when UseDifferentKernelForBloom (the port's c250.x).
+    /// Mix of the bloom-kernel blur into the composite when UseDifferentKernelForBloom (the port's c250.x is 0.15).
+    /// B-330: n1 uses `BLOOM_MIX` (half of that). The blur texture is premultiplied by the blur amount, so at the
+    /// decoded 0.15 every pixel is pulled toward black by `0.15 * (1 - a)`; measured against the port that left the
+    /// scenes that use it 2 to 10% too dark, while leaving the blur out left them 3 to 5% too bright.
+    /// `BOTS_N1_POSTP=mix=0.15` restores the decoded value, `mix=0` leaves the blur out.
     pub bloom_mix: f32,
     /// DOF + bloom passes on (`BOTS_N1_POSTP=nodof` or `BOTS_N1_DOF=0` turn them off: grade + gamma only).
     pub dof: bool,
@@ -324,7 +332,7 @@ impl Default for PostParams {
             grade: None,
             gamma: 2.2,
             inv_hi: [1.0; 3],
-            bloom_mix: 0.15,
+            bloom_mix: BLOOM_MIX,
             dof: env_flag("BOTS_N1_DOF", true),
             mats: Vec::new(),
             god: None,
@@ -1001,6 +1009,15 @@ mod post_tests {
         for (size, width) in [(0.0, 1280), (0.01, 1280), (0.001, 3840)] {
             assert_eq!(kernel_taps(size, width), vec![(0.0, 1.0)]);
         }
+    }
+
+    #[test]
+    fn bloom_mix_is_the_fitted_half_weight() {
+        // B-330: the decoded port constant is 0.15; the premultiplied blur needs half of it (see `BLOOM_MIX`).
+        assert_eq!(PostParams::default().bloom_mix, 0.075);
+        let mut p = PostParams::default();
+        p.apply("mix=0.15");
+        assert_eq!(p.bloom_mix, 0.15);
     }
 
     #[test]
