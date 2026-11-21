@@ -89,6 +89,11 @@ std::string CheckTarMembers(const std::string& names, const std::string& verbose
 // update itself; the launcher then says to move it to Applications first.
 bool MacAppNeedsMove(const std::string& exe_dir);
 
+// The address the update check fetches: `base` plus "?v=<version>&p=<platform>" (or "&" when base already has a query).
+// Both values are cut down to letters, digits, '.', '-' and '_' so they are URL-safe; a value left empty is omitted.
+// Nothing else is ever added: no identifier, no machine information.
+std::string UpdateCheckUrl(const std::string& base, const std::string& version, const std::string& platform);
+
 // The key in UpdateInfo::downloads for an install kind; empty for kNone.
 const char* AssetKey(InstallKind kind);
 

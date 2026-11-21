@@ -30,7 +30,17 @@ static std::string Dl(const std::string& key, const std::string& file, const std
          "\", \"url\": \"" + url + "\"}";
 }
 
+static void TestUpdateCheckUrl() {
+  CHECK(UpdateCheckUrl("https://x.example/version.json", "0.4.0", "linux_appimage") ==
+        "https://x.example/version.json?v=0.4.0&p=linux_appimage");
+  CHECK(UpdateCheckUrl("https://x.example/version.json?a=1", "0.4.0", "macos") == "https://x.example/version.json?a=1&v=0.4.0&p=macos");
+  CHECK(UpdateCheckUrl("https://x.example/v.json", "1.0&x=1 '\"", "win/dows") == "https://x.example/v.json?v=1.0x1&p=windows");
+  CHECK(UpdateCheckUrl("https://x.example/v.json", "", "windows") == "https://x.example/v.json?p=windows");
+  CHECK(UpdateCheckUrl("https://x.example/v.json", "", "") == "https://x.example/v.json");
+}
+
 int main() {
+  TestUpdateCheckUrl();
   // Versions.
   CHECK(IsNewerVersion("1.10.0", "1.9.9"));
   CHECK(!IsNewerVersion("1.0.0", "1.0.0"));
