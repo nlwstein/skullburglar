@@ -29,4 +29,13 @@ inline float LauncherUiScale(float logical_height, const char* override_text = n
   return std::round(raw * 20.0f) / 20.0f;  // steps of 0.05: no flicker, and no odd sizes while a window is dragged
 }
 
+// The launcher window's width in the same logical pixels (B-387). The layout is designed 720 wide at scale 1; on a larger
+// display the window grows with it, to 90 % of the display up to 1000 designed pixels, so long lines (folders, notes) have
+// room, and never past the display's edge (20 px margin each side).
+inline float LauncherWindowWidth(float logical_width, float ui_scale) {
+  const float designed = 720.0f * ui_scale;
+  const float wide = std::min(logical_width * 0.9f, 1000.0f * ui_scale);
+  return std::max(std::min(std::max(designed, wide), logical_width - 40.0f), 1.0f);
+}
+
 }  // namespace bots::setup
