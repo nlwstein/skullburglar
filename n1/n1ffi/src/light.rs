@@ -287,6 +287,8 @@ impl Env {
 /// B-330: weight of the bloom-kernel blur in the composite. A fitted value: 0.075 puts the mean luma of the five scenes
 /// that use the blur within 0.2 to 1.6% of the port's (0.15: 2.7 to 10.4% under, 0: 3.3 to 4.6% over; 0.05: 1.2 to 1.7% over).
 pub const BLOOM_MIX: f32 = 0.075;
+/// The port's own weight (c250.x), which `BLOOM_MIX` halves.
+pub const BLOOM_MIX_DECODED: f32 = 0.15;
 
 /// W4: the game's post chain (MaterialEffect grade, uber DOF + bloom, gamma 2.2), driven by the feed.
 #[derive(Clone, Debug)]

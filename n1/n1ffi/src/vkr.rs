@@ -2514,6 +2514,14 @@ impl Renderer {
             blk(ft, [0.0, 0.0], &[], off),        // copy
             blk(ft, [0.0, 0.0], &[], [0.0, 0.0]), // linear composite
         ];
+        // B-330 + B-384: the bloom-kernel blur's weight (`BLOOM_MIX`, 0.075) was fitted on scenes whose fire glow n1 then left out.
+        // Once the glow is drawn, a frame with it wants the decoded weight back: blend from the fitted one to 0.15 as the glow's
+        // Fade rises to `fire_mix_ramp` (0 = off). Only the composites that mix at all (differing kernels) change.
+        if let Some(f) = mats.iter().find(|m| m.0 == "fs_fireheat").map(|m| m.1[0]) {
+            for k in [5, 7] {
+                blocks[k][4][0] = crate::postmat::mix_with_fire(blocks[k][4][0], f, crate::postmat::fire_mix_ramp());
+            }
+        }
         blocks[5][4][3] = if self.hdr_output { 2.0 } else { 0.0 };
         blocks[6][4][3] = blocks[5][4][3];
         for (j, (_, params, _, pwl)) in mats.iter().enumerate() {
