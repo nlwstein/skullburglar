@@ -324,6 +324,8 @@ class BotsApp : public rex::ReXApp {
     if (const auto& data = bots::setup::ActiveDataRoot(); data.source != bots::setup::DataSource::kDefault) {
       REXLOG_INFO("data folder: {} ({})", bots::PathUtf8(data.root),
                   data.source == bots::setup::DataSource::kEnv ? "BOTS_DATA_DIR" : "portable.txt");
+      if (const auto misplaced = bots::setup::FindMisplacedGameData(data); !misplaced.empty())
+        REXLOG_WARN("{}", bots::setup::MisplacedMessage(data, misplaced));  // B-386; the launcher offers to move them
     }
 #if !TARGET_OS_IPHONE && !defined(__ANDROID__)
     try {
