@@ -12,6 +12,7 @@ and Android APK are published when their jobs built them. Only the newest KEEP v
 in the bucket. Every release is also copied to the public archive project on GitLab.com (ARCHIVE_*, below) when
 GITLAB_COM_TOKEN is set; a version that leaves the bucket keeps its downloads there ("archived": true, absolute URLs),
 and one that isn't in the archive is marked "No longer available" as before. Every version stays in the file's history.
+The archive project also gets a Releases-page entry per version (release_archive.archive_release).
 
 version.json:
     {"latest": "0.4.0", "page": "https://<site>/", "updated": "...",
@@ -60,7 +61,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ed25519_sign  # noqa: E402
 import update_signing  # noqa: E402
 from update_signing import signing_message, signing_seed  # noqa: E402,F401
-from release_archive import archive_entry, archive_put, archive_token  # noqa: E402
+from release_archive import archive_entry, archive_put, archive_release, archive_token  # noqa: E402
 
 VERSION = os.environ["VERSION"]
 if not update_signing.plain_version(VERSION):
@@ -217,6 +218,8 @@ def main():
         print("release entry signed")
     else:
         print("no signing key: release entry is unsigned (launchers offer Download it only)")
+    if archive:
+        archive_release(archive, entry)  # the Releases-page entry; after the packages are all downloadable
     versions = [v for v in doc["versions"] if v["version"] != VERSION] + [entry]
     key = lambda v: [int(n) for n in re.findall(r"\d+", v["version"].split("-")[0])]
     versions.sort(key=key, reverse=True)

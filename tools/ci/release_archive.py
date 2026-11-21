@@ -4,6 +4,11 @@ project skullburglar/releases (which doesn't count toward GitLab.com storage), s
 bucket stay downloadable. Used by publish_downloads.py.
 
     python3 tools/ci/release_archive.py check   # before tagging: GITLAB_COM_TOKEN is usable (required on the default branch)
+    python3 tools/ci/release_archive.py release ENTRY.json [--dry-run]
+        # make or refresh the archive's Releases-page entry for one version.json entry; --dry-run only prints the plan
+
+Each release also gets an entry on the archive project's Releases page (tag v<version> on the archive repo, the notes,
+and one link per package). Entries hold no files, so they cost no storage; an existing entry is updated, never deleted.
 
 GITLAB_COM_TOKEN: an api-scope token of the archive project's account (a masked, hidden, protected CI variable). It is
 never printed.
@@ -17,7 +22,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-ARCHIVE_API = "https://gitlab.com/api/v4/projects/skullburglar%2Freleases/packages/generic/skullburglar"
+ARCHIVE_PROJECT = "https://gitlab.com/api/v4/projects/skullburglar%2Freleases"
+ARCHIVE_API = ARCHIVE_PROJECT + "/packages/generic/skullburglar"
+LABELS = (("windows", "Windows installer"), ("macos", "macOS"), ("AppImage", "Linux AppImage"),
+          ("tar.xz", "Linux .tar.xz"), ("ios", "iPhone/iPad (.ipa)"), ("tvos", "Apple TV (.ipa)"),
+          ("android", "Android (.apk)"))
 
 
 def archive_url(version, name):
@@ -94,7 +103,79 @@ def archive_entry(v):
         print(f"archived: {v['version']}")
 
 
+def release_description(entry):
+    """The Releases-page text for a version.json entry: its date and notes."""
+    notes = "\n".join(f"- {n}" for n in entry.get("notes", [])) or "_No notes recorded for this version._"
+    return f"Released {entry.get('date', 'unknown date')}.\n\n## What changed\n\n{notes}\n"
+
+
+def release_links(entry):
+    """One package link per download, pointing at the archive copy."""
+    version = entry["version"]
+    out = []
+    for platform, d in entry.get("downloads", {}).items():
+        label = next((text for key, text in LABELS if key in platform or key in d["file"]), platform)
+        out.append({"name": f"{label}: {d['file']}", "url": archive_url(version, d["file"]), "link_type": "package"})
+    return out
+
+
+def release_plan(entry, existing_links=None):
+    """What to do for this version: ("create", body) or ("update", body, missing links). existing_links is None when
+    there's no entry yet, else the URLs it already links."""
+    version = entry["version"]
+    links = release_links(entry)
+    desc = release_description(entry)
+    if existing_links is None:
+        body = {"tag_name": f"v{version}", "name": f"Skullburglar {version}", "description": desc,
+                "assets": {"links": links}}
+        if entry.get("date"):
+            body["released_at"] = f"{entry['date']}T12:00:00Z"
+        return ("create", body)
+    return ("update", {"name": f"Skullburglar {version}", "description": desc},
+            [link for link in links if link["url"] not in existing_links])
+
+
+def _api(token, method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(ARCHIVE_PROJECT + path, data=data, method=method,
+                                 headers={"PRIVATE-TOKEN": token, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.load(r)
+
+
+def archive_release(token, entry, dry_run=False):
+    """Create (or refresh) the archive's Releases-page entry for one version. Never deletes anything. Exits on failure."""
+    tag = urllib.parse.quote(f"v{entry['version']}", safe="")
+    try:
+        existing = [link["url"] for link in _api(token, "GET", f"/releases/{tag}/assets/links")]
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            sys.exit(f"archive release lookup failed: HTTP {e.code}")
+        existing = None
+    plan = release_plan(entry, existing)
+    print(f"archive release v{entry['version']}: {plan[0]}"
+          + (f", {len(plan[2])} new links" if plan[0] == "update" else f", {len(plan[1]['assets']['links'])} links")
+          + (" (dry run)" if dry_run else ""))
+    if dry_run:
+        return plan
+    try:
+        if plan[0] == "create":
+            # The tag is created on the archive repo's default branch.
+            plan[1]["ref"] = _api(token, "GET", "")["default_branch"]
+            _api(token, "POST", "/releases", plan[1])
+        else:
+            _api(token, "PUT", f"/releases/{tag}", plan[1])
+            for link in plan[2]:
+                _api(token, "POST", f"/releases/{tag}/assets/links", link)
+    except urllib.error.HTTPError as e:
+        sys.exit(f"archive release v{entry['version']} failed: HTTP {e.code}")
+    return plan
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["release"] and len(sys.argv) in (3, 4) and sys.argv[3:] in ([], ["--dry-run"]):
+        archive_release(archive_token(), json.load(open(sys.argv[2])), dry_run=bool(sys.argv[3:]))
+        sys.exit(0)
     if sys.argv[1:] != ["check"]:
         sys.exit(__doc__)
     print("release archive: token ok" if archive_token() else "release archive: no GITLAB_COM_TOKEN, archive copy will be skipped")
