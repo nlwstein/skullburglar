@@ -47,6 +47,7 @@
 
 #ifdef BOTS_N1FFI
 #include <n1ffi.h>
+#include "../../aa_math.h"
 #endif
 
 namespace bots::gfx::vk {
@@ -918,6 +919,10 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
     std::memcpy(hdr.gamma_ramp, scene_gamma_ramp_, sizeof(hdr.gamma_ramp));
     n1_set_hdr(host->r, &hdr);
   }
+  // B-054: anti-aliasing and sharpening of the finished scene (the HUD is drawn after n1, so it is not filtered). Read
+  // every frame, so the settings take effect live.
+  n1_set_aa(host->r, bots::aa::Mode(rex::cvar::Query<std::string>("anti_aliasing")),
+            bots::aa::Sharpening(rex::cvar::Query<double>("sharpening")));
   const int32_t rc = n1_record(host->r, cmd_, &t, &camera, host->instances.data(), uint32_t(host->instances.size()),
                                host->material_handles.data(), uint32_t(host->material_handles.size()),
                                stats_.flushes + 1, completed, host->budget, &st);

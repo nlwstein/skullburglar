@@ -107,6 +107,18 @@ pub unsafe extern "C" fn n1_set_hdr(r: *const N1Renderer, hdr: *const N1Hdr) {
     }
 }
 
+/// B-054: the anti-aliasing filter (0 off, 1 FXAA, 2 SMAA 1x) and the sharpening strength (0 off, up to 1) for the
+/// final image. Set every frame is fine; a change takes effect on the next `n1_record`.
+///
+/// Safety
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn n1_set_aa(r: *const N1Renderer, mode: u32, sharpen: f32) {
+    with(r, (), |i| {
+        i.renderer.aa_mode = mode;
+        i.renderer.aa_sharpen = sharpen;
+    });
+}
+
 #[repr(C)]
 pub struct N1Target {
     pub view: vk::ImageView,
