@@ -165,11 +165,18 @@ fn fire_heat_on() -> bool {
     *ON.get_or_init(|| std::env::var("BOTS_N1_FIRE_HEAT").map_or(true, |v| v != "0"))
 }
 
-/// Scale of the heat glow (B-384). The material decoded as is (gain 1) is 5 to 7% too bright in the fire street and in chapter
-/// 33250 against the Pre-1.0 renderer: its red matches, its green and blue are 19% and 31% over the gap it should close, which
-/// 0.85 (the luma-weighted fit of per-channel scales 0.92 / 0.84 / 0.76) brings within about 2%. A fitted constant;
-/// `BOTS_N1_FIRE_HEAT_GAIN=<f>` overrides it (1 = the material as decoded).
-pub const FIRE_HEAT_GAIN: f32 = 0.85;
+/// Scale of the heat glow (B-384). 1 = the material as decoded. With the scene clamp (`fire_heat_clamp`) the decoded strength
+/// matches the Pre-1.0 renderer in the fire street and chapter 33250 (n1/port luma 0.98 to 1.03), so nothing is fitted here;
+/// `BOTS_N1_FIRE_HEAT_GAIN=<f>` still overrides it.
+pub const FIRE_HEAT_GAIN: f32 = 1.0;
+
+/// B-330: clamp the scene the heat glow samples to 1 (the port's material reads an 8-bit, saturated composite).
+/// `BOTS_N1_FIRE_CLAMP=0` leaves it unclamped (1.13.0).
+fn fire_heat_clamp() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BOTS_N1_FIRE_CLAMP").map_or(true, |v| v != "0"))
+}
 
 /// See `FIRE_HEAT_GAIN`.
 fn fire_heat_gain() -> f32 {
@@ -177,28 +184,6 @@ fn fire_heat_gain() -> f32 {
     static G: OnceLock<f32> = OnceLock::new();
     *G.get_or_init(|| std::env::var("BOTS_N1_FIRE_HEAT_GAIN").ok().and_then(|v| v.parse().ok()).filter(|g: &f32| g.is_finite() && *g >= 0.0).unwrap_or(FIRE_HEAT_GAIN))
 }
-
-/// B-330 + B-384: the Fade (0..1) at which the heat glow has fully taken over from the bloom-blur mix's fitted compensation
-/// (see `vkr.rs`). Not fitted: it only has to be below the Fade values seen in range (0.06 to 0.13) so the weight is not
-/// switched on and off at the edge of the range. `BOTS_N1_FIRE_MIX=<fade>` sets it; 0 leaves the mix weight alone.
-pub fn fire_mix_ramp() -> f32 {
-    use std::sync::OnceLock;
-    static G: OnceLock<f32> = OnceLock::new();
-    *G.get_or_init(|| std::env::var("BOTS_N1_FIRE_MIX").ok().and_then(|v| v.parse().ok()).filter(|g: &f32| g.is_finite() && *g >= 0.0).unwrap_or(FIRE_MIX_RAMP))
-}
-
-/// The composite's bloom-blur mix weight `m` (0: the pass doesn't mix) in a frame whose heat glow has `fade`: the fitted weight
-/// while the glow is off, rising linearly to the decoded one (`BLOOM_MIX_DECODED`) at `fade >= ramp`. `ramp` 0 leaves it alone.
-pub fn mix_with_fire(m: f32, fade: f32, ramp: f32) -> f32 {
-    if m <= 0.0 || ramp <= 0.0 {
-        return m;
-    }
-    let t = (fade / ramp).clamp(0.0, 1.0);
-    m + (crate::light::BLOOM_MIX_DECODED - m) * t
-}
-
-/// Default of `fire_mix_ramp`.
-pub const FIRE_MIX_RAMP: f32 = 0.05;
 
 /// `BOTS_N1_SCOPE_FX=0` leaves the sniper scope overlay out (the pre-B-295 path: the scene is shown unmasked).
 fn scope_fx_on() -> bool {
@@ -284,7 +269,7 @@ pub fn effects_with(p: &PostFeed, merk: bool) -> Vec<Effect> {
                 // The game drives `Fade` from the player's distance to the fire; without it (or at zero) nothing is added.
                 let a = p.param(m, "Fade").unwrap_or(0.0);
                 if a.is_finite() && a > 0.0 {
-                    Some(Effect { kind, params: [a * fire_heat_gain(), 0.0, 0.0, 0.0] })
+                    Some(Effect { kind, params: [a * fire_heat_gain(), if fire_heat_clamp() { 1.0 } else { 0.0 }, 0.0, 0.0] })
                 } else {
                     None
                 }
@@ -362,21 +347,10 @@ mod tests {
     }
 
     #[test]
-    fn mix_blends_to_the_decoded_weight_with_the_glow() {
-        let (fit, dec) = (crate::light::BLOOM_MIX, crate::light::BLOOM_MIX_DECODED);
-        assert_eq!(mix_with_fire(fit, 0.5, 0.0), fit, "off");
-        assert_eq!(mix_with_fire(fit, 0.0, 0.05), fit, "no glow");
-        assert!((mix_with_fire(fit, 0.05, 0.05) - dec).abs() < 1e-6, "full glow");
-        assert!((mix_with_fire(fit, 0.9, 0.05) - dec).abs() < 1e-6, "clamped");
-        assert!((mix_with_fire(fit, 0.025, 0.05) - (fit + dec) / 2.0).abs() < 1e-6, "halfway");
-        assert_eq!(mix_with_fire(0.0, 0.05, 0.05), 0.0, "a pass that doesn't mix stays off");
-    }
-
-    #[test]
     fn fire_heat_fade() {
         let m = "FX_EnvironmentLibrary.Fire.PostProcessIntensity_MIC";
         let e = effects(&feed(&["GEN_PostProcess.AmbushPP_MAT01", m], &[(m, "Fade", 0.6)]));
-        assert_eq!(e, [Effect { kind: Kind::FireHeat, params: [0.6 * FIRE_HEAT_GAIN, 0.0, 0.0, 0.0] }]);
+        assert_eq!(e, [Effect { kind: Kind::FireHeat, params: [0.6 * FIRE_HEAT_GAIN, 1.0, 0.0, 0.0] }]);
         // Off at zero and without the parameter (a feed that doesn't carry it).
         assert!(effects(&feed(&[m], &[(m, "Fade", 0.0)])).is_empty());
         assert!(effects(&feed(&[m], &[])).is_empty());
