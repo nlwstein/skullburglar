@@ -244,7 +244,11 @@ class BotsApp : public rex::ReXApp {
           return fs::is_regular_file(p, e);
         });
     su::ActiveDataRoot() = data;
-    if (data.source == su::DataSource::kDefault) return;
+    if (data.source == su::DataSource::kDefault) {  // B-389: a portable.txt that Windows named portable.txt.txt, say
+      su::ActiveMarkerHint() = su::FindMarkerHint(data, rex::filesystem::GetExecutableFolder(), appimage ? appimage : "",
+                                                  paths.user_data_root);
+      return;
+    }
     const su::DataLayout layout = su::LayoutFor(data.root);
     const bool user_given = !rex::cvar::Query<std::string>("user_data_root").empty();
     const bool cache_given = !rex::cvar::Query<std::string>("cache_root").empty();
@@ -327,6 +331,11 @@ class BotsApp : public rex::ReXApp {
                   data.source == bots::setup::DataSource::kEnv ? "BOTS_DATA_DIR" : "portable.txt");
       if (const auto misplaced = bots::setup::FindMisplacedGameData(data); !misplaced.empty())
         REXLOG_WARN("{}", bots::setup::MisplacedMessage(data, misplaced));  // B-386; the launcher offers to move them
+    }
+    if (!bots::setup::ActiveMarkerHint().empty()) REXLOG_WARN("{}", bots::setup::ActiveMarkerHint());  // B-389
+    if (!user_data_root().empty()) {  // B-389: which folder the saves are read from and whether any are there
+      REXLOG_INFO("saves: {} ({} saved game(s) found)", bots::PathUtf8(user_data_root()),
+                  bots::setup::CountSaves(user_data_root()));
     }
 #if !TARGET_OS_IPHONE && !defined(__ANDROID__)
     try {

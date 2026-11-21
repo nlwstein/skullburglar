@@ -204,6 +204,90 @@ inline std::string MisplacedMessage(const DataRoot& data, const std::vector<std:
          ". Until they are moved there, the game starts without them.";
 }
 
+// Portable mode that isn't on (B-389). The switch is a file named exactly portable.txt next to the program. Windows
+// hides ".txt" by default, so "New > Text Document" named portable.txt is really portable.txt.txt, and the game then
+// quietly uses the user folder: the saves put in bots-data are never read. `names` are the files next to the program
+// (names only). Returns the file that is almost the marker (empty when none): same name ignoring case, or with a
+// second extension or none ("portable", "portable.txt.txt", "Portable.TXT" on a case-sensitive file system).
+inline std::string MarkerLookalike(const std::vector<std::string>& names) {
+  auto lower = [](std::string v) {
+    for (char& c : v) c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    return v;
+  };
+  for (const auto& n : names) {
+    if (n == kPortableMarker) return {};  // the real one is there
+  }
+  for (const auto& n : names) {
+    const std::string l = lower(n);
+    if (l == "portable" || l == "portable.txt" || l == "portable.txt.txt" || l == "portable.text" ||
+        l == "portable.txt.rtf" || l == "portable.txt.lnk")
+      return n;
+  }
+  return {};
+}
+
+// The sentence for the player when portable mode is off but there is a sign they wanted it: a lookalike of portable.txt
+// or a bots-data folder (`has_data_dir`) next to the program. `lookalike` is MarkerLookalike's answer, `base` the folder
+// portable.txt belongs in, `saves` where the game reads its saves instead. Empty when there is nothing to say.
+inline std::string MarkerHint(const std::string& lookalike, bool has_data_dir, const std::filesystem::path& base,
+                              const std::filesystem::path& saves) {
+  if (lookalike.empty() && !has_data_dir) return {};
+  std::string m = "Portable mode is off, so " + std::string(has_data_dir ? "the bots-data folder is ignored and " : "") +
+                  "the game uses " + bots::PlainPathUtf8(saves) + " for saves and settings. ";
+  if (!lookalike.empty())
+    m += "The file next to the game is named \"" + lookalike + "\", but it must be named exactly " + kPortableMarker +
+         " (Windows hides the .txt ending: in File Explorer choose View > Show > File name extensions, then rename it).";
+  else
+    m += "To use it, create an empty file named exactly " + std::string(kPortableMarker) + " in " +
+         bots::PlainPathUtf8(base) + ".";
+  return m;
+}
+
+// The probe for MarkerHint: lists the files and folders next to the program.
+inline std::string FindMarkerHint(const DataRoot& data, const std::filesystem::path& exe_dir, std::string_view appimage,
+                                  const std::filesystem::path& saves) {
+  if (data.source != DataSource::kDefault) return {};
+  if (exe_dir.empty() && appimage.empty()) return {};
+  const std::filesystem::path base = PortableBaseDir(exe_dir, appimage);
+  std::vector<std::string> files;
+  std::error_code ec;
+  for (std::filesystem::directory_iterator it(base, ec), end; !ec && it != end; it.increment(ec)) {
+    std::error_code e2;
+    if (it->is_regular_file(e2)) files.push_back(bots::PathUtf8(it->path().filename()));
+  }
+  const bool has_data_dir = std::filesystem::is_directory(base / kPortableDirName, ec);
+  return MarkerHint(MarkerLookalike(files), has_data_dir, base, saves);
+}
+
+// What this run found out about a portable.txt that isn't (set once by OnConfigurePaths; the launcher and the log read it).
+inline std::string& ActiveMarkerHint() {
+  static std::string hint;
+  return hint;
+}
+
+// How many saves the folder holds, for the log: the .header files under <user>/<profile id>/<game id>/Headers (one per
+// saved game, next to its content folder). 0 for a folder with none or one that can't be read.
+inline int CountSaves(const std::filesystem::path& user_root) {
+  namespace fs = std::filesystem;
+  int n = 0;
+  std::error_code ec;
+  for (fs::directory_iterator prof(user_root, ec), end; !ec && prof != end; prof.increment(ec)) {
+    std::error_code e;
+    const std::string pn = bots::PathUtf8(prof->path().filename());
+    if (pn.size() != 16 || !IsGameDataName(pn) || !prof->is_directory(e)) continue;
+    for (fs::directory_iterator game(prof->path(), e), end2; !e && game != end2; game.increment(e)) {
+      std::error_code e3;
+      const fs::path headers = game->path() / "Headers";
+      if (!fs::is_directory(headers, e3)) continue;
+      for (fs::recursive_directory_iterator h(headers, e3), end3; !e3 && h != end3; h.increment(e3)) {
+        std::error_code e4;
+        if (h->is_regular_file(e4) && h->path().extension() == ".header") ++n;
+      }
+    }
+  }
+  return n;
+}
+
 // The message for the player when portable mode can't be used. `why` is CheckWritable's text.
 inline std::string PortableErrorMessage(const DataRoot& data, const std::string& why) {
   std::string m = "Portable mode is on, but the data folder can't be used.\n\n" + why + "\n\n";
