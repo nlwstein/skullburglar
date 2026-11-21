@@ -76,6 +76,16 @@ checks:
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/save_backup_test.cpp -o $d/t && $d/t
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/portable_test.cpp -o $d/t && $d/t
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/occlusion_choice_test.cpp -o $d/t && $d/t
+    - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/launcher_logic_test.cpp src/setup/settings_catalog.cpp -o $d/t && $d/t
+    # The launcher menu at every target size (layout check) and its keyboard / controller / mouse parity script, drawn
+    # without the game (tools/launcher_preview.cpp) with Dear ImGui at the SDK's version.
+    - >-
+      d=$(mktemp -d) && git -c advice.detachedHead=false clone -q --depth 1 --branch v1.92.5 https://github.com/ocornut/imgui.git $d/imgui &&
+      tools/launcher_preview.sh $d/imgui --out $d/shots --check &&
+      PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/input --sizes 1920x1080,1280x800 --script @tests/launcher_input.script &&
+      PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/input113 --sizes 1920x1080,1280x800 --script @tests/launcher_input_113.script &&
+      PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/saves --state misplaced-repeat --sizes 1920x1080 --script @tests/launcher_input_saves.script &&
+      for s in misplaced misnamed pre1; do PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/$s --state $s --check --script "shot:main;page:graphics;shot:graphics;page:about;shot:about;move-confirm;shot:move-confirm" || exit 1; done
     - sh tests/apprun_test.sh
     - >-
       for f in tools/ci/*.sh tools/rust_env.sh tools/ios/build.sh tools/android/build.sh packaging/linux/AppRun;

@@ -66,6 +66,23 @@ anyway. F11 toggles fullscreen; F3 shows the debug overlay. Debug environment va
 input, frame capture and console commands; `REX_*` for SDK settings) are read in `src/bots_app.h` and
 `src/game_hooks.cpp`.
 
+### Launcher screenshots and the launcher without the game
+
+The launcher (`src/setup/launcher_menu.h`) can draw itself into PNG files at any size and display scaling, which is
+how its changes get screenshots: no capture tool can see its window. The script steps are in
+`src/setup/launcher_shot.h`.
+
+```bash
+BOTS_SETUP_SHOT=run/shots BOTS_SETUP_SHOT_SIZES=1920x1080,1280x800,3840x2160@2 \
+  BOTS_SETUP_SCRIPT='shot:main;page:graphics;pad:Down;shot:graphics' BOTS_SETUP_SHOT_QUIT=1 \
+  ./out/build/mac-arm64-relwithdebinfo/bots --launcher --user_data_root=run/testuser
+```
+
+`tools/launcher_preview.sh <imgui dir>` builds the menu without the game (only Dear ImGui's sources, at the SDK's
+version) and draws every page at nine screen sizes, failing on cut-off text or a selection out of view with
+`--check`; `--script @tests/launcher_input.script` checks that the keyboard, a controller and the mouse can each
+change every kind of setting. CI runs both.
+
 ## Linux and Windows
 
 Both build in throwaway Docker containers after codegen has produced `generated/` (on macOS as above).

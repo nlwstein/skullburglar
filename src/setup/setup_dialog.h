@@ -7,8 +7,10 @@
 // game files as "Choose another folder..." would (desktop builds); BOTS_SETUP_AUTO=1 installs (when a path is set and
 // nothing is installed) and presses Play, so the flow runs unattended.
 // Release builds also check for a newer version when the window opens (update_check.h).
-// Controllers work too (pad_nav.h): focus starts on Play (or Browse... without game files). Start on a controller or
-// Enter on the keyboard plays from anywhere in the window.
+// It draws the full-screen menu (launcher_menu.h, B-387): mouse, keyboard and controllers alike (pad_nav.h feeds the
+// controllers in). The menu edits the settings; this class does everything else and saves on Play.
+// BOTS_SETUP_SHOT=<dir> writes PNG screenshots of the launcher at any size, driven by BOTS_SETUP_SCRIPT (test-only;
+// launcher_shot.h).
 #pragma once
 
 #include "../path_utf8.h"
@@ -40,6 +42,8 @@
 #include "portable.h"
 #include "file_picker.h"
 #include "iso_extract.h"
+#include "launcher_menu.h"
+#include "launcher_shot.h"
 #include "pad_nav.h"
 #include "settings.h"
 #include "settings_logic.h"
@@ -179,78 +183,283 @@ class SetupDialog : public rex::ui::ImGuiDialog {
  protected:
   void OnDraw(ImGuiIO& io) override {
     if (pad_) pad_->Update(io);
-    capturing_ = capture_ >= 0;  // as the frame starts: a key binding may take Enter this frame
     PollWorker();
     if (auto_) RunAuto();
-
-    // Text and layout size (ui_scale.h): the style is scaled for this window only and put back at the end, so the
-    // game's overlays (FPS counter, shader progress) keep their own size.
-    ui_scale_ = LauncherUiScale(io.DisplaySize.y, std::getenv("BOTS_UI_SCALE"));
-    const ImGuiStyle unscaled_style = ImGui::GetStyle();
-    ImGui::GetStyle().ScaleAllSizes(ui_scale_);
-    ImGui::GetStyle().FontScaleMain *= ui_scale_;
-
-    const float width = LauncherWindowWidth(io.DisplaySize.x, ui_scale_);
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
-                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    // The settings scroll inside the window and the buttons stay at the bottom, so at a larger text size Play is
-    // always in view (it was the last line of one long scrolling window).
-    ImGui::SetNextWindowSize(ImVec2(width, io.DisplaySize.y - S(20.0f)));
-    ImGui::SetNextWindowBgAlpha(0.95f);
-    if (ImGui::Begin("50 Cent - Blood on the Sand##bots_setup", nullptr,
-                     ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-                         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
-      LogUiScale(io);  // before the draw calls: Play can delete this dialog
-      DrawMisplaced();
-      DrawGameFiles();
-      ImGui::Spacing();
-      ImGui::Separator();
-      ImGui::Spacing();
-      // The footer's height is what the last frame measured (an update notice makes it taller); 0 on the first.
-      // Kept in ImGui's window storage, not a member: Play can delete this dialog inside DrawButtons.
-      ImGuiStorage* storage = ImGui::GetStateStorage();
-      const ImGuiID footer_id = ImGui::GetID("footer_height");
-      if (ImGui::BeginChild("##settings", ImVec2(0, -storage->GetFloat(footer_id, 0.0f)), ImGuiChildFlags_None)) {
-        DrawSettings();
-        settings_overflow_ = ImGui::GetScrollMaxX();
-      }
-      ImGui::EndChild();
-      const float footer_top = ImGui::GetCursorPosY();
-      ImGui::Spacing();
-      ImGui::Separator();
-      ImGui::Spacing();
-      DrawButtons();
-      storage->SetFloat(footer_id, ImGui::GetCursorPosY() - footer_top + ImGui::GetStyle().WindowPadding.y);
-      // In the window's storage, not a member: Play can delete this dialog inside DrawButtons.
-      storage->SetFloat(ImGui::GetID("window_overflow"), ImGui::GetScrollMaxX());
+    if (!shots_done_) RunShots(io);
+    // BOTS_SETUP_SHOT_QUIT: close a few frames after the shots, as the Quit entry would.
+    if (shot_quit_frames_ > 0 && --shot_quit_frames_ == 0 && !quit_requested_) {
+      quit_requested_ = true;
+      pad_.reset();
+      quit_();
+      return;
     }
-    ImGui::End();
-    ImGui::GetStyle() = unscaled_style;
+    // An installed update restarts the program.
+    if (update_ && update_->finished.load() && !quit_requested_) {
+      quit_requested_ = true;
+      pad_.reset();
+      quit_();
+      return;
+    }
+    // Windows asks about the network as the launcher opens with LAN co-op on, not in the middle of a story.
+    if (Value("user_signin_live") == "true" && FirewallState(firewall_->state.load()) == FirewallState::kNotAsked &&
+        !firewall_asked_) {
+      firewall_asked_ = true;
+      firewall_->asked = true;
+      AskFirewall();
+    }
+    LogUpdate();
+    const LauncherStatus status = Status();
+    const LauncherAction action = menu_.Draw(settings_, status, LaunchFonts());
+    LogUiScale(io, status.dpi_scale);
+    Do(action);  // last: Play and Quit can delete this dialog
   }
 
  private:
-  // Scaled pixels: a size from the layout (designed at scale 1) at this window's text scale.
-  float S(float pixels) const { return pixels * ui_scale_; }
+  // Screen pixels per logical pixel (Windows display scaling; 1 on macOS, where the window's size is in points).
+  float DpiScale() const {
+    const rex::ui::Window* w = imgui_drawer()->window();
+    return w ? float(w->GetDpi()) / float(w->GetMediumDpi()) : 1.0f;
+  }
 
-  // One log line per change of scale or window size: the numbers a "text too small" report needs.
-  void LogUiScale(const ImGuiIO& io) {
-    const float dpi = float(imgui_drawer()->window()->GetDpi());
-    const float font = ImGui::GetFontSize();
-    // The overflow is last frame's: how far the settings list and the window's own content run past their right edge (0 =
-    // everything fits; the layout wraps long lines, so more than 0 means something doesn't).
-    const float window_overflow = ImGui::GetStateStorage()->GetFloat(ImGui::GetID("window_overflow"), 0.0f);
-    const float overflow = std::max(settings_overflow_, window_overflow);
-    if (io.DisplaySize.x == logged_width_ && io.DisplaySize.y == logged_height_ && ui_scale_ == logged_scale_ &&
-        font == logged_font_ && overflow == logged_overflow_)
-      return;
-    logged_width_ = io.DisplaySize.x, logged_height_ = io.DisplaySize.y, logged_scale_ = ui_scale_, logged_font_ = font;
-    logged_overflow_ = overflow;
-    REXLOG_INFO("setup: UI scale {:.2f} (window {:.0f}x{:.0f} logical, display scaling {:.0f}%, text {:.1f} px, "
-                "about {:.1f} px on screen)",
-                ui_scale_, io.DisplaySize.x, io.DisplaySize.y, dpi * 100.0f / 96.0f, font, font * dpi / 96.0f);
-    REXLOG_INFO("setup: layout: launcher {:.0f} px wide, content runs {:.0f} px past the right edge (settings {:.0f}, "
-                "window {:.0f})",
-                LauncherWindowWidth(io.DisplaySize.x, ui_scale_), overflow, settings_overflow_, window_overflow);
+  // One log line per change of size or scale: the numbers a "text too small" report needs.
+  void LogUiScale(const ImGuiIO& io, float dpi) {
+    const float scale = LauncherMenuScale(io.DisplaySize.x, io.DisplaySize.y, std::getenv("BOTS_UI_SCALE"));
+    if (io.DisplaySize.x == logged_width_ && io.DisplaySize.y == logged_height_ && scale == logged_scale_) return;
+    logged_width_ = io.DisplaySize.x, logged_height_ = io.DisplaySize.y, logged_scale_ = scale;
+    const LauncherLayoutReport& r = menu_.report();
+    REXLOG_INFO("setup: menu scale {:.2f} (window {:.0f}x{:.0f} logical, display scaling {:.0f}%, body text about "
+                "{:.1f} px on screen, font bake {:.2f}x the size drawn); layout: {} cut-off texts, {} prompts left out",
+                scale, io.DisplaySize.x, io.DisplaySize.y, dpi * 100.0f, double(r.min_text_px),
+                double(LaunchFonts().Mismatch(scale * dpi)), r.truncated, r.prompts_dropped);
+  }
+
+  void LogUpdate() {
+    if (update_logged_ || !update_ || !update_->done.load()) return;
+    update_logged_ = true;
+    const UpdateInfo& info = update_->info;
+    if (!info.error.empty()) REXLOG_INFO("setup: update check failed: {}", info.error);
+    else REXLOG_INFO("setup: newest release {}, this is {}", info.latest, AppVersion());
+  }
+
+  // What the menu shows, from the window's own state.
+  LauncherStatus Status() {
+    LauncherStatus st;
+    st.version = AppVersion();
+    st.dpi_scale = DpiScale();
+    st.pad = pad_ ? pad_->Kind() : PadKind::kNone;
+    st.installed = installed_;
+    st.show_reinstall = show_reinstall_;
+    st.extracting = Extracting();
+    if (st.extracting) {
+      const uint64_t done = progress_->bytes_done, total = progress_->bytes_total;
+      st.extract_fraction = total ? float(double(done) / double(total)) : 0.0f;
+      char text[96];
+      std::snprintf(text, sizeof(text), "%.1f / %.1f GB", done / 1e9, total / 1e9);
+      st.extract_progress = text;
+      std::snprintf(text, sizeof(text), "File %u of %u: ", progress_->files_done.load(), progress_->files_total.load());
+      st.extract_file = text + progress_->Current();
+    }
+    st.game_dir = bots::PlainPathUtf8(game_dir_);
+    st.game_dir_locked = game_dir_locked_;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    st.folder_choice = false;
+#endif
+    st.can_use_default = !SamePath(game_dir_, default_game_dir_);
+    if (!old_game_dir_.empty() && !SamePath(old_game_dir_, game_dir_) && IsGameDir(old_game_dir_))
+      st.unused_copy = bots::PlainPathUtf8(old_game_dir_);
+    st.install_error = error_;
+    st.folder_error = folder_error_;
+    st.iso_path = iso_path_;
+    st.iso_path_size = sizeof(iso_path_);
+    st.config_path = bots::PlainPathUtf8(config_path_);
+    if (const DataRoot& data = ActiveDataRoot(); data.source != DataSource::kDefault) {
+      st.portable_note = std::string("Portable mode (") +
+                         (data.source == DataSource::kEnv ? "BOTS_DATA_DIR" : "portable.txt") +
+                         "): saves, settings, shader cache and logs are in " + bots::PlainPathUtf8(data.root);
+    }
+    st.log_folder = bots::PlainPathUtf8(LogFolder());
+    st.reset_note = reset_note_;
+    // Portable mode (B-386, B-389): saves or bots.toml in the data folder instead of its user/ folder, or a portable.txt
+    // that Windows named portable.txt.txt. Never moves anything by itself.
+    if (!misplaced_.empty()) {
+      st.saves_warning = MisplacedMessage(ActiveDataRoot(), misplaced_);
+      st.saves_can_move = true;
+      std::string list;
+      for (const auto& n : misplaced_) list += (list.empty() ? "" : ", ") + n;
+      st.saves_move_text = "This moves " + list + " from " + bots::PlainPathUtf8(ActiveDataRoot().root) + " into " +
+                           bots::PlainPathUtf8(LayoutFor(ActiveDataRoot().root).user) +
+                           ", where the game looks for them. Nothing is copied or deleted, and nothing already in the "
+                           "user folder is replaced.";
+    }
+    st.saves_note = misplaced_note_;
+    st.saves_note_is_error = misplaced_note_is_error_;
+    st.update_available_feature = UpdateCheckAvailable();
+    if (update_) {
+      UpdateState& u = *update_;
+      st.update_checking = !u.done.load();
+      if (u.done.load()) {
+        const UpdateInfo& info = u.info;
+        st.update_check_failed = !info.error.empty();
+        st.update_failed_note = u.failed_note;
+        st.update_newer = info.error.empty() && !info.latest.empty() && IsNewerVersion(info.latest, AppVersion());
+        st.update_latest = info.latest;
+        st.update_can_install = st.update_newer && u.has_asset && u.blocker.empty();
+        st.update_can_download = st.update_newer && !info.page.empty();
+        st.update_busy = UpdateBusy();
+        st.update_committed = UpdateCommitted();
+        st.update_finished = u.finished.load();
+        st.update_stage = u.progress.stage.load();
+        st.update_done_mb = double(u.progress.done.load()) / 1e6;
+        st.update_total_mb = double(u.progress.total.load()) / 1e6;
+        std::string error;
+        {
+          std::lock_guard<std::mutex> lock(u.mutex);
+          error = u.install_error;
+        }
+        if (!error.empty()) {
+          st.update_note = "The update didn't install (" + error +
+                           "). Your install is unchanged; the download page gets the new version by hand.";
+          st.update_note_is_error = true;
+        } else if (st.update_newer && u.needs_move) {
+          st.update_note = "To update from here, move Skullburglar to your Applications folder first.";
+        } else if (st.update_newer && u.has_asset && !u.blocker.empty()) {
+          st.update_note = "Can't update in place: " + u.blocker + ".";
+        }
+      }
+    }
+    st.firewall = int(firewall_->state.load());
+    st.firewall_fixing = firewall_->fixing.load() || firewall_->fix.load();
+    st.firewall_fix_failed = firewall_->fix_failed.load();
+    return st;
+  }
+
+  // What the menu asked for. Play and Quit delete this dialog: nothing may follow them.
+  void Do(LauncherAction action) {
+    switch (action) {
+      case LauncherAction::kNone: return;
+      case LauncherAction::kPlay:
+        if (installed_ && !Extracting() && !UpdateBusy()) Play();
+        return;
+      case LauncherAction::kQuit:
+        if (UpdateCommitted()) return;  // past the download the swap can't be interrupted
+        if (Extracting()) progress_->cancel = true;
+        if (UpdateBusy()) update_->progress.cancel = true;
+        pad_.reset();
+        quit_();
+        return;
+      case LauncherAction::kBrowseIso:
+        if (!Extracting()) {
+          auto picked = OpenPicker(PickIsoFile);
+          if (!picked.empty()) SetIsoPath(bots::PathUtf8(picked));
+        }
+        return;
+      case LauncherAction::kInstall:
+        if (!Extracting()) StartExtract();
+        return;
+      case LauncherAction::kCancelInstall:
+        if (Extracting()) progress_->cancel = true;
+        return;
+      case LauncherAction::kShowReinstall: show_reinstall_ = true; return;
+      case LauncherAction::kHideReinstall: show_reinstall_ = false; return;
+      case LauncherAction::kChooseFolder:
+#if !(defined(__APPLE__) && TARGET_OS_IPHONE)
+        if (!Extracting() && !game_dir_locked_) {
+          const std::filesystem::path chosen = OpenPicker(PickFolder);
+          if (!chosen.empty()) UseGameDir(ChosenGameDir(chosen, folder_error_));
+        }
+#endif
+        return;
+      case LauncherAction::kUseDefaultFolder:
+        if (!Extracting() && !game_dir_locked_) UseGameDir(default_game_dir_);
+        return;
+      case LauncherAction::kUpdateNow:
+        if (update_ && update_->has_asset && update_->blocker.empty() && !UpdateBusy()) StartInstall();
+        return;
+      case LauncherAction::kCancelUpdate:
+        if (UpdateBusy()) update_->progress.cancel = true;
+        return;
+      case LauncherAction::kDownloadPage:
+        if (update_ && update_->done.load() && !update_->info.page.empty()) OpenInBrowser(update_->info.page);
+        return;
+      case LauncherAction::kFixFirewall: firewall_->fix = true; return;
+      case LauncherAction::kDismissSaves: misplaced_.clear(); return;
+      case LauncherAction::kMoveSaves: {
+        if (misplaced_.empty() || Extracting()) return;
+        std::string err;
+        const auto moved = MoveMisplacedGameData(ActiveDataRoot(), misplaced_, err);
+        REXLOG_INFO("setup: moved {} of {} entries from the data folder into user/{}{}", moved.size(), misplaced_.size(),
+                    err.empty() ? "" : ": ", err);
+        const bool toml_moved = std::find(moved.begin(), moved.end(), "bots.toml") != moved.end();
+        if (toml_moved) settings_file_moved_ = true;
+        misplaced_note_ = err;
+        misplaced_note_is_error_ = !err.empty();
+        if (!moved.empty()) {
+          misplaced_note_ += (err.empty() ? "" : " ") + std::string("Moved. Your saves are used from now on.");
+          if (toml_moved)
+            misplaced_note_ += " Your settings file moved too: it takes effect the next time you start Skullburglar "
+                               "(this session uses the defaults, and changes made now aren't saved).";
+        }
+        misplaced_.clear();
+        return;
+      }
+      case LauncherAction::kResetAll: {
+        int changed = 0;
+        const std::string err = ResetSettings(settings_, config_path_, &changed);
+        if (!err.empty()) error_ = err;
+        reset_note_ = err.empty() ? std::to_string(changed) + " settings were put back to this version's defaults."
+                                  : "Reset failed: " + err;
+        return;
+      }
+    }
+  }
+
+  // BOTS_SETUP_SHOT (launcher_shot.h): the launcher draws itself into PNGs at the sizes asked for, driven by
+  // BOTS_SETUP_SCRIPT, on a copy of the settings. Once, on the first frame.
+  void RunShots(const ImGuiIO& io) {
+    shots_done_ = true;
+    const std::filesystem::path dir = bots::EnvPath("BOTS_SETUP_SHOT");
+    if (dir.empty()) return;
+    const float dpi = DpiScale();
+    std::vector<ShotSize> sizes;
+    if (const char* list = std::getenv("BOTS_SETUP_SHOT_SIZES"); list && *list) sizes = ParseShotSizes(list);
+    if (sizes.empty())
+      sizes.push_back({int(std::lround(io.DisplaySize.x * dpi)), int(std::lround(io.DisplaySize.y * dpi)), dpi});
+    const char* script_text = std::getenv("BOTS_SETUP_SCRIPT");
+    const auto script = ParseShotScript(script_text && *script_text ? script_text : "shot:launcher");
+    std::vector<Setting> copy = settings_;
+    const LauncherStatus base = Status();
+    ShotHost host;
+    host.fonts = EmbeddedLauncherFontData();
+    host.frame = [&](LauncherMenu& menu, const LauncherFonts& fonts, float shot_dpi, PadKind pad) {
+      LauncherStatus st = base;
+      st.dpi_scale = shot_dpi;
+      if (pad != PadKind::kXbox || st.pad == PadKind::kNone) st.pad = pad;
+      // What the menu asks for is only logged: the shots never install, update or play. Reset to defaults applies to the
+      // copy, as the window's would, so a script can check it.
+      const LauncherAction a = menu.Draw(copy, st, fonts);
+      if (a == LauncherAction::kResetAll)
+        for (auto& s : copy)
+          if (!s.locked && !ResetKeeps(s.cvar)) s.value = s.default_value;
+      return a;
+    };
+    host.value_of = [&](const std::string& cvar) {
+      for (const auto& s : copy)
+        if (s.cvar == cvar) return s.value;
+      return std::string();
+    };
+    host.reset = [&] { copy = settings_; };  // each size starts from the settings as loaded
+    host.log = [](const std::string& line) { REXLOG_INFO("setup: shot: {}", line); };
+    const int failures = RunShotScript(host, dir, sizes, script);
+    // BOTS_SETUP_SHOT_SAVE=1: keep what the script changed (at the last size) and save it as Play would, so a test can
+    // check what reaches bots.toml.
+    if (const char* save = std::getenv("BOTS_SETUP_SHOT_SAVE"); save && std::strcmp(save, "1") == 0) {
+      settings_ = copy;
+      const std::string err = SaveSettings(settings_, config_path_);
+      REXLOG_INFO("setup: BOTS_SETUP_SHOT_SAVE: {}", err.empty() ? "saved" : err);
+    }
+    REXLOG_INFO("setup: BOTS_SETUP_SHOT: {} size(s) written to {}, {} failure(s)", sizes.size(), bots::PathUtf8(dir),
+                failures);
+    if (const char* q = std::getenv("BOTS_SETUP_SHOT_QUIT"); q && std::strcmp(q, "1") == 0) shot_quit_frames_ = 10;
   }
 
   void SetIsoPath(const std::string& path) {
@@ -363,204 +572,6 @@ class SetupDialog : public rex::ui::ImGuiDialog {
 #endif
   }
 
-  void DrawFirewall() {
-    const auto state = FirewallState(firewall_->state.load());
-    if (state == FirewallState::kNotApplicable || state == FirewallState::kChecking || state == FirewallState::kUnknown)
-      return;
-    if (state == FirewallState::kNotAsked && !firewall_asked_) {
-      firewall_asked_ = true;
-      firewall_->asked = true;
-      AskFirewall();  // Windows' prompt opens now, over this window, instead of during a story
-    }
-    ImGui::Indent();
-    const ImVec4 warn(1.0f, 0.75f, 0.3f, 1.0f);
-    switch (state) {
-      case FirewallState::kAllowed:
-        WrappedDisabled("Windows Firewall: allowed.");
-        break;
-      case FirewallState::kNotAsked:
-        WrappedColored(warn, "Windows is asking whether Skullburglar may use your network: choose Allow.");
-        break;
-      case FirewallState::kPublicNetwork:
-        WrappedColored(warn,
-                       "This network is set to Public, where Windows Firewall blocks LAN co-op. Set it to Private "
-                       "(Settings > Network & internet > your network > Private network).");
-        break;
-      case FirewallState::kBlocked:
-        WrappedColored(warn, "Windows Firewall is blocking LAN co-op: other players' games won't show up.");
-        ImGui::BeginDisabled(firewall_->fixing.load() || firewall_->fix.load());
-        if (ImGui::Button(firewall_->fixing.load() ? "Waiting for Windows..." : "Allow Skullburglar")) {
-          firewall_->fix = true;
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        WrappedDisabled(firewall_->fix_failed.load() ? "Not changed. Windows asks for administrator permission."
-                                                         : "Windows asks for administrator permission.");
-        break;
-      default:
-        break;
-    }
-    ImGui::Unindent();
-  }
-
-  // The update offer, and a note when the check failed. Drawn in the Play row (DrawButtons), not at the top of the long
-  // page, so it is in view whenever Play is (B-294).
-  void DrawUpdate() {
-    if (!update_ || !update_->done.load()) return;
-    const UpdateInfo& info = update_->info;
-    if (!update_logged_) {
-      update_logged_ = true;
-      if (!info.error.empty()) REXLOG_INFO("setup: update check failed: {}", info.error);
-      else REXLOG_INFO("setup: newest release {}, this is {}", info.latest, AppVersion());
-    }
-    if (!update_->failed_note.empty()) {
-      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.4f, 1.0f));
-      ImGui::TextWrapped("%s", update_->failed_note.c_str());
-      ImGui::PopStyleColor();
-    }
-    if (!info.error.empty()) {
-      WrappedDisabled("Couldn't check for updates.");
-      return;
-    }
-    if (info.latest.empty() || !IsNewerVersion(info.latest, AppVersion())) return;
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
-    ImGui::TextWrapped("Skullburglar %s is out (you have %s).", info.latest.c_str(), AppVersion());
-    ImGui::PopStyleColor();
-    UpdateState& u = *update_;
-    const bool can_update = u.has_asset && u.blocker.empty();
-    ImGui::BeginDisabled(UpdateBusy());
-    if (can_update) {
-      ImGui::SameLine();
-      if (ImGui::SmallButton("Update now")) StartInstall();
-    }
-    if (!info.page.empty()) {
-      ImGui::SameLine();
-      if (ImGui::SmallButton("Download it")) OpenInBrowser(info.page);
-    }
-    ImGui::EndDisabled();
-    if (UpdateBusy()) {
-      const auto stage = UpdateStage(u.progress.stage.load());
-      const double done = double(u.progress.done.load()) / 1e6, total = double(u.progress.total.load()) / 1e6;
-      if (stage == UpdateStage::kDownloading) {
-        ImGui::TextDisabled("Downloading %.1f of %.1f MB...", done, total);
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Cancel")) u.progress.cancel = true;
-      } else if (stage == UpdateStage::kVerifying) {
-        ImGui::TextDisabled("Checking the download...");
-      } else {
-        ImGui::TextDisabled("Installing...");
-      }
-    } else if (u.finished.load()) {
-      ImGui::TextDisabled("Updated. Restarting...");
-      if (!quit_requested_) {
-        quit_requested_ = true;
-        pad_.reset();
-        quit_();
-        return;
-      }
-    } else {
-      std::string error;
-      {
-        std::lock_guard<std::mutex> lock(u.mutex);
-        error = u.install_error;
-      }
-      if (!error.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.4f, 1.0f));
-        ImGui::TextWrapped("The update didn't install (%s). Your install is unchanged; \"Download it\" gets the new version by hand.",
-                           error.c_str());
-        ImGui::PopStyleColor();
-      } else if (u.needs_move) {
-        WrappedDisabled("To update from here, move Skullburglar to your Applications folder first.");
-      } else if (u.has_asset && !u.blocker.empty()) {
-        WrappedDisabled("Can't update in place: %s.", u.blocker.c_str());
-      }
-    }
-    ImGui::Spacing();
-  }
-
-  void DrawGameFiles() {
-    ImGui::TextUnformatted("Game files");
-    if (installed_ && !show_reinstall_) {
-      WrappedDisabled("Installed in %s", bots::PlainPathUtf8(game_dir_).c_str());
-      DrawUnusedCopy();
-      if (ImGui::SmallButton("Reinstall from a disc image...")) show_reinstall_ = true;
-      return;
-    }
-    if (!installed_) {
-      ImGui::TextWrapped(
-          "This port runs on files from your own copy of the game. Choose a disc image (.iso) "
-          "of the Xbox 360 disc. The files (about 7 GB) are copied once into:");
-    } else {
-      ImGui::TextUnformatted("Reinstall into:");
-    }
-    WrappedDisabled("%s", bots::PlainPathUtf8(game_dir_).c_str());
-    DrawFolderChoice();
-    ImGui::BeginDisabled(Extracting());
-    ImGui::SetNextItemWidth(-S(110.0f));
-    ImGui::InputTextWithHint("##iso", "Path to the .iso file", iso_path_, sizeof(iso_path_));
-    ImGui::SameLine();
-    if (ImGui::Button("Browse...", ImVec2(-1, 0))) {
-      auto picked = OpenPicker(PickIsoFile);
-      if (!picked.empty()) SetIsoPath(bots::PathUtf8(picked));
-    }
-    if (!installed_) ImGui::SetItemDefaultFocus();
-    ImGui::BeginDisabled(iso_path_[0] == 0);
-    if (ImGui::Button(installed_ ? "Reinstall" : "Install", ImVec2(S(160), 0))) StartExtract();
-    ImGui::EndDisabled();
-    ImGui::EndDisabled();
-
-    if (Extracting()) {
-      uint64_t done = progress_->bytes_done, total = progress_->bytes_total;
-      float fraction = total ? float(double(done) / double(total)) : 0.0f;
-      char overlay[96];
-      std::snprintf(overlay, sizeof(overlay), "%.1f / %.1f GB", done / 1e9, total / 1e9);
-      ImGui::ProgressBar(fraction, ImVec2(-1, 0), overlay);
-      WrappedDisabled("File %u of %u: %s", progress_->files_done.load(),
-                          progress_->files_total.load(), progress_->Current().c_str());
-      if (ImGui::Button("Cancel")) progress_->cancel = true;
-    }
-    if (!error_.empty()) {
-      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.4f, 1.0f));
-      ImGui::TextWrapped("%s", error_.c_str());
-      ImGui::PopStyleColor();
-    }
-  }
-
-  // Desktop builds: the player may put the game files in another folder (a roomier drive, the install folder). The
-  // choice is kept in bots.toml as game_data_root once that folder holds the game; until then the default stays.
-  // iOS and tvOS have no launcher, and keep the game files in the app container.
-  void DrawFolderChoice() {
-#if !(defined(__APPLE__) && TARGET_OS_IPHONE)
-    if (game_dir_locked_) {
-      ImGui::SameLine();
-      ImGui::TextDisabled("(set by a launch option)");
-      return;
-    }
-    ImGui::BeginDisabled(Extracting());
-    if (ImGui::SmallButton("Choose another folder...")) {
-      const std::filesystem::path chosen = OpenPicker(PickFolder);
-      if (!chosen.empty()) UseGameDir(ChosenGameDir(chosen, folder_error_));
-    }
-    if (!SamePath(game_dir_, default_game_dir_)) {
-      ImGui::SameLine();
-      if (ImGui::SmallButton("Use the default folder")) UseGameDir(default_game_dir_);
-    }
-    ImGui::EndDisabled();
-    if (!folder_error_.empty()) {
-      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.4f, 1.0f));
-      ImGui::TextWrapped("%s", folder_error_.c_str());
-      ImGui::PopStyleColor();
-    }
-#endif
-  }
-
-  // An installed copy that the chosen folder replaced: say it can go, never delete it.
-  void DrawUnusedCopy() {
-    if (old_game_dir_.empty() || SamePath(old_game_dir_, game_dir_) || !IsGameDir(old_game_dir_)) return;
-    ImGui::TextWrapped("The game files in %s aren't used any more: delete that folder to free about 7 GB.",
-                       bots::PlainPathUtf8(old_game_dir_).c_str());
-  }
-
   void UseGameDir(const std::filesystem::path& dir) {
     if (dir.empty()) {  // refused; folder_error_ says why
       if (!folder_error_.empty()) REXLOG_WARN("setup: {}", folder_error_);
@@ -582,128 +593,6 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     if (!err.empty()) REXLOG_WARN("setup: {}", err);
   }
 
-  void DrawSettings() {
-    ImGui::TextUnformatted("Settings");
-    WrappedDisabled("Saved in %s", bots::PlainPathUtf8(config_path_).c_str());
-    if (const DataRoot& data = ActiveDataRoot(); data.source != DataSource::kDefault) {
-      WrappedDisabled("Portable mode (%s): saves, settings, shader cache and logs are in %s",
-                          data.source == DataSource::kEnv ? "BOTS_DATA_DIR" : "portable.txt",
-                          bots::PlainPathUtf8(data.root).c_str());
-    }
-    DrawReset();
-    for (auto& s : settings_) {
-      if (s.binding) continue;  // DrawBindings
-      if (s.cvar == "pre1_occlusion" && Value("renderer") != "pre1") continue;  // only the pre-1.0 renderer has it
-      if (!s.section.empty()) {
-        ImGui::Spacing();
-        ImGui::SeparatorText(s.section.c_str());
-      }
-      // The rest of the keyboard and mouse section only matters with it on.
-      const bool kbm_off = s.cvar.starts_with("kbm_") && Value("kbm") == "false";
-      // Anti-aliasing and sharpening are n1 passes: greyed out with the pre-1.0 renderer, like HDR.
-      const bool n1_only = (s.cvar == "anti_aliasing" || s.cvar == "sharpening") && Value("renderer") == "pre1";
-      ImGui::BeginDisabled(Extracting() || kbm_off || n1_only);
-      DrawSetting(s, S(260.0f));
-      ImGui::EndDisabled();
-      if (s.cvar == "vulkan_hdr" && Value("renderer") == "pre1")
-        WrappedDisabled("HDR requires the new renderer.");
-      if (s.cvar == "sharpening" && Value("renderer") == "pre1")
-        WrappedDisabled("Anti-aliasing and sharpening require the new renderer.");
-      if (s.cvar == "user_signin_live" && s.value == "true") DrawFirewall();
-      if (s.cvar == "diagnostic_logging") {
-        ImGui::Indent();
-        WrappedDisabled("Logs are in %s", bots::PlainPathUtf8(LogFolder()).c_str());
-        ImGui::Unindent();
-      }
-    }
-    DrawBindings();
-  }
-
-  // Portable mode (B-386): saves or bots.toml sitting in the data folder instead of its user/ folder. Say where they
-  // belong and offer to move them, after a confirmation that says what happens. Never moves anything by itself.
-  void DrawMisplaced() {
-    if (misplaced_.empty() && misplaced_note_.empty()) return;
-    const ImVec4 warn(1.0f, 0.75f, 0.3f, 1.0f);
-    ImGui::PushStyleColor(ImGuiCol_Text, warn);
-    if (!misplaced_.empty()) ImGui::TextWrapped("%s", MisplacedMessage(ActiveDataRoot(), misplaced_).c_str());
-    else ImGui::TextWrapped("%s", misplaced_note_.c_str());
-    ImGui::PopStyleColor();
-    if (!misplaced_.empty()) {
-      ImGui::BeginDisabled(Extracting());
-      if (ImGui::Button("Move them to the user folder...")) ImGui::OpenPopup("Move your saves and settings?");
-      ImGui::EndDisabled();
-      ImGui::SameLine();
-      if (ImGui::Button("Not now")) misplaced_.clear();
-    }
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(S(520.0f), 0.0f));
-    if (!ImGui::BeginPopupModal("Move your saves and settings?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
-    std::string list;
-    for (const auto& n : misplaced_) list += (list.empty() ? "" : ", ") + n;
-    ImGui::TextWrapped("This moves %s from %s into %s, where the game looks for them. Nothing is copied or deleted, and "
-                       "nothing already in the user folder is replaced.",
-                       list.c_str(), bots::PlainPathUtf8(ActiveDataRoot().root).c_str(),
-                       bots::PlainPathUtf8(LayoutFor(ActiveDataRoot().root).user).c_str());
-    ImGui::Spacing();
-    if (ImGui::Button("Move them", ImVec2(S(160), 0))) {
-      std::string err;
-      const auto moved = MoveMisplacedGameData(ActiveDataRoot(), misplaced_, err);
-      REXLOG_INFO("setup: moved {} of {} entries from the data folder into user/{}{}", moved.size(), misplaced_.size(),
-                  err.empty() ? "" : ": ", err);
-      const bool toml_moved = std::find(moved.begin(), moved.end(), "bots.toml") != moved.end();
-      if (toml_moved) settings_file_moved_ = true;
-      misplaced_note_ = err;
-      if (!moved.empty()) {
-        misplaced_note_ += (err.empty() ? "" : " ") + std::string("Moved. Your saves are used from now on.");
-        if (toml_moved)
-          misplaced_note_ += " Your settings file moved too: it takes effect the next time you start Skullburglar "
-                             "(this session uses the defaults, and changes made now aren't saved).";
-      }
-      misplaced_.clear();
-      ImGui::CloseCurrentPopup();
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Cancel", ImVec2(S(120), 0))) ImGui::CloseCurrentPopup();
-    ImGui::EndPopup();
-  }
-
-  // "Reset to defaults" with a confirmation that says what it does and doesn't touch (B-359).
-  void DrawReset() {
-    ImGui::BeginDisabled(Extracting());
-    if (ImGui::SmallButton("Reset to defaults...")) ImGui::OpenPopup("Reset to defaults?");
-    ImGui::EndDisabled();
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(S(520.0f), 0.0f));
-    if (!ImGui::BeginPopupModal("Reset to defaults?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
-    int differ = 0;
-    for (const auto& s : settings_)
-      if (!s.locked && !ResetKeeps(s.cvar) && !SameValue(s.value, s.default_value)) ++differ;
-    ImGui::TextWrapped("This puts every setting in this window back to the defaults of version %s: the display and "
-                       "graphics options, the controller and co-op options, and the keyboard and mouse options "
-                       "including every key binding.",
-                       AppVersion());
-    ImGui::Spacing();
-    ImGui::TextWrapped("It does not change the game files folder or where your data is kept, \"Check for new versions\", "
-                       "or anything a launch option has set. Your saves are not touched.");
-    ImGui::Spacing();
-    ImGui::TextWrapped("The reset keys are removed from the settings file, so a later version's new defaults apply to "
-                       "you. %d of the settings here differ from the defaults now.",
-                       differ);
-    ImGui::Spacing();
-    if (ImGui::Button("Reset settings", ImVec2(S(160), 0))) {
-      std::string err = ResetSettings(settings_, config_path_, nullptr);
-      if (!err.empty()) error_ = err;
-      capture_ = -1;
-      ImGui::CloseCurrentPopup();
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Cancel", ImVec2(S(120), 0))) ImGui::CloseCurrentPopup();
-    ImGui::EndPopup();
-  }
-
   // Where this run's log goes: next to --log_file when one is set (the Linux AppImage's launcher script and the macOS
   // app set it: ~/.local/state/bots-recomp/logs, ~/Library/Logs/Skullburglar), else the logs folder next to the program.
   static std::filesystem::path LogFolder() {
@@ -718,193 +607,9 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     return {};
   }
 
-  // Key bindings (kbm_* cvars): each action lists its keys. Set waits for the next key, mouse button or wheel
-  // notch and makes it the only key; + adds one; Reset restores the default.
-  void DrawBindings() {
-    if (std::none_of(settings_.begin(), settings_.end(), [](const Setting& s) { return s.binding; })) return;
-    ImGui::BeginDisabled(Value("kbm") == "false" || Extracting());
-    if (ImGui::TreeNode("Key bindings")) {
-      if (capture_ >= 0) PollCapture();
-      if (ImGui::BeginTable("##bindings", 3,
-                            ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY,
-                            ImVec2(0, S(240)))) {
-        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthStretch, 1.2f);
-        ImGui::TableSetupColumn("Keys", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-        ImGui::TableSetupColumn("##edit", ImGuiTableColumnFlags_WidthFixed, S(150.0f));
-        for (int i = 0; i < int(settings_.size()); ++i) {
-          Setting& s = settings_[i];
-          if (!s.binding) continue;
-          ImGui::PushID(s.cvar.c_str());
-          ImGui::TableNextRow();
-          ImGui::TableNextColumn();
-          ImGui::TextUnformatted(s.label.c_str());
-          ImGui::TableNextColumn();
-          if (capture_ == i) {
-            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Press a key or mouse button...");
-          } else {
-            std::string keys = s.value;
-            for (size_t at = keys.find(','); at != std::string::npos; at = keys.find(',', at + 2)) keys.insert(at + 1, " ");
-            ImGui::TextUnformatted(keys.empty() ? "(none)" : keys.c_str());
-          }
-          ImGui::TableNextColumn();
-          ImGui::BeginDisabled(s.locked);
-          if (capture_ == i) {
-            if (ImGui::SmallButton("Cancel")) capture_ = -1;
-          } else {
-            if (ImGui::SmallButton("Set")) StartCapture(i, false);
-            ImGui::SameLine();
-            if (ImGui::SmallButton("+")) StartCapture(i, true);
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Reset")) s.value = s.default_value;
-          }
-          ImGui::EndDisabled();
-          ImGui::PopID();
-        }
-        ImGui::EndTable();
-      }
-      if (ImGui::SmallButton("Reset all keys")) {
-        for (auto& s : settings_)
-          if (s.binding && !s.locked) s.value = s.default_value;
-      }
-      ImGui::TreePop();
-    } else {
-      capture_ = -1;
-    }
-    ImGui::EndDisabled();
-  }
-
-  void StartCapture(int index, bool append) {
-    capture_ = index;
-    capture_append_ = append;
-    capture_armed_ = false;  // from the next frame, so the click on Set isn't taken as the key
-  }
-
-  // Key names as the kbm_* cvars spell them (rex/ui/keybinds.cpp).
-  static std::string KeyName(ImGuiKey key) {
-    if (key >= ImGuiKey_A && key <= ImGuiKey_Z) return std::string(1, char('A' + (key - ImGuiKey_A)));
-    if (key >= ImGuiKey_0 && key <= ImGuiKey_9) return std::string(1, char('0' + (key - ImGuiKey_0)));
-    if (key >= ImGuiKey_F1 && key <= ImGuiKey_F12) return "F" + std::to_string(1 + (key - ImGuiKey_F1));
-    if (key >= ImGuiKey_Keypad0 && key <= ImGuiKey_Keypad9) return "Numpad" + std::to_string(key - ImGuiKey_Keypad0);
-    switch (key) {
-      case ImGuiKey_Space: return "Space";
-      case ImGuiKey_Enter: return "Return";
-      case ImGuiKey_KeypadEnter: return "NumpadEnter";
-      case ImGuiKey_Escape: return "Escape";
-      case ImGuiKey_Tab: return "Tab";
-      case ImGuiKey_Backspace: return "Backspace";
-      case ImGuiKey_LeftShift: case ImGuiKey_RightShift: return "Shift";
-      case ImGuiKey_LeftCtrl: case ImGuiKey_RightCtrl: return "Control";
-      case ImGuiKey_LeftAlt: case ImGuiKey_RightAlt: return "Alt";
-      case ImGuiKey_UpArrow: return "Up";
-      case ImGuiKey_DownArrow: return "Down";
-      case ImGuiKey_LeftArrow: return "Left";
-      case ImGuiKey_RightArrow: return "Right";
-      case ImGuiKey_Delete: return "Delete";
-      case ImGuiKey_Insert: return "Insert";
-      case ImGuiKey_Home: return "Home";
-      case ImGuiKey_End: return "End";
-      case ImGuiKey_PageUp: return "PageUp";
-      case ImGuiKey_PageDown: return "PageDown";
-      case ImGuiKey_CapsLock: return "CapsLock";
-      case ImGuiKey_GraveAccent: return "Backtick";
-      case ImGuiKey_Minus: return "Minus";
-      case ImGuiKey_Equal: return "Plus";
-      case ImGuiKey_Comma: return "Comma";
-      case ImGuiKey_Period: return "Period";
-      case ImGuiKey_Semicolon: return "Semicolon";
-      case ImGuiKey_Slash: return "Slash";
-      case ImGuiKey_Backslash: return "Backslash";
-      case ImGuiKey_LeftBracket: return "LBracket";
-      case ImGuiKey_RightBracket: return "RBracket";
-      case ImGuiKey_Apostrophe: return "Quote";
-      default: return {};
-    }
-  }
-
-  void PollCapture() {
-    if (!capture_armed_) {
-      capture_armed_ = true;
-      return;
-    }
-    // A controller can't press a key: B gives up, as Cancel does.
-    if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
-      capture_ = -1;
-      return;
-    }
-    std::string name;
-    for (int k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_NamedKey_END && name.empty(); ++k) {
-      if (ImGui::IsKeyPressed(ImGuiKey(k), false)) name = KeyName(ImGuiKey(k));
-    }
-    // Mouse buttons count unless they are clicking a button in this window (Cancel, another row).
-    if (name.empty() && !ImGui::IsAnyItemHovered()) {
-      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) name = "LMB";
-      else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) name = "RMB";
-      else if (ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) name = "MMB";
-    }
-    if (name.empty() && ImGui::GetIO().MouseWheel != 0) name = ImGui::GetIO().MouseWheel > 0 ? "WheelUp" : "WheelDown";
-    if (name.empty()) return;
-    std::string& value = settings_[capture_].value;
-    if (!capture_append_ || value.empty()) {
-      value = name;
-    } else if (("," + value + ",").find("," + name + ",") == std::string::npos) {
-      value += "," + name;
-    }
-    capture_ = -1;
-  }
-
-  // Start on a controller or Enter on the keyboard plays from anywhere in the window, except while a path is typed, a
-  // list is open or a key binding waits for its key.
-  bool QuickPlayPressed() const {
-    if (!installed_ || Extracting() || capturing_ || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) return false;
-    if (pad_ && ImGui::IsKeyPressed(ImGuiKey_GamepadStart, false)) return true;
-    return !ImGui::GetIO().WantTextInput &&
-           (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false));
-  }
-
-  void DrawButtons() {
-    DrawUpdate();
-    const bool pad = pad_ && pad_->Connected();
-    const bool ps = pad && pad_->PlayStation();
-    char play[48];
-    std::snprintf(play, sizeof(play), "Play  (%s)##play", pad ? (ps ? "Options" : "Start") : "Enter");
-    const bool can_play = installed_ && !Extracting() && !UpdateBusy();
-    // The way in, so it stands out from the other buttons.
-    const ImVec4* colors = ImGui::GetStyle().Colors;
-    ImGui::PushStyleColor(ImGuiCol_Button, colors[ImGuiCol_ButtonHovered]);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, colors[ImGuiCol_ButtonActive]);
-    ImGui::BeginDisabled(!can_play);
-    const bool pressed = ImGui::Button(play, ImVec2(S(220), ImGui::GetFrameHeight() * 1.5f));
-    if (can_play) ImGui::SetItemDefaultFocus();
-    ImGui::EndDisabled();
-    ImGui::PopStyleColor(2);
-    if (pressed || QuickPlayPressed()) {
-      Play();
-      return;
-    }
-    ImGui::SameLine();
-    ImGui::BeginDisabled(UpdateCommitted());
-    const bool quit_pressed = ImGui::Button("Quit", ImVec2(S(120), ImGui::GetFrameHeight() * 1.5f));
-    ImGui::EndDisabled();
-    if (quit_pressed) {
-      if (Extracting()) progress_->cancel = true;
-      if (UpdateBusy()) update_->progress.cancel = true;
-      pad_.reset();
-      quit_();
-      return;
-    }
-    if (!installed_) {
-      ImGui::SameLine();
-      ImGui::TextDisabled("Install the game files to play.");
-    }
-    char version[64];
-    std::snprintf(version, sizeof(version), "Version %s", AppVersion());
-    ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - ImGui::CalcTextSize(version).x);
-    ImGui::TextDisabled("%s", version);
-    if (pad) ImGui::TextDisabled(ps ? "Controller: Cross selects, Circle goes back." : "Controller: A selects, B goes back.");
-  }
-
   void StartExtract() {
     error_.clear();
+    if (iso_path_[0] == 0) return;
     // Never spread the game's files into a folder that holds something else (only a chosen or configured folder
     // could; the per-user default is ours). A reinstall over the game replaces only the game's own entries.
     std::error_code ec;
@@ -976,20 +681,21 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   QuitFn quit_;
   std::vector<Setting> settings_;
   std::unique_ptr<PadNav> pad_;  // null once Play or Quit is pressed
-  float ui_scale_ = 1.0f;  // ui_scale.h; set at the start of every frame
-  float logged_width_ = 0, logged_height_ = 0, logged_scale_ = 0, logged_font_ = 0, logged_overflow_ = -1;
-  float settings_overflow_ = 0;  // ImGui::GetScrollMaxX() of the settings list (the window's is in its storage)
+  float logged_width_ = 0, logged_height_ = 0, logged_scale_ = 0;
+  LauncherMenu menu_;
+  std::string reset_note_;
+  bool update_logged_ = false;
+  bool shots_done_ = false;
+  int shot_quit_frames_ = 0;
   bool installed_ = false;
   bool quit_requested_ = false;  // an installed update asked the program to quit
   bool show_reinstall_ = false;
   std::vector<std::string> misplaced_;  // game data in the portable data folder that belongs in user/ (portable.h)
   std::string misplaced_note_;          // what moving them did, shown in place of the offer
+  bool misplaced_note_is_error_ = true;  // the misnamed-portable.txt hint is a warning; "Moved." is not
   bool settings_file_moved_ = false;    // bots.toml was moved in: saving this window's settings would overwrite it
   bool auto_ = false;
   bool auto_reinstall_ = false;
-  int capture_ = -1;  // settings_ index of the binding waiting for a key, or -1
-  bool capture_append_ = false, capture_armed_ = false;
-  bool capturing_ = false;  // a key binding was waiting when this frame started
   char iso_path_[1024] = {};
   std::string error_;
   std::thread worker_;
@@ -999,7 +705,6 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   std::shared_ptr<UpdateState> update_;
   std::shared_ptr<FirewallWatch> firewall_;
   bool firewall_asked_ = false;
-  bool update_logged_ = false;
 };
 
 // F6 display settings. Changes apply on the next frame and are saved when the window closes.

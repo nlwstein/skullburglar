@@ -429,10 +429,39 @@ class BotsApp : public rex::ReXApp {
   }
   bool picker_left_fullscreen_ = false;
 
-#if defined(_WIN32)
-  // The SDK's launcher font covers Latin-1 and Japanese, so a Cyrillic or Greek folder name (a Russian "Documents")
-  // drew as "?". Merge Segoe UI's Greek and Cyrillic glyphs into it; without the file the "?" stays.
+  // The launcher's own fonts (launcher_style.h), baked for the window's size and for the whole display (fullscreen), as
+  // the SDK's renderer can't add font sizes once the atlas is uploaded.
   void OnConfigureFonts(ImFontAtlas* atlas) override {
+#if defined(_WIN32)
+    MergeSegoeUi(atlas);  // first: it keeps Greek and Cyrillic out of every font already in the atlas
+#endif
+#if !TARGET_OS_IPHONE && !defined(__ANDROID__)
+    std::vector<float> scales;
+    auto add = [&scales](float physical_w, float physical_h, float dpi) {
+      if (physical_w > 0 && physical_h > 0 && dpi > 0)
+        scales.push_back(bots::setup::LauncherMenuScale(physical_w / dpi, physical_h / dpi, std::getenv("BOTS_UI_SCALE")) *
+                         dpi);
+    };
+    float dpi = 1.0f;
+    if (rex::ui::Window* w = window()) {
+      dpi = float(w->GetDpi()) / float(w->GetMediumDpi());
+      add(float(w->GetActualPhysicalWidth()), float(w->GetActualPhysicalHeight()), dpi);
+    }
+    if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay())) {
+      const float density = mode->pixel_density > 0 ? mode->pixel_density : 1.0f;
+      add(float(mode->w) * density, float(mode->h) * density, dpi);
+    }
+    if (scales.empty()) scales.push_back(1.0f);
+    const bool ok = bots::setup::LaunchFonts().Build(atlas, bots::setup::EmbeddedLauncherFontData(), scales);
+    REXLOG_INFO("setup: launcher fonts {} for {} size(s)", ok ? "baked" : "missing", scales.size());
+#endif
+  }
+
+#if defined(_WIN32)
+  // The SDK's overlay font covers Latin-1 and Japanese, so a Cyrillic or Greek folder name (a Russian "Documents")
+  // drew as "?" in the overlays. Merge Segoe UI's Greek and Cyrillic glyphs into it; without the file the "?" stays.
+  // (The launcher has its own fonts, which cover them.)
+  void MergeSegoeUi(ImFontAtlas* atlas) {
     wchar_t windir[MAX_PATH];
     const UINT n = GetWindowsDirectoryW(windir, MAX_PATH);
     if (n == 0 || n >= MAX_PATH) return;

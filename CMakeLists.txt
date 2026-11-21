@@ -65,12 +65,37 @@ set(BOTS_SOURCES
     src/gfx/shadow.cpp
     src/setup/iso_extract.cpp
     src/setup/settings.cpp
+    src/setup/settings_catalog.cpp
+    src/setup/launcher_menu.cpp
+    src/setup/launcher_shot.cpp
+    src/setup/launcher_fonts.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/launcher_font_data.cpp
     src/setup/config_migrate.cpp
     src/setup/update_check.cpp
     src/setup/ed25519.cpp
     src/setup/update_logic.cpp
     src/setup/update_install.cpp
 )
+# The launcher's fonts (assets/fonts: Inter and Oswald, SIL Open Font License; src/setup/launcher_style.h) compiled in
+# as byte arrays. Written through configure_file so unchanged fonts don't rebuild.
+set(_fonts_src "#include <cstddef>\n")
+foreach(_font Inter-Regular:InterRegular Inter-SemiBold:InterSemiBold Oswald-SemiBold:OswaldSemiBold)
+    string(REPLACE ":" ";" _font "${_font}")
+    list(GET _font 0 _name)
+    list(GET _font 1 _symbol)
+    set(_file ${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/${_name}.ttf)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_file})
+    file(READ ${_file} _hex HEX)
+    string(LENGTH "${_hex}" _len)
+    math(EXPR _len "${_len} / 2")
+    string(REGEX REPLACE "(..)" "0x\\1," _hex "${_hex}")
+    string(APPEND _fonts_src "extern const unsigned char k${_symbol}Ttf[] = {${_hex}};\n"
+        "extern const size_t k${_symbol}TtfSize = ${_len};\n")
+endforeach()
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/launcher_font_data.cpp.in "${_fonts_src}")
+configure_file(${CMAKE_CURRENT_BINARY_DIR}/launcher_font_data.cpp.in ${CMAKE_CURRENT_BINARY_DIR}/launcher_font_data.cpp
+    COPYONLY)
+
 # Release builds carry their version and where to check for a newer one (src/setup/update_check.h); the release CI
 # sets both. Only that file sees them, so a new version recompiles one file.
 set(BOTS_VERSION "dev" CACHE STRING "Version shown in the launcher")
