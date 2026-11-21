@@ -11,7 +11,7 @@
 //   fs_comp   DOF lerp, the 15% mix of the bloom-kernel blur, saturate, gamma 2.2
 //   fs_copy   low-end path: gamma only
 //   fs_comp_lin  fs_comp without the gamma, into a full-res target, when post materials follow (B-266)
-//   fs_gangsta, fs_death, fs_damage, fs_scope   post materials (B-266, n1ffi/src/postmat.rs): read the linear scene, write linear or (the last one)
+//   fs_gangsta, fs_death, fs_damage, fs_scope, fs_fireheat   post materials (B-266, n1ffi/src/postmat.rs): read the linear scene, write linear or (the last one)
 //             gamma_out into the target. Their block: g0 the material's parameters, g1.x time (the game's world
 //             time, the clock the materials' parameters use), g1.w real time (seconds, any origin), g1.y/z 1 = tex0/tex1
 //             take Xenos's gamma curve (raw upload), comp.w 1 = last pass. tex0/tex1 sit in the bloom bindings.
@@ -429,6 +429,22 @@ fn fs_gangsta(i: VOut) -> @location(0) vec4<f32> {
     let suv = vec2<f32>(4.0, 0.6) * vec2<f32>(sx, r) + t * vec2<f32>(0.0, -1.0);
     let streak = mat_tex0(suv).rgb * 10.0 * pow(1.5 * r, 8.0);
     return mat_out(mix(vec3<f32>(1.0), vec3<f32>(1.0) + streak, a) * col, i.pos);
+}
+
+// FX_EnvironmentLibrary.Fire.PostProcessIntensity_MIC (an instance of PostProcessIntensity_MAT, additive, B-384), g0.x =
+// Fade. tex0 FX_Blood.Wobble_DIF, tex1 FX_Smoke.SmokeLayer2NormalMap. Decoded node by node from the material graph: the scene
+// is read through a horizontal shimmer min(SmokeLayer2NormalMap.r(u * 0.5, v * 0.1 + 0.2 t), 0.0025) (ScreenPosition
+// plus (shimmer, 0)); that sample times 1.5 times (2, 1, 0.5) times (Wobble_DIF(uv * 0.05 + t * (-0.35, 0.7)) + 0.4)
+// times Fade is added to the scene (BLEND_Additive).
+@fragment
+fn fs_fireheat(i: VOut) -> @location(0) vec4<f32> {
+    let t = p.g1.x;
+    let uv = i.uv;
+    let base = textureSample(src, smp, uv).rgb;
+    let sh = min(mat_tex1(vec2<f32>(uv.x * 0.5, uv.y * 0.1 + 0.2 * t)).r, 0.0025);
+    let s = textureSample(src, smp, uv + vec2<f32>(sh, 0.0)).rgb;
+    let wob = mat_tex0(uv * 0.05 + t * vec2<f32>(-0.35, 0.7)).rgb;
+    return mat_out(base + s * 1.5 * vec3<f32>(2.0, 1.0, 0.5) * (wob + vec3<f32>(0.4)) * p.g0.x, i.pos);
 }
 
 const DAMAGE_GAMMA: f32 = 1.12;
