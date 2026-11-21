@@ -26,10 +26,11 @@ struct Result {
   int frames_out = 0;         // frames that moved the camera
   double max_step = 0;        // biggest single-frame output, counts
   double first_out_ms = -1;   // time of the first output
+  double net_in = 0, net_out = 0;  // signed sums (zero-mean jitter cancels): how far the camera really turned
   double mean_lag = 0, max_lag = 0;  // how far the camera is behind the input, counts
 };
 
-enum class Algo { kLegacy, kDrift };
+enum class Algo { kLegacy, kDrift, kStrict };
 
 Result Run(const std::string& spec, Algo algo, double gate, double secs, uint32_t seed = 7) {
   MousePattern pat;
@@ -50,12 +51,13 @@ Result Run(const std::string& spec, Algo algo, double gate, double secs, uint32_
       if (MouseGateHolds(acc_x, acc_y, gate)) ox = oy = 0;
       else ox = acc_x, oy = acc_y, acc_x = acc_y = 0;
     } else {
-      const auto o = g.Step(c.x, c.y, kDt, gate, g_tau);
+      const auto o = g.Step(c.x, c.y, kDt, gate, g_tau, algo == Algo::kStrict);
       ox = o.x, oy = o.y;
     }
     // x axis for the camera metrics (the y patterns are only used to see that both axes are gated together)
     r.in += std::fabs(c.x), r.out += std::fabs(ox);
     cum_in += c.x, cum_out += ox;
+    r.net_in = cum_in, r.net_out = cum_out;
     if (ox != 0 || oy != 0) {
       ++r.frames_out;
       r.max_step = std::max(r.max_step, std::hypot(ox, oy));
@@ -100,6 +102,16 @@ int main(int argc, char** argv) {
       {"turn 80/s (26 deg/s)", "steady:80"},       {"fast turn 240/s (79 deg/s)", "steady:240"},
       {"slow turn 20/s + poisson drift 3/s", "steady:20+poisson:3:0.8"},
   };
+  static const Case kEdge[] = {
+      {"rare +1/-1 (Deck-like), p=0.02", "noise:0.02"}, {"+1/-1, p=0.15", "noise:0.15"}, {"+1/-1, p=0.3", "noise:0.3"},
+      {"1-2 counts, p=0.15", "burst:0.15:2"}, {"1-3 counts, p=0.3", "burst:0.3:3"},
+      {"1-3 counts, p=0.3, + 2/s drift 90% one way", "burst:0.3:3+poisson:2:0.9"},
+  };
+  static const Case kEdgeAim[] = {
+      {"slow turn 5/s (1.6 deg/s)", "steady:5"}, {"slow turn 10/s", "steady:10"}, {"turn 20/s", "steady:20"},
+      {"flick 240/s", "steady:240"}, {"turn 20/s + 1-2 count jitter", "steady:20+burst:0.15:2"},
+      {"turn 10/s + +1/-1 jitter p=0.15", "steady:10+noise:0.15"},
+  };
   static const double kGates[] = {1, 2, 3, 4, 8};
 
   if (!check) {
@@ -138,6 +150,18 @@ int main(int argc, char** argv) {
         }
       }
       std::printf("\n");
+    }
+    std::printf("\n## Wide jitter (an Edge-class gyro), %.0f s, gate 1.6: counts a second reaching the camera, normal gate -> strict gate\n\n", g_secs);
+    std::printf("Jitter | normal | strict |\n---|---|---|\n");
+    for (const auto& c : kEdge) {
+      const Result a = Run(c.spec, Algo::kDrift, 1.6, g_secs), b = Run(c.spec, Algo::kStrict, 1.6, g_secs);
+      std::printf("%s | %.2f | %.2f |\n", c.name, a.out / g_secs, b.out / g_secs);
+    }
+    std::printf("\n## Slow aim, 3 s, gate 1.6: share of the turn that reaches the camera (signed), normal -> strict\n\n");
+    std::printf("Motion | normal | strict |\n---|---|---|\n");
+    for (const auto& c : kEdgeAim) {
+      const Result a = Run(c.spec, Algo::kDrift, 1.6, 3), b = Run(c.spec, Algo::kStrict, 1.6, 3);
+      std::printf("%s | %.1f%% | %.1f%% |\n", c.name, 100 * a.net_out / a.net_in, 100 * b.net_out / b.net_in);
     }
     return 0;
   }
@@ -218,6 +242,29 @@ int main(int argc, char** argv) {
       out += std::fabs(o.x) + std::fabs(o.y);
     }
     CHECK(out == 0);
+  }
+  // 8. Strict mode (B-396). Off, the gate is exactly the normal one. On, steady motion is unchanged (a coherent sum equals
+  //    its path), wide random jitter that leaks through the normal gate is cut at least 4x (2x for the mildest, 1-2 counts at p=0.15), and a turn still passes.
+  for (const char* spec : {"steady:1", "steady:5", "steady:20", "steady:240", "noise:0.02", "poisson:1:0.8", "poisson:3:0.8",
+                           "steady:20+poisson:3:0.8"}) {
+    const Result a = Run(spec, Algo::kDrift, 1.6, 20), b = Run(spec, Algo::kStrict, 1.6, 20);
+    CHECK(a.out == b.out && a.frames_out == b.frames_out);
+  }
+  for (const char* spec : {"noise:0.3", "burst:0.15:2", "burst:0.3:3", "burst:0.3:3+poisson:2:0.9"}) {
+    const int factor = std::strcmp(spec, "burst:0.15:2") == 0 ? 2 : 4;  // the mildest jitter is the hardest to tell from a turn
+    double a = 0, b = 0;
+    for (uint32_t seed : {3u, 7u, 11u, 13u}) a += Run(spec, Algo::kDrift, 1.6, 120, seed).out, b += Run(spec, Algo::kStrict, 1.6, 120, seed).out;
+    CHECK(b * factor <= a);
+  }
+  for (const char* spec : {"steady:5", "steady:10", "steady:20", "steady:240", "steady:20+burst:0.15:2"}) {
+    const Result r = Run(spec, Algo::kStrict, 1.6, 3);
+    CHECK(r.net_out >= 0.93 * r.net_in);
+    CHECK(r.first_out_ms <= 700);
+  }
+  {  // strict off must not even track the coherence state
+    MouseGate g;
+    for (int i = 0; i < 100; ++i) g.Step(1, 0, kDt, 1.6);
+    CHECK(g.path == 0);
   }
   if (g_failures) return 1;
   std::puts("mouse_gate_sim: all passed");

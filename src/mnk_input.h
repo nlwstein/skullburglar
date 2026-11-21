@@ -42,6 +42,7 @@ REXCVAR_DECLARE(double, kbm_aim_sensitivity);
 REXCVAR_DECLARE(bool, kbm_invert_y);
 REXCVAR_DECLARE(bool, aim_toggle);
 REXCVAR_DECLARE(double, kbm_noise_gate);
+REXCVAR_DECLARE(bool, kbm_noise_gate_strict);
 REXCVAR_DECLARE(bool, kbm_prompts);
 REXCVAR_DECLARE(std::string, pad_prompts);
 

@@ -24,6 +24,10 @@ REXCVAR_DEFINE_DOUBLE(kbm_noise_gate, 0.0, "bots/Input",
                       "creep is dropped, and +1/-1 jitter cancels. BOTS_MOUSE_GATE=<px> overrides, BOTS_MOUSE_TRACE=1 "
                       "logs what it sees and passes.")
     .range(0.0, 8.0);
+REXCVAR_DEFINE_BOOL(kbm_noise_gate_strict, false, "bots/Input",
+                    "Stricter noise gate for a gyro with wide random jitter (a DualSense Edge): on top of kbm_noise_gate, "
+                    "motion must also keep one direction (about 0.8 s) before it counts as deliberate. Turns and steady "
+                    "drift are treated as before. Does nothing while kbm_noise_gate is 0. BOTS_MOUSE_GATE_STRICT=1 overrides.");
 REXCVAR_DEFINE_BOOL(aim_toggle, false, "bots/Input",
                     "Toggle aim: press Aim once to start aiming and again to stop, instead of holding it. Works with a "
                     "controller and with keyboard and mouse (aim_toggle.h). Taking cover or running (A) also ends it; menus, "
@@ -383,6 +387,11 @@ void MouseKeyboardDriver::TakeMouseDelta(float& dx, float& dy) {
     return feeding_;
   }();
   (void)env_feed;
+  static const int env_strict = [] {
+    const char* v = std::getenv("BOTS_MOUSE_GATE_STRICT");
+    return v && *v ? std::atoi(v) : -1;
+  }();
+  const bool strict = env_strict >= 0 ? env_strict != 0 : REXCVAR_GET(kbm_noise_gate_strict);
   const double gate = env_gate >= 0 ? env_gate : REXCVAR_GET(kbm_noise_gate);
   // Seconds of wall time since the last frame: motion arrives in wall time, whatever the game's clock does.
   const auto now_tp = std::chrono::steady_clock::now();
@@ -396,7 +405,7 @@ void MouseKeyboardDriver::TakeMouseDelta(float& dx, float& dy) {
   }
   const double in_x = mouse_dx_, in_y = mouse_dy_;
   // Counts that arrived since the last frame go through the drift gate (a pass-through when it is off).
-  const auto pass = gate_.Step(in_x, in_y, dt, gate, env_tau);
+  const auto pass = gate_.Step(in_x, in_y, dt, gate, env_tau, strict);
   mouse_dx_ = mouse_dy_ = 0;
   dx = float(pass.x * s);
   // Window y grows downward; the engine's MouseY is positive for "look up".
