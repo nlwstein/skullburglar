@@ -64,12 +64,17 @@ struct VOut {
     @location(8) @interpolate(flat) inst: u32,
 };
 
-// B-235: Xenos's piecewise-linear gamma-to-linear curve (the SDK's PWLGammaToLinear) on a raw (UNORM) sample, for
-// textures the original fetches with the gamma sign. Four segments over the stored 0..255 value, out of 1024.
+// B-235: Xenos's piecewise-linear gamma-to-linear curve on a raw (UNORM) sample, for textures the original fetches with
+// the gamma sign. B-392: the SDK's PWLGammaToLinear exactly (mirrored in `pwl.rs`, with its tests): the stored 0..255
+// value picks a slope k = 1, 2, 4 or 8 (joins at 64, 96, 192) and an offset, then the SDK adds trunc(lin * k / 1024) and
+// divides by 1023, so white is 1.0 (the first version here divided by 1024 and left the top segment up to 0.8% low).
 fn xe_pwl3(c: vec3<f32>) -> vec3<f32> {
-    // G6: the four segments (slopes 1, 2, 4, 8 in stored units, joined at 64, 96, 192) form a convex curve, so it is
-    // the largest of the four lines (stored value * 255 / 1024 folded in). The UNORM sample is already 0..1.
-    return max(max(c * 0.2490234375, c * 0.498046875 - 0.0625), max(c * 0.99609375 - 0.25, c * 1.9921875 - 1.0));
+    let g = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0;
+    let hi = g >= vec3<f32>(96.0);
+    let k = select(select(vec3<f32>(1.0), vec3<f32>(2.0), g >= vec3<f32>(64.0)), select(vec3<f32>(4.0), vec3<f32>(8.0), g >= vec3<f32>(192.0)), hi);
+    let o = select(select(vec3<f32>(0.0), vec3<f32>(-64.0), g >= vec3<f32>(64.0)), select(vec3<f32>(-256.0), vec3<f32>(-1024.0), g >= vec3<f32>(192.0)), hi);
+    let l = g * k + o;
+    return (l + trunc(l * k * (1.0 / 1024.0))) * (1.0 / 1023.0);
 }
 
 fn xe_pwl(c: vec4<f32>) -> vec4<f32> {
