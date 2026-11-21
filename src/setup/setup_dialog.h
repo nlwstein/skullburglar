@@ -169,6 +169,9 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     misplaced_ = FindMisplacedGameData(ActiveDataRoot());
     if (!misplaced_.empty()) REXLOG_WARN("setup: {}", MisplacedMessage(ActiveDataRoot(), misplaced_));
     if (misplaced_.empty()) misplaced_note_ = ActiveMarkerHint();  // B-389: portable.txt misnamed, shown in the same place
+    // Test runs: do what "Move them" does as the window opens (the window can't be clicked from a script; the preview tool's
+    // tests/launcher_input_saves.script covers the button).
+    if (const char* move = std::getenv("BOTS_SETUP_MOVE"); move && std::strcmp(move, "1") == 0) Do(LauncherAction::kMoveSaves);
   }
 
   ~SetupDialog() override {

@@ -81,7 +81,12 @@ BOTS_SETUP_SHOT=run/shots BOTS_SETUP_SHOT_SIZES=1920x1080,1280x800,3840x2160@2 \
 `tools/launcher_preview.sh <imgui dir>` builds the menu without the game (only Dear ImGui's sources, at the SDK's
 version) and draws every page at nine screen sizes, failing on cut-off text or a selection out of view with
 `--check`; `--script @tests/launcher_input.script` checks that the keyboard, a controller and the mouse can each
-change every kind of setting. CI runs both.
+change every kind of setting. CI runs both, plus `tests/launcher_input_113.script` (anti-aliasing, sharpening,
+toggle aim and the pre-1.0 occlusion choice), and `tests/launcher_input_saves.script` with `--state misplaced-repeat`
+(the portable-mode "Move them to the user folder" notice; `--state misnamed` shows the portable.txt hint, `--state
+pre1` the greyed-out new-renderer settings). In the game, `BOTS_DATA_DIR=<folder>` with a `bots.toml` or a
+console-id folder in it (not in its `user` folder) shows that notice, and `BOTS_SETUP_MOVE=1` does what its button
+does as the window opens (test runs only).
 
 ## Linux and Windows
 
