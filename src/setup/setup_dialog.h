@@ -132,6 +132,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     StartFirewallWatch();
     misplaced_ = FindMisplacedGameData(ActiveDataRoot());
     if (!misplaced_.empty()) REXLOG_WARN("setup: {}", MisplacedMessage(ActiveDataRoot(), misplaced_));
+    if (misplaced_.empty()) misplaced_note_ = ActiveMarkerHint();  // B-389: portable.txt misnamed, shown in the same place
   }
 
   ~SetupDialog() override {
