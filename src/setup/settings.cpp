@@ -37,7 +37,7 @@ REXCVAR_DEFINE_STRING(renderer, bots::kDefaultRenderer, "bots",
 REXCVAR_DEFINE_STRING(render_scale, "auto", "bots",
                       "Render resolution as a multiple of 720p (auto, 3, 2, 1.5, 1.25, 1, 0.75, "
                       "0.667, 0.5); auto is 2/3 on Intel GPUs, else 1");
-REXCVAR_DEFINE_STRING(anti_aliasing, "off", "bots",
+REXCVAR_DEFINE_STRING(anti_aliasing, "smaa", "bots",
                       "Smooths jagged edges in the new renderer (off, fxaa, smaa). Read by the renderer every frame; "
                       "the pre-1.0 renderer ignores it");
 REXCVAR_DEFINE_DOUBLE(sharpening, 0.0, "bots",
