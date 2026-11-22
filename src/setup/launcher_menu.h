@@ -99,7 +99,7 @@ struct LauncherStatus {
   bool update_busy = false;
   bool update_committed = false;  // past the download: can't be cancelled
   bool update_finished = false;
-  int update_stage = 0;  // UpdateStage: 0 downloading, 1 verifying, 2+ installing
+  int update_stage = 0;  // 0 downloading, 1 verifying, 2+ installing (UpdateStage minus kDownloading)
   double update_done_mb = 0, update_total_mb = 0;
 
   // Windows Firewall for LAN co-op (FirewallState as int)

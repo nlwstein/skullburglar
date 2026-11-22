@@ -78,6 +78,13 @@ BOTS_SETUP_SHOT=run/shots BOTS_SETUP_SHOT_SIZES=1920x1080,1280x800,3840x2160@2 \
   ./out/build/mac-arm64-relwithdebinfo/bots --launcher --user_data_root=run/testuser
 ```
 
+`BOTS_SETUP_SHOT` draws a copy and only logs what the menu asks for. To test the real flows (install from a disc image,
+update, Play), `BOTS_SETUP_LIVE=<steps>` drives the real window instead, with the same key, pad and click steps plus
+`pick-iso:`, `pick-folder:` (what Browse and Choose folder return), `until:`, `expect-live:`, `shot:` (a PNG of the window as
+it is, into `BOTS_SETUP_SHOT`) and file checks; the list is in `src/setup/setup_dialog.h`. A test of the update needs a
+build with `-DBOTS_ALLOW_HTTP_UPDATE_URL=ON`, a throwaway `BOTS_UPDATE_PUBKEY` (`tools/ci/ed25519_sign.py keygen`) and a
+packaged `.app` (`tools/ci/package.sh`), as `tools/update_probe_test.sh` does.
+
 `tools/launcher_preview.sh <imgui dir>` builds the menu without the game (only Dear ImGui's sources, at the SDK's
 version) and draws every page at nine screen sizes, failing on cut-off text or a selection out of view with
 `--check`; `--script @tests/launcher_input.script` checks that the keyboard, a controller and the mouse can each

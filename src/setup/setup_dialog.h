@@ -189,6 +189,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     PollWorker();
     if (auto_) RunAuto();
     if (!shots_done_) RunShots(io);
+    RunLive(io);
     // BOTS_SETUP_SHOT_QUIT: close a few frames after the shots, as the Quit entry would.
     if (shot_quit_frames_ > 0 && --shot_quit_frames_ == 0 && !quit_requested_) {
       quit_requested_ = true;
@@ -213,6 +214,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     LogUpdate();
     const LauncherStatus status = Status();
     const LauncherAction action = menu_.Draw(settings_, status, LaunchFonts());
+    if (action != LauncherAction::kNone) live_.last_action = action;
     LogUiScale(io, status.dpi_scale);
     Do(action);  // last: Play and Quit can delete this dialog
   }
@@ -311,7 +313,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
         st.update_busy = UpdateBusy();
         st.update_committed = UpdateCommitted();
         st.update_finished = u.finished.load();
-        st.update_stage = u.progress.stage.load();
+        // The menu counts from the download (0 downloading, 1 verifying, 2+ installing); UpdateStage starts at kIdle.
+        st.update_stage = MenuUpdateStage(u.progress.stage.load(), int(UpdateStage::kDownloading));
         st.update_done_mb = double(u.progress.done.load()) / 1e6;
         st.update_total_mb = double(u.progress.total.load()) / 1e6;
         std::string error;
@@ -352,7 +355,9 @@ class SetupDialog : public rex::ui::ImGuiDialog {
         return;
       case LauncherAction::kBrowseIso:
         if (!Extracting()) {
-          auto picked = OpenPicker(PickIsoFile);
+          // Test runs (BOTS_SETUP_LIVE, pick-iso:): the file the native dialog would have returned.
+          std::filesystem::path picked = !live_.pick_iso.empty() ? bots::PathFromUtf8(live_.pick_iso) : OpenPicker(PickIsoFile);
+          live_.pick_iso.clear();
           if (!picked.empty()) SetIsoPath(bots::PathUtf8(picked));
         }
         return;
@@ -367,7 +372,9 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       case LauncherAction::kChooseFolder:
 #if !(defined(__APPLE__) && TARGET_OS_IPHONE)
         if (!Extracting() && !game_dir_locked_) {
-          const std::filesystem::path chosen = OpenPicker(PickFolder);
+          const std::filesystem::path chosen =
+              !live_.pick_folder.empty() ? bots::PathFromUtf8(live_.pick_folder) : OpenPicker(PickFolder);
+          live_.pick_folder.clear();
           if (!chosen.empty()) UseGameDir(ChosenGameDir(chosen, folder_error_));
         }
 #endif
@@ -463,6 +470,260 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     REXLOG_INFO("setup: BOTS_SETUP_SHOT: {} size(s) written to {}, {} failure(s)", sizes.size(), bots::PathUtf8(dir),
                 failures);
     if (const char* q = std::getenv("BOTS_SETUP_SHOT_QUIT"); q && std::strcmp(q, "1") == 0) shot_quit_frames_ = 10;
+  }
+
+  // BOTS_SETUP_LIVE=<steps> (test-only; B-387 end-to-end): drives the REAL window, unlike BOTS_SETUP_SCRIPT (which draws a
+  // copy and only logs what the menu asks for). The steps act on this window's own menu, settings and status, so Install
+  // installs, Update now updates and Play plays. Steps (';' or newlines, @<file>), one or two per frame:
+  //   key:/hold:/pad:/move:/click:/rclick:/wheel:/text:   as in launcher_shot.h, injected into the window's input
+  //   page: focus: row: device: reset-confirm move-confirm   menu hooks      frames:<n>   wait:<seconds>
+  //   pick-iso:<path> pick-folder:<path>   what the next Browse / Choose folder returns (the native dialogs can't be scripted)
+  //   shot:<name>      PNG of the window as it is now into BOTS_SETUP_SHOT (the copy of the menu at its page and focus)
+  //   until:<key><=|~><value>[:<timeout s>]   wait for a value (default 60 s; a FAIL line on timeout)
+  //   expect-live:<key><=|~><value>   PASS/FAIL line; keys: installed extracting error folder-error game-dir iso page
+  //       update-checking update-newer update-error update-busy update-finished update-stage update-can-install
+  //       update-note firewall action;  <key>~<text> means "contains"; expect:<cvar>=<value> checks a setting
+  //   exists:<path> absent:<path> size-gt:<path>:<bytes>    file checks, log:<text>, quit
+  // Lines are logged as "setup: live: ..."; BOTS_SETUP_LIVE_QUIT=1 quits at the end.
+  struct LiveScript {
+    bool init = false, done = false;
+    std::vector<ScriptStep> steps;
+    size_t i = 0;
+    int phase = 0, frames = 0, failures = 0;
+    std::chrono::steady_clock::time_point since{};
+    bool waiting = false;
+    std::string pick_iso, pick_folder;
+    LauncherAction last_action = LauncherAction::kNone;
+  } live_;
+
+  std::string LiveValue(const std::string& key) {
+    const auto b = [](bool v) { return std::string(v ? "1" : "0"); };
+    if (key == "installed") return b(installed_);
+    if (key == "extracting") return b(Extracting());
+    if (key == "error") return error_;
+    if (key == "folder-error") return folder_error_;
+    if (key == "game-dir") return bots::PlainPathUtf8(game_dir_);
+    if (key == "iso") return iso_path_;
+    if (key == "page") return ScriptPageName(menu_.page());
+    if (key == "action") return ScriptActionName(live_.last_action);
+    if (key == "firewall") return std::to_string(firewall_->state.load());
+    const LauncherStatus st = Status();
+    if (key == "update-checking") return b(st.update_checking);
+    if (key == "update-newer") return b(st.update_newer);
+    if (key == "update-error") return st.update_check_failed ? "check failed" : st.update_note_is_error ? st.update_note : "";
+    if (key == "update-busy") return b(st.update_busy);
+    if (key == "update-finished") return b(st.update_finished);
+    if (key == "update-stage") return std::to_string(st.update_stage);
+    if (key == "update-can-install") return b(st.update_can_install);
+    if (key == "update-note") return st.update_note;
+    if (key == "update-latest") return st.update_latest;
+    return "<unknown key " + key + ">";
+  }
+
+  // "<key>=<value>" or "<key>~<text>": true when it holds; `got` says what the key was.
+  bool LiveCondition(const std::string& expr, std::string* got) {
+    const size_t at = expr.find_first_of("=~");
+    if (at == std::string::npos) return *got = "<bad condition>", false;
+    const std::string key = expr.substr(0, at), want = expr.substr(at + 1);
+    *got = LiveValue(key);
+    return expr[at] == '=' ? *got == want : got->find(want) != std::string::npos;
+  }
+
+  void LiveLog(const std::string& line) { REXLOG_INFO("setup: live: {}", line); }
+
+  void LiveShot(const ImGuiIO& io, const std::string& name) {
+    const std::filesystem::path dir = bots::EnvPath("BOTS_SETUP_SHOT");
+    if (dir.empty()) return LiveLog("shot " + name + ": BOTS_SETUP_SHOT is not set"), void(++live_.failures);
+    const float dpi = DpiScale();
+    ShotSize size{int(std::lround(io.DisplaySize.x * dpi)), int(std::lround(io.DisplaySize.y * dpi)), dpi};
+    if (const char* list = std::getenv("BOTS_SETUP_SHOT_SIZES"); list && *list) {
+      const auto sizes = ParseShotSizes(list);
+      if (!sizes.empty()) size = sizes.front();
+    }
+    std::vector<Setting> copy = settings_;
+    const LauncherStatus base = Status();
+    const LauncherMenu snapshot = menu_;
+    ShotHost host;
+    host.fonts = EmbeddedLauncherFontData();
+    host.initial_menu = &snapshot;
+    host.frame = [&](LauncherMenu& menu, const LauncherFonts& fonts, float shot_dpi, PadKind pad) {
+      LauncherStatus st = base;
+      st.dpi_scale = shot_dpi;
+      if (pad != PadKind::kXbox || st.pad == PadKind::kNone) st.pad = pad;
+      menu.Draw(copy, st, fonts);
+      return LauncherAction::kNone;  // the shot only looks
+    };
+    host.value_of = [&](const std::string&) { return std::string(); };
+    host.log = [&](const std::string& line) { LiveLog(line); };
+    live_.failures += RunShotScript(host, dir, {size}, {{"shot", name}});
+  }
+
+  void RunLive(ImGuiIO& io) {
+    if (live_.done) return;
+    if (!live_.init) {
+      live_.init = true;
+      const char* text = std::getenv("BOTS_SETUP_LIVE");
+      if (!text || !*text) return void(live_.done = true);
+      live_.steps = ParseShotScript(text);
+      LiveLog(std::to_string(live_.steps.size()) + " steps");
+    }
+    if (live_.frames > 0) return void(--live_.frames);
+    const auto pass = [&](bool ok, const std::string& what) {
+      LiveLog(std::string(ok ? "PASS " : "FAIL ") + what);
+      if (!ok) ++live_.failures;
+    };
+    while (live_.i < live_.steps.size()) {
+      const ScriptStep s = live_.steps[live_.i];
+      const std::string& v = s.verb;
+      const std::string& a = s.arg;
+      const auto next = [&] { ++live_.i, live_.phase = 0, live_.waiting = false; };
+      const auto point = [&](size_t index) {
+        float p[4] = {0, 0, 0, 0};
+        std::sscanf(a.c_str(), "%f,%f,%f,%f", &p[0], &p[1], &p[2], &p[3]);
+        return ImVec2(p[index * 2] <= 1.0f ? p[index * 2] * io.DisplaySize.x : p[index * 2],
+                      p[index * 2 + 1] <= 1.0f ? p[index * 2 + 1] * io.DisplaySize.y : p[index * 2 + 1]);
+      };
+      if (v == "key" || v == "hold") {
+        std::string name = a;
+        float seconds = 0.0f;
+        if (v == "hold")
+          if (const size_t c = name.rfind(':'); c != std::string::npos)
+            seconds = std::strtof(name.c_str() + c + 1, nullptr), name = name.substr(0, c);
+        const ImGuiKey key = ScriptKeyByName(name);
+        if (key == ImGuiKey_None) pass(false, "unknown key " + name);
+        if (live_.phase == 0 && key != ImGuiKey_None) {
+          io.AddKeyEvent(key, true);
+          live_.phase = 1, live_.frames = int(seconds * 60.0f);
+          return;
+        }
+        if (key != ImGuiKey_None) io.AddKeyEvent(key, false);
+        next();
+        return;
+      } else if (v == "pad") {
+        const ImGuiKey key = ScriptPadByName(a);
+        if (key == ImGuiKey_None) pass(false, "unknown button " + a), next();
+        else if (live_.phase == 0) {
+          io.BackendFlags |= ImGuiBackendFlags_HasGamepad;  // no controller is connected: ImGui ignores pad keys without this
+          io.AddKeyAnalogEvent(key, true, 1.0f), live_.phase = 1, live_.frames = 1;
+        }
+        else io.AddKeyAnalogEvent(key, false, 0.0f), next(), live_.frames = 1;
+        return;
+      } else if (v == "move" || v == "click" || v == "rclick") {
+        const ImVec2 p = point(0);
+        const int button = v == "rclick" ? 1 : 0;
+        if (live_.phase == 0) io.AddMousePosEvent(p.x, p.y), live_.phase = v == "move" ? 3 : 1, live_.frames = 1;
+        else if (live_.phase == 1) io.AddMouseButtonEvent(button, true), live_.phase = 2, live_.frames = 1;
+        else if (live_.phase == 2) io.AddMouseButtonEvent(button, false), next(), live_.frames = 1;
+        else next();
+        return;
+      } else if (v == "wheel") {
+        io.AddMouseWheelEvent(0.0f, std::strtof(a.c_str(), nullptr));
+        next(), live_.frames = 1;
+        return;
+      } else if (v == "text") {
+        io.AddInputCharactersUTF8(a.c_str());
+        next(), live_.frames = 1;
+        return;
+      } else if (v == "page") {
+        LauncherPage page;
+        if (ScriptPageByName(a, &page)) menu_.GoTo(page);
+        else pass(false, "unknown page " + a);
+        next(), live_.frames = 1;
+        return;
+      } else if (v == "focus") {
+        pass(menu_.FocusSetting(a), "focus " + a);
+        next(), live_.frames = 2;
+        return;
+      } else if (v == "row") {
+        menu_.FocusRow(std::atoi(a.c_str()));
+        next(), live_.frames = 1;
+        return;
+      } else if (v == "device") {
+        menu_.SetLastInput(a == "pad" ? LastInput::kController : LastInput::kKeyboardMouse);
+        next(), live_.frames = 1;
+        return;
+      } else if (v == "reset-confirm") {
+        menu_.OpenResetConfirm();
+        next(), live_.frames = 1;
+        return;
+      } else if (v == "move-confirm") {
+        menu_.OpenMoveConfirm();
+        next(), live_.frames = 1;
+        return;
+      } else if (v == "frames") {
+        next(), live_.frames = std::max(1, std::atoi(a.c_str()));
+        return;
+      } else if (v == "wait") {
+        if (!live_.waiting) live_.waiting = true, live_.since = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(std::chrono::steady_clock::now() - live_.since).count() >=
+            std::strtod(a.c_str(), nullptr))
+          next();
+        return;
+      } else if (v == "until") {
+        std::string expr = a;
+        double timeout = 60.0;
+        if (const size_t c = expr.rfind(':'); c != std::string::npos && c > expr.find_first_of("=~")) {
+          timeout = std::strtod(expr.c_str() + c + 1, nullptr), expr = expr.substr(0, c);
+        }
+        if (!live_.waiting) live_.waiting = true, live_.since = std::chrono::steady_clock::now();
+        std::string got;
+        if (LiveCondition(expr, &got)) {
+          LiveLog("until " + expr + ": reached");
+          next();
+          continue;  // the steps after it run in this frame: an installed update quits the window right after
+        }
+        if (std::chrono::duration<double>(std::chrono::steady_clock::now() - live_.since).count() >= timeout) {
+          pass(false, "until " + expr + " timed out (" + got + ")");
+          next();
+        }
+        return;
+      } else if (v == "shot") {
+        LiveShot(io, a);
+        next();
+        return;
+      } else if (v == "expect-live") {
+        std::string got;
+        const bool ok = LiveCondition(a, &got);
+        pass(ok, a + " (is: " + got + ")");
+        next();
+      } else if (v == "expect") {
+        const size_t eq = a.find('=');
+        const std::string got = Value(a.substr(0, eq));
+        pass(ValuesEqual(got, a.substr(eq + 1)), a + " (is: " + got + ")");
+        next();
+      } else if (v == "pick-iso") {
+        live_.pick_iso = a, next();
+      } else if (v == "pick-folder") {
+        live_.pick_folder = a, next();
+      } else if (v == "iso") {
+        SetIsoPath(a), next();
+      } else if (v == "exists" || v == "absent") {
+        std::error_code ec;
+        const bool there = std::filesystem::exists(bots::PathFromUtf8(a), ec);
+        pass(v == "exists" ? there : !there, v + " " + a);
+        next();
+      } else if (v == "size-gt") {
+        const size_t c = a.rfind(':');
+        std::error_code ec;
+        const auto size = std::filesystem::file_size(bots::PathFromUtf8(a.substr(0, c)), ec);
+        pass(!ec && size > std::strtoull(a.c_str() + c + 1, nullptr, 10), "size-gt " + a + " (is: " + std::to_string(ec ? 0 : size) + ")");
+        next();
+      } else if (v == "log") {
+        LiveLog(a), next();
+      } else if (v == "quit") {
+        next();
+        quit_requested_ = true;
+        pad_.reset();
+        quit_();
+        return;
+      } else {
+        pass(false, "unknown step " + v);
+        next();
+      }
+    }
+    live_.done = true;
+    LiveLog("finished, " + std::to_string(live_.failures) + " failure(s)");
+    if (const char* q = std::getenv("BOTS_SETUP_LIVE_QUIT"); q && std::strcmp(q, "1") == 0) shot_quit_frames_ = 10;
   }
 
   void SetIsoPath(const std::string& path) {

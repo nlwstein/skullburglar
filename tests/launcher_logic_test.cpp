@@ -149,6 +149,10 @@ int main() {
   assert(near_f(LauncherMenuScale(1920, 1080, "1.25"), 1.25f));
   assert(near_f(LauncherMenuScale(0, 0), 1.0f));
 
+  // The installer's stages (idle 0, downloading 1, verifying 2, installing 3, restarting 4) as the menu counts them.
+  assert(MenuUpdateStage(0, 1) == 0 && MenuUpdateStage(1, 1) == 0);
+  assert(MenuUpdateStage(2, 1) == 1 && MenuUpdateStage(3, 1) == 2 && MenuUpdateStage(4, 1) == 3);
+
   std::printf("launcher_logic_test: all passed\n");
   return 0;
 }

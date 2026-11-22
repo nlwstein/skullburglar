@@ -811,9 +811,24 @@ class BotsApp : public rex::ReXApp {
   // Keyboard and mouse (mnk_input.h), and BOTS_INPUT=<script>: scripted controller as guest user 0
   // (script_input.h). --pad=N: only pad N drives this instance; --coop: player 1 starts player 2 here,
   // once the launcher (if any) has settled the game files and before the shader cache opens (coop.h).
+  // One log line with the launcher settings this run plays with that differ from the defaults, from the cvars as the game
+  // sees them after the launcher's Play (or bots.toml / the command line): what a bug report and the launcher's
+  // end-to-end test check.
+  static void LogSettingsInEffect() {
+    std::string changed;
+    int differ = 0, total = 0;
+    for (const auto& s : bots::setup::LoadSettings()) {
+      ++total;
+      if (bots::setup::ValuesEqual(s.value, s.default_value)) continue;
+      changed += (differ++ ? ", " : "") + s.cvar + "=" + s.value;
+    }
+    REXLOG_INFO("settings in effect: {} of {} differ from the defaults{}{}", differ, total, differ ? ": " : "", changed);
+  }
+
   void OnPostSetup() override {
     bots::StartThreadStats();
     SetLaunchCommandLine();
+    LogSettingsInEffect();
     RegisterFullscreenBind();
     RegisterDisplayBind();
     bots::SpawnPlayerTwo(game_data_root(), user_data_root(), cache_root());

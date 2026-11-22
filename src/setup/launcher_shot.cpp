@@ -345,6 +345,12 @@ std::string PageName(LauncherPage page) {
 
 }  // namespace
 
+ImGuiKey ScriptKeyByName(const std::string& name) { return KeyByName(name); }
+ImGuiKey ScriptPadByName(const std::string& name) { return PadByName(name); }
+bool ScriptPageByName(const std::string& name, LauncherPage* page) { return PageByName(name, page); }
+std::string ScriptPageName(LauncherPage page) { return PageName(page); }
+const char* ScriptActionName(LauncherAction action) { return ActionName(action); }
+
 int RunShotScript(const ShotHost& host, const std::filesystem::path& dir, const std::vector<ShotSize>& sizes,
                   const std::vector<ScriptStep>& script) {
   int failures = 0;
@@ -373,7 +379,7 @@ int RunShotScript(const ShotHost& host, const std::filesystem::path& dir, const 
     int tw = 0, th = 0;
     io.Fonts->GetTexDataAsRGBA32(&pixels, &tw, &th);
     io.Fonts->SetTexID(ImTextureID(1));
-    LauncherMenu menu;
+    LauncherMenu menu = host.initial_menu ? *host.initial_menu : LauncherMenu();
     PadKind pad = PadKind::kXbox;
     LauncherAction last_action = LauncherAction::kNone;
     auto frame = [&] {

@@ -86,7 +86,16 @@ struct ShotHost {
   // Called before each size's run: start from the settings as they were.
   std::function<void()> reset;
   std::function<void(const std::string& line)> log;
+  // Start each run from a copy of this menu (the live script's shots: the page and focus the real window is on).
+  const LauncherMenu* initial_menu = nullptr;
 };
+
+// Script names, for the live script (setup_dialog.h, BOTS_SETUP_LIVE).
+ImGuiKey ScriptKeyByName(const std::string& name);
+ImGuiKey ScriptPadByName(const std::string& name);
+bool ScriptPageByName(const std::string& name, LauncherPage* page);
+std::string ScriptPageName(LauncherPage page);
+const char* ScriptActionName(LauncherAction action);
 
 // Runs `script` at every size and writes the shots into `dir`. Returns the number of failed expect: steps (and
 // unwritable shots); 0 is a clean run.

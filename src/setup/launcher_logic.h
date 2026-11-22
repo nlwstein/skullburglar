@@ -292,4 +292,9 @@ inline std::string BindKey(const std::string& value, const std::string& key, boo
   return value + "," + key;
 }
 
+// The menu counts the update's stages from the download (0 downloading, 1 verifying, 2+ installing). The installer's own
+// UpdateStage enum starts at kIdle = 0, kDownloading = 1, so its value is shifted down by `downloading` (e2e 2026-11-21: with
+// the raw value the menu never drew the progress bar or Cancel, and "Checking the download" showed while it downloaded).
+inline int MenuUpdateStage(int installer_stage, int downloading) { return installer_stage < downloading ? 0 : installer_stage - downloading; }
+
 }  // namespace bots::setup
