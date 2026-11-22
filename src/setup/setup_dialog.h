@@ -6,6 +6,9 @@
 // Test hooks: BOTS_SETUP_ISO=<path> prefills the image path; BOTS_SETUP_FOLDER=<path> chooses that folder for the
 // game files as "Choose another folder..." would (desktop builds); BOTS_SETUP_AUTO=1 installs (when a path is set and
 // nothing is installed) and presses Play, so the flow runs unattended.
+// BOTS_SETUP_COPY=copy|iso|notnow answers the portable copy offer (game_location.h) as a player would (page|inplace press
+// the Game files page's "Copy from the shared folder" / "Use it where it is" instead), and
+// BOTS_SETUP_COPY_CANCEL_MB=<n> presses Cancel once n MB have been copied.
 // Release builds also check for a newer version when the window opens (update_check.h).
 // Controllers work too (pad_nav.h): focus starts on Play (or Browse... without game files). Start on a controller or
 // Enter on the keyboard plays from anywhere in the window.
@@ -37,6 +40,7 @@
 #include <rex/ui/window.h>
 
 #include "app_paths.h"
+#include "game_location.h"
 #include "portable.h"
 #include "file_picker.h"
 #include "iso_extract.h"
@@ -165,6 +169,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     misplaced_ = FindMisplacedGameData(ActiveDataRoot());
     if (!misplaced_.empty()) REXLOG_WARN("setup: {}", MisplacedMessage(ActiveDataRoot(), misplaced_));
     if (misplaced_.empty()) misplaced_note_ = ActiveMarkerHint();  // B-389: portable.txt misnamed, shown in the same place
+    StartCopyOffer();
   }
 
   ~SetupDialog() override {
@@ -181,6 +186,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     if (pad_) pad_->Update(io);
     capturing_ = capture_ >= 0;  // as the frame starts: a key binding may take Enter this frame
     PollWorker();
+    CopyTestHooks();
     if (auto_) RunAuto();
 
     // Text and layout size (ui_scale.h): the style is scaled for this window only and put back at the end, so the
@@ -201,6 +207,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                          ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
       LogUiScale(io);  // before the draw calls: Play can delete this dialog
+      DrawCopyOffer();
       DrawMisplaced();
       DrawGameFiles();
       ImGui::Spacing();
@@ -482,6 +489,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     ImGui::TextUnformatted("Game files");
     if (installed_ && !show_reinstall_) {
       WrappedDisabled("Installed in %s", bots::PlainPathUtf8(game_dir_).c_str());
+      DrawPortableGameNote();
       DrawUnusedCopy();
       if (ImGui::SmallButton("Reinstall from a disc image...")) show_reinstall_ = true;
       return;
@@ -494,7 +502,9 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       ImGui::TextUnformatted("Reinstall into:");
     }
     WrappedDisabled("%s", bots::PlainPathUtf8(game_dir_).c_str());
+    DrawPortableGameNote();
     DrawFolderChoice();
+    DrawCopyFromShared();
     ImGui::BeginDisabled(Extracting());
     ImGui::SetNextItemWidth(-S(110.0f));
     ImGui::InputTextWithHint("##iso", "Path to the .iso file", iso_path_, sizeof(iso_path_));
@@ -514,6 +524,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       float fraction = total ? float(double(done) / double(total)) : 0.0f;
       char overlay[96];
       std::snprintf(overlay, sizeof(overlay), "%.1f / %.1f GB", done / 1e9, total / 1e9);
+      if (copying_) WrappedDisabled("Copying the game files from %s (they stay there too).", bots::PlainPathUtf8(shared_dir_).c_str());
       ImGui::ProgressBar(fraction, ImVec2(-1, 0), overlay);
       WrappedDisabled("File %u of %u: %s", progress_->files_done.load(),
                           progress_->files_total.load(), progress_->Current().c_str());
@@ -586,7 +597,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     ImGui::TextUnformatted("Settings");
     WrappedDisabled("Saved in %s", bots::PlainPathUtf8(config_path_).c_str());
     if (const DataRoot& data = ActiveDataRoot(); data.source != DataSource::kDefault) {
-      WrappedDisabled("Portable mode (%s): saves, settings, shader cache and logs are in %s",
+      WrappedDisabled("Portable mode (%s): saves, settings, shader cache, logs and (by default) the game files are in %s",
                           data.source == DataSource::kEnv ? "BOTS_DATA_DIR" : "portable.txt",
                           bots::PlainPathUtf8(data.root).c_str());
     }
@@ -903,12 +914,220 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     if (pad) ImGui::TextDisabled(ps ? "Controller: Cross selects, Circle goes back." : "Controller: A selects, B goes back.");
   }
 
+  // ---- Portable mode: the game files (B-400) ----
+
+  // Called once from the constructor: log which folder is in use and why, and decide whether to offer the copy.
+  void StartCopyOffer() {
+    const GameLocation& loc = ActiveGameLocation();
+    shared_dir_ = loc.shared;
+    portable_ = loc.portable;
+    if (!loc.dir.empty())
+      REXLOG_INFO("setup: game folder in use: {} ({}{})", bots::PathUtf8(game_dir_), WhyText(loc.why),
+                  portable_ && loc.why == GameDirWhy::kShared ? ", outside the portable folder" : "");
+    if (!portable_ || game_dir_locked_) return;
+    const bool declined = CopyDeclined(loc.data_root);
+    const auto is_game = [](const std::filesystem::path& p) { return IsGameDir(p); };
+    if (!ShouldOfferCopy(loc, declined, is_game)) {
+      if (declined && CanCopyFromShared(portable_, game_dir_, default_game_dir_, shared_dir_, is_game))
+        REXLOG_INFO("setup: copy offer: not shown (Not now was chosen earlier); the Game files page has the button");
+      return;
+    }
+    shared_size_ = MeasureGameDir(shared_dir_);
+    std::error_code ec;
+    const auto space = std::filesystem::space(loc.data_root, ec);
+    offer_free_ = ec ? ~0ull : uint64_t(space.available);
+    offer_prior_use_ = std::filesystem::exists(config_path_, ec) || CountSaves(LayoutFor(loc.data_root).user) > 0;
+    offer_open_ = true;
+    REXLOG_INFO("setup: copy offer: shared game files in {} ({:.2f} GB, {} files), free space {:.2f} GB in {}{}",
+                bots::PathUtf8(shared_dir_), shared_size_.bytes / 1e9, shared_size_.files, offer_free_ / 1e9,
+                bots::PathUtf8(loc.data_root), offer_prior_use_ ? "; this data folder has been used before" : "");
+  }
+
+  bool CopyTestHook(const char* value) const {
+    const char* env = std::getenv("BOTS_SETUP_COPY");
+    return env && std::strcmp(env, value) == 0;
+  }
+
+  void CopyTestHooks() {
+    if (offer_open_ && !Extracting()) {
+      if (CopyTestHook("copy")) AnswerOffer(OfferAnswer::kCopy);
+      else if (CopyTestHook("iso")) AnswerOffer(OfferAnswer::kDisc);
+      else if (CopyTestHook("notnow")) AnswerOffer(OfferAnswer::kNotNow);
+    }
+    // The Game files page's two buttons, for a test: "page" presses Copy from the shared folder, "inplace" Use it where it is.
+    if (!offer_open_ && !Extracting() && !installed_ && !page_hook_done_ &&
+        CanCopyFromShared(portable_, game_dir_, default_game_dir_, shared_dir_,
+                          [](const std::filesystem::path& p) { return IsGameDir(p); })) {
+      if (CopyTestHook("page")) {
+        page_hook_done_ = true;
+        REXLOG_INFO("setup: test hook: Copy from the shared folder pressed");
+        shared_size_ = MeasureGameDir(shared_dir_);
+        StartCopy();
+      } else if (CopyTestHook("inplace")) {
+        page_hook_done_ = true;
+        REXLOG_INFO("setup: test hook: Use it where it is pressed");
+        UseSharedInPlace();
+      }
+    }
+    if (const char* mb = std::getenv("BOTS_SETUP_COPY_CANCEL_MB"); mb && copying_ && Extracting() && !cancel_hook_done_ &&
+                                                                  progress_->bytes_done.load() >= uint64_t(std::atof(mb) * 1e6)) {
+      cancel_hook_done_ = true;
+      REXLOG_INFO("setup: test hook: Cancel pressed at {} bytes", progress_->bytes_done.load());
+      progress_->cancel = true;
+    }
+  }
+
+  enum class OfferAnswer { kCopy, kDisc, kNotNow };
+
+  void AnswerOffer(OfferAnswer answer) {
+    offer_open_ = false;
+    switch (answer) {
+      case OfferAnswer::kCopy:
+        REXLOG_INFO("setup: copy offer: player chose Copy");
+        StartCopy();
+        break;
+      case OfferAnswer::kDisc:
+        REXLOG_INFO("setup: copy offer: player chose to install from a disc image");
+        break;
+      case OfferAnswer::kNotNow:
+        REXLOG_INFO("setup: copy offer: player chose Not now (not offered again in this data folder)");
+        RememberCopyDeclined(ActiveGameLocation().data_root);
+        break;
+    }
+  }
+
+  void DrawCopyOffer() {
+    if (!offer_open_) return;
+    if (!offer_popup_opened_) {
+      offer_popup_opened_ = true;
+      ImGui::OpenPopup("Copy the game files here?");
+    }
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(S(580.0f), 0.0f));
+    if (!ImGui::BeginPopupModal("Copy the game files here?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    ImGui::TextWrapped("Portable mode keeps everything in one folder, so it can hold its own copy of the game files. This "
+                       "computer already has them, installed for the normal Skullburglar, in:");
+    WrappedDisabled("%s", bots::PlainPathUtf8(shared_dir_).c_str());
+    ImGui::TextWrapped("Copy them into the portable folder:");
+    WrappedDisabled("%s", bots::PlainPathUtf8(game_dir_).c_str());
+    ImGui::Spacing();
+    const bool measured = shared_size_.error.empty();
+    const bool enough = measured && EnoughSpace(offer_free_, shared_size_.bytes);
+    if (measured) {
+      ImGui::TextWrapped("Size: %.1f GB (%u files). Free space there: %.1f GB.", shared_size_.bytes / 1e9, shared_size_.files,
+                         offer_free_ / 1e9);
+    } else {
+      WrappedColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "%s", shared_size_.error.c_str());
+    }
+    if (measured && !enough)
+      WrappedColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "%s Free some space, or choose a folder on a bigger drive.",
+                     SpaceMessage(ActiveDataRoot().root, shared_size_.bytes, offer_free_).c_str());
+    ImGui::Spacing();
+    ImGui::TextWrapped("The files are copied, not moved: the shared copy stays where it is for the normal install.");
+    if (offer_prior_use_) {
+      ImGui::Spacing();
+      WrappedColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                     "Earlier versions of portable mode played from the shared folder without saying so. From this version "
+                     "the game files are part of the portable folder. If you choose Not now, nothing changes until you "
+                     "ask: the Game files section then offers to copy them, or to use the shared folder where it is.");
+    }
+    ImGui::Spacing();
+    ImGui::BeginDisabled(!enough);
+    if (ImGui::Button("Copy the game files here", ImVec2(S(240), 0))) {
+      AnswerOffer(OfferAnswer::kCopy);
+      ImGui::CloseCurrentPopup();
+    }
+    if (enough) ImGui::SetItemDefaultFocus();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Install from a disc image instead", ImVec2(S(260), 0))) {
+      AnswerOffer(OfferAnswer::kDisc);
+      ImGui::CloseCurrentPopup();
+    }
+    if (!enough) ImGui::SetItemDefaultFocus();
+    if (ImGui::Button("Not now", ImVec2(S(120), 0))) {
+      AnswerOffer(OfferAnswer::kNotNow);
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+
+  // The Game files page's own way to ask for the copy (after "Not now", a cancel or a failed copy), and the way to keep
+  // using the shared folder where it is.
+  void DrawCopyFromShared() {
+    if (Extracting() || offer_open_ ||
+        !CanCopyFromShared(portable_, game_dir_, default_game_dir_, shared_dir_,
+                           [](const std::filesystem::path& p) { return IsGameDir(p); }))
+      return;
+    ImGui::Spacing();
+    ImGui::TextWrapped("This computer already has the game files for the normal install, in %s. This folder holds none.",
+                       bots::PlainPathUtf8(shared_dir_).c_str());
+    if (ImGui::SmallButton("Copy from the shared folder...")) {
+      shared_size_ = MeasureGameDir(shared_dir_);
+      StartCopy();
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Use it where it is")) UseSharedInPlace();
+    ImGui::Spacing();
+  }
+
+  void UseSharedInPlace() {
+    REXLOG_INFO("setup: using the shared game files in place: {}", bots::PathUtf8(shared_dir_));
+    UseGameDir(shared_dir_);
+  }
+
+  // Portable mode: say where the game files are kept and, when they are outside the portable folder, that they won't move
+  // with it. Nothing is said outside portable mode.
+  void DrawPortableGameNote() {
+    if (!portable_) return;
+    const std::filesystem::path root = ActiveDataRoot().root;
+    if (SamePath(game_dir_, default_game_dir_)) {
+      WrappedDisabled("Portable game folder: kept with your saves in %s.", bots::PlainPathUtf8(root).c_str());
+    } else if (SamePath(game_dir_, shared_dir_)) {
+      WrappedDisabled("This is the shared folder, outside the portable folder: it won't move with it. \"Use the default "
+                      "folder\" goes back to %s.", bots::PlainPathUtf8(default_game_dir_).c_str());
+    } else {
+      WrappedDisabled("A folder you chose, outside the portable folder: it won't move with it.");
+    }
+  }
+
+  void StartCopy() {
+    error_.clear();
+    std::error_code ec;
+    if (std::filesystem::exists(game_dir_, ec) && !(std::filesystem::is_directory(game_dir_, ec) && std::filesystem::is_empty(game_dir_, ec))) {
+      error_ = bots::PlainPathUtf8(game_dir_) + " already exists and doesn't hold the game's files. Move it away, or choose another folder.";
+      REXLOG_WARN("setup: copy not started: {}", error_);
+      return;
+    }
+    progress_ = std::make_shared<ExtractProgress>();
+    result_ = std::make_shared<ExtractResult>();
+    done_ = std::make_shared<std::atomic<bool>>(false);
+    copying_ = true;
+    cancel_hook_done_ = false;
+    REXLOG_INFO("setup: copy started: {:.2f} GB, {} files, from {} to {}", shared_size_.bytes / 1e9, shared_size_.files,
+                bots::PathUtf8(shared_dir_), bots::PathUtf8(game_dir_));
+    worker_ = std::thread([src = shared_dir_, dest = game_dir_, progress = progress_, result = result_, done = done_]() {
+      *result = CopyGameFiles(
+          src, dest, *progress, [](const std::filesystem::path& p) { return IsGameDir(p); },
+          [](const std::filesystem::path& root) -> std::string {  // the install's own check: default.xex is this game's
+            std::FILE* f = bots::OpenFile(root / "default.xex", "rb");
+            if (!f) return "The copy has no readable default.xex.";
+            std::vector<uint8_t> head(0x10000);
+            head.resize(std::fread(head.data(), 1, head.size(), f));
+            std::fclose(f);
+            return XexTitleId(head.data(), head.size()) == kTitleId ? std::string()
+                                                                    : "The copied default.xex isn't 50 Cent: Blood on the Sand.";
+          });
+      done->store(true);
+    });
+  }
+
   void StartExtract() {
     error_.clear();
     // Never spread the game's files into a folder that holds something else (only a chosen or configured folder
     // could; the per-user default is ours). A reinstall over the game replaces only the game's own entries.
     std::error_code ec;
-    if (!SamePath(game_dir_, DefaultGameDir()) && !IsGameDir(game_dir_) && std::filesystem::exists(game_dir_, ec) &&
+    if (!SamePath(game_dir_, default_game_dir_) && !IsGameDir(game_dir_) && std::filesystem::exists(game_dir_, ec) &&
         !(std::filesystem::is_directory(game_dir_, ec) && std::filesystem::is_empty(game_dir_, ec))) {
       error_ = bots::PlainPathUtf8(game_dir_) + " already exists and doesn't hold the game's files. Choose another folder.";
       return;
@@ -930,6 +1149,13 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   void PollWorker() {
     if (!Extracting() || !done_->load()) return;
     worker_.join();
+    if (copying_) {
+      copying_ = false;
+      if (result_->ok) REXLOG_INFO("setup: copy finished: {} files, {} bytes into {}", progress_->files_done.load(),
+                                   progress_->bytes_done.load(), bots::PathUtf8(game_dir_));
+      else REXLOG_WARN("setup: copy stopped after {} bytes: {} (the partial copy was removed)", progress_->bytes_done.load(),
+                       result_->error);
+    }
     if (result_->ok) {
       installed_ = IsGameDir(game_dir_);
       show_reinstall_ = false;
@@ -980,6 +1206,14 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   float logged_width_ = 0, logged_height_ = 0, logged_scale_ = 0, logged_font_ = 0, logged_overflow_ = -1;
   float settings_overflow_ = 0;  // ImGui::GetScrollMaxX() of the settings list (the window's is in its storage)
   bool installed_ = false;
+  // Portable mode: the offer to copy the shared install here (game_location.h, B-400).
+  std::filesystem::path shared_dir_;  // the per-user default: the copy's source
+  bool portable_ = false;
+  bool copying_ = false;              // the worker is copying the shared files, not extracting a disc
+  bool offer_open_ = false, offer_popup_opened_ = false, offer_prior_use_ = false;
+  GameSize shared_size_;
+  uint64_t offer_free_ = 0;
+  bool cancel_hook_done_ = false, page_hook_done_ = false;
   bool quit_requested_ = false;  // an installed update asked the program to quit
   bool show_reinstall_ = false;
   std::vector<std::string> misplaced_;  // game data in the portable data folder that belongs in user/ (portable.h)

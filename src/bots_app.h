@@ -60,6 +60,7 @@
 #include "renderer_choice.h"
 #include "script_input.h"
 #include "setup/portable.h"
+#include "setup/game_location.h"
 #include "setup/occlusion_choice.h"
 #include "save_backup.h"
 #include "setup/app_paths.h"
@@ -220,10 +221,21 @@ class BotsApp : public rex::ReXApp {
     bots::setup::MigrateOldDefaults(config_path_);  // before the SDK reads the file (B-360)
     UseBundleLogDir();
     game_root_given_ = !paths.game_data_root.empty();
-    if (paths.game_data_root.empty()) {
-      const std::filesystem::path configured = bots::setup::ConfigPath(config_path_, "game_data_root");
-      paths.game_data_root =
-          configured.empty() ? bots::setup::AutoGameDir(rex::filesystem::GetExecutableFolder()) : configured;
+    // Which game folder (B-400, setup/game_location.h): --game_data_root, a folder chosen in the launcher, then in
+    // portable mode <data folder>/game, else a game folder next to the program, else the per-user default.
+    {
+      namespace su = bots::setup;
+      const su::DataRoot& data = su::ActiveDataRoot();
+      su::GameLocationInput in;
+      in.command_line = paths.game_data_root;
+      in.configured = su::ConfigPath(config_path_, "game_data_root");
+      in.portable = data.source != su::DataSource::kDefault;
+      in.data_root = data.root;
+      in.next_to_program = su::PortableGameDir(rex::filesystem::GetExecutableFolder());
+      in.shared = su::DefaultGameDir();
+      su::GameLocation loc = su::ResolveGameLocation(in, [](const fs::path& p) { return su::IsGameDir(p); });
+      paths.game_data_root = loc.dir;
+      su::ActiveGameLocation() = loc;
     }
     paths.game_data_root = bots::LongPath(paths.game_data_root);
   }
@@ -332,6 +344,12 @@ class BotsApp : public rex::ReXApp {
       if (const auto misplaced = bots::setup::FindMisplacedGameData(data); !misplaced.empty())
         REXLOG_WARN("{}", bots::setup::MisplacedMessage(data, misplaced));  // B-386; the launcher offers to move them
     }
+    {  // B-400: which game folder this run uses, and why (the launcher may change it; it logs that itself)
+      const auto& loc = bots::setup::ActiveGameLocation();
+      if (!loc.dir.empty())
+        REXLOG_INFO("game folder: {} ({}{})", bots::PathUtf8(loc.dir), bots::setup::WhyText(loc.why),
+                    loc.portable && loc.why == bots::setup::GameDirWhy::kShared ? ", outside the portable folder" : "");
+    }
     if (!bots::setup::ActiveMarkerHint().empty()) REXLOG_WARN("{}", bots::setup::ActiveMarkerHint());  // B-389
     if (!user_data_root().empty()) {  // B-389: which folder the saves are read from and whether any are there
       REXLOG_INFO("saves: {} ({} saved game(s) found)", bots::PathUtf8(user_data_root()),
@@ -389,7 +407,7 @@ class BotsApp : public rex::ReXApp {
     SetPickerHost();
     new bots::setup::SetupDialog(
         imgui_drawer(), defaults.game_data_root,
-        bots::setup::AutoGameDir(rex::filesystem::GetExecutableFolder()), game_root_given_, config_path_,
+        bots::setup::ActiveGameLocation().default_dir, game_root_given_, config_path_,
         [defaults, resume, intro_before](const std::filesystem::path& dir) {
           // The UE3 command line was set in OnPreSetup; follow a changed intro-movies choice.
           bool intro = rex::cvar::Query<bool>("intro_movies");
