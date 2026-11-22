@@ -1,0 +1,24 @@
+# Input parity for cancelling an install (lpolish): run with --state installing --sizes 1920x1080. After a cancel the
+# preview's Install starts the install again, so each device cancels it once. "Cancelled." is a plain note, not an error:
+# the shot is checked by eye (tests/launcher_logic_test.cpp checks the rule for what counts as one).
+# Keyboard: Game files, Down to Cancel the install, Enter; Up to Install, Enter
+page:files
+key:Down
+key:Down
+key:Down
+key:Enter
+expect-action:cancel-install
+shot:cancelled
+key:Up
+key:Enter
+expect-action:install
+# Controller
+pad:Down
+pad:A
+expect-action:cancel-install
+pad:Up
+pad:A
+expect-action:install
+# Mouse: the Cancel row, then Install again
+click:0.3,0.66
+expect-action:cancel-install

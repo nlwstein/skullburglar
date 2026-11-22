@@ -144,6 +144,10 @@ int main(int argc, char** argv) {
     st.extract_file = "File 311 of 737: C1Game/CookedXenon/Chapter_03.xxx";
     std::snprintf(iso, sizeof(iso), "D:\\Games\\Blood on the Sand.iso");
   }
+  if (state == "install-failed") {  // the red error, for contrast with "Cancelled."
+    st.install_error = "Not an Xbox 360 disc image (no XDVDFS filesystem found). Use a full ISO dump of the game disc.";
+    std::snprintf(iso, sizeof(iso), "D:\\Games\\notes.txt");
+  }
   if (state == "update" || state == "updating") {
     st.update_newer = true, st.update_latest = "1.14.0", st.update_can_install = true, st.update_can_download = true;
   }
@@ -164,6 +168,12 @@ int main(int argc, char** argv) {
     }
     if (state == "install-finish" && a == LauncherAction::kPlay) {  // run the install again for the next device
       st.extracting = true, st.installed = false, install_frames = 0;
+    }
+    if (state == "installing" && a == LauncherAction::kInstall) {  // start again, so the next device can cancel it too
+      st.extracting = true, st.install_error.clear(), st.install_error_is_info = false;
+    }
+    if (a == LauncherAction::kCancelInstall) {  // the dialog's own result for a cancel
+      st.extracting = false, st.install_error = "Cancelled.", st.install_error_is_info = true;
     }
     if (a == LauncherAction::kResetAll) {
       for (auto& s : settings)

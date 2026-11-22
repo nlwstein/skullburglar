@@ -273,6 +273,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     if (!old_game_dir_.empty() && !SamePath(old_game_dir_, game_dir_) && IsGameDir(old_game_dir_))
       st.unused_copy = bots::PlainPathUtf8(old_game_dir_);
     st.install_error = error_;
+    st.install_error_is_info = error_is_cancel_;
     st.folder_error = folder_error_;
     st.iso_path = iso_path_;
     st.iso_path_size = sizeof(iso_path_);
@@ -415,7 +416,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       case LauncherAction::kResetAll: {
         int changed = 0;
         const std::string err = ResetSettings(settings_, config_path_, &changed);
-        if (!err.empty()) error_ = err;
+        if (!err.empty()) error_ = err, error_is_cancel_ = false;
         reset_note_ = err.empty() ? std::to_string(changed) + " settings were put back to this version's defaults."
                                   : "Reset failed: " + err;
         return;
@@ -843,6 +844,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     }
     folder_error_.clear();
     error_.clear();
+    error_is_cancel_ = false;
     game_dir_ = bots::LongPath(dir);  // a folder 260+ characters deep needs the extended-length form (path_utf8.h)
     installed_ = IsGameDir(game_dir_);
     REXLOG_INFO("setup: game folder {} ({})", bots::PathUtf8(game_dir_), installed_ ? "installed" : "missing");
@@ -873,6 +875,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
 
   void StartExtract() {
     error_.clear();
+    error_is_cancel_ = false;
     if (iso_path_[0] == 0) return;
     // Never spread the game's files into a folder that holds something else (only a chosen or configured folder
     // could; the per-user default is ours). A reinstall over the game replaces only the game's own entries.
@@ -906,6 +909,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       else if (!game_dir_locked_) RememberGameDir();
     } else {
       error_ = result_->error;
+      error_is_cancel_ = result_->cancelled;
     }
   }
 
@@ -962,6 +966,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   bool auto_reinstall_ = false;
   char iso_path_[1024] = {};
   std::string error_;
+  bool error_is_cancel_ = false;  // error_ is "Cancelled.": shown as a plain note
   std::thread worker_;
   std::shared_ptr<ExtractProgress> progress_;
   std::shared_ptr<ExtractResult> result_;

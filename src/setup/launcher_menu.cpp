@@ -1210,7 +1210,7 @@ void LauncherMenu::DrawGameFilesRows(const LauncherStatus& st, Intent& in, float
                                   width, !st.extracting))
       action_ = LauncherAction::kHideReinstall;
   }
-  if (!st.install_error.empty()) Note(st.install_error, color::kBad, width);
+  if (!st.install_error.empty()) Note(st.install_error, st.install_error_is_info ? color::kTextDim : color::kBad, width);
   if (st.folder_choice) {
     GroupHeading("Folder", width);
     if (st.game_dir_locked) {

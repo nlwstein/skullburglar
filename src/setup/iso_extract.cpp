@@ -168,7 +168,7 @@ ExtractResult ExtractIso(const fs::path& iso, const fs::path& dest, ExtractProgr
   fs::remove_all(partial, ec);
   if (!ExtractDir(root, partial, progress, result.error)) {
     fs::remove_all(partial, ec);
-    if (progress.cancel.load()) result.error = "Cancelled.";
+    if (progress.cancel.load()) result.error = "Cancelled.", result.cancelled = true;
     REXLOG_WARN("setup: extraction stopped: {}", result.error);
     return result;
   }

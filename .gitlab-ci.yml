@@ -86,6 +86,8 @@ checks:
       PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/input113 --sizes 1920x1080,1280x800 --script @tests/launcher_input_113.script &&
       PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/saves --state misplaced-repeat --sizes 1920x1080 --script @tests/launcher_input_saves.script &&
       PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/polish --state install-finish --sizes 1920x1080,1280x800 --script @tests/launcher_input_polish.script &&
+      PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/cancel --state installing --sizes 1920x1080,1280x800 --script @tests/launcher_input_cancel.script &&
+      PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/failed --state install-failed --check --script "page:files;shot:files" &&
       for s in misplaced misnamed pre1; do PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/$s --state $s --check --script "shot:main;page:graphics;shot:graphics;page:about;shot:about;move-confirm;shot:move-confirm" || exit 1; done
     - sh tests/apprun_test.sh
     - >-

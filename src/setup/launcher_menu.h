@@ -67,6 +67,7 @@ struct LauncherStatus {
   bool can_use_default = false;  // the chosen folder isn't the default one
   std::string unused_copy;       // an installed copy that isn't used any more
   std::string install_error;
+  bool install_error_is_info = false;  // "Cancelled.": drawn plain, not as an error
   std::string folder_error;
   char* iso_path = nullptr;  // the disc image path text box
   size_t iso_path_size = 0;
