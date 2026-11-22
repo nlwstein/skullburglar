@@ -6,6 +6,7 @@
 // Test hooks: BOTS_SETUP_ISO=<path> prefills the image path; BOTS_SETUP_FOLDER=<path> chooses that folder for the
 // game files as "Choose another folder..." would (desktop builds); BOTS_SETUP_AUTO=1 installs (when a path is set and
 // nothing is installed) and presses Play, so the flow runs unattended.
+// BOTS_SETUP_FRAME_SHOT=<dir> writes PNGs of the launcher as its state settles (frame_shot.h).
 // BOTS_SETUP_COPY=copy|iso|notnow answers the portable copy offer (game_location.h) as a player would (page|inplace press
 // the Game files page's "Copy from the shared folder" / "Use it where it is" instead), and
 // BOTS_SETUP_COPY_CANCEL_MB=<n> presses Cancel once n MB have been copied.
@@ -43,6 +44,7 @@
 #include "game_location.h"
 #include "portable.h"
 #include "file_picker.h"
+#include "frame_shot.h"
 #include "iso_extract.h"
 #include "pad_nav.h"
 #include "settings.h"
@@ -233,9 +235,37 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     }
     ImGui::End();
     ImGui::GetStyle() = unscaled_style;
+    if (!DialogClosing()) FrameShotHook();  // Play deletes this dialog inside DrawButtons
   }
 
  private:
+  static bool& DialogClosing() {
+    static bool closing = false;
+    return closing;
+  }
+
+  // BOTS_SETUP_FRAME_SHOT=<dir> (test-only, frame_shot.h): a PNG of the launcher whenever its state has stayed the same for
+  // 20 frames (the copy offer, the copy running, installed, an error, the first-run page), named <n>-<state>.png.
+  void FrameShotHook() {
+    static const std::filesystem::path dir = bots::EnvPath("BOTS_SETUP_FRAME_SHOT");
+    if (dir.empty()) return;
+    const std::string key = offer_open_ ? "offer"
+                            : Extracting() ? (copying_ ? "copying" : "installing")
+                            : installed_ ? "installed"
+                            : !error_.empty() ? "error"
+                                              : "firstrun";
+    if (key != shot_key_) {
+      shot_key_ = key;
+      shot_frames_ = 0;
+      shot_taken_ = false;
+    }
+    if (shot_taken_ || ++shot_frames_ < (key == "copying" ? 240 : 20)) return;
+    shot_taken_ = true;
+    const std::filesystem::path path = dir / (std::to_string(++shot_seq_) + "-" + key + ".png");
+    const bool ok = frameshot::CaptureFrame(path);
+    REXLOG_INFO("setup: frame shot {} {}", bots::PathUtf8(path), ok ? "written" : "failed");
+  }
+
   // Scaled pixels: a size from the layout (designed at scale 1) at this window's text scale.
   float S(float pixels) const { return pixels * ui_scale_; }
 
@@ -1185,6 +1215,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     std::string err = settings_file_moved_ ? std::string() : SaveSettings(settings_, config_path_);
     if (!err.empty()) REXLOG_WARN("setup: {}", err);
     REXLOG_INFO("setup: play with game files in {}", bots::PathUtf8(game_dir_));
+    DialogClosing() = true;
     auto play = play_;
     auto dir = game_dir_;
     pad_.reset();  // the controllers are the game's from here
@@ -1214,6 +1245,9 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   GameSize shared_size_;
   uint64_t offer_free_ = 0;
   bool cancel_hook_done_ = false, page_hook_done_ = false;
+  std::string shot_key_;
+  int shot_frames_ = 0, shot_seq_ = 0;
+  bool shot_taken_ = false;
   bool quit_requested_ = false;  // an installed update asked the program to quit
   bool show_reinstall_ = false;
   std::vector<std::string> misplaced_;  // game data in the portable data folder that belongs in user/ (portable.h)
