@@ -1,0 +1,4 @@
+[
+  "Portable mode now keeps the game files in the bots-data folder too, so a portable copy is fully self-contained. If this computer already has the game files for the normal Skullburglar, the launcher offers to copy them into the portable folder (it shows the size and your free space, can be cancelled, and leaves the original alone).",
+  "If you already used portable mode, choosing Not now keeps the game working from the shared folder; you can copy it into the portable folder from Game files at any time."
+]
