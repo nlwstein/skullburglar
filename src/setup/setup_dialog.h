@@ -393,6 +393,14 @@ class SetupDialog : public rex::ui::ImGuiDialog {
         return;
       case LauncherAction::kFixFirewall: firewall_->fix = true; return;
       case LauncherAction::kDismissSaves: misplaced_.clear(); return;
+      case LauncherAction::kOpenLogFolder: {
+        const std::filesystem::path folder = LogFolder();
+        std::error_code ec;
+        std::filesystem::create_directories(folder, ec);  // nothing may have been logged there yet
+        REXLOG_INFO("setup: open the log folder {}", bots::PlainPathUtf8(folder));
+        if (!live_.init) OpenFolder(bots::PathUtf8(folder));  // test runs (BOTS_SETUP_LIVE) never open a window
+        return;
+      }
       case LauncherAction::kMoveSaves: {
         if (misplaced_.empty() || Extracting()) return;
         std::string err;

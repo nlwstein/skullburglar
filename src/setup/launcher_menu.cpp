@@ -1304,7 +1304,14 @@ void LauncherMenu::DrawAboutRows(std::vector<Setting>& settings, const LauncherS
     if (PageOf(settings[i], sections_[i]) == LauncherPage::kAbout) {
       if (!focus_cvar_.empty() && focus_cvar_ == settings[i].cvar) focus_target_ = row_index_, focus_cvar_.clear();
       SettingRow(settings[i], settings, in, width, false, nullptr);
-      if (settings[i].cvar == "diagnostic_logging") Note("Logs are in " + st.log_folder, color::kTextDim, width, FontRole::kSmall);
+      if (settings[i].cvar == "diagnostic_logging") {
+        Note("Logs are in " + st.log_folder, color::kTextDim, width, FontRole::kSmall);
+        if (ActionRow("##open_logs", "Open the log folder", "",
+                      "Shows the folder holding the game's log files in your file browser. Attach the newest one when "
+                      "you report a problem.",
+                      in, width))
+          action_ = LauncherAction::kOpenLogFolder;
+      }
     }
   GroupHeading("Reset", width);
   if (ActionRow("##reset", "Reset to defaults...", "",

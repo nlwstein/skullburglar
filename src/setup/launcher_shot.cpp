@@ -321,6 +321,7 @@ const char* ActionName(LauncherAction a) {
     case LauncherAction::kResetAll: return "reset";
     case LauncherAction::kMoveSaves: return "move-saves";
     case LauncherAction::kDismissSaves: return "dismiss-saves";
+    case LauncherAction::kOpenLogFolder: return "open-logs";
   }
   return "?";
 }

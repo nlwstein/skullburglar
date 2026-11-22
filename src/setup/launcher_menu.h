@@ -46,6 +46,7 @@ enum class LauncherAction {
   kResetAll,        // Reset to defaults, confirmed
   kMoveSaves,       // portable mode: move the misplaced saves and settings into user/, confirmed (B-386)
   kDismissSaves,    // "Not now" on the misplaced-saves notice
+  kOpenLogFolder,   // About & logs: show the logs folder in the system's file browser
 };
 
 // What the window knows that the menu shows. Filled every frame.
