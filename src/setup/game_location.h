@@ -123,6 +123,11 @@ inline bool ShouldOfferCopy(const GameLocation& loc, bool declined, const IsGame
          CanCopyFromShared(loc.portable, loc.dir, loc.default_dir, loc.shared, is_game);
 }
 
+// What "Not now" does: a data folder that has been used before (settings or saves exist: a 1.12/1.13 portable install that
+// played from the shared folder) keeps using the shared folder, saved as the chosen folder, so an update never looks like
+// the game broke. A brand-new portable folder stays in the normal first-run state.
+inline bool NotNowUsesShared(bool data_folder_used_before) { return data_folder_used_before; }
+
 // The marker "Not now" leaves in the data root.
 inline std::filesystem::path CopyDeclinedMarker(const std::filesystem::path& data_root) {
   return data_root / "game-copy-declined";

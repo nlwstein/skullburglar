@@ -210,6 +210,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
                          ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
       LogUiScale(io);  // before the draw calls: Play can delete this dialog
       DrawCopyOffer();
+      DrawSharedNote();
       DrawMisplaced();
       DrawGameFiles();
       ImGui::Spacing();
@@ -1022,6 +1023,10 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       case OfferAnswer::kNotNow:
         REXLOG_INFO("setup: copy offer: player chose Not now (not offered again in this data folder)");
         RememberCopyDeclined(ActiveGameLocation().data_root);
+        if (NotNowUsesShared(offer_prior_use_)) {  // played portable before: keep playing, saved as the chosen folder
+          REXLOG_INFO("setup: existing portable data folder: using the shared game folder (saved as the chosen folder)");
+          UseSharedInPlace();
+        }
         break;
     }
   }
@@ -1058,8 +1063,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       ImGui::Spacing();
       WrappedColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
                      "Earlier versions of portable mode played from the shared folder without saying so. From this version "
-                     "the game files are part of the portable folder. If you choose Not now, nothing changes until you "
-                     "ask: the Game files section then offers to copy them, or to use the shared folder where it is.");
+                     "the game files are part of the portable folder. If you choose Not now, the game keeps using the shared "
+                     "folder, and Game files can copy it into this folder at any time.");
     }
     ImGui::Spacing();
     ImGui::BeginDisabled(!enough);
@@ -1098,6 +1103,13 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     }
     ImGui::SameLine();
     if (ImGui::SmallButton("Use it where it is")) UseSharedInPlace();
+    ImGui::Spacing();
+  }
+
+  // Portable mode playing from the shared folder (an existing portable user's Not now, or "Use it where it is").
+  void DrawSharedNote() {
+    if (!portable_ || shared_dir_.empty() || !installed_ || !SamePath(game_dir_, shared_dir_)) return;
+    WrappedDisabled("Using the shared game folder. You can copy it into this portable folder from Game files at any time.");
     ImGui::Spacing();
   }
 

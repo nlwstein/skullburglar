@@ -118,6 +118,8 @@ int main() {
     auto loc = su::ResolveGameLocation(in, yes);
     CHECK(loc.dir == fs::path("/x/bots-recomp/game") && !su::ShouldOfferCopy(loc, false, yes));
   }
+  // Not now: an existing portable user keeps the shared folder; a brand-new portable folder gets the first-run state.
+  CHECK(su::NotNowUsesShared(true) && !su::NotNowUsesShared(false));
   CHECK(std::string(su::WhyText(su::GameDirWhy::kPortableDefault)) == "portable default");
   CHECK(std::string(su::WhyText(su::GameDirWhy::kShared)) == "shared");
   CHECK(std::string(su::WhyText(su::GameDirWhy::kChosen)) == "chosen");
