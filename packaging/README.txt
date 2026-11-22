@@ -129,9 +129,13 @@ Portable mode (keep everything in one folder)
   (and Steam Deck)
   macOS               Skullburglar.app, same folder     bots-data next to the app (never inside it)
 
-  bots-data holds user (saves and bots.toml), cache (shader cache), logs, and the save-backups and crashes folders.
-  The game files stay where the launcher put them; a game folder next to bots is still found on its own (not on
-  macOS or the AppImage: choose a folder in the launcher).
+  bots-data holds user (saves and bots.toml), cache (shader cache), logs, game (the game files), and the
+  save-backups and crashes folders. In portable mode the launcher installs the game files into bots-data\game by
+  default. If this computer already has them (installed for the normal Skullburglar), the launcher offers to copy
+  them there: the copy leaves the original alone, shows its size and your free space, and can be cancelled. "Not now"
+  is remembered; the Game files section keeps a "Copy from the shared folder" button, and "Use it where it is" if you
+  would rather keep one shared copy outside the portable folder. A game folder you chose in the launcher is kept,
+  and so is a game folder next to bots from an earlier version (not on macOS or the AppImage).
 
   To use a folder of your choice instead (for scripts, or Steam's Launch Options), set the environment variable
   BOTS_DATA_DIR to it, for example BOTS_DATA_DIR=/mnt/games/bots %command% in Steam. It beats portable.txt, and it
