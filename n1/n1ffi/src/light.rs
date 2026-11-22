@@ -53,11 +53,14 @@ fn fog_volume_scale() -> f32 {
 }
 
 /// The colour the port's volume apply shader emits, measured from a capture (`BOTS_N1_FOGVOL_COL=r,g,b` overrides it);
-/// the game's own `ApproxFogLightColor` is not what is drawn.
+/// the game's own `ApproxFogLightColor` is not what is drawn. B-398: blue 0.4 -> 0.3. Chapter 33250's fog is a warm amber in the
+/// Pre-1.0 renderer; with 0.4 n1's was pink, and the fire heat glow (which multiplies the scene by (3, 1.5, 0.75)) turned it
+/// salmon: n1/Pre-1.0 channel ratios r 1.03, g 1.04, b 1.13 and chroma 0.89 (with 0.3: 1.04, 1.04, 1.04 and 1.04).
+/// `BOTS_N1_FOGVOL_COL=0.6,0.35,0.4` restores the earlier colour.
 fn fog_volume_color() -> Option<[f32; 3]> {
     static C: std::sync::OnceLock<Option<[f32; 3]>> = std::sync::OnceLock::new();
     *C.get_or_init(|| {
-        let d = [0.6, 0.35, 0.4];
+        let d = [0.6, 0.35, 0.3];
         match std::env::var("BOTS_N1_FOGVOL_COL") {
             Ok(v) => {
                 let p: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
