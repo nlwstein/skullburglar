@@ -138,7 +138,7 @@ int main(int argc, char** argv) {
                     "\"portable.txt.txt\", but it must be named exactly portable.txt (Windows hides the .txt ending).";
     st.saves_note_is_error = true;
   }
-  if (state == "installing") {
+  if (state == "installing" || state == "install-finish") {  // install-finish: the install ends by itself after a few frames
     st.installed = false, st.extracting = true, st.extract_fraction = 0.42f;
     st.extract_progress = "2.9 / 6.8 GB";
     st.extract_file = "File 311 of 737: C1Game/CookedXenon/Chapter_03.xxx";
@@ -150,6 +150,7 @@ int main(int argc, char** argv) {
   if (state == "updating") st.update_busy = true, st.update_stage = 0, st.update_done_mb = 61.2, st.update_total_mb = 164.0;
 
   const LauncherStatus saves0 = st;  // the notices a size's run starts from
+  int install_frames = 0;
   ShotHost host;
   host.fonts.inter_regular = inter_r.data(), host.fonts.inter_regular_size = inter_r.size();
   host.fonts.inter_semibold = inter_sb.data(), host.fonts.inter_semibold_size = inter_sb.size();
@@ -158,6 +159,12 @@ int main(int argc, char** argv) {
     st.dpi_scale = dpi;
     st.pad = pad;
     const LauncherAction a = menu.Draw(settings, st, fonts);
+    if (state == "install-finish" && st.extracting && ++install_frames > 3) {  // done: installed, no error
+      st.extracting = false, st.installed = true, st.install_error.clear();
+    }
+    if (state == "install-finish" && a == LauncherAction::kPlay) {  // run the install again for the next device
+      st.extracting = true, st.installed = false, install_frames = 0;
+    }
     if (a == LauncherAction::kResetAll) {
       for (auto& s : settings)
         if (!s.locked && s.cvar != "check_updates") s.value = s.default_value;
@@ -181,6 +188,8 @@ int main(int argc, char** argv) {
   host.reset = [&] {
     settings = pristine;
     st.reset_note.clear();
+    install_frames = 0;
+    st = saves0;
     st.saves_warning = saves0.saves_warning, st.saves_can_move = saves0.saves_can_move;
     st.saves_note = saves0.saves_note, st.saves_note_is_error = saves0.saves_note_is_error;
   };

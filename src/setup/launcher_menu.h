@@ -194,6 +194,7 @@ class LauncherMenu {
   std::string focus_cvar_;
   bool scroll_to_focus_ = true;
   bool started_ = false;        // the first frame chose where focus starts
+  bool was_extracting_ = false;  // an install was running last frame: when it ends well, Play is the next step
   int row_index_ = 0;           // rows drawn so far this frame
   int prev_rows_ = 0;           // rows on the page last frame
   int dragging_row_ = -1;       // a slider held by the mouse

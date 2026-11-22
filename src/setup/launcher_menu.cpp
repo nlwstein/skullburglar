@@ -332,6 +332,9 @@ LauncherAction LauncherMenu::Draw(std::vector<Setting>& settings, const Launcher
   action_ = LauncherAction::kNone;
   report_.Reset();
   sections_ = SectionsOf(settings);
+  // An install that just finished (not cancelled, not failed): Back lands on Play, the obvious next step.
+  if (was_extracting_ && !st.extracting && st.installed && st.install_error.empty()) main_focus_ = kMainPlay;
+  was_extracting_ = st.extracting;
   // FocusSetting: open the setting's page; its row is selected while the page draws.
   if (!focus_cvar_.empty()) {
     if (std::none_of(settings.begin(), settings.end(), [&](const Setting& s) { return s.cvar == focus_cvar_; }))
