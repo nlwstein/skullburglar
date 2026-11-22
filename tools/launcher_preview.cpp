@@ -148,6 +148,11 @@ int main(int argc, char** argv) {
     st.install_error = "Not an Xbox 360 disc image (no XDVDFS filesystem found). Use a full ISO dump of the game disc.";
     std::snprintf(iso, sizeof(iso), "D:\\Games\\notes.txt");
   }
+  if (state == "update-failed") {  // the notes the window writes for failed downloads (UpdateFailureNote)
+    st.update_newer = true, st.update_latest = "1.14.0", st.update_can_install = true, st.update_can_download = true;
+    st.update_note = UpdateFailureNote("the download failed (curl 22)");
+    st.update_note_is_error = true;
+  }
   if (state == "update" || state == "updating") {
     st.update_newer = true, st.update_latest = "1.14.0", st.update_can_install = true, st.update_can_download = true;
   }

@@ -297,4 +297,28 @@ inline std::string BindKey(const std::string& value, const std::string& key, boo
 // the raw value the menu never drew the progress bar or Cancel, and "Checking the download" showed while it downloaded).
 inline int MenuUpdateStage(int installer_stage, int downloading) { return installer_stage < downloading ? 0 : installer_stage - downloading; }
 
+// What the Updates page says when the update didn't install. `raw` is the installer's technical reason (it goes to the
+// log as it is). A failed download ("the download failed (curl 22)", Windows: "(HTTP 404)" or "(error 12029)") reads in
+// player language: no tool names or codes in the window. Anything else keeps the old sentence.
+inline std::string UpdateFailureNote(const std::string& raw) {
+  constexpr std::string_view kTail = " Check your connection and try again. Your install is unchanged.";
+  constexpr std::string_view kHead = "the download failed (";
+  if (raw.rfind(kHead, 0) != 0) {
+    return "The update didn't install (" + raw +
+           "). Your install is unchanged; the download page gets the new version by hand.";
+  }
+  const std::string detail = raw.substr(kHead.size());
+  auto number_after = [&](std::string_view tag) {
+    return detail.rfind(tag, 0) == 0 ? std::atoi(detail.c_str() + tag.size()) : -1;
+  };
+  const int curl = number_after("curl "), http = number_after("HTTP "), sys = number_after("error ");
+  const std::string head = "The download failed";
+  if (http >= 400 || curl == 22) return head + " (the server returned an error)." + std::string(kTail);
+  if (curl == 23) return head + " (the file couldn't be saved; is the disk full?). Your install is unchanged.";
+  if (sys >= 0 || curl == 6 || curl == 7 || curl == 18 || curl == 28 || curl == 35 || curl == 52 || curl == 55 ||
+      curl == 56 || curl == 60)
+    return head + " (the connection dropped or timed out)." + std::string(kTail);
+  return head + "." + std::string(kTail);
+}
+
 }  // namespace bots::setup

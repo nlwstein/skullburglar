@@ -153,6 +153,22 @@ int main() {
   assert(MenuUpdateStage(0, 1) == 0 && MenuUpdateStage(1, 1) == 0);
   assert(MenuUpdateStage(2, 1) == 1 && MenuUpdateStage(3, 1) == 2 && MenuUpdateStage(4, 1) == 3);
 
+  // Failed downloads read in player language (e2e 2026-11-21: "curl 22" in the window); the raw reason stays in the log.
+  for (const char* raw : {"the download failed (curl 22)", "the download failed (HTTP 404)", "the download failed (HTTP 500)"}) {
+    const std::string note = UpdateFailureNote(raw);
+    assert(note == "The download failed (the server returned an error). Check your connection and try again. Your install is unchanged.");
+  }
+  for (const char* raw : {"the download failed (curl 7)", "the download failed (curl 28)", "the download failed (curl 56)",
+                          "the download failed (error 12030)"}) {  // refused, timed out, dropped mid-transfer, Windows
+    const std::string note = UpdateFailureNote(raw);
+    assert(note.find("the connection dropped or timed out") != std::string::npos);
+    assert(note.find("curl") == std::string::npos && note.find("error 1") == std::string::npos);
+  }
+  assert(UpdateFailureNote("the download failed (curl 99)").find("curl") == std::string::npos);
+  assert(UpdateFailureNote("the download failed (curl 23)").find("disk") != std::string::npos);
+  assert(UpdateFailureNote("the new app's signature is broken") ==
+         "The update didn't install (the new app's signature is broken). Your install is unchanged; the download page gets the new version by hand.");
+
   std::printf("launcher_logic_test: all passed\n");
   return 0;
 }

@@ -324,8 +324,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
           error = u.install_error;
         }
         if (!error.empty()) {
-          st.update_note = "The update didn't install (" + error +
-                           "). Your install is unchanged; the download page gets the new version by hand.";
+          st.update_note = UpdateFailureNote(error);  // the log has the raw reason (StartInstall)
           st.update_note_is_error = true;
         } else if (st.update_newer && u.needs_move) {
           st.update_note = "To update from here, move Skullburglar to your Applications folder first.";
