@@ -198,6 +198,7 @@ class LauncherMenu {
   void IsoPathRow(const LauncherStatus& st, Intent& in, float width);
   void Note(const std::string& text, ImU32 color, float width, FontRole role = FontRole::kBody);
   void GroupHeading(const char* text, float width);
+  void PageGroupHeading(const Setting& s, std::string& group, float width);
   void ProgressRow(float fraction, const std::string& overlay, float width);
 
   // Drawing helpers
@@ -247,7 +248,6 @@ class LauncherMenu {
   // The focused row's help (filled while the rows draw, shown in the help panel).
   std::string help_title_, help_text_, help_default_, help_note_;
   bool help_locked_ = false;
-  std::vector<std::string> sections_;  // each setting's catalog section
 };
 
 }  // namespace bots::setup
