@@ -674,6 +674,10 @@ impl AssetDb {
             if std::env::var("BOTS_N1_MATLOG").map_or(true, |v| v != "0") {
                 eprintln!("n1: material {path} [{}] uses unsupported expressions {:?} (drawn as constant 0)", d.blend, d.unsupported);
             }
+            // B-384 diagnostics: BOTS_N1_MAT_DUMP=<substring of a material path> prints that material's expression graph.
+            if std::env::var("BOTS_N1_MAT_DUMP").is_ok_and(|v| !v.is_empty() && path.contains(&v)) {
+                eprintln!("n1: material graph {path}: {}", self.particle_material_json(path).map(|j| j.to_string()).unwrap_or_default());
+            }
         }
         let m = Arc::new(mo);
         self.materials

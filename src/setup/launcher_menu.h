@@ -47,6 +47,12 @@ enum class LauncherAction {
   kMoveSaves,       // portable mode: move the misplaced saves and settings into user/, confirmed (B-386)
   kDismissSaves,    // "Not now" on the misplaced-saves notice
   kOpenLogFolder,   // About & logs: show the logs folder in the system's file browser
+  // Portable mode keeps the game files in its own folder (B-400)
+  kCopyFromShared,  // Game files: copy the shared install into the portable folder
+  kUseSharedInPlace,  // Game files: keep playing from the shared folder
+  kOfferCopy,       // the copy offer: Copy the game files here
+  kOfferDisc,       // the copy offer: Install from a disc image instead
+  kOfferNotNow,     // the copy offer: Not now
 };
 
 // What the window knows that the menu shows. Filled every frame.
@@ -70,8 +76,23 @@ struct LauncherStatus {
   std::string install_error;
   bool install_error_is_info = false;  // "Cancelled.": drawn plain, not as an error
   std::string folder_error;
+  // Portable mode (B-400): the game files live in the portable folder; the shared install can be copied into it.
+  bool copying = false;                 // the running install is the copy from the shared folder
+  std::string portable_game_note;       // where the portable game files are kept (or the shared folder isn't)
+  std::string shared_dir;               // the shared install (the copy's source)
+  bool can_copy_from_shared = false;    // this folder holds no game and the shared one does
+  std::string shared_note;              // "Using the shared game folder..." (an existing portable user chose Not now)
+  bool offer_open = false;              // the copy offer is up
+  std::string offer_dest, offer_size_text, offer_free_text, offer_error;  // size and free space, or why they're unknown
+  bool offer_enough = true;             // the free space holds the copy
+  bool offer_prior_use = false;         // this portable folder was used before: Not now keeps the shared folder
   char* iso_path = nullptr;  // the disc image path text box
   size_t iso_path_size = 0;
+
+  // Auto-save: every change is written to bots.toml as it is made
+  bool saved_flash = false;     // a write just succeeded: "Saved" in the footer for a moment
+  std::string save_failed;      // the last write failed: why, short (the changes stay in memory for this session)
+  std::string save_failed_full;
 
   // Settings file, data and logs
   std::string config_path;
@@ -129,7 +150,10 @@ class LauncherMenu {
   LauncherAction Draw(std::vector<Setting>& settings, const LauncherStatus& status, const LauncherFonts& fonts);
 
   // A key binding is waiting for its key, or a confirmation is open: the window's own shortcuts stay off.
-  bool Busy() const { return capture_ >= 0 || confirm_reset_ || confirm_move_; }
+  bool Busy() const { return capture_ >= 0 || confirm_reset_ || confirm_move_ || offer_open_; }
+
+  // A slider is held by the mouse (auto-save waits for the release).
+  bool Dragging() const { return dragging_row_ >= 0; }
 
   LauncherPage page() const { return page_; }
   LastInput last_input() const { return last_input_; }
@@ -206,6 +230,7 @@ class LauncherMenu {
   float capture_escape_held_ = -1.0f;
   bool confirm_reset_ = false;
   bool confirm_move_ = false;   // the move-saves confirmation
+  bool offer_open_ = false;     // the portable copy offer (three buttons), from the status
   int confirm_focus_ = 1;       // 0 reset, 1 cancel
   bool text_input_active_ = false;
   bool focus_text_input_ = false;

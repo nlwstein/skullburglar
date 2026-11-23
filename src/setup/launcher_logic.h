@@ -321,4 +321,36 @@ inline std::string UpdateFailureNote(const std::string& raw) {
   return head + "." + std::string(kTail);
 }
 
+// ---- Auto-save ----
+
+// A change is written when it is a discrete one (a switch, a choice, a key binding), at once; a slider is written when
+// the mouse lets go of it, or after it has been still for kAutosaveIdleSeconds (a held arrow key or a drag would
+// otherwise write 60 times a second). `dirty`: some setting differs from what was last written; `slider_pending`: one of
+// those is a slider; `released`: the mouse let go of a slider this frame; `idle`: seconds since the last change.
+inline constexpr double kAutosaveIdleSeconds = 0.3;
+inline bool AutosaveDue(bool dirty, bool slider_pending, bool released, double idle) {
+  if (!dirty) return false;
+  if (!slider_pending || released) return true;
+  return idle >= kAutosaveIdleSeconds;
+}
+
+// How long "Saved" stays in the footer.
+inline constexpr double kSavedFlashSeconds = 1.8;
+
+// The short reason in the footer for a failed write: the settings file's own error text reads
+// "Can't write <path> (<why>)"; the footer says what it means for the player.
+inline std::string SaveErrorShort(const std::string& error) {
+  std::string why;
+  if (const size_t open = error.rfind('('); open != std::string::npos && error.back() == ')')
+    why = error.substr(open + 1, error.size() - open - 2);
+  auto has = [&](const char* needle) { return why.find(needle) != std::string::npos; };
+  if (has("read-only") || has("Read-only") || has("Permission denied") || has("Operation not permitted") || has("Access is denied") ||
+      has("denied"))
+    return "the settings file or folder is read-only";
+  if (has("No space") || has("disk is full") || has("not enough space") || has("Not enough space") || has("quota"))
+    return "the disk is full";
+  if (has("No such file") || has("cannot find the path")) return "the settings folder can't be found";
+  return why.empty() ? "the settings file can't be written" : why;
+}
+
 }  // namespace bots::setup

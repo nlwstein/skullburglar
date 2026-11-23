@@ -158,6 +158,42 @@ int main(int argc, char** argv) {
   }
   if (state == "updating") st.update_busy = true, st.update_stage = 0, st.update_done_mb = 61.2, st.update_total_mb = 164.0;
 
+  // Portable mode (B-400): the game files live in the portable folder.
+  const std::string kShared = "C:\\Users\\Player\\AppData\\Local\\bots-recomp\\game";
+  const std::string kPortable = "D:\\Games\\Skullburglar\\bots-data\\game";
+  if (state.rfind("offer", 0) == 0 || state == "copying" || state.rfind("can-copy", 0) == 0 || state == "shared-note" ||
+      state == "portable-installed") {
+    st.portable_note = "Portable mode (portable.txt): saves, settings, shader cache, logs and (by default) the game files are in D:\\Games\\Skullburglar\\bots-data";
+    st.shared_dir = kShared;
+    st.game_dir = kPortable;
+    st.portable_game_note = "Portable game folder: kept with your saves in D:\\Games\\Skullburglar\\bots-data.";
+    st.installed = state == "shared-note" || state == "portable-installed";
+  }
+  if (state.rfind("offer", 0) == 0) {  // the copy offer; -prior: an existing portable user, -nospace: not enough room, -error: can't measure
+    st.offer_open = true, st.offer_dest = kPortable;
+    st.offer_size_text = "6.8 GB (737 files)", st.offer_free_text = "212.4 GB", st.offer_enough = true;
+    if (state == "offer-prior") st.offer_prior_use = true;
+    if (state == "offer-nospace") st.offer_free_text = "3.0 GB", st.offer_enough = false;
+    if (state == "offer-error") st.offer_error = "Can't read the shared game folder to size it.", st.offer_enough = false;
+  }
+  if (state == "copying") {
+    st.installed = false, st.extracting = true, st.copying = true, st.extract_fraction = 0.42f;
+    st.extract_progress = "2.9 / 6.8 GB";
+    st.extract_file = "File 311 of 737: C1Game/CookedXenon/Chapter_03.xxx";
+  }
+  if (state.rfind("can-copy", 0) == 0) st.can_copy_from_shared = true;  // after Not now, a cancelled copy or a failed one
+  if (state == "shared-note") {
+    st.game_dir = kShared;
+    st.portable_game_note = "This is the shared folder, outside the portable folder: it won't move with it. \"Use the default folder\" goes back to " + kPortable + ".";
+    st.shared_note = "Using the shared game folder. You can copy it into this portable folder from Game files at any time.";
+    st.can_use_default = true;
+  }
+  if (state == "saved") st.saved_flash = true;
+  if (state == "save-failed") {
+    st.save_failed = SaveErrorShort("Can't write C:\\Users\\Player\\AppData\\Local\\bots-recomp\\bots.toml (Access is denied.)");
+    st.save_failed_full = "Can't write C:\\Users\\Player\\AppData\\Local\\bots-recomp\\bots.toml (Access is denied.)";
+  }
+
   const LauncherStatus saves0 = st;  // the notices a size's run starts from
   int install_frames = 0;
   ShotHost host;
@@ -191,6 +227,13 @@ int main(int argc, char** argv) {
       st.saves_note_is_error = false;
     }
     if (a == LauncherAction::kDismissSaves && state != "misplaced-repeat") st.saves_warning.clear(), st.saves_can_move = false, st.saves_note.clear();
+    // The offer's answers, as the window handles them (the preview keeps the offer up for the other devices in "offer-repeat").
+    if (state.rfind("offer", 0) == 0 && a != LauncherAction::kNone && state != "offer-repeat" && state != "offer-nospace") {
+      if (a == LauncherAction::kOfferCopy) st.offer_open = false, st.installed = false, st.extracting = true, st.copying = true, st.extract_fraction = 0.1f;
+      if (a == LauncherAction::kOfferDisc || a == LauncherAction::kOfferNotNow) st.offer_open = false;
+    }
+    if (a == LauncherAction::kCopyFromShared && state == "can-copy") st.can_copy_from_shared = false, st.extracting = true, st.copying = true;
+    if (a == LauncherAction::kUseSharedInPlace && state == "can-copy") st.can_copy_from_shared = false, st.installed = true, st.shared_note = "Using the shared game folder.";
     if (a == LauncherAction::kShowReinstall) st.show_reinstall = true;
     if (a == LauncherAction::kHideReinstall) st.show_reinstall = false;
     return a;

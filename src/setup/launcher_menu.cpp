@@ -88,7 +88,7 @@ constexpr int kMainPlay = 0;
 bool SavesNotice(const LauncherStatus& st) { return !st.saves_warning.empty() || !st.saves_note.empty(); }
 std::vector<MainEntry> MainEntries() {
   std::vector<MainEntry> e;
-  e.push_back({LauncherPage::kMain, "Play", "Start the game. Your settings are saved first."});
+  e.push_back({LauncherPage::kMain, "Play", "Start the game with your settings. Changes are saved as you make them."});
   for (const auto& p : kPages) e.push_back({p.page, p.title, p.about});
   e.push_back({LauncherPage::kMain, "Quit", "Close Skullburglar."});
   return e;
@@ -335,6 +335,9 @@ LauncherAction LauncherMenu::Draw(std::vector<Setting>& settings, const Launcher
   // An install that just finished (not cancelled, not failed): Back lands on Play, the obvious next step.
   if (was_extracting_ && !st.extracting && st.installed && st.install_error.empty()) main_focus_ = kMainPlay;
   was_extracting_ = st.extracting;
+  // The copy offer opens with focus on its first usable button.
+  if (st.offer_open && !offer_open_) confirm_focus_ = st.offer_enough ? 0 : 1;
+  offer_open_ = st.offer_open;
   // FocusSetting: open the setting's page; its row is selected while the page draws.
   if (!focus_cvar_.empty()) {
     if (std::none_of(settings.begin(), settings.end(), [&](const Setting& s) { return s.cvar == focus_cvar_; }))
@@ -441,7 +444,7 @@ LauncherAction LauncherMenu::Draw(std::vector<Setting>& settings, const Launcher
   }
   ImGui::End();
   if (capture_ >= 0) DrawCapture(settings, modal_in);
-  if (confirm_reset_ || confirm_move_) DrawConfirm(st, modal_in);
+  if (confirm_reset_ || confirm_move_ || offer_open_) DrawConfirm(st, modal_in);
   ImGui::PopStyleColor(4);
   ImGui::PopStyleVar(6);
 
@@ -568,7 +571,7 @@ void LauncherMenu::DrawMain(std::vector<Setting>& settings, const LauncherStatus
   const MainEntry& sel = entries[std::clamp(main_focus_, 0, n - 1)];
   std::string about = sel.about;
   if (main_focus_ == kMainPlay && !can_play) {
-    about = st.extracting ? "The game files are being installed." : st.update_busy ? "An update is installing."
+    about = st.extracting ? (st.copying ? "The game files are being copied." : "The game files are being installed.") : st.update_busy ? "An update is installing."
                                                                                      : "Install the game files first: open Game files.";
   }
   if (side) {
@@ -608,11 +611,14 @@ void LauncherMenu::DrawStatusCards(const std::vector<Setting>& settings, const L
   std::vector<Card> cards;
   if (st.extracting) {
     char t[64];
-    std::snprintf(t, sizeof(t), "Installing, %.0f%%", st.extract_fraction * 100.0f);
+    std::snprintf(t, sizeof(t), st.copying ? "Copying, %.0f%%" : "Installing, %.0f%%", st.extract_fraction * 100.0f);
     cards.push_back({"GAME FILES", t, color::kGold, LauncherPage::kGameFiles});
   } else {
-    cards.push_back({"GAME FILES", st.installed ? "Installed" : "Not installed: choose your disc image",
-                     st.installed ? color::kGood : color::kWarn, LauncherPage::kGameFiles});
+    // Portable mode (B-400): playing from the shared folder says so here, where the player lands first.
+    std::string text = st.installed ? (st.shared_note.empty() ? "Installed" : "Installed: using the shared game folder")
+                       : st.can_copy_from_shared ? "Not installed: copy it or use a disc image"
+                                                 : "Not installed: choose your disc image";
+    cards.push_back({"GAME FILES", text, st.installed ? color::kGood : color::kWarn, LauncherPage::kGameFiles});
   }
   {
     Card c{"UPDATES", "", color::kTextFaint, LauncherPage::kUpdates};
@@ -1173,6 +1179,8 @@ void LauncherMenu::IsoPathRow(const LauncherStatus& st, Intent& in, float width)
 void LauncherMenu::DrawGameFilesRows(const LauncherStatus& st, Intent& in, float width) {
   if (st.installed && !st.show_reinstall) {
     Note("Installed in " + st.game_dir, color::kText, width);
+    if (!st.portable_game_note.empty()) Note(st.portable_game_note, color::kTextDim, width, FontRole::kSmall);
+    if (!st.shared_note.empty()) Note(st.shared_note, color::kText, width);
     if (!st.unused_copy.empty())
       Note("The game files in " + st.unused_copy + " aren't used any more: delete that folder to free about 7 GB.",
            color::kWarn, width);
@@ -1189,6 +1197,23 @@ void LauncherMenu::DrawGameFilesRows(const LauncherStatus& st, Intent& in, float
       Note("Reinstall into:", color::kText, width);
     }
     Note(st.game_dir, color::kTextDim, width, FontRole::kSmall);
+    if (!st.portable_game_note.empty()) Note(st.portable_game_note, color::kTextDim, width, FontRole::kSmall);
+    // Portable mode: the shared install can be copied in (after Not now, a cancelled copy or a failed one) or used where it is.
+    if (st.can_copy_from_shared && !st.extracting) {
+      Note("This computer already has the game files for the normal install, in " + st.shared_dir +
+               ". This folder holds none.",
+           color::kText, width);
+      if (ActionRow("##copy_shared", "Copy from the shared folder...", "",
+                    "Copies the game files from the shared install into this folder, so the portable folder holds "
+                    "everything. The shared copy stays where it is.",
+                    in, width))
+        action_ = LauncherAction::kCopyFromShared;
+      if (ActionRow("##use_shared", "Use it where it is", "",
+                    "Keep playing from the shared folder. The portable folder then won't hold the game files, and "
+                    "they won't move with it.",
+                    in, width))
+        action_ = LauncherAction::kUseSharedInPlace;
+    }
     IsoPathRow(st, in, width);
     if (ActionRow("##browse", "Browse for the disc image...", "", "Opens a file dialog to choose the .iso file.", in,
                   width, !st.extracting))
@@ -1200,10 +1225,14 @@ void LauncherMenu::DrawGameFilesRows(const LauncherStatus& st, Intent& in, float
                   in, width, has_path && !st.extracting, true))
       action_ = LauncherAction::kInstall;
     if (st.extracting) {
+      if (st.copying)
+        Note("Copying the game files from " + st.shared_dir + " (they stay there too).", color::kTextDim, width);
       ProgressRow(st.extract_fraction, st.extract_progress, width);
       Note(st.extract_file, color::kTextDim, width, FontRole::kSmall);
-      if (ActionRow("##cancel_install", "Cancel the install", "", "Stops copying; nothing counts as installed.", in,
-                    width))
+      if (ActionRow("##cancel_install", st.copying ? "Cancel the copy" : "Cancel the install", "",
+                    st.copying ? "Stops copying and removes the partial copy; the shared files stay where they are."
+                               : "Stops copying; nothing counts as installed.",
+                    in, width))
         action_ = LauncherAction::kCancelInstall;
     }
     if (st.installed && ActionRow("##keep", "Keep the installed files", "", "Back to the installed game files.", in,
@@ -1281,7 +1310,9 @@ void LauncherMenu::DrawUpdatesRows(std::vector<Setting>& settings, const Launche
 void LauncherMenu::DrawAboutRows(std::vector<Setting>& settings, const LauncherStatus& st, Intent& in, float width) {
   Note("Skullburglar " + st.version + ", a native port of 50 Cent: Blood on the Sand.", color::kText, width,
        FontRole::kLabel);
-  Note("Settings are saved in " + st.config_path, color::kTextDim, width, FontRole::kSmall);
+  Note("Settings are saved as you change them, in " + st.config_path, color::kTextDim, width, FontRole::kSmall);
+  if (!st.save_failed_full.empty())
+    Note(st.save_failed_full + " Your changes stay in effect until you quit.", color::kBad, width);
   if (!st.portable_note.empty()) Note(st.portable_note, color::kWarn, width, FontRole::kSmall);
   if (SavesNotice(st)) {
     GroupHeading("Your saves", width);
@@ -1421,7 +1452,7 @@ void LauncherMenu::DrawBindingRows(std::vector<Setting>& settings, Intent& in, f
   }
   ImGui::PopID();
   if (ActionRow("##reset_keys", "Put every key back to its default", "",
-                "Restores the default keys of every action above. Saved when you press Play.", in, width, !kbm_off)) {
+                "Restores the default keys of every action above. Saved as soon as you change it.", in, width, !kbm_off)) {
     for (auto& s : settings)
       if (s.binding && !s.locked) s.value = s.default_value;
   }
@@ -1532,6 +1563,20 @@ void LauncherMenu::DrawFooter(const LauncherStatus& st, Intent& in, float top) {
     placed.push_back({&p, x});
     x -= S(22);
   }
+  // Auto-save (the window writes every change to bots.toml): "Saved" for a moment after a write, or why it failed.
+  {
+    const float room = (placed.empty() ? size.x - mx : placed.back().second - S(22)) - left;
+    if (!st.save_failed.empty() && room > S(120)) {
+      const std::string msg = "Not saved: " + st.save_failed + ". Kept until you quit.";
+      const float th = Measure(FontRole::kSmall, msg, room).y;
+      TextWrapped(dl, FontRole::kSmall, ImVec2(left, cy - th * 0.5f), color::kBad, msg, room);
+      if (th > size.y - top - S(4)) ++report_.truncated;
+    } else if (st.saved_flash && room > S(70)) {
+      const float r = S(4.5f);
+      dl->AddCircleFilled(ImVec2(left + r, cy), r, color::kGood, 16);
+      Text(dl, FontRole::kSmall, ImVec2(left + 2 * r + S(8), cy - Size(FontRole::kSmall) * 0.6f), color::kGood, "Saved");
+    }
+  }
   for (const auto& [p, px] : placed) {
     const float w = prompt_w(*p);
     ImGui::SetCursorScreenPos(ImVec2(px, cy - gh * 0.5f - S(4)));
@@ -1562,7 +1607,9 @@ void LauncherMenu::DrawFooter(const LauncherStatus& st, Intent& in, float top) {
 }
 
 void LauncherMenu::DrawConfirm(const LauncherStatus& st, Intent& in) {
-  const bool move = confirm_move_;
+  // Three kinds: Reset to defaults and Move the saves (two buttons), and the portable copy offer (three; B-400).
+  const bool offer = offer_open_;
+  const bool move = !offer && confirm_move_;
   const ImVec2 size = ImGui::GetIO().DisplaySize;
   ImGui::SetNextWindowPos(ImVec2(0, 0));
   ImGui::SetNextWindowSize(size);
@@ -1572,47 +1619,115 @@ void LauncherMenu::DrawConfirm(const LauncherStatus& st, Intent& in) {
                    ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBackground);
   ImDrawList* dl = ImGui::GetWindowDrawList();
   dl->AddRectFilled(ImVec2(0, 0), size, color::kShade);
-  const float w = std::min(S(600), size.x - S(32));
-  const std::string body = move ? st.saves_move_text :
-      "Every setting goes back to this version's defaults: display and graphics, HDR, game, controller and co-op, and "
-      "keyboard and mouse including every key binding.\n\nNot changed: the game files folder, where your data is "
-      "kept, \"Check for new versions\", and anything a launch option set. Your saves are not touched.";
-  const float body_h = Measure(FontRole::kBody, body, w - S(48)).y;
-  const float h = S(24) + Size(FontRole::kPageTitle) * 1.3f + body_h + S(24) + S(44) + S(24);
+  const float w = std::min(S(offer ? 660 : 600), size.x - S(32));
+  struct Para {
+    std::string text;
+    ImU32 color;
+    bool small = false;
+  };
+  std::vector<Para> paras;
+  if (offer) {
+    paras.push_back({"Portable mode keeps everything in one folder, so it can hold its own copy of the game files. This "
+                     "computer already has them, installed for the normal Skullburglar, in:",
+                     color::kText});
+    paras.push_back({st.shared_dir, color::kTextDim, true});
+    paras.push_back({"Copy them into the portable folder:", color::kText});
+    paras.push_back({st.offer_dest, color::kTextDim, true});
+    if (st.offer_error.empty()) paras.push_back({"Size: " + st.offer_size_text + ". Free space there: " + st.offer_free_text + ".", color::kText});
+    else paras.push_back({st.offer_error, color::kBad});
+    if (st.offer_error.empty() && !st.offer_enough)
+      paras.push_back({"Not enough free space there. Free some space, or choose a folder on a bigger drive.", color::kBad});
+    paras.push_back({"The files are copied, not moved: the shared copy stays where it is for the normal install.", color::kText});
+    if (st.offer_prior_use)
+      paras.push_back({"Earlier versions of portable mode played from the shared folder without saying so. From this "
+                       "version the game files are part of the portable folder. If you choose Not now, the game keeps "
+                       "using the shared folder, and Game files can copy it into this folder at any time.",
+                       color::kWarn});
+  } else if (move) {
+    paras.push_back({st.saves_move_text, color::kText});
+  } else {
+    paras.push_back({"Every setting goes back to this version's defaults: display and graphics, HDR, game, controller and "
+                     "co-op, and keyboard and mouse including every key binding.\n\nNot changed: the game files folder, "
+                     "where your data is kept, \"Check for new versions\", and anything a launch option set. Your saves "
+                     "are not touched.",
+                     color::kText});
+  }
+  const char* title = offer ? "COPY THE GAME FILES HERE?" : move ? "MOVE YOUR SAVES AND SETTINGS?" : "RESET TO DEFAULTS?";
+  std::vector<std::string> labels;
+  std::vector<bool> enabled;
+  if (offer) {
+    labels = {"COPY THEM HERE", "USE A DISC IMAGE", "NOT NOW"};
+    enabled = {st.offer_enough && st.offer_error.empty(), true, true};
+  } else {
+    labels = {move ? "MOVE THEM" : "RESET SETTINGS", "CANCEL"};
+    enabled = {true, true};
+  }
+  const int nb = int(labels.size());
+  // Buttons flow in rows when the window is too narrow for them side by side.
+  std::vector<float> bw(nb), bx(nb), by(nb);
+  float cx = 0, rows = 1;
+  for (int i = 0; i < nb; ++i) {
+    bw[i] = Measure(FontRole::kMenu, labels[i]).x + S(36);
+    if (cx > 0 && cx + bw[i] > w - S(48)) cx = 0, rows += 1;
+    bx[i] = cx, by[i] = (rows - 1) * S(54);
+    cx += bw[i] + S(16);
+  }
+  float body_h = 0;
+  for (const Para& p : paras) body_h += Measure(p.small ? FontRole::kSmall : FontRole::kBody, p.text, w - S(48)).y + S(8);
+  const float h = S(24) + Size(FontRole::kPageTitle) * 1.3f + body_h + S(16) + rows * S(54) + S(10);
   const ImVec2 a((size.x - w) * 0.5f, std::max(S(8), (size.y - h) * 0.5f)), b(a.x + w, a.y + h);
   dl->AddRectFilled(a, b, color::Rgb(26, 21, 17), S(6));
   dl->AddRect(a, b, color::kGoldDim, S(6), 0, std::max(1.0f, S(1)));
+  if (a.y < S(8) + 0.5f && h > size.y - S(16)) ++report_.truncated;  // taller than the window
   float y = a.y + S(24);
-  Text(dl, FontRole::kPageTitle, ImVec2(a.x + S(24), y), color::kText, move ? "MOVE YOUR SAVES AND SETTINGS?" : "RESET TO DEFAULTS?", w - S(48));
+  Text(dl, FontRole::kPageTitle, ImVec2(a.x + S(24), y), color::kText, title, w - S(48));
   y += Size(FontRole::kPageTitle) * 1.3f;
-  TextWrapped(dl, FontRole::kBody, ImVec2(a.x + S(24), y), color::kText, body, w - S(48));
-  y += body_h + S(24);
-  if (in.left) confirm_focus_ = 0, in.left = false;
-  if (in.right) confirm_focus_ = 1, in.right = false;
+  for (const Para& p : paras) {
+    const FontRole role = p.small ? FontRole::kSmall : FontRole::kBody;
+    y += TextWrapped(dl, role, ImVec2(a.x + S(24), y), p.color, p.text, w - S(48)) + S(8);
+  }
+  y += S(16);
+  // Left and Right move between the buttons that can be pressed; Up and Down are swallowed.
+  auto step = [&](int dir) {
+    for (int i = confirm_focus_ + dir; i >= 0 && i < nb; i += dir)
+      if (enabled[i]) return void(confirm_focus_ = i);
+  };
+  if (in.left) step(-1), in.left = false;
+  if (in.right) step(1), in.right = false;
   if (in.up || in.down) in.up = in.down = false;
-  bool reset = false, cancel = false;
-  const char* kLabels[] = {move ? "MOVE THEM" : "RESET SETTINGS", "CANCEL"};
-  float x = a.x + S(24);
-  for (int i = 0; i < 2; ++i) {
-    const float bw = Measure(FontRole::kMenu, kLabels[i]).x + S(36);
-    ImGui::SetCursorScreenPos(ImVec2(x, y));
+  if (confirm_focus_ >= nb) confirm_focus_ = nb - 1;
+  int pressed = -1;
+  bool cancel = false;
+  for (int i = 0; i < nb; ++i) {
+    const float x = a.x + S(24) + bx[i], yy = y + by[i];
+    ImGui::SetCursorScreenPos(ImVec2(x, yy));
     ImGui::PushID(i);
-    ImGui::InvisibleButton("##confirm", ImVec2(bw, S(44)));
+    ImGui::InvisibleButton("##confirm", ImVec2(bw[i], S(44)));
     const bool over = ImGui::IsItemHovered();
-    if (over && in.mouse_moved) confirm_focus_ = i;
-    if (over && ImGui::IsItemClicked(ImGuiMouseButton_Left)) (i == 0 ? reset : cancel) = true;
+    if (over && in.mouse_moved && enabled[i]) confirm_focus_ = i;
+    if (over && ImGui::IsItemClicked(ImGuiMouseButton_Left) && enabled[i]) pressed = i;
     ImGui::PopID();
     const bool f = confirm_focus_ == i;
-    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + bw, y + S(44)), f ? color::kGold : color::Rgb(44, 36, 28), S(4));
-    Text(dl, FontRole::kMenu, ImVec2(x + S(18), y + (S(44) - Size(FontRole::kMenu) * 1.2f) * 0.5f),
-         f ? color::kOnGold : color::kText, kLabels[i]);
-    x += bw + S(16);
+    dl->AddRectFilled(ImVec2(x, yy), ImVec2(x + bw[i], yy + S(44)),
+                      !enabled[i] ? color::kTrack : f ? color::kGold : color::Rgb(44, 36, 28), S(4));
+    Text(dl, FontRole::kMenu, ImVec2(x + S(18), yy + (S(44) - Size(FontRole::kMenu) * 1.2f) * 0.5f),
+         !enabled[i] ? color::kTextFaint : f ? color::kOnGold : color::kText, labels[i]);
   }
-  if (in.accept) (confirm_focus_ == 0 ? reset : cancel) = true, in.accept = false;
-  if (in.back) cancel = true, in.back = false;
+  if (in.accept && enabled[confirm_focus_]) pressed = confirm_focus_, in.accept = false;
+  if (in.back) {
+    if (offer) pressed = 2;  // Esc / B: Not now, the least committing answer
+    else cancel = true;
+    in.back = false;
+  }
   ImGui::End();
-  if (reset) action_ = move ? LauncherAction::kMoveSaves : LauncherAction::kResetAll;
-  if (reset || cancel) confirm_reset_ = confirm_move_ = false, capture_ = -1;
+  if (offer) {
+    if (pressed == 0) action_ = LauncherAction::kOfferCopy;
+    else if (pressed == 1) action_ = LauncherAction::kOfferDisc;
+    else if (pressed == 2) action_ = LauncherAction::kOfferNotNow;
+    return;  // the window closes the offer (its status stops saying offer_open)
+  }
+  if (pressed == 0) action_ = move ? LauncherAction::kMoveSaves : LauncherAction::kResetAll;
+  if (pressed == 0 || pressed == 1 || cancel) confirm_reset_ = confirm_move_ = false, capture_ = -1;
 }
 
 void LauncherMenu::DrawCapture(std::vector<Setting>& settings, Intent& in) {

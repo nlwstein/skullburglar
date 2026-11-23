@@ -146,25 +146,63 @@ toml::table ReadConfig(const fs::path& config_path) {
   return {};
 }
 
+// Writes bots.toml atomically: the text goes to a temp file beside it, then replaces the file in one rename, so a crash,
+// a full disk or a quit in the middle never leaves half a file. A file marked read-only is refused (the rename would
+// replace it silently). Returns an error message, empty on success.
 std::string WriteConfig(const toml::table& table, const fs::path& config_path) {
   std::error_code ec;
   fs::create_directories(config_path.parent_path(), ec);
-  std::ofstream out(config_path, std::ios::trunc);
-  if (!out) {
-    // The reason matters: a path that is too long reads "No such file or directory" and looks like a missing folder.
-    const std::string why = ec ? ec.message() : std::error_code(errno, std::generic_category()).message();
+  const auto why_of = [&](const std::error_code& e) {
+    return e ? e.message() : std::error_code(errno, std::generic_category()).message();
+  };
+  if (fs::exists(config_path, ec)) {
+    const auto perms = fs::status(config_path, ec).permissions();
+    if (!ec && (perms & fs::perms::owner_write) == fs::perms::none)
+      return "Can't write " + bots::PlainPathUtf8(config_path) + " (the file is read-only)";
+  }
+  fs::path temp = config_path;
+  temp += ".tmp";
+  {
+    std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+    if (!out) {
+      // The reason matters: a path that is too long reads "No such file or directory" and looks like a missing folder.
+      return "Can't write " + bots::PlainPathUtf8(config_path) + " (" + why_of(ec) + ")";
+    }
+    out << "# bots settings (also editable in the launcher, which opens on start)\n" << table << "\n";
+    out.flush();
+    if (!out) {
+      const std::string why = why_of({});
+      out.close();
+      fs::remove(temp, ec);
+      return "Can't write " + bots::PlainPathUtf8(config_path) + " (" + why + ")";
+    }
+  }
+  fs::rename(temp, config_path, ec);
+  if (ec) {
+    const std::string why = ec.message();
+    fs::remove(temp, ec);
     return "Can't write " + bots::PlainPathUtf8(config_path) + " (" + why + ")";
   }
-  out << "# bots settings (also editable in the launcher, which opens on start)\n" << table << "\n";
   return {};
 }
 
 }  // namespace
 
 std::string SaveSettings(const std::vector<Setting>& settings, const fs::path& config_path) {
+  return SaveChangedSettings(settings, nullptr, config_path);
+}
+
+std::string SaveChangedSettings(const std::vector<Setting>& settings, const std::vector<Setting>* saved,
+                                const fs::path& config_path) {
   toml::table table = ReadConfig(config_path);
+  int written = 0;
+  std::string names;  // for the log
   for (const auto& s : settings) {
     if (s.locked) continue;
+    if (saved) {  // only what differs from what was last written
+      const auto was = std::find_if(saved->begin(), saved->end(), [&](const Setting& o) { return o.cvar == s.cvar; });
+      if (was != saved->end() && SameValue(was->value, s.value)) continue;
+    }
     for (const std::string& name : {s.cvar, s.also_cvar}) {
       if (name.empty()) continue;
       if (!rex::cvar::SetFlagByName(name, s.value)) {
@@ -182,12 +220,16 @@ std::string SaveSettings(const std::vector<Setting>& settings, const fs::path& c
       } else {
         table.insert_or_assign(name, int64_t(std::stoll(s.value)));
       }
+      ++written;
+      if (saved && written <= 6) names += (names.empty() ? "" : ", ") + name + "=" + s.value;
     }
   }
   // Older launchers wrote the renderer as gpu_plugin; it is ignored now (bots_app.h), so don't leave it behind.
   if (const auto* old = table.get("gpu_plugin"); old && old->is_string()) table.erase("gpu_plugin");
+  if (saved && written == 0) return {};  // nothing in the file changes (a value back at its default with no key)
   std::string err = WriteConfig(table, config_path);
-  if (err.empty()) REXLOG_INFO("setup: settings saved to {}", bots::PathUtf8(config_path));
+  if (err.empty())
+    REXLOG_INFO("setup: settings saved to {} ({} key(s){}{})", bots::PathUtf8(config_path), written, names.empty() ? "" : ": ", names);
   return err;
 }
 

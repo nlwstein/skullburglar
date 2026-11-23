@@ -1,9 +1,10 @@
 [
- "New renderer: anti-aliasing smooths jagged edges, on by default (SMAA). Choose FXAA or Off, and add Sharpening, in the launcher. The HUD and text are never filtered.",
- "New \"Toggle aim\" setting: press Aim once to start aiming and again to stop, with a controller or keyboard and mouse. Off by default, so Aim is still a hold.",
- "In portable mode, if your saves or settings ended up in the bots-data folder instead of bots-data/user, the launcher now tells you where they belong and offers to move them.",
- "If portable.txt is misnamed (Windows hides the .txt ending), the launcher now says so, and the log says which folder your saves are read from.",
- "New launcher setting for the pre-1.0 renderer, \"hide objects behind walls\" (Auto, On, Off). It is a troubleshooting option: Off turns that renderer's visibility test off if something looks wrong.",
- "The launcher no longer cuts off long lines (folders, notes) on a Full HD screen: they wrap, and the window is wider on large displays.",
- "The launcher's update check now sends the game's version and platform (nothing else), so we can see which versions are in use."
+  "New renderer: anti-aliasing smooths jagged edges, on by default (SMAA). Choose FXAA or Off, and add Sharpening, in the launcher. The HUD and text are never filtered.",
+  "New \"Toggle aim\" setting: press Aim once to start aiming and again to stop, with a controller or keyboard and mouse. Off by default, so Aim is still a hold.",
+  "New renderer: standing near a fire is warm and bright again, with the flickering heat glow on characters and the street that the Pre-1.0 renderer shows.",
+  "In portable mode, if your saves or settings ended up in the bots-data folder instead of bots-data/user, the launcher now tells you where they belong and offers to move them.",
+  "If portable.txt is misnamed (Windows hides the .txt ending), the launcher now says so, and the log says which folder your saves are read from.",
+  "New launcher setting for the pre-1.0 renderer, \"hide objects behind walls\" (Auto, On, Off). It is a troubleshooting option: Off turns that renderer's visibility test off if something looks wrong.",
+  "The launcher no longer cuts off long lines (folders, notes) on a Full HD screen: they wrap, and the window is wider on large displays.",
+  "The launcher's update check now sends the game's version and platform (nothing else), so we can see which versions are in use."
 ]

@@ -169,6 +169,20 @@ int main() {
   assert(UpdateFailureNote("the new app's signature is broken") ==
          "The update didn't install (the new app's signature is broken). Your install is unchanged; the download page gets the new version by hand.");
 
+  // Auto-save: a switch is written at once; a slider while it moves is not, on release or after 300 ms still it is.
+  assert(!AutosaveDue(false, false, false, 9.0));
+  assert(AutosaveDue(true, false, false, 0.0));
+  assert(!AutosaveDue(true, true, false, 0.05));
+  assert(AutosaveDue(true, true, true, 0.0));
+  assert(AutosaveDue(true, true, false, kAutosaveIdleSeconds));
+  // Why a write failed, in player language.
+  assert(SaveErrorShort("Can't write /x/bots.toml (Permission denied)") == "the settings file or folder is read-only");
+  assert(SaveErrorShort("Can't write /x/bots.toml (the file is read-only)") == "the settings file or folder is read-only");
+  assert(SaveErrorShort("Can't write C:\\x\\bots.toml (Access is denied.)") == "the settings file or folder is read-only");
+  assert(SaveErrorShort("Can't write /x/bots.toml (No space left on device)") == "the disk is full");
+  assert(SaveErrorShort("Can't write /x/bots.toml (No such file or directory)") == "the settings folder can't be found");
+  assert(SaveErrorShort("something else") == "the settings file can't be written");
+
   std::printf("launcher_logic_test: all passed\n");
   return 0;
 }

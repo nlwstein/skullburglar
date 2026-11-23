@@ -1,0 +1,21 @@
+# Input parity for the Game files page's portable rows (B-400): run with --state can-copy-repeat --sizes 1920x1080.
+# "Copy from the shared folder..." and "Use it where it is" are the first two rows.
+page:files
+# Keyboard
+key:Enter
+expect-action:copy-shared
+key:Down
+key:Enter
+expect-action:use-shared
+# Controller
+pad:Up
+pad:A
+expect-action:copy-shared
+pad:Down
+pad:A
+expect-action:use-shared
+# Mouse
+click:0.344,0.424
+expect-action:copy-shared
+click:0.344,0.5
+expect-action:use-shared

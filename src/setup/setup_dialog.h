@@ -1,11 +1,14 @@
 // Setup / launcher window (B-061). Shown before the game starts on every launch (BotsApp::
 // OnFinalizePaths has the exceptions). Without game files, the player points it at their own disc
 // image once and the files are copied to a per-user folder (app_paths.h), or on the desktop builds to a folder the
-// player chooses, kept in bots.toml as game_data_root. The window also edits the player settings (settings.h). Play
-// saves them and starts the game.
+// player chooses, kept in bots.toml as game_data_root. The window also edits the player settings (settings.h); every change is written to bots.toml as it is made (auto-save: AutosaveTick), so
+// Play only starts the game.
 // Test hooks: BOTS_SETUP_ISO=<path> prefills the image path; BOTS_SETUP_FOLDER=<path> chooses that folder for the
 // game files as "Choose another folder..." would (desktop builds); BOTS_SETUP_AUTO=1 installs (when a path is set and
 // nothing is installed) and presses Play, so the flow runs unattended.
+// BOTS_SETUP_COPY=copy|iso|notnow answers the portable copy offer (game_location.h) as a player would (page|inplace press
+// the Game files page's "Copy from the shared folder" / "Use it where it is" instead), and
+// BOTS_SETUP_COPY_CANCEL_MB=<n> presses Cancel once n MB have been copied.
 // Release builds also check for a newer version when the window opens (update_check.h).
 // It draws the full-screen menu (launcher_menu.h, B-387): mouse, keyboard and controllers alike (pad_nav.h feeds the
 // controllers in). The menu edits the settings; this class does everything else and saves on Play.
@@ -39,6 +42,7 @@
 #include <rex/ui/window.h>
 
 #include "app_paths.h"
+#include "game_location.h"
 #include "portable.h"
 #include "file_picker.h"
 #include "iso_extract.h"
@@ -143,6 +147,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
         quit_(std::move(quit)),
         settings_(LoadSettings()),
         pad_(std::make_unique<PadNav>()) {
+    Instance() = this;
+    saved_ = settings_;
     installed_ = IsGameDir(game_dir_);
     if (installed_) old_game_dir_ = game_dir_;
     if (const std::string iso = bots::PathUtf8(bots::EnvPath("BOTS_SETUP_ISO")); !iso.empty()) SetIsoPath(iso);
@@ -156,6 +162,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       int changed = 0;
       std::string err = ResetSettings(settings_, config_path_, &changed);
       REXLOG_INFO("setup: BOTS_SETUP_RESET: {} settings changed{}{}", changed, err.empty() ? "" : ", error: ", err);
+      if (err.empty()) saved_ = settings_;
     }
     const char* autorun = std::getenv("BOTS_SETUP_AUTO");
     auto_ = autorun && std::strcmp(autorun, "1") == 0;
@@ -172,9 +179,12 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     // Test runs: do what "Move them" does as the window opens (the window can't be clicked from a script; the preview tool's
     // tests/launcher_input_saves.script covers the button).
     if (const char* move = std::getenv("BOTS_SETUP_MOVE"); move && std::strcmp(move, "1") == 0) Do(LauncherAction::kMoveSaves);
+    StartCopyOffer();
   }
 
   ~SetupDialog() override {
+    FlushSettings();
+    if (Instance() == this) Instance() = nullptr;
     firewall_->stop = true;
     CloseFirewallAsk();
     if (worker_.joinable()) {
@@ -187,6 +197,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   void OnDraw(ImGuiIO& io) override {
     if (pad_) pad_->Update(io);
     PollWorker();
+    CopyTestHooks();
     if (auto_) RunAuto();
     if (!shots_done_) RunShots(io);
     RunLive(io);
@@ -216,6 +227,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     const LauncherAction action = menu_.Draw(settings_, status, LaunchFonts());
     if (action != LauncherAction::kNone) live_.last_action = action;
     LogUiScale(io, status.dpi_scale);
+    // Every change goes to bots.toml as it is made. Play and Quit write what is pending first (they delete this dialog).
+    AutosaveTick(action == LauncherAction::kPlay || action == LauncherAction::kQuit);
     Do(action);  // last: Play and Quit can delete this dialog
   }
 
@@ -272,6 +285,27 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     st.can_use_default = !SamePath(game_dir_, default_game_dir_);
     if (!old_game_dir_.empty() && !SamePath(old_game_dir_, game_dir_) && IsGameDir(old_game_dir_))
       st.unused_copy = bots::PlainPathUtf8(old_game_dir_);
+    st.copying = copying_ && st.extracting;
+    st.shared_dir = bots::PlainPathUtf8(shared_dir_);
+    st.can_copy_from_shared = !offer_open_ && !Extracting() &&
+                              CanCopyFromShared(portable_, game_dir_, default_game_dir_, shared_dir_,
+                                                [](const std::filesystem::path& p) { return IsGameDir(p); });
+    st.portable_game_note = PortableGameNote();
+    st.shared_note = SharedNote();
+    if (offer_open_) {
+      const bool measured = shared_size_.error.empty();
+      st.offer_open = true;
+      st.offer_dest = bots::PlainPathUtf8(game_dir_);
+      char text[96];
+      std::snprintf(text, sizeof(text), "%.1f GB (%u files)", shared_size_.bytes / 1e9, shared_size_.files);
+      st.offer_size_text = text;
+      std::snprintf(text, sizeof(text), "%.1f GB", offer_free_ / 1e9);
+      st.offer_free_text = text;
+      st.offer_error = measured ? std::string() : shared_size_.error;
+      st.offer_enough = measured && EnoughSpace(offer_free_, shared_size_.bytes);
+      if (measured && !st.offer_enough) st.offer_error.clear();
+      st.offer_prior_use = offer_prior_use_;
+    }
     st.install_error = error_;
     st.install_error_is_info = error_is_cancel_;
     st.folder_error = folder_error_;
@@ -333,6 +367,9 @@ class SetupDialog : public rex::ui::ImGuiDialog {
         }
       }
     }
+    st.saved_flash = saved_at_ != std::chrono::steady_clock::time_point{} &&
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - saved_at_).count() < kSavedFlashSeconds;
+    if (!save_error_.empty()) st.save_failed = SaveErrorShort(save_error_), st.save_failed_full = save_error_;
     st.firewall = int(firewall_->state.load());
     st.firewall_fixing = firewall_->fixing.load() || firewall_->fix.load();
     st.firewall_fix_failed = firewall_->fix_failed.load();
@@ -393,6 +430,30 @@ class SetupDialog : public rex::ui::ImGuiDialog {
         return;
       case LauncherAction::kFixFirewall: firewall_->fix = true; return;
       case LauncherAction::kDismissSaves: misplaced_.clear(); return;
+      case LauncherAction::kCopyFromShared:
+        if (!Extracting()) {
+          shared_size_ = MeasureGameDir(shared_dir_);
+          StartCopy();
+        }
+        return;
+      case LauncherAction::kUseSharedInPlace:
+        if (!Extracting()) UseSharedInPlace();
+        return;
+      case LauncherAction::kOfferCopy:
+        if (offer_open_) {
+          AnswerOffer(OfferAnswer::kCopy);
+          menu_.GoTo(LauncherPage::kGameFiles);  // the progress and Cancel are there
+        }
+        return;
+      case LauncherAction::kOfferDisc:
+        if (offer_open_) {
+          AnswerOffer(OfferAnswer::kDisc);
+          menu_.GoTo(LauncherPage::kGameFiles);
+        }
+        return;
+      case LauncherAction::kOfferNotNow:
+        if (offer_open_) AnswerOffer(OfferAnswer::kNotNow);
+        return;
       case LauncherAction::kOpenLogFolder: {
         const std::filesystem::path folder = LogFolder();
         std::error_code ec;
@@ -423,6 +484,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       case LauncherAction::kResetAll: {
         int changed = 0;
         const std::string err = ResetSettings(settings_, config_path_, &changed);
+        if (err.empty()) NoteSaved();  // the reset wrote the file: nothing pending
+        else NoteSaveFailed(err);
         if (!err.empty()) error_ = err, error_is_cancel_ = false;
         reset_note_ = err.empty() ? std::to_string(changed) + " settings were put back to this version's defaults."
                                   : "Reset failed: " + err;
@@ -474,6 +537,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       settings_ = copy;
       const std::string err = SaveSettings(settings_, config_path_);
       REXLOG_INFO("setup: BOTS_SETUP_SHOT_SAVE: {}", err.empty() ? "saved" : err);
+      if (err.empty()) saved_ = settings_;
     }
     REXLOG_INFO("setup: BOTS_SETUP_SHOT: {} size(s) written to {}, {} failure(s)", sizes.size(), bots::PathUtf8(dir),
                 failures);
@@ -491,7 +555,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   //   expect-live:<key><=|~><value>   PASS/FAIL line; keys: installed extracting error folder-error game-dir iso page
   //       update-checking update-newer update-error update-busy update-finished update-stage update-can-install
   //       update-note firewall action;  <key>~<text> means "contains"; expect:<cvar>=<value> checks a setting
-  //   exists:<path> absent:<path> size-gt:<path>:<bytes>    file checks, log:<text>, quit
+  //   exists:<path> absent:<path> size-gt:<path>:<bytes>    file checks, log:<text>, dump (every setting to the log), quit
   // Lines are logged as "setup: live: ..."; BOTS_SETUP_LIVE_QUIT=1 quits at the end.
   struct LiveScript {
     bool init = false, done = false;
@@ -514,6 +578,10 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     if (key == "iso") return iso_path_;
     if (key == "page") return ScriptPageName(menu_.page());
     if (key == "action") return ScriptActionName(live_.last_action);
+    if (key == "offer") return b(offer_open_);
+    if (key == "copying") return b(copying_ && Extracting());
+    if (key == "save-count") return std::to_string(save_count_);
+    if (key == "save-error") return save_error_;
     if (key == "firewall") return std::to_string(firewall_->state.load());
     const LauncherStatus st = Status();
     if (key == "update-checking") return b(st.update_checking);
@@ -718,6 +786,9 @@ class SetupDialog : public rex::ui::ImGuiDialog {
         next();
       } else if (v == "log") {
         LiveLog(a), next();
+      } else if (v == "dump") {  // every setting's value, to the log (test)
+        for (const auto& st : settings_) LiveLog("value " + st.cvar + "=" + st.value);
+        next();
       } else if (v == "quit") {
         next();
         quit_requested_ = true;
@@ -796,7 +867,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       state->install_error.clear();
     }
     state->progress.cancel = false;
-    if (!settings_file_moved_) SaveSettings(settings_, config_path_);  // what was changed in this window survives the restart
+    FlushSettings();  // what was changed in this window survives the restart
     std::thread([state] {
       std::string error;
       bool ok = InstallUpdate(state->kind, state->asset, state->progress, error);
@@ -880,6 +951,210 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     return {};
   }
 
+  // ---- Portable mode: the game files (B-400) ----
+
+  // Called once from the constructor: log which folder is in use and why, and decide whether to offer the copy.
+  void StartCopyOffer() {
+    const GameLocation& loc = ActiveGameLocation();
+    shared_dir_ = loc.shared;
+    portable_ = loc.portable;
+    if (!loc.dir.empty())
+      REXLOG_INFO("setup: game folder in use: {} ({}{})", bots::PathUtf8(game_dir_), WhyText(loc.why),
+                  portable_ && loc.why == GameDirWhy::kShared ? ", outside the portable folder" : "");
+    if (!portable_ || game_dir_locked_) return;
+    const bool declined = CopyDeclined(loc.data_root);
+    const auto is_game = [](const std::filesystem::path& p) { return IsGameDir(p); };
+    if (!ShouldOfferCopy(loc, declined, is_game)) {
+      if (declined && CanCopyFromShared(portable_, game_dir_, default_game_dir_, shared_dir_, is_game))
+        REXLOG_INFO("setup: copy offer: not shown (Not now was chosen earlier); the Game files page has the button");
+      return;
+    }
+    shared_size_ = MeasureGameDir(shared_dir_);
+    std::error_code ec;
+    const auto space = std::filesystem::space(loc.data_root, ec);
+    offer_free_ = ec ? ~0ull : uint64_t(space.available);
+    offer_prior_use_ = std::filesystem::exists(config_path_, ec) || CountSaves(LayoutFor(loc.data_root).user) > 0;
+    offer_open_ = true;
+    REXLOG_INFO("setup: copy offer: shared game files in {} ({:.2f} GB, {} files), free space {:.2f} GB in {}{}",
+                bots::PathUtf8(shared_dir_), shared_size_.bytes / 1e9, shared_size_.files, offer_free_ / 1e9,
+                bots::PathUtf8(loc.data_root), offer_prior_use_ ? "; this data folder has been used before" : "");
+  }
+
+  bool CopyTestHook(const char* value) const {
+    const char* env = std::getenv("BOTS_SETUP_COPY");
+    return env && std::strcmp(env, value) == 0;
+  }
+
+  void CopyTestHooks() {
+    if (offer_open_ && !Extracting()) {
+      if (CopyTestHook("copy")) AnswerOffer(OfferAnswer::kCopy);
+      else if (CopyTestHook("iso")) AnswerOffer(OfferAnswer::kDisc);
+      else if (CopyTestHook("notnow")) AnswerOffer(OfferAnswer::kNotNow);
+    }
+    // The Game files page's two buttons, for a test: "page" presses Copy from the shared folder, "inplace" Use it where it is.
+    if (!offer_open_ && !Extracting() && !installed_ && !page_hook_done_ &&
+        CanCopyFromShared(portable_, game_dir_, default_game_dir_, shared_dir_,
+                          [](const std::filesystem::path& p) { return IsGameDir(p); })) {
+      if (CopyTestHook("page")) {
+        page_hook_done_ = true;
+        REXLOG_INFO("setup: test hook: Copy from the shared folder pressed");
+        shared_size_ = MeasureGameDir(shared_dir_);
+        StartCopy();
+      } else if (CopyTestHook("inplace")) {
+        page_hook_done_ = true;
+        REXLOG_INFO("setup: test hook: Use it where it is pressed");
+        UseSharedInPlace();
+      }
+    }
+    if (const char* mb = std::getenv("BOTS_SETUP_COPY_CANCEL_MB"); mb && copying_ && Extracting() && !cancel_hook_done_ &&
+                                                                  progress_->bytes_done.load() >= uint64_t(std::atof(mb) * 1e6)) {
+      cancel_hook_done_ = true;
+      REXLOG_INFO("setup: test hook: Cancel pressed at {} bytes", progress_->bytes_done.load());
+      progress_->cancel = true;
+    }
+  }
+
+  enum class OfferAnswer { kCopy, kDisc, kNotNow };
+
+  void AnswerOffer(OfferAnswer answer) {
+    offer_open_ = false;
+    switch (answer) {
+      case OfferAnswer::kCopy:
+        REXLOG_INFO("setup: copy offer: player chose Copy");
+        StartCopy();
+        break;
+      case OfferAnswer::kDisc:
+        REXLOG_INFO("setup: copy offer: player chose to install from a disc image");
+        break;
+      case OfferAnswer::kNotNow:
+        REXLOG_INFO("setup: copy offer: player chose Not now (not offered again in this data folder)");
+        RememberCopyDeclined(ActiveGameLocation().data_root);
+        if (NotNowUsesShared(offer_prior_use_)) {  // played portable before: keep playing, saved as the chosen folder
+          REXLOG_INFO("setup: existing portable data folder: using the shared game folder (saved as the chosen folder)");
+          UseSharedInPlace();
+        }
+        break;
+    }
+  }
+
+
+  void UseSharedInPlace() {
+    REXLOG_INFO("setup: using the shared game files in place: {}", bots::PathUtf8(shared_dir_));
+    UseGameDir(shared_dir_);
+  }
+
+  // Portable mode: say where the game files are kept and, when they are outside the portable folder, that they won't move
+  // with it. Nothing is said outside portable mode.
+
+  void StartCopy() {
+    error_.clear();
+    std::error_code ec;
+    if (std::filesystem::exists(game_dir_, ec) && !(std::filesystem::is_directory(game_dir_, ec) && std::filesystem::is_empty(game_dir_, ec))) {
+      error_ = bots::PlainPathUtf8(game_dir_) + " already exists and doesn't hold the game's files. Move it away, or choose another folder.";
+      REXLOG_WARN("setup: copy not started: {}", error_);
+      return;
+    }
+    progress_ = std::make_shared<ExtractProgress>();
+    result_ = std::make_shared<ExtractResult>();
+    done_ = std::make_shared<std::atomic<bool>>(false);
+    copying_ = true;
+    cancel_hook_done_ = false;
+    REXLOG_INFO("setup: copy started: {:.2f} GB, {} files, from {} to {}", shared_size_.bytes / 1e9, shared_size_.files,
+                bots::PathUtf8(shared_dir_), bots::PathUtf8(game_dir_));
+    worker_ = std::thread([src = shared_dir_, dest = game_dir_, progress = progress_, result = result_, done = done_]() {
+      *result = CopyGameFiles(
+          src, dest, *progress, [](const std::filesystem::path& p) { return IsGameDir(p); },
+          [](const std::filesystem::path& root) -> std::string {  // the install's own check: default.xex is this game's
+            std::FILE* f = bots::OpenFile(root / "default.xex", "rb");
+            if (!f) return "The copy has no readable default.xex.";
+            std::vector<uint8_t> head(0x10000);
+            head.resize(std::fread(head.data(), 1, head.size(), f));
+            std::fclose(f);
+            return XexTitleId(head.data(), head.size()) == kTitleId ? std::string()
+                                                                    : "The copied default.xex isn't 50 Cent: Blood on the Sand.";
+          });
+      done->store(true);
+    });
+  }
+
+  // Portable mode: where the game files are kept, and when they are outside the portable folder, that they won't move with it.
+  // Nothing is said outside portable mode.
+  std::string PortableGameNote() const {
+    if (!portable_) return {};
+    const std::filesystem::path root = ActiveDataRoot().root;
+    if (SamePath(game_dir_, default_game_dir_)) return "Portable game folder: kept with your saves in " + bots::PlainPathUtf8(root) + ".";
+    if (SamePath(game_dir_, shared_dir_))
+      return "This is the shared folder, outside the portable folder: it won't move with it. \"Use the default folder\" goes "
+             "back to " + bots::PlainPathUtf8(default_game_dir_) + ".";
+    return "A folder you chose, outside the portable folder: it won't move with it.";
+  }
+
+  // Portable mode playing from the shared folder (an existing portable user's Not now, or "Use it where it is").
+  std::string SharedNote() const {
+    if (!portable_ || shared_dir_.empty() || !installed_ || !SamePath(game_dir_, shared_dir_)) return {};
+    return "Using the shared game folder. You can copy it into this portable folder from Game files at any time.";
+  }
+
+
+  // ---- Auto-save ----
+
+ public:
+  static SetupDialog*& Instance() {
+    static SetupDialog* instance = nullptr;
+    return instance;
+  }
+
+  // Writes whatever is pending to bots.toml now (Play, Quit, the window closing, an update restarting the program).
+  void FlushSettings() { AutosaveTick(true); }
+
+ private:
+  void NoteSaved() {
+    saved_ = settings_;
+    save_error_.clear();
+    saved_at_ = std::chrono::steady_clock::now();
+    ++save_count_;
+  }
+
+  void NoteSaveFailed(const std::string& err) {
+    save_error_ = err;
+    retry_at_ = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    REXLOG_WARN("setup: settings not saved: {} (kept in memory for this session)", err);
+  }
+
+  // Every setting change is written to bots.toml as it is made: a switch, choice or key binding at once; a slider when the
+  // mouse lets go of it or after it has been still for 300 ms (launcher_logic.h: AutosaveDue). Only the keys that
+  // changed are written, atomically (settings.cpp). A failed write keeps the value in memory and shows why in the footer;
+  // it is tried again on the next change or every few seconds. `force`: write now whatever is pending.
+  void AutosaveTick(bool force) {
+    if (settings_file_moved_) return;  // bots.toml was moved in: saving would overwrite it (B-386)
+    const auto now = std::chrono::steady_clock::now();
+    if (prev_values_.size() == settings_.size()) {
+      for (size_t i = 0; i < settings_.size(); ++i)
+        if (prev_values_[i] != settings_[i].value) last_change_ = now;
+    }
+    prev_values_.resize(settings_.size());
+    for (size_t i = 0; i < settings_.size(); ++i) prev_values_[i] = settings_[i].value;
+    const bool dragging = menu_.Dragging();
+    const bool released = was_dragging_ && !dragging;
+    was_dragging_ = dragging;
+    bool dirty = false, slider = false;
+    for (size_t i = 0; i < settings_.size(); ++i) {
+      const Setting& s = settings_[i];
+      if (s.locked) continue;
+      const auto was = std::find_if(saved_.begin(), saved_.end(), [&](const Setting& o) { return o.cvar == s.cvar; });
+      if (was != saved_.end() && ValuesEqual(was->value, s.value)) continue;
+      dirty = true;
+      slider = slider || s.slider_max > 0;
+    }
+    if (!dirty) return;
+    const double idle = std::chrono::duration<double>(now - last_change_).count();
+    if (!force && !AutosaveDue(dirty, slider, released, idle)) return;
+    if (!force && !save_error_.empty() && now < retry_at_) return;  // a failed write is tried again every few seconds, not every frame
+    const std::string err = SaveChangedSettings(settings_, &saved_, config_path_);
+    if (err.empty()) NoteSaved();
+    else NoteSaveFailed(err);
+  }
+
   void StartExtract() {
     error_.clear();
     error_is_cancel_ = false;
@@ -887,7 +1162,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     // Never spread the game's files into a folder that holds something else (only a chosen or configured folder
     // could; the per-user default is ours). A reinstall over the game replaces only the game's own entries.
     std::error_code ec;
-    if (!SamePath(game_dir_, DefaultGameDir()) && !IsGameDir(game_dir_) && std::filesystem::exists(game_dir_, ec) &&
+    if (!SamePath(game_dir_, default_game_dir_) && !IsGameDir(game_dir_) && std::filesystem::exists(game_dir_, ec) &&
         !(std::filesystem::is_directory(game_dir_, ec) && std::filesystem::is_empty(game_dir_, ec))) {
       error_ = bots::PlainPathUtf8(game_dir_) + " already exists and doesn't hold the game's files. Choose another folder.";
       return;
@@ -909,6 +1184,13 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   void PollWorker() {
     if (!Extracting() || !done_->load()) return;
     worker_.join();
+    if (copying_) {
+      copying_ = false;
+      if (result_->ok) REXLOG_INFO("setup: copy finished: {} files, {} bytes into {}", progress_->files_done.load(),
+                                   progress_->bytes_done.load(), bots::PathUtf8(game_dir_));
+      else REXLOG_WARN("setup: copy stopped after {} bytes: {} (the partial copy was removed)", progress_->bytes_done.load(),
+                       result_->error);
+    }
     if (result_->ok) {
       installed_ = IsGameDir(game_dir_);
       show_reinstall_ = false;
@@ -936,8 +1218,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   }
 
   void Play() {
-    std::string err = settings_file_moved_ ? std::string() : SaveSettings(settings_, config_path_);
-    if (!err.empty()) REXLOG_WARN("setup: {}", err);
+    FlushSettings();  // already written as they were changed; this catches anything still pending
     REXLOG_INFO("setup: play with game files in {}", bots::PathUtf8(game_dir_));
     auto play = play_;
     auto dir = game_dir_;
@@ -963,6 +1244,23 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   bool shots_done_ = false;
   int shot_quit_frames_ = 0;
   bool installed_ = false;
+  // Portable mode: the offer to copy the shared install here (game_location.h, B-400).
+  std::filesystem::path shared_dir_;  // the per-user default: the copy's source
+  bool portable_ = false;
+  bool copying_ = false;              // the worker is copying the shared files, not extracting a disc
+  bool offer_open_ = false, offer_popup_opened_ = false, offer_prior_use_ = false;
+  GameSize shared_size_;
+  uint64_t offer_free_ = 0;
+  bool cancel_hook_done_ = false, page_hook_done_ = false;
+  std::string shot_key_;
+  int shot_frames_ = 0, shot_seq_ = 0;
+  bool shot_taken_ = false;
+  std::vector<Setting> saved_;  // the settings as last written to bots.toml (the auto-save baseline)
+  std::vector<std::string> prev_values_;
+  std::chrono::steady_clock::time_point last_change_{}, saved_at_{}, retry_at_{};
+  std::string save_error_;  // why the last write failed; empty when it worked
+  bool was_dragging_ = false;
+  int save_count_ = 0;
   bool quit_requested_ = false;  // an installed update asked the program to quit
   bool show_reinstall_ = false;
   std::vector<std::string> misplaced_;  // game data in the portable data folder that belongs in user/ (portable.h)
@@ -1044,5 +1342,10 @@ class DisplayDialog : public rex::ui::ImGuiDialog {
   std::vector<Setting> original_settings_;
   bool close_ = false;
 };
+
+// The window is closing (the X, Cmd-Q, Alt-F4) while the launcher is up: write any change still pending first.
+inline void FlushLauncherSettings() {
+  if (SetupDialog* dialog = SetupDialog::Instance()) dialog->FlushSettings();
+}
 
 }  // namespace bots::setup

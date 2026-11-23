@@ -75,6 +75,7 @@ checks:
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/path_utf8_test.cpp -o $d/t && $d/t
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/save_backup_test.cpp -o $d/t && $d/t
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/portable_test.cpp -o $d/t && $d/t
+    - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/game_location_test.cpp -o $d/t && $d/t
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/occlusion_choice_test.cpp -o $d/t && $d/t
     - d=$(mktemp -d) && c++ -std=c++20 -Wall -Werror -I src tests/launcher_logic_test.cpp src/setup/settings_catalog.cpp -o $d/t && $d/t
     # The launcher menu at every target size (layout check) and its keyboard / controller / mouse parity script, drawn
@@ -90,6 +91,10 @@ checks:
       PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/failed --state install-failed --check --script "page:files;shot:files" &&
       PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/updfail --state update-failed --check --script "page:updates;shot:updates" &&
       PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/logs --sizes 1920x1080,1280x800 --script @tests/launcher_input_logs.script &&
+      PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/offer --state offer-repeat --sizes 1920x1080 --script @tests/launcher_input_offer.script &&
+      PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/nospace --state offer-nospace --sizes 1920x1080 --script @tests/launcher_input_nospace.script &&
+      PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/copyrows --state can-copy-repeat --sizes 1920x1080 --script @tests/launcher_input_copy_rows.script &&
+      for s in offer offer-prior offer-nospace offer-error copying can-copy shared-note portable-installed saved save-failed; do PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/$s --state $s --check --script "shot:main;page:graphics;shot:graphics;page:files;shot:files;page:about;shot:about" || exit 1; done &&
       for s in misplaced misnamed pre1; do PREVIEW_BIN=$d/lp tools/launcher_preview.sh $d/imgui --out $d/$s --state $s --check --script "shot:main;page:graphics;shot:graphics;page:about;shot:about;move-confirm;shot:move-confirm" || exit 1; done
     - sh tests/apprun_test.sh
     - >-

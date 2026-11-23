@@ -85,6 +85,11 @@ it is, into `BOTS_SETUP_SHOT`) and file checks; the list is in `src/setup/setup_
 build with `-DBOTS_ALLOW_HTTP_UPDATE_URL=ON`, a throwaway `BOTS_UPDATE_PUBKEY` (`tools/ci/ed25519_sign.py keygen`) and a
 packaged `.app` (`tools/ci/package.sh`), as `tools/update_probe_test.sh` does.
 
+The launcher saves every setting change to bots.toml as it is made (auto-save: switches and choices at once, sliders on release
+or after 300 ms, atomic temp file + rename, only the changed keys); `expect-live:save-count`, `save-error` and `offer` /
+`copying` read the state in a live script. `BOTS_SETUP_COPY=copy|iso|notnow|page|inplace` answers the portable copy offer (B-400)
+and `BOTS_SETUP_COPY_CANCEL_MB=<n>` presses Cancel once n MB are copied.
+
 `tools/launcher_preview.sh <imgui dir>` builds the menu without the game (only Dear ImGui's sources, at the SDK's
 version) and draws every page at nine screen sizes, failing on cut-off text or a selection out of view with
 `--check`; `--script @tests/launcher_input.script` checks that the keyboard, a controller and the mouse can each

@@ -44,6 +44,11 @@ std::vector<Setting> LoadSettings();
 std::string SaveSettings(const std::vector<Setting>& settings,
                          const std::filesystem::path& config_path);
 
+// The same, but only for the settings whose value differs from `saved` (what was last written; the launcher's auto-save
+// passes its baseline). The file is replaced atomically (temp file + rename). nullptr = every setting.
+std::string SaveChangedSettings(const std::vector<Setting>& settings, const std::vector<Setting>* saved,
+                                const std::filesystem::path& config_path);
+
 // Puts every setting except the kept ones (settings_logic.h: ResetKeeps) back to this version's default: the value in
 // `settings` (the window shows it at once), the running value, and the key is removed from `config_path`, so a future
 // version's new default applies. Locked settings (a launch option set them) are left alone. `changed` gets how many
