@@ -164,6 +164,10 @@ std::vector<Setting> SettingsCatalog() {
                "than this is held back until it adds up. Ctrl-click to type a value.",
                {}});
   s.back().slider_min = 0, s.back().slider_max = 4;
+  add(LauncherPage::kControls, "Keyboard and mouse", {"kbm_noise_gate_strict", "", "Stricter noise gate (jittery gyros)",
+               "For a gyro that still twitches with the noise gate on, such as a DualSense Edge: slow motion must also "
+               "keep one direction for a moment before it counts. Real turns pass as before. Needs the noise gate above 0.",
+               {}});
   add(LauncherPage::kControls, "Keyboard and mouse", {"kbm_prompts", "", "Keyboard and mouse button prompts",
                "Show keys instead of controller buttons in prompts while you play with keyboard and mouse.", {}});
   // Page Coop: Over your network

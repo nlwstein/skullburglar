@@ -43,7 +43,7 @@ const std::map<std::string, std::string> kDefaults = {
     {"stick_acceleration", "true"}, {"stick_response", "original"}, {"stick_look_speed", "1.00"},
     {"vibration", "true"}, {"user_signin_live", "true"}, {"split_screen", "false"}, {"coop", "false"},
     {"coop_pads", "1,2"}, {"kbm", "true"}, {"kbm_sensitivity", "1.00"}, {"kbm_aim_sensitivity", "1.00"},
-    {"kbm_invert_y", "false"}, {"kbm_noise_gate", "0.00"}, {"kbm_prompts", "true"},
+    {"kbm_invert_y", "false"}, {"kbm_noise_gate", "0.00"}, {"kbm_noise_gate_strict", "false"}, {"kbm_prompts", "true"},
     {"kbm_move_forward", "W"}, {"kbm_move_back", "S"}, {"kbm_move_left", "A"}, {"kbm_move_right", "D"},
     {"kbm_right_trigger", "LMB"}, {"kbm_left_trigger", "RMB,Shift"}, {"kbm_accelerate", "W"}, {"kbm_brake", "S"},
     {"kbm_a", "Space"}, {"kbm_b", "E,F,Backspace"}, {"kbm_x", "R"}, {"kbm_y", "Q"}, {"kbm_right_shoulder", "G,MMB"},

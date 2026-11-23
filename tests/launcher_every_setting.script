@@ -91,6 +91,8 @@ focus:kbm_invert_y
 key:Enter
 focus:kbm_noise_gate
 pad:Right
+focus:kbm_noise_gate_strict
+key:Enter
 focus:kbm_prompts
 key:Enter
 focus:kbm_move_forward
