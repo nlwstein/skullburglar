@@ -1,0 +1,38 @@
+# Input parity for the portable-mode saves notice (B-386): run with --state misplaced-repeat (the notice stays up after
+# each Move or Not now, so the keyboard, the controller and the mouse can each do it).
+# Keyboard: main menu -> About, Move, confirm; Cancel with Esc; Not now
+expect-page:main
+key:Up
+key:Up
+key:Enter
+expect-page:about
+key:Enter
+key:Escape
+key:Enter
+key:Left
+key:Enter
+expect-action:move-saves
+key:Down
+key:Enter
+expect-action:dismiss-saves
+# Controller: Move, B cancels, then confirm; Not now
+page:about
+pad:Up
+pad:A
+pad:B
+pad:A
+pad:Left
+pad:A
+expect-action:move-saves
+pad:Down
+pad:A
+expect-action:dismiss-saves
+# Mouse: the card on the main menu opens About, then the row and the confirmation's button
+page:main
+click:0.73,0.69
+expect-page:about
+click:0.3,0.46
+click:0.294,0.593
+expect-action:move-saves
+click:0.1,0.545
+expect-action:dismiss-saves

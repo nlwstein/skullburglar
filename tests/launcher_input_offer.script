@@ -1,0 +1,45 @@
+# Input parity for the portable copy offer (B-400): run with --state offer-repeat --sizes 1920x1080 (the offer stays up after
+# each answer, so the keyboard, the controller and the mouse can each give every answer). Focus starts on Copy.
+# Keyboard: Enter = Copy; Right, Enter = Use a disc image; Right, Right, Enter = Not now; Esc = Not now
+expect-page:main
+key:Enter
+expect-action:offer-copy
+key:Right
+key:Enter
+expect-action:offer-disc
+key:Right
+key:Enter
+expect-action:offer-notnow
+key:Escape
+expect-action:offer-notnow
+key:Space
+expect-action:offer-notnow
+key:Left
+key:Left
+key:Enter
+expect-action:offer-copy
+# Controller (A selects, B = Not now, d-pad moves)
+pad:Left
+pad:Left
+pad:A
+expect-action:offer-copy
+pad:Right
+pad:A
+expect-action:offer-disc
+pad:Right
+pad:A
+expect-action:offer-notnow
+pad:B
+expect-action:offer-notnow
+# Mouse: the three buttons
+click:0.284,0.674
+expect-action:offer-copy
+click:0.445,0.674
+expect-action:offer-disc
+click:0.579,0.674
+expect-action:offer-notnow
+# Nothing behind the offer reacts: Down / Tab / a click on the menu don't change the page
+key:Down
+key:Tab
+click:0.1,0.4
+expect-page:main

@@ -34,4 +34,8 @@ UpdateInfo FetchUpdateInfo();
 // Opens an http(s) address in the default browser.
 void OpenInBrowser(const std::string& url);
 
+// Opens a folder in the system's file browser (Explorer, Finder, or what xdg-open picks). `path` is UTF-8 and must
+// be an existing folder; anything else does nothing. Never waits for the file browser.
+void OpenFolder(const std::string& path);
+
 }  // namespace bots::setup

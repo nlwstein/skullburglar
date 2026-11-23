@@ -1,0 +1,15 @@
+# Input parity for "Open the log folder" on About & logs (lpolish): run with --sizes 1920x1080,1280x800.
+# Keyboard: About, Down to the row under Diagnostic logging, Enter
+page:about
+key:Down
+key:Enter
+expect-action:open-logs
+# Controller: up to the toggle and down again, A
+pad:Up
+pad:Down
+pad:A
+expect-action:open-logs
+# Mouse: click the row
+click:0.3,0.413
+expect-action:open-logs
+shot:about-logs

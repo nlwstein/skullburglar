@@ -38,4 +38,22 @@ inline float LauncherWindowWidth(float logical_width, float ui_scale) {
   return std::max(std::min(std::max(designed, wide), logical_width - 40.0f), 1.0f);
 }
 
+// The full-screen menu's scale (launcher_menu.h): a game's front end grows with the screen, so this follows the height
+// (600 logical pixels = 1) like LauncherUiScale, but also the width (900 = 1: a narrow window keeps its side columns)
+// and goes up to 3.6 (a 4K screen at 100% gets the same layout as 1080p, twice as large). Below 0.8 the text would get
+// too small to read; the pages scroll instead. BOTS_UI_SCALE overrides it, as for LauncherUiScale.
+inline constexpr float kMenuScaleMin = 0.8f;
+inline constexpr float kMenuScaleMax = 3.6f;
+inline float LauncherMenuScale(float logical_width, float logical_height, const char* override_text = nullptr) {
+  if (override_text && *override_text) {
+    char* end = nullptr;
+    const float v = std::strtof(override_text, &end);
+    if (end != override_text && v > 0.0f) return std::clamp(v, 0.5f, 4.0f);
+  }
+  if (!(logical_height > 0.0f) || !(logical_width > 0.0f)) return 1.0f;
+  const float raw = std::clamp(std::min(logical_height / kUiScaleDesignHeight, logical_width / 900.0f), kMenuScaleMin,
+                               kMenuScaleMax);
+  return std::round(raw * 20.0f) / 20.0f;
+}
+
 }  // namespace bots::setup

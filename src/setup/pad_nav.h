@@ -14,6 +14,8 @@
 
 #include <rex/logging.h>
 
+#include "launcher_logic.h"
+
 namespace bots::setup {
 
 class PadNav {
@@ -62,6 +64,17 @@ class PadNav {
   }
 
   bool Connected() const { return !pads_.empty(); }
+
+  // The kind of the first connected controller, for the launcher's button glyphs (launcher_logic.h).
+  PadKind Kind() const {
+    if (pads_.empty()) return PadKind::kNone;
+    switch (SDL_GetGamepadType(pads_.front().pad)) {
+      case SDL_GAMEPAD_TYPE_PS3:
+      case SDL_GAMEPAD_TYPE_PS4: return PadKind::kPlayStation4;
+      case SDL_GAMEPAD_TYPE_PS5: return PadKind::kPlayStation5;
+      default: return PadKind::kXbox;
+    }
+  }
 
   // A PlayStation pad is connected (the window names its buttons: Cross, Circle, Options).
   bool PlayStation() const {

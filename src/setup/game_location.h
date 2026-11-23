@@ -296,7 +296,8 @@ inline ExtractResult CopyGameFiles(const std::filesystem::path& src, const std::
   }
   auto fail = [&](std::string why) {
     fs::remove_all(partial, ec);
-    result.error = progress.cancel.load() ? "Cancelled." : std::move(why);
+    result.cancelled = progress.cancel.load();  // a plain "Cancelled." note in the launcher, as for an install
+    result.error = result.cancelled ? "Cancelled." : std::move(why);
     return result;
   };
   for (fs::recursive_directory_iterator it(src, fs::directory_options::skip_permission_denied, ec), end;

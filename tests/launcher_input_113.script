@@ -1,0 +1,68 @@
+# Input parity for the 1.13.0 settings and notices (tools/launcher_preview.sh ... --script @tests/launcher_input_113.script).
+# Anti-aliasing (a choice), sharpening (a slider), toggle aim (a switch) and the pre-1.0 occlusion choice, each by
+# keyboard, controller and mouse. The misplaced-saves notice has its own script, tests/launcher_input_saves.script.
+# Keyboard
+page:graphics
+focus:anti_aliasing
+key:Left
+expect:anti_aliasing=fxaa
+key:Delete
+expect:anti_aliasing=smaa
+focus:sharpening
+key:Right
+expect:sharpening=0.02
+key:Shift+Right
+expect:sharpening=0.12
+key:Delete
+expect:sharpening=0
+page:controls
+focus:aim_toggle
+key:Enter
+expect:aim_toggle=true
+key:Delete
+expect:aim_toggle=false
+# Controller
+page:graphics
+focus:anti_aliasing
+pad:Left
+pad:Left
+expect:anti_aliasing=off
+pad:Y
+expect:anti_aliasing=smaa
+focus:sharpening
+pad:RT
+expect:sharpening=0.10
+pad:Y
+expect:sharpening=0
+page:controls
+focus:aim_toggle
+pad:A
+expect:aim_toggle=true
+pad:Y
+expect:aim_toggle=false
+# Mouse: the arrows of a choice, a slider drag, a switch click
+page:graphics
+focus:anti_aliasing
+click:0.38,0.716
+expect:anti_aliasing=fxaa
+focus:sharpening
+drag:0.40,0.79,0.60,0.79
+expect:sharpening=1
+page:controls
+click:0.61,0.44
+expect:aim_toggle=true
+# With the pre-1.0 renderer anti-aliasing is greyed out (Left changes nothing) and the pre-1.0 occlusion choice works
+page:graphics
+focus:renderer
+key:Right
+expect:renderer=pre1
+focus:anti_aliasing
+key:Left
+expect:anti_aliasing=fxaa
+focus:pre1_occlusion
+key:Right
+expect:pre1_occlusion=on
+pad:Right
+expect:pre1_occlusion=off
+key:Delete
+expect:pre1_occlusion=auto
