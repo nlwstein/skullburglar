@@ -43,13 +43,13 @@ expect:aim_toggle=false
 # Mouse: the arrows of a choice, a slider drag, a switch click
 page:graphics
 focus:anti_aliasing
-click:0.38,0.716
+click:0.38,0.662
 expect:anti_aliasing=fxaa
 focus:sharpening
-drag:0.40,0.79,0.60,0.79
+drag:0.40,0.739,0.60,0.739
 expect:sharpening=1
 page:controls
-click:0.61,0.44
+click:0.61,0.366
 expect:aim_toggle=true
 # With the pre-1.0 renderer anti-aliasing is greyed out (Left changes nothing) and the pre-1.0 occlusion choice works
 page:graphics

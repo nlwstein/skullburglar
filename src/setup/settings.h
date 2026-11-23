@@ -11,6 +11,21 @@
 
 namespace bots::setup {
 
+// The launcher's pages (launcher_logic.h: kPages gives each its title and order). Every catalog setting names the page it
+// is on; kMain is "none" and is refused by the catalog test. kBindings opens from Controls and isn't in the menu.
+enum class LauncherPage {
+  kMain,
+  kGraphics,
+  kHdr,
+  kGame,
+  kControls,
+  kCoop,
+  kGameFiles,
+  kUpdates,
+  kAbout,
+  kBindings,
+};
+
 struct Choice {
   std::string value;  // cvar value as text
   std::string label;
@@ -25,7 +40,8 @@ struct Setting {
   double slider_min = 0, slider_max = 0;  // slider_max > 0: a slider for a double cvar
   bool slider_linear = false;     // linear instead of the default logarithmic slider
   std::string slider_format = "%.2f";  // printf format of the slider's value
-  std::string section;            // starts a new heading in the window
+  LauncherPage page = LauncherPage::kMain;  // the launcher page it is on (set by the catalog's add())
+  std::string group;              // heading over it on that page; empty = none. The catalog keeps a group's settings together
   bool binding = false;           // a key binding (kbm_*: comma-separated key names), shown in the bindings table
   std::string default_value;      // the cvar's built-in value (Reset)
   // Live state for the window.

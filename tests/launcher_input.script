@@ -10,13 +10,15 @@ key:Delete
 expect:fullscreen=true
 key:Down
 key:Right
+expect:aspect_ratio=auto
+key:Left
+expect:aspect_ratio=16:9
+focus:renderer
+key:Right
 expect:renderer=pre1
 key:Left
 expect:renderer=new
-key:Down
-key:Down
-key:Down
-key:Down
+focus:fov_offset
 key:Right
 expect:fov_offset=1
 key:Shift+Right
@@ -53,9 +55,9 @@ pad:B
 expect-page:main
 # Mouse: click a toggle, drag a slider to its end, wheel
 page:game
-click:0.3,0.22
+click:0.3,0.287
 expect:intro_movies=true
-drag:0.45,0.525,0.95,0.525
+drag:0.45,0.363,0.95,0.363
 expect:movie_volume=200
 wheel:-3
 # Key bindings: Set, Add, Default, cancel three ways, Escape as a key
