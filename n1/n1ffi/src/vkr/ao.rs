@@ -15,6 +15,40 @@ pub(super) struct Parameters {
 }
 const _: () = assert!(std::mem::size_of::<Parameters>() == 96);
 
+/// Test hook `BOTS_N1_AO_FAIL`: `pipelines` makes the AO pipeline build fail, `frame` makes the per-frame setup fail.
+fn forced_failure(stage: &str) -> bool {
+    static MODE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MODE.get_or_init(|| std::env::var("BOTS_N1_AO_FAIL").unwrap_or_default()) == stage
+}
+
+/// AO is optional, so a failure while setting it up must cost the AO and nothing else. `prepare_ao` errors used to
+/// reach `n1_record`, which makes the host turn the whole new renderer off. The gate logs the first error, stops
+/// asking for AO for the rest of the session, and lets the frame go on without it.
+#[derive(Default)]
+pub(super) struct AoGate {
+    failed: bool,
+}
+
+impl AoGate {
+    pub(super) fn usable(&self) -> bool {
+        !self.failed
+    }
+
+    /// The result of this frame's AO setup: whether AO is drawn this frame.
+    pub(super) fn resolve(&mut self, prepared: Result<bool>) -> bool {
+        match prepared {
+            Ok(on) => on,
+            Err(e) => {
+                if !self.failed {
+                    eprintln!("n1ffi: ambient occlusion disabled for this session: {e:#}");
+                }
+                self.failed = true;
+                false
+            }
+        }
+    }
+}
+
 pub(crate) struct AmbientOcclusion {
     set_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
@@ -23,6 +57,9 @@ pub(crate) struct AmbientOcclusion {
 
 impl AmbientOcclusion {
     pub(crate) fn new(device: &ash::Device, cache: vk::PipelineCache) -> Result<Self> {
+        if forced_failure("pipelines") {
+            return Err(anyhow!("forced by BOTS_N1_AO_FAIL=pipelines"));
+        }
         let words = shaders::spirv(&shaders::ao_source())?;
         unsafe {
             let module = device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)?;
@@ -99,6 +136,9 @@ impl AmbientOcclusion {
 
 impl Renderer {
     pub(super) fn prepare_ao(&mut self, si: usize, at: u64, w: u32, h: u32, strength: f32, globals: &Globals) -> Result<bool> {
+        if forced_failure("frame") {
+            return Err(anyhow!("forced by BOTS_N1_AO_FAIL=frame"));
+        }
         let Some(inverse_view_proj) = scenekit::inverse(&globals.view_proj) else { return Ok(false) };
         let (aw, ah) = (w.div_ceil(2), h.div_ceil(2));
         if !self.ao_targets.as_ref().is_some_and(|r| r[0].width == aw && r[0].height == ah) {
@@ -200,5 +240,26 @@ impl Renderer {
                     vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE),
             ]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_setup_error_turns_ao_off_and_stays_off() {
+        let mut gate = AoGate::default();
+        assert!(gate.usable());
+        assert!(gate.resolve(Ok(true)));
+        assert!(!gate.resolve(Err(anyhow!("out of memory"))), "the failed frame draws without AO");
+        assert!(!gate.usable(), "later frames don't ask for AO again");
+    }
+
+    #[test]
+    fn a_skipped_frame_is_not_a_failure() {
+        let mut gate = AoGate::default();
+        assert!(!gate.resolve(Ok(false)), "singular view matrix: no AO this frame");
+        assert!(gate.usable(), "the next frame may use AO");
     }
 }

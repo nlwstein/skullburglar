@@ -522,6 +522,8 @@ pub struct Renderer {
     destc: Option<Rt>,
     depth: Option<Rt>,
     ao_targets: Option<[Rt; 2]>,
+    /// Latches the first AO setup failure so the rest of the session renders without AO (see `ao::AoGate`).
+    ao_gate: ao::AoGate,
     /// Near plane of the frame's reverse-Z projection (the post chain linearises depth with it).
     pub near: f32,
     pending: Vec<Upload>,
@@ -867,6 +869,7 @@ impl Renderer {
                 slots: Vec::new(),
                 hdr: None,
                 ao_targets: None,
+                ao_gate: ao::AoGate::default(),
                 bloom: None,
                 god: None,
                 graded: None,
@@ -2429,7 +2432,7 @@ impl Renderer {
         let shadows_at = align(end_bones);
         let shadows_end = shadows_at + self.shadows.frame.len().max(1) as u64 * std::mem::size_of::<shadow::GpuShadow>() as u64;
         let ao_at = align(shadows_end);
-        let ao_ready = target.ambient_occlusion_strength > 0.0 && self.store.ao().is_some();
+        let ao_ready = target.ambient_occlusion_strength > 0.0 && self.ao_gate.usable() && self.store.ao().is_some();
         let end = if ao_ready { ao_at + std::mem::size_of::<ao::Parameters>() as u64 } else { shadows_end };
         let si = self.slot(end, serial, completed)?;
         self.laps.lap("slot");
@@ -2458,7 +2461,11 @@ impl Renderer {
         if crate::light::fog_volumes_on() {
             globals.set_fog_volumes(&self.lighting.fog_vols);
         }
-        let ao_on = ao_ready && self.prepare_ao(si, ao_at, rw, rh, target.ambient_occlusion_strength, &globals)?;
+        // A failure while setting AO up (target or descriptor allocation) turns AO off for the session; the scene still draws.
+        let ao_on = ao_ready && {
+            let prepared = self.prepare_ao(si, ao_at, rw, rh, target.ambient_occlusion_strength, &globals);
+            self.ao_gate.resolve(prepared)
+        };
         let post_on = self.knobs.post;
         let pp = &self.lighting.post;
         let grade_on = post_on && pp.grade.is_some();
