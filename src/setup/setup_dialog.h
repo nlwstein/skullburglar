@@ -1289,7 +1289,8 @@ class DisplayDialog : public rex::ui::ImGuiDialog {
       : ImGuiDialog(drawer), config_path_(std::move(config_path)), status_(std::move(status)),
         closed_(std::move(closed)), settings_(LoadSettings()) {
     std::erase_if(settings_, [](const Setting& s) {
-      return !s.cvar.starts_with("vulkan_hdr") && s.cvar != "fov_offset";
+      return !s.cvar.starts_with("vulkan_hdr") && s.cvar != "fov_offset" && s.cvar != "motion_blur" &&
+             s.cvar != "ambient_occlusion" && s.cvar != "ambient_occlusion_strength";
     });
     original_settings_ = settings_;
   }
@@ -1317,12 +1318,17 @@ class DisplayDialog : public rex::ui::ImGuiDialog {
       ImGui::TextUnformatted(status_());
       ImGui::TextDisabled("Enabling HDR requires a restart.");
       ImGui::Separator();
+      std::string group;
       for (auto& s : settings_) {
+        if (s.group != group) {
+          group = s.group;
+          if (!group.empty()) ImGui::SeparatorText(group.c_str());
+        }
         if (DrawSetting(s)) rex::cvar::SetFlagByName(s.cvar, s.value);
       }
       if (ImGui::Button("Reset brightness and grading")) {
         for (auto& s : settings_) {
-          if (s.locked || s.cvar == "vulkan_hdr" || s.cvar == "fov_offset") continue;
+          if (s.locked || !s.cvar.starts_with("vulkan_hdr_")) continue;
           s.value = s.default_value;
           rex::cvar::SetFlagByName(s.cvar, s.value);
         }

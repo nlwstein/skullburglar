@@ -50,6 +50,8 @@ int main() {
   assert(page_of("fov_offset") == LauncherPage::kGraphics);
   assert(page_of("anti_aliasing") == LauncherPage::kGraphics);
   assert(page_of("sharpening") == LauncherPage::kGraphics);
+  assert(page_of("ambient_occlusion") == LauncherPage::kGraphics && page_of("ambient_occlusion_strength") == LauncherPage::kGraphics);
+  assert(page_of("kbm_noise_gate_strict") == LauncherPage::kControls);
   assert(page_of("pre1_occlusion") == LauncherPage::kGraphics);
   assert(page_of("aim_toggle") == LauncherPage::kControls);
   assert(page_of("vulkan_hdr_peak") == LauncherPage::kHdr);

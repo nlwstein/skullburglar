@@ -1083,7 +1083,9 @@ void LauncherMenu::DrawPageRows(std::vector<Setting>& settings, const LauncherSt
     // Anti-aliasing and sharpening are new-renderer passes (greyed out with the pre-1.0 renderer, like HDR); the
     // pre-1.0 renderer's visibility test is the other way round.
     const bool pre1 = value("renderer") == "pre1";
-    const bool n1_only = (s.cvar == "anti_aliasing" || s.cvar == "sharpening") && pre1;
+    const bool n1_only = (s.cvar == "anti_aliasing" || s.cvar == "sharpening" || s.cvar == "ambient_occlusion" ||
+                          s.cvar == "ambient_occlusion_strength") &&
+                         pre1;
     const bool pre1_only = s.cvar == "pre1_occlusion" && !pre1;
     const char* why = kbm_dependent ? "Turn on Keyboard and mouse to change this."
                       : n1_only     ? "Requires the new renderer."
@@ -1091,7 +1093,7 @@ void LauncherMenu::DrawPageRows(std::vector<Setting>& settings, const LauncherSt
     SettingRow(s, settings, in, width, kbm_dependent || n1_only || pre1_only, why);
     // Notes that belong under a setting.
     if (s.cvar == "vulkan_hdr" && pre1) Note("HDR requires the new renderer.", color::kWarn, width);
-    if (s.cvar == "sharpening" && pre1) Note("Anti-aliasing and sharpening require the new renderer.", color::kWarn, width);
+    if (s.cvar == "ambient_occlusion_strength" && pre1) Note("Anti-aliasing, sharpening and ambient occlusion require the new renderer.", color::kWarn, width);
     if (pre1_only) Note("Only the pre-1.0 renderer uses this setting.", color::kTextDim, width);
     if (s.cvar == "user_signin_live" && s.value == "true") {
       switch (st.firewall) {

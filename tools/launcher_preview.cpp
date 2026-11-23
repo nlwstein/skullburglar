@@ -37,7 +37,7 @@ const std::map<std::string, std::string> kDefaults = {
     {"vulkan_hdr_exposure", "0.00"}, {"vulkan_hdr_middle_gray", "0.180"}, {"vulkan_hdr_contrast", "1.00"},
     {"vulkan_hdr_highlights", "1.00"}, {"vulkan_hdr_shadows", "1.00"}, {"vulkan_hdr_saturation", "1.00"},
     {"motion_blur", "true"}, {"screen_shake", "100.00"}, {"movie_volume", "100.00"}, {"framerate_limit", "60"},
-    {"anti_aliasing", "smaa"}, {"sharpening", "0.00"}, {"pre1_occlusion", "auto"}, {"aim_toggle", "false"},
+    {"anti_aliasing", "smaa"}, {"sharpening", "0.00"}, {"ambient_occlusion", "false"}, {"ambient_occlusion_strength", "3.00"}, {"pre1_occlusion", "auto"}, {"aim_toggle", "false"},
     {"present_vsync", "true"}, {"fps_counter", "false"}, {"check_updates", "true"}, {"diagnostic_logging", "false"},
     {"pad_prompts", "auto"}, {"aim_assist", "true"}, {"right_stick_deadzone", "20.00"},
     {"stick_acceleration", "true"}, {"stick_response", "original"}, {"stick_look_speed", "1.00"},

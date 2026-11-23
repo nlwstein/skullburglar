@@ -14,6 +14,10 @@ focus:anti_aliasing
 key:Enter
 focus:sharpening
 pad:Right
+focus:ambient_occlusion
+key:Enter
+focus:ambient_occlusion_strength
+pad:Right
 focus:renderer
 pad:A
 # The pre-1.0 occlusion setting only works with the pre-1.0 renderer, chosen just above.

@@ -36,6 +36,7 @@ use std::sync::Arc;
 
 mod aa;
 mod gprof;
+pub(crate) mod ao;
 mod outline;
 mod pgpu;
 mod shadow;
@@ -156,6 +157,7 @@ struct Slot {
     buf: Buf,
     set: vk::DescriptorSet,
     post_sets: [vk::DescriptorSet; POST_PASSES],
+    ao_sets: [vk::DescriptorSet; 2],
     /// Particle globals + instances, and their descriptor set (B-186).
     pbuf: Buf,
     pset: vk::DescriptorSet,
@@ -195,6 +197,7 @@ pub struct Target {
     pub height: u32,
     pub rect: vk::Rect2D,
     pub clear: Option<[f32; 4]>,
+    pub ambient_occlusion_strength: f32,
 }
 
 /// Static vertex as the matdef shader reads it (60 bytes).
@@ -518,6 +521,7 @@ pub struct Renderer {
     /// B-273: a copy of the HDR target taken before the sprite pass, for DestColor particle materials (the QTE ring).
     destc: Option<Rt>,
     depth: Option<Rt>,
+    ao_targets: Option<[Rt; 2]>,
     /// Near plane of the frame's reverse-Z projection (the post chain linearises depth with it).
     pub near: f32,
     pending: Vec<Upload>,
@@ -862,6 +866,7 @@ impl Renderer {
                 light_copy_serial: 0,
                 slots: Vec::new(),
                 hdr: None,
+                ao_targets: None,
                 bloom: None,
                 god: None,
                 graded: None,
@@ -1709,6 +1714,7 @@ impl Renderer {
                     buf,
                     set,
                     post_sets,
+                    ao_sets: [vk::DescriptorSet::null(); 2],
                     pbuf: Buf::null(),
                     pset,
                     serial: 0,
@@ -2421,7 +2427,10 @@ impl Renderer {
         self.shadow_receivers();
         self.laps.lap("shadows_select");
         let shadows_at = align(end_bones);
-        let end = shadows_at + self.shadows.frame.len().max(1) as u64 * std::mem::size_of::<shadow::GpuShadow>() as u64;
+        let shadows_end = shadows_at + self.shadows.frame.len().max(1) as u64 * std::mem::size_of::<shadow::GpuShadow>() as u64;
+        let ao_at = align(shadows_end);
+        let ao_ready = target.ambient_occlusion_strength > 0.0 && self.store.ao().is_some();
+        let end = if ao_ready { ao_at + std::mem::size_of::<ao::Parameters>() as u64 } else { shadows_end };
         let si = self.slot(end, serial, completed)?;
         self.laps.lap("slot");
 
@@ -2449,6 +2458,7 @@ impl Renderer {
         if crate::light::fog_volumes_on() {
             globals.set_fog_volumes(&self.lighting.fog_vols);
         }
+        let ao_on = ao_ready && self.prepare_ao(si, ao_at, rw, rh, target.ambient_occlusion_strength, &globals)?;
         let post_on = self.knobs.post;
         let pp = &self.lighting.post;
         let grade_on = post_on && pp.grade.is_some();
@@ -2676,7 +2686,7 @@ impl Renderer {
                 bi(idyn_at, lights_at - idyn_at),
                 bi(envs_at, bones_at - envs_at),
                 bi(bones_at, shadows_at - bones_at),
-                bi(shadows_at, end - shadows_at),
+                bi(shadows_at, shadows_end - shadows_at),
             ];
             let writes: Vec<vk::WriteDescriptorSet> = infos
                 .iter()
@@ -3005,7 +3015,7 @@ impl Renderer {
             // it whenever the post chain runs; with DONT_CARE its contents afterwards are undefined (B-313 found the
             // RTX 3090 keeping them anyway). Debug bit 20 (1048576) puts back the old rule (stored only for the sprite
             // pass or the outline) for an A/B.
-            let depth_kept = late_pass || outline_on || (post_on && self.debug_bits & 1048576 == 0);
+            let depth_kept = ao_on || late_pass || outline_on || (post_on && self.debug_bits & 1048576 == 0);
             let cc = target.clear.unwrap_or([0.0, 0.0, 0.0, 1.0]);
             let clear = [
                 srgb_to_linear(cc[0]),
@@ -3048,12 +3058,12 @@ impl Renderer {
             d.cmd_set_scissor(cmd, 0, &[full(rw, rh)]);
             // B-327: `late`: the draws of materials that read the scene depth (a soft edge), recorded in the pass that has
             // it bound read-only; every other draw goes in the main pass.
-            let record_scene = |late: bool, st: &mut FrameStats| {
+            let record_scene = |draws: &[Draw], late: bool, st: &mut FrameStats| {
                 let (mut cur_key, mut cur_mat, mut cur_lm, mut cur_mesh) =
                     (None, u32::MAX, vk::DescriptorSet::null(), (false, u32::MAX));
                 let mut cur_layout = vk::PipelineLayout::null();
                 let mut cur_pipe = vk::Pipeline::null();
-                for dr in &self.draws {
+                for dr in draws {
                     if (dr.key.shader != NO_SHADER && self.materials.get(dr.mat as usize).is_some_and(|m| m.soft)) != late {
                         continue;
                     }
@@ -3137,19 +3147,37 @@ impl Renderer {
                     st.triangles += dr.index_count as u64 / 3;
                 }
             };
-            record_scene(false, &mut st);
+            // The draw list already puts opaque first.
+            // Splitting the slice adds no AO checks.
+            let opaque_end = if ao_on { self.draws.partition_point(|dr| !blended(dr.key.blend)) } else { self.draws.len() };
+            record_scene(&self.draws[..opaque_end], false, &mut st);
             if let Some(g) = &self.gprof {
                 g.mark(d, cmd, 2);
             }
             self.laps.lap("scene_draws");
+            if ao_on {
+                d.cmd_end_rendering(cmd);
+                self.record_ao(cmd, si, rw, rh);
+                st.draws += 4;
+                // Foliage has a separate fog shader. Keep it and all blended draws outside the AO composite.
+                let color_load = [catt[0].load_op(vk::AttachmentLoadOp::LOAD)];
+                let depth_load = datt.load_op(vk::AttachmentLoadOp::LOAD);
+                d.cmd_begin_rendering(cmd, &vk::RenderingInfo::default().render_area(full(rw, rh)).layer_count(1)
+                    .color_attachments(&color_load).depth_attachment(&depth_load));
+                viewport(0.0, 0.0, rw, rh);
+                d.cmd_set_scissor(cmd, 0, &[full(rw, rh)]);
+            }
+            if let Some(g) = &self.gprof { g.mark(d, cmd, 3); }
+            self.laps.lap("ambient_occlusion");
             st.draws += self.tg_record(cmd, si, &tf);
+            if ao_on { record_scene(&self.draws[opaque_end..], false, &mut st); }
             if pg_meshes {
                 st.draws += self.pg_record(cmd, si, &pf, true);
             }
             d.cmd_end_rendering(cmd);
             self.laps.lap("tg_pg_record");
             if let Some(g) = &self.gprof {
-                g.mark(d, cmd, 3);
+                g.mark(d, cmd, 4);
             }
             if pg_sprites && self.pg_needs_dest(&pf) {
                 // B-273: the scene as drawn so far, for DestColor materials (read in the sprite pass).
@@ -3274,7 +3302,7 @@ impl Renderer {
                 );
                 viewport(0.0, 0.0, rw, rh);
                 d.cmd_set_scissor(cmd, 0, &[full(rw, rh)]);
-                record_scene(true, &mut st);
+                record_scene(&self.draws, true, &mut st);
                 if pg_sprites {
                     st.draws += self.pg_record(cmd, si, &pf, false);
                 }
@@ -3300,7 +3328,7 @@ impl Renderer {
             }
             barrier(cao, frag, &[to_read(hdr.image)]);
             if let Some(g) = &self.gprof {
-                g.mark(d, cmd, 4);
+                g.mark(d, cmd, 5);
             }
 
             // ---- post
@@ -3436,7 +3464,7 @@ impl Renderer {
                 if mats.is_empty() {
                     pass(dst_view, dst_layout, dst_rect, p_comp, ps[5]);
                     if let Some(g) = &self.gprof {
-                        g.mark(d, cmd, 5);
+                        g.mark(d, cmd, 6);
                     }
                 } else {
                     // B-266: linear composite into the full-res target the composite doesn't read, then each post
@@ -3445,7 +3473,7 @@ impl Renderer {
                     pass(other_rt.view, catt_layout, full(rw, rh), p_mats[0], ps[7]);
                     barrier(cao, frag, &[to_read(other_rt.image)]);
                     if let Some(g) = &self.gprof {
-                        g.mark(d, cmd, 5);
+                        g.mark(d, cmd, 6);
                     }
                     let (mut cur, mut next) = (other_rt, scene_rt); // read, write
                     for j in 0..mats.len() {
@@ -3463,18 +3491,18 @@ impl Renderer {
             } else {
                 pass(dst_view, dst_layout, dst_rect, p_copy, ps[6]);
                 if let Some(g) = &self.gprof {
-                    g.mark(d, cmd, 5);
+                    g.mark(d, cmd, 6);
                 }
             }
             if let Some(g) = &self.gprof {
-                g.mark(d, cmd, 6);
+                g.mark(d, cmd, 7);
             }
             if let Some((img, _)) = aa_ldr {
                 barrier(cao, frag, &[to_read(img)]);
                 self.aa_record(cmd, target, aa_plan);
             }
             if let Some(g) = &self.gprof {
-                g.mark(d, cmd, 7);
+                g.mark(d, cmd, 8);
             }
         }
         self.laps.lap("post_pass");
@@ -4044,6 +4072,7 @@ impl Drop for Renderer {
             if let Some(b) = self.bloom.take() {
                 rts.extend(b);
             }
+            if let Some(r) = self.ao_targets.take() { rts.extend(r); }
             for r in rts {
                 self.free(Garbage::Image(r.image, r.view, r.alloc));
             }

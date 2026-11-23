@@ -657,6 +657,7 @@ pub fn start(store: Arc<Store>, db: Arc<AssetDb>, mut o: Opts) -> Arc<Progress> 
             } else {
                 store.load_persisted_cache()
             };
+            store.precompile_ao();
             // B-223: the host may destroy the renderer while this thread runs (hybrid dual mode remakes it at startup).
             // The store's Vulkan calls are safe after that (see `Store::gate`); here we just stop early.
             let gone = || {

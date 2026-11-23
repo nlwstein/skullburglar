@@ -508,6 +508,32 @@ pub fn mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     r
 }
 
+/// Row-major inverse, with partial pivoting. Invalid or singular matrices return None.
+pub fn inverse(m: &[f32; 16]) -> Option<[f32; 16]> {
+    let mut a = [[0.0f64; 8]; 4];
+    for i in 0..4 {
+        for j in 0..4 { a[i][j] = f64::from(m[i * 4 + j]); }
+        a[i][i + 4] = 1.0;
+    }
+    for c in 0..4 {
+        let p = (c..4).max_by(|&x, &y| a[x][c].abs().total_cmp(&a[y][c].abs()))?;
+        let d = a[p][c];
+        if !d.is_finite() || d.abs() < 1.0e-12 { return None; }
+        a.swap(c, p);
+        for x in &mut a[c] { *x /= d; }
+        for r in 0..4 {
+            if r == c { continue; }
+            let f = a[r][c];
+            for j in 0..8 { a[r][j] -= f * a[c][j]; }
+        }
+    }
+    let mut out = [0.0; 16];
+    for i in 0..4 {
+        for j in 0..4 { out[i * 4 + j] = a[i][j + 4] as f32; }
+    }
+    out.iter().all(|v| v.is_finite()).then_some(out)
+}
+
 /// The reverse-Z view-projection for a UE3 view matrix and UE3 projection (only its x/y scales are used; the
 /// near plane is given: 5 in this game's FSceneView).
 pub fn view_proj(view: &[f32; 16], proj: &[f32; 16], near: f32) -> [f32; 16] {

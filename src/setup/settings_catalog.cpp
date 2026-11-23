@@ -41,6 +41,11 @@ std::vector<Setting> SettingsCatalog() {
                "Brings back the crispness that anti-aliasing and a lower resolution take away. 0 is off. Edges that "
                "are already sharp change little. Requires the new renderer.", {}});
   s.back().slider_min = 0, s.back().slider_max = 1, s.back().slider_linear = true, s.back().slider_format = "%.2f";
+  add(LauncherPage::kGraphics, "Image quality", {"ambient_occlusion", "", "Ambient occlusion",
+               "Soft contact shading around nearby surfaces. Requires the new renderer.", {}});
+  add(LauncherPage::kGraphics, "Image quality", {"ambient_occlusion_strength", "", "AO strength",
+               "Darkens contact shading without changing its radius. 3.0 is the default.", {}});
+  s.back().slider_min = 0, s.back().slider_max = 6, s.back().slider_linear = true;
   // Page Graphics: Performance
   add(LauncherPage::kGraphics, "Performance", {"framerate_limit", "", "Frame rate limit",
                "30 plays at a steady 30 fps: choose it if the game feels jumpy because your computer can't hold 60. "

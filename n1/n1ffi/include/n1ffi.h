@@ -68,6 +68,7 @@ typedef struct N1Target {
   uint32_t w, h;
   uint32_t clear; /* non-zero: clear the rectangle to clear_color first */
   float clear_color[4];
+  float ambient_occlusion_strength; /* optional host SSAO strength; 0 disables it */
 } N1Target;
 
 typedef struct N1Instance {

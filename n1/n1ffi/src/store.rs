@@ -19,8 +19,9 @@ use matdef::shader::ShaderFlags;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
+use crate::vkr::ao::AmbientOcclusion;
 pub use crate::vkr::{DEPTH_FORMAT, HDR_FORMAT};
 /// Bump when anything that changes SPIR-V without changing the WGSL text (naga upgrade, writer options) changes.
 const SPV_REV: &str = "naga30-r1";
@@ -149,6 +150,7 @@ pub struct Store {
     pub startup_done: AtomicBool,
     dir: Option<PathBuf>,
     cache_dirty_at: AtomicU32,
+    ao: OnceLock<Option<AmbientOcclusion>>,
     /// Log every miss (`BOTS_N1_COMPILE_LOG=1`).
     pub log_misses: bool,
     /// Cull mode and front face are set per draw (Vulkan 1.3 dynamic state); else they are part of the pipeline key.
@@ -239,6 +241,7 @@ impl Store {
             startup_done: AtomicBool::new(false),
             dir,
             cache_dirty_at: AtomicU32::new(0),
+            ao: OnceLock::new(),
             log_misses: std::env::var("BOTS_N1_COMPILE_LOG").is_ok(),
             dyn_cull,
             manifest_header: Mutex::new(String::new()),
@@ -400,6 +403,24 @@ impl Store {
         }
     }
 
+    /// Build the AO pipelines during startup so enabling AO in F6 can use them immediately.
+    pub fn precompile_ao(&self) {
+        let g = self.gate.lock().unwrap_or_else(|p| p.into_inner());
+        if g.dead || self.stopping() {
+            return;
+        }
+        self.ao.get_or_init(|| {
+            let _use = self.cache_use.read().unwrap_or_else(|p| p.into_inner());
+            AmbientOcclusion::new(&self.device, self.cache)
+                .inspect_err(|e| eprintln!("n1ffi: ambient occlusion pipelines: {e}"))
+                .ok()
+        });
+    }
+
+    pub(crate) fn ao(&self) -> Option<&AmbientOcclusion> {
+        self.ao.get().and_then(Option::as_ref)
+    }
+
     /// Destroys every object the store made. The workers must be stopped and the GPU idle.
     pub unsafe fn destroy(&self) {
         self.save_cache();
@@ -419,6 +440,9 @@ impl Store {
             for (_, (sl, pl)) in i.layouts.drain() {
                 self.device.destroy_pipeline_layout(pl, None);
                 self.device.destroy_descriptor_set_layout(sl, None);
+            }
+            if let Some(ao) = self.ao() {
+                ao.destroy(&self.device);
             }
             self.device.destroy_pipeline_cache(self.cache, None);
         }
