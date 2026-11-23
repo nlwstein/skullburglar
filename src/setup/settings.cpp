@@ -60,6 +60,8 @@ REXCVAR_DEFINE_DOUBLE(vulkan_hdr_contrast, 1.0, "bots/HDR", "Scene contrast arou
 REXCVAR_DEFINE_DOUBLE(vulkan_hdr_highlights, 1.0, "bots/HDR", "Scene highlights");
 REXCVAR_DEFINE_DOUBLE(vulkan_hdr_shadows, 1.0, "bots/HDR", "Scene shadows");
 REXCVAR_DEFINE_DOUBLE(vulkan_hdr_saturation, 1.0, "bots/HDR", "Scene saturation");
+REXCVAR_DEFINE_BOOL(ambient_occlusion, false, "bots/Display", "Soft contact shading with the new renderer");
+REXCVAR_DEFINE_DOUBLE(ambient_occlusion_strength, 3.0, "bots/Display", "Ambient occlusion strength");
 
 namespace bots::setup {
 namespace fs = std::filesystem;
