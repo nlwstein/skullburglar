@@ -16,20 +16,7 @@
 
 namespace bots::setup {
 
-// The main menu's sections, in menu order. kBindings opens from the Controls page; it isn't in the menu.
-enum class LauncherPage {
-  kMain,
-  kGraphics,
-  kHdr,
-  kGame,
-  kControls,
-  kCoop,
-  kGameFiles,
-  kUpdates,
-  kAbout,
-  kBindings,
-};
-
+// The main menu's sections (enum LauncherPage, settings.h), in menu order (kPages). kBindings opens from the Controls page.
 struct PageInfo {
   LauncherPage page;
   const char* title;  // heading and menu entry
@@ -39,15 +26,14 @@ struct PageInfo {
 
 inline constexpr PageInfo kPages[] = {
     {LauncherPage::kGraphics, "Graphics", "Graphics",
-     "Fullscreen, renderer, render resolution, aspect ratio, field of view, frame rate and VSync."},
+     "Fullscreen, aspect ratio, field of view, render resolution, anti-aliasing, frame rate, VSync and the renderer."},
     {LauncherPage::kHdr, "HDR", "HDR",
      "HDR output on an HDR display: brightness in nits, exposure and the scene's grade."},
     {LauncherPage::kGame, "Game", "Game",
-     "Intro movies, achievement popups, motion blur, screen shake and movie volume."},
+     "Intro movies and movie volume, motion blur and screen shake, achievement popups."},
     {LauncherPage::kControls, "Controls", "Controls",
-     "Controller and keyboard and mouse options: aim assist, stick feel, sensitivity, button prompts and key "
-     "bindings."},
-    {LauncherPage::kCoop, "Co-op", "Co-op", "LAN co-op, split screen and two-window co-op on one computer."},
+     "Aiming, controller and keyboard and mouse options: stick feel, sensitivity, button prompts and key bindings."},
+    {LauncherPage::kCoop, "Co-op", "Co-op", "LAN co-op over your network; split screen and two-window co-op on one computer."},
     {LauncherPage::kGameFiles, "Game files", "Game files",
      "Where the game files are, and installing them from your own disc image."},
     {LauncherPage::kUpdates, "Updates", "Updates", "Check for new versions and install them."},
@@ -71,43 +57,27 @@ inline LauncherPage NeighborPage(LauncherPage page, int direction) {
   return kPages[((at + direction) % n + n) % n].page;
 }
 
-// Which page shows a setting. Every setting lands on exactly one page: one this list doesn't name (a setting added
-// later) goes by its catalog section, and a setting with no section to Game, so nothing is ever left out.
-inline LauncherPage PageOf(const Setting& s, std::string_view section) {
-  static constexpr std::pair<const char*, LauncherPage> kByCvar[] = {
-      {"fullscreen", LauncherPage::kGraphics},     {"renderer", LauncherPage::kGraphics},
-      {"render_scale", LauncherPage::kGraphics},   {"aspect_ratio", LauncherPage::kGraphics},
-      {"fov_offset", LauncherPage::kGraphics},     {"framerate_limit", LauncherPage::kGraphics},
-      {"present_vsync", LauncherPage::kGraphics},  {"fps_counter", LauncherPage::kGraphics},
-      {"intro_movies", LauncherPage::kGame},       {"achievement_popups", LauncherPage::kGame},
-      {"motion_blur", LauncherPage::kGame},        {"screen_shake", LauncherPage::kGame},
-      {"movie_volume", LauncherPage::kGame},       {"check_updates", LauncherPage::kUpdates},
-      {"diagnostic_logging", LauncherPage::kAbout},
-      // Settings from open merge requests (anti-aliasing, the pre-1.0 renderer's visibility test, toggle aim): placed
-      // here so they land on the right page whichever merges first.
-      {"anti_aliasing", LauncherPage::kGraphics},  {"sharpening", LauncherPage::kGraphics},
-      {"pre1_occlusion", LauncherPage::kGraphics}, {"aim_toggle", LauncherPage::kControls},
-  };
-  for (const auto& [cvar, page] : kByCvar)
-    if (s.cvar == cvar) return page;
-  if (s.binding) return LauncherPage::kBindings;
-  if (s.cvar.starts_with("vulkan_hdr") || section == "HDR") return LauncherPage::kHdr;
-  if (section == "Controller" || section == "Keyboard and mouse") return LauncherPage::kControls;
-  if (section == "Co-op") return LauncherPage::kCoop;
-  if (section == "Display and launcher") return LauncherPage::kGraphics;
-  if (section.empty()) return LauncherPage::kGraphics;  // the catalog's first block: display options
-  return LauncherPage::kGame;
+// Pages the catalog may use for settings. Every catalog setting names its page and an optional group heading
+// (settings_catalog.cpp), so there is no guessing from a section name or a cvar list; the catalog test fails for a
+// setting that names none.
+inline bool PageTakesSettings(LauncherPage page) {
+  return page != LauncherPage::kMain && page != LauncherPage::kGameFiles;
 }
 
-// The catalog's sections run on from the setting that starts them (Setting::section); this gives each setting its own.
-inline std::vector<std::string> SectionsOf(const std::vector<Setting>& settings) {
+// The group headings of `page`, in the order they show: first appearance in the catalog, ungrouped settings count as
+// the group "". Returns false if a group's settings are not together (the heading would show twice).
+inline bool PageGroups(const std::vector<Setting>& settings, LauncherPage page, std::vector<std::string>* groups) {
   std::vector<std::string> out;
-  std::string current;
+  bool together = true;
   for (const auto& s : settings) {
-    if (!s.section.empty()) current = s.section;
-    out.push_back(current);
+    if (s.page != page) continue;
+    if (out.empty() || out.back() != s.group) {
+      if (std::find(out.begin(), out.end(), s.group) != out.end()) together = false;
+      out.push_back(s.group);
+    }
   }
-  return out;
+  if (groups) *groups = out;
+  return together;
 }
 
 // Setting values compare as text, or as numbers when both read as one ("1.000000" is "1"); settings_logic.h's

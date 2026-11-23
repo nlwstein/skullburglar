@@ -134,6 +134,7 @@ pub struct N1Target {
     /// Non-zero: clear the rectangle to `clear_color` first (the host scene must cover the whole view).
     pub clear: u32,
     pub clear_color: [f32; 4],
+    pub ambient_occlusion_strength: f32,
 }
 
 /// One primitive this frame: handles from `n1_mesh` / `n1_light` (or N1_NONE), and a range in the frame's material
@@ -1676,6 +1677,7 @@ pub unsafe extern "C" fn n1_record(
                 },
             },
             clear: (t.clear != 0).then_some(t.clear_color),
+            ambient_occlusion_strength: t.ambient_occlusion_strength,
         };
         i.env_map.clear();
         for p in &i.env_paths {

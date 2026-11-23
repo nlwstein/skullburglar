@@ -324,6 +324,65 @@ pub struct Fog {
     pub extinction: f32,
 }
 
+impl Fog {
+    /// `LightBrightness`: the feeds carry `LightColor` and `LightColor x LightBrightness`, so it is their ratio (1 when
+    /// the colour is black or the two are not proportional enough to tell).
+    pub fn brightness(&self) -> f32 {
+        let (mut best, mut k) = (0.0f32, 1.0f32);
+        for i in 0..3 {
+            if self.light_color[i] > best {
+                best = self.light_color[i];
+                k = self.color[i] / self.light_color[i];
+            }
+        }
+        if k.is_finite() && k > 0.0 { k } else { 1.0 }
+    }
+
+    /// B-392: the colour the port's height-fog pass blends in (its pixel constant c5, in scene units):
+    /// `LightColor^2.2 x LightBrightness x log2(e)`. Measured on the port's own passes of three levels (Ambush
+    /// brightness 0.4, The Mall 1.40345, MountainCity 2.0): c5 / LightColor^2.2 = 0.5771, 2.0248, 2.8854 = brightness
+    /// x 1.4427 to four digits, in every channel. (The earlier model, from a capture where the product happened to be
+    /// near 1, took `LightColor^2.2` alone and ignored the brightness.) The log2(e) is the engine's: the pass takes
+    /// its transmittance with exp2 and the density constant carries the same factor.
+    pub fn pass_color(&self) -> [f32; 3] {
+        let k = self.brightness() * std::f32::consts::LOG2_E;
+        self.light_color.map(|c| c.powf(2.2) * k)
+    }
+}
+
+#[cfg(test)]
+mod fog_tests {
+    use super::*;
+
+    fn fog(light: [f32; 3], brightness: f32) -> Fog {
+        Fog { color: light.map(|c| c * brightness), light_color: light, density: 0.0, height: 0.0, start: 0.0, extinction: 1e8 }
+    }
+
+    /// The pixel constant c5 of the port's fog pass (magnitudes) next to the level's fog component, dumped from the
+    /// running game (draw 22022 of Ambush's chapter 11005 and the first pass of each other level).
+    #[test]
+    fn pass_color_matches_the_ports_constants() {
+        let levels = [
+            ("Ambush", [125.0 / 255.0, 182.0 / 255.0, 200.0 / 255.0], 0.4, [0.12024, 0.274791, 0.338152]),
+            ("The Mall", [247.0 / 255.0, 210.0 / 255.0, 134.0 / 255.0], 1.40345, [1.8877, 1.32093, 0.49162]),
+            ("MountainCity", [218.0 / 255.0, 194.0 / 255.0, 158.0 / 255.0], 2.0, [2.04372, 1.58118, 1.00661]),
+        ];
+        for (name, light, b, c5) in levels {
+            let got = fog(light, b).pass_color();
+            for i in 0..3 {
+                assert!((got[i] - c5[i]).abs() <= c5[i] * 2e-3, "{name} channel {i}: {} vs the port's {}", got[i], c5[i]);
+            }
+        }
+    }
+
+    #[test]
+    fn brightness_is_recovered_from_the_two_colours() {
+        assert!((fog([0.5, 0.7, 0.8], 0.4).brightness() - 0.4).abs() < 1e-6);
+        assert!((fog([0.0, 0.7, 0.0], 2.0).brightness() - 2.0).abs() < 1e-6);
+        assert_eq!(fog([0.0, 0.0, 0.0], 3.0).brightness(), 1.0);
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Frame {
     /// The level's shadow-casting directional light (the sun), if any.

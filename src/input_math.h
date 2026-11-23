@@ -114,24 +114,45 @@ struct MouseGate {
   double x = 0, y = 0;                   // leaky sum of counts, pixels
   bool open = false;
 
+  // Strict mode (B-396, opt in): a sensor with wide random jitter (a DualSense Edge's gyro) has a level that wanders
+  // past the gate on its own, because the sum of random counts grows like the square root of their number. What tells it
+  // from a turn is direction: a turn's counts point one way, jitter's cancel. So strict mode also keeps, over a longer
+  // time kTauC, the leaky sum of the counts (cx, cy) and of their lengths (path). The gate opens only when the
+  // sum is at least kCoherence of the path, and shuts again when it falls under kCoherenceClose of it. A steady drift
+  // or turn has sum == path, so it is unchanged; only mixed-direction motion is held back more.
+  static constexpr double kTauC = 0.8;           // seconds
+  static constexpr double kCoherence = 0.6;      // open needs |sum| >= this share of the path
+  static constexpr double kCoherenceClose = 0.3; // an open gate closes below this share
+  double cx = 0, cy = 0, path = 0;
+
   // One frame: `dt` seconds since the last one, (dx, dy) the counts that arrived meanwhile. Returns what passes.
   struct Out {
     double x = 0, y = 0;
   };
-  Out Step(double dx, double dy, double dt, double gate, double tau = kTau) {
+  Out Step(double dx, double dy, double dt, double gate, double tau = kTau, bool strict = false) {
     if (!(gate > 0)) {
-      x = y = 0, open = false;
+      x = y = cx = cy = path = 0, open = false;
       return {dx, dy};
     }
     const double keep = tau > 0 && dt > 0 ? std::exp(-dt / tau) : 0.0;
     x = x * keep + dx, y = y * keep + dy;
     const double level = std::hypot(x, y);
+    bool coherent_open = true, coherent_shut = false;
+    if (strict) {
+      const double kc = dt > 0 ? std::exp(-dt / kTauC) : 0.0;
+      cx = cx * kc + dx, cy = cy * kc + dy, path = path * kc + std::hypot(dx, dy);
+      const double sum = std::hypot(cx, cy);
+      coherent_open = sum >= kCoherence * path;
+      coherent_shut = sum < kCoherenceClose * path;
+    } else {
+      cx = cy = path = 0;
+    }
     if (open) {
       // The level now holds counts that already passed: forget them when the gate shuts, so they are not released again.
-      if (level < close * gate) open = false, x = y = 0;
+      if (level < close * gate || coherent_shut) open = false, x = y = cx = cy = path = 0;
       return {dx, dy};
     }
-    if (level < gate) return {};
+    if (level < gate || !coherent_open) return {};
     open = true;
     return {x, y};
   }

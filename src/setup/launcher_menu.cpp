@@ -331,7 +331,6 @@ LauncherAction LauncherMenu::Draw(std::vector<Setting>& settings, const Launcher
   fonts_ = &fonts;
   action_ = LauncherAction::kNone;
   report_.Reset();
-  sections_ = SectionsOf(settings);
   // An install that just finished (not cancelled, not failed): Back lands on Play, the obvious next step.
   if (was_extracting_ && !st.extracting && st.installed && st.install_error.empty()) main_focus_ = kMainPlay;
   was_extracting_ = st.extracting;
@@ -343,8 +342,7 @@ LauncherAction LauncherMenu::Draw(std::vector<Setting>& settings, const Launcher
     if (std::none_of(settings.begin(), settings.end(), [&](const Setting& s) { return s.cvar == focus_cvar_; }))
       focus_cvar_.clear();  // not in this build
     for (size_t i = 0; i < settings.size(); ++i)
-      if (settings[i].cvar == focus_cvar_ && PageOf(settings[i], sections_[i]) != page_)
-        GoTo(PageOf(settings[i], sections_[i]));
+      if (settings[i].cvar == focus_cvar_ && settings[i].page != page_) GoTo(settings[i].page);
   }
   // The menu does its own focus and navigation; ImGui's would move a second cursor with the same keys.
   io.ConfigFlags &= ~(ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad);
@@ -866,6 +864,13 @@ void LauncherMenu::GroupHeading(const char* text, float width) {
   ImGui::Dummy(ImVec2(width, h));
 }
 
+// The heading over a setting's group, drawn when the group changes (Setting::group; the catalog keeps a group together).
+void LauncherMenu::PageGroupHeading(const Setting& s, std::string& group, float width) {
+  if (s.group == group) return;
+  group = s.group;
+  if (!group.empty()) GroupHeading(group.c_str(), width);
+}
+
 void LauncherMenu::Note(const std::string& text, ImU32 col, float width, FontRole role) {
   if (text.empty()) return;
   ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1071,23 +1076,16 @@ void LauncherMenu::DrawPageRows(std::vector<Setting>& settings, const LauncherSt
   std::string group;
   for (size_t i = 0; i < settings.size(); ++i) {
     Setting& s = settings[i];
-    if (PageOf(s, sections_[i]) != page_) continue;
-    if (page_ == LauncherPage::kControls) {
-      const std::string g = sections_[i] == "Keyboard and mouse" ? "Keyboard and mouse" : "Controller";
-      if (g != group) {
-        if (!group.empty()) {
-          // The key bindings open from the end of the controller group... no: they follow the keyboard group below.
-        }
-        GroupHeading(g.c_str(), width);
-        group = g;
-      }
-    }
+    if (s.page != page_) continue;
+    PageGroupHeading(s, group, width);
     if (!focus_cvar_.empty() && focus_cvar_ == s.cvar) focus_target_ = row_index_, focus_cvar_.clear();
     const bool kbm_dependent = s.cvar.starts_with("kbm_") && kbm_off;
     // Anti-aliasing and sharpening are new-renderer passes (greyed out with the pre-1.0 renderer, like HDR); the
     // pre-1.0 renderer's visibility test is the other way round.
     const bool pre1 = value("renderer") == "pre1";
-    const bool n1_only = (s.cvar == "anti_aliasing" || s.cvar == "sharpening") && pre1;
+    const bool n1_only = (s.cvar == "anti_aliasing" || s.cvar == "sharpening" || s.cvar == "ambient_occlusion" ||
+                          s.cvar == "ambient_occlusion_strength") &&
+                         pre1;
     const bool pre1_only = s.cvar == "pre1_occlusion" && !pre1;
     const char* why = kbm_dependent ? "Turn on Keyboard and mouse to change this."
                       : n1_only     ? "Requires the new renderer."
@@ -1095,7 +1093,7 @@ void LauncherMenu::DrawPageRows(std::vector<Setting>& settings, const LauncherSt
     SettingRow(s, settings, in, width, kbm_dependent || n1_only || pre1_only, why);
     // Notes that belong under a setting.
     if (s.cvar == "vulkan_hdr" && pre1) Note("HDR requires the new renderer.", color::kWarn, width);
-    if (s.cvar == "sharpening" && pre1) Note("Anti-aliasing and sharpening require the new renderer.", color::kWarn, width);
+    if (s.cvar == "ambient_occlusion_strength" && pre1) Note("Anti-aliasing, sharpening and ambient occlusion require the new renderer.", color::kWarn, width);
     if (pre1_only) Note("Only the pre-1.0 renderer uses this setting.", color::kTextDim, width);
     if (s.cvar == "user_signin_live" && s.value == "true") {
       switch (st.firewall) {
@@ -1260,8 +1258,10 @@ void LauncherMenu::DrawGameFilesRows(const LauncherStatus& st, Intent& in, float
 }
 
 void LauncherMenu::DrawUpdatesRows(std::vector<Setting>& settings, const LauncherStatus& st, Intent& in, float width) {
+  std::string group;
   for (size_t i = 0; i < settings.size(); ++i)
-    if (PageOf(settings[i], sections_[i]) == LauncherPage::kUpdates) {
+    if (settings[i].page == LauncherPage::kUpdates) {
+      PageGroupHeading(settings[i], group, width);
       if (!focus_cvar_.empty() && focus_cvar_ == settings[i].cvar) focus_target_ = row_index_, focus_cvar_.clear();
       SettingRow(settings[i], settings, in, width, false, nullptr);
     }
@@ -1329,10 +1329,11 @@ void LauncherMenu::DrawAboutRows(std::vector<Setting>& settings, const LauncherS
         action_ = LauncherAction::kDismissSaves;
     }
     if (!st.saves_warning.empty() && !st.saves_note.empty()) Note(st.saves_note, color::kWarn, width);
-    GroupHeading("Settings", width);
   }
+  std::string group;
   for (size_t i = 0; i < settings.size(); ++i)
-    if (PageOf(settings[i], sections_[i]) == LauncherPage::kAbout) {
+    if (settings[i].page == LauncherPage::kAbout) {
+      PageGroupHeading(settings[i], group, width);
       if (!focus_cvar_.empty() && focus_cvar_ == settings[i].cvar) focus_target_ = row_index_, focus_cvar_.clear();
       SettingRow(settings[i], settings, in, width, false, nullptr);
       if (settings[i].cvar == "diagnostic_logging") {

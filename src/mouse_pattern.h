@@ -8,10 +8,13 @@
 //   alt:<cps>              +1, -1, +1... at <cps> counts per second: noise around zero
 //   noise:<p>[:<bias>]     on each frame with probability <p> one count, positive with probability <bias> (default
 //                          0.5): random jitter, with a bias a sensor that leans one way
+//   burst:<p>:<max>[:<bias>] on each frame with probability <p> a random 1..<max> counts (a sensor with a wider jitter
+//                          than noise:, e.g. an Edge-class gyro), positive with probability <bias> (default 0.5)
 //   poisson:<cps>[:<bias>] counts arrive at random (a Poisson process) at <cps> per second, positive with probability
 //                          <bias> (default 1): drift that is not evenly spaced
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -67,6 +70,9 @@ class MousePattern {
         case Kind::kNoise:
           if (Uniform() < p.rate) n = Uniform() < p.bias ? 1.0 : -1.0;
           break;
+        case Kind::kBurst:
+          if (Uniform() < p.rate) n = (1 + std::floor(Uniform() * p.max)) * (Uniform() < p.bias ? 1.0 : -1.0);
+          break;
         case Kind::kPoisson: {
           // Knuth's method; fine for the small means a frame has.
           const double limit = std::exp(-p.rate * dt);
@@ -84,10 +90,10 @@ class MousePattern {
 
  private:
   static constexpr double kEps = 1e-9;  // frames add up to a round time only to within rounding
-  enum class Kind { kSteady, kAlt, kNoise, kPoisson };
+  enum class Kind { kSteady, kAlt, kNoise, kPoisson, kBurst };
   struct Part {
     Kind kind = Kind::kSteady;
-    double rate = 0, bias = 0.5;
+    double rate = 0, bias = 0.5, max = 1;
     bool y = false;
   };
 
@@ -110,6 +116,11 @@ class MousePattern {
     } else if (f[0] == "noise") {
       p.kind = Kind::kNoise;
       p.bias = f.size() > 2 ? std::atof(f[2].c_str()) : 0.5;
+    } else if (f[0] == "burst") {
+      if (f.size() < 3) return false;
+      p.kind = Kind::kBurst;
+      p.max = std::max(1.0, std::atof(f[2].c_str()));
+      p.bias = f.size() > 3 ? std::atof(f[3].c_str()) : 0.5;
     } else if (f[0] == "poisson") {
       p.kind = Kind::kPoisson;
       p.bias = f.size() > 2 ? std::atof(f[2].c_str()) : 1.0;

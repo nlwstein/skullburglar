@@ -628,7 +628,11 @@ impl AssetDb {
         };
         let mut colors = l.colors.clone();
         colors.resize(nv, [255; 4]);
-        let mut uv1 = l.uvs.get(1).cloned().unwrap_or_default();
+        // B-398: the lightmap's coordinates are the set named by the mesh's `LightMapCoordinateIndex` (default 1). The car park
+        // floor of chapter 32215 has three sets and index 2: with set 1 its lightmap was sampled at the wrong places (hard black
+        // wedges and shadows where the Pre-1.0 renderer is sunlit).
+        let lm_set = lightmap_coord_set(&pkg, idx, l.uvs.len());
+        let mut uv1 = l.uvs.get(lm_set).cloned().unwrap_or_default();
         uv1.resize(nv, [0.0, 0.0]);
         let m = MeshAsset {
             name: path.to_string(),
@@ -1328,7 +1332,23 @@ impl<'a> R<'a> {
     }
 }
 
-const MESH_MAGIC: u32 = 0x4853_4D32; // "2MSH": + tangents, colours, uv1
+/// B-398: which texture-coordinate set holds the lightmap UVs of the StaticMesh export `idx` (`LightMapCoordinateIndex`, default
+/// 1), limited to the sets the mesh has.
+fn lightmap_coord_set(pkg: &Package, idx: i32, sets: usize) -> usize {
+    let i = ue3::props::object_props(pkg, idx).ok().and_then(|(props, _)| props.get("LightMapCoordinateIndex").map(|p| p.as_i32())).unwrap_or(1);
+    pick_coord_set(i, sets)
+}
+
+/// The set `index` names, or 1 when the mesh doesn't have it.
+fn pick_coord_set(index: i32, sets: usize) -> usize {
+    if index >= 0 && (index as usize) < sets {
+        index as usize
+    } else {
+        1
+    }
+}
+
+const MESH_MAGIC: u32 = 0x4853_4D33; // "3MSH" (B-398: uv1 is the mesh's lightmap coordinate set, not always set 1); "2MSH": + tangents, colours, uv1
 const TEX_MAGIC: u32 = 0x5845_5432; // + normal, unpack
 const TEX_MAGIC2: u32 = 0x5845_5433; // same layout; small packed-mip textures decoded from the right place (B-292)
 const TEX_MAGIC3: u32 = 0x5845_5434; // + AddressX/AddressY after the unpack range (B-324)
@@ -1716,5 +1736,24 @@ mod pick_tests {
         });
         assert!(pick_class(Some("SkeletalMesh"), it, is).unwrap().is_some());
         assert_eq!(seen.get(), 2);
+    }
+}
+
+#[cfg(test)]
+mod coord_set_tests {
+    use super::pick_coord_set;
+
+    #[test]
+    fn lightmap_coordinates_come_from_the_set_the_mesh_names() {
+        // B-398: the chapter 32215 car park floor has three sets and LightMapCoordinateIndex 2.
+        assert_eq!(pick_coord_set(2, 3), 2);
+        assert_eq!(pick_coord_set(1, 2), 1);
+        assert_eq!(pick_coord_set(0, 2), 0);
+    }
+
+    #[test]
+    fn a_set_the_mesh_lacks_falls_back_to_set_one() {
+        assert_eq!(pick_coord_set(2, 2), 1);
+        assert_eq!(pick_coord_set(-1, 3), 1);
     }
 }

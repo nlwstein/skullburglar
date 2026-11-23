@@ -542,10 +542,15 @@ impl Resolver {
 
     /// `gamma`: upload raw for the shader's PWL curve (B-235); it overrides `srgb`.
     fn upload_texture(&mut self, r: &mut impl Backend, name: &str, t: &TextureAsset, srgb: bool, gamma: bool) -> u32 {
+        let (srgb, gamma) = crate::pwl_override(name, t.fmt, srgb, gamma);
         let srgb = srgb && !gamma;
         let key = format!("{name}|{}{}", srgb as u8, gamma as u8);
         if let Some(&id) = self.tex_ids.get(&key) {
             return id;
+        }
+        if std::env::var_os("BOTS_N1_PWL_LOG").is_some() {
+            let how = if gamma { "pwl" } else if srgb { "srgb" } else { "plain" };
+            eprintln!("n1 pwl tex {name} {:?} {}x{} flag_srgb={} normal={} -> {how}", t.fmt, t.width, t.height, t.srgb, t.normal);
         }
         let mips: Vec<&[u8]> = t.mips.iter().map(|m| m.as_slice()).collect();
         let id = r.add_texture(&TextureDesc {

@@ -166,6 +166,10 @@ pub fn post_source() -> String {
     include_str!("post.wgsl").to_string()
 }
 
+pub fn ao_source() -> String {
+    format!("{}\n{}\n{}", matdef::shader::GLOBALS_WGSL, matdef::shader::FOG_WGSL, include_str!("ao.wgsl"))
+}
+
 /// WGSL -> SPIR-V words. Same writer options as the build-time shaders: clip-space Y flipped as wgpu does.
 pub fn spirv(src: &str) -> Result<Vec<u32>> {
     spirv_caps(src, naga::valid::Capabilities::empty())
@@ -418,10 +422,10 @@ mod tests {
     fn fog_target_follows_the_blend() {
         let grey = MatDef { diffuse_const: Some([0.6, 0.6, 0.6, 1.0]), ..Default::default() };
         let c = matdef::codegen::compile(&grey, &[]);
-        for (mode, want) in [(0u8, "mix(g.fog_col.rgb, col, t)"), (1, "mix(vec3<f32>(0.0), col, t)"), (2, "mix(vec3<f32>(1.0), col, t)")] {
+        for mode in 0u8..3 {
             let f = ShaderFlags { fog_mode: mode, ..ShaderFlags::new(false, false, true, 330) };
             let src = scene_source(&c, f);
-            assert!(src.contains(want), "mode {mode}");
+            assert!(src.contains(&format!("apply_fog(col, i.wpos, {mode}u)")), "mode {mode}");
             spirv(&src).unwrap();
         }
         assert_eq!(crate::plan::fog_mode(scenekit::Blend::Opaque), 0);

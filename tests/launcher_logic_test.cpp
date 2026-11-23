@@ -19,31 +19,39 @@ static Setting Slider(const char* cvar, double lo, double hi, bool linear) {
 }
 
 int main() {
-  // Every setting in the catalog is on exactly one page (not the main menu), and every page but the bindings and the
-  // files page has settings. A new setting with an unknown name still lands somewhere, by its section.
+  // Every catalog setting names its page (not "none", not the main menu or the game-files page) and no page is guessed
+  // from a section or a name: a setting added without a page fails here. Every page that takes settings has some.
   const auto catalog = SettingsCatalog();
-  const auto sections = SectionsOf(catalog);
   std::set<LauncherPage> used;
-  for (size_t i = 0; i < catalog.size(); ++i) {
-    const LauncherPage p = PageOf(catalog[i], sections[i]);
-    assert(p != LauncherPage::kMain);
-    used.insert(p);
-    if (catalog[i].binding) assert(p == LauncherPage::kBindings);
+  std::set<std::string> cvars;
+  for (const auto& s : catalog) {
+    assert(PageTakesSettings(s.page) && "a catalog setting names no launcher page");
+    assert(cvars.insert(s.cvar).second && "duplicate cvar in the catalog");
+    used.insert(s.page);
+    assert((s.page == LauncherPage::kBindings) == s.binding);
+    assert(s.group.empty() || s.page != LauncherPage::kBindings);
   }
   for (LauncherPage p : {LauncherPage::kGraphics, LauncherPage::kHdr, LauncherPage::kGame, LauncherPage::kControls,
                          LauncherPage::kCoop, LauncherPage::kUpdates, LauncherPage::kAbout, LauncherPage::kBindings})
     assert(used.count(p));
   auto page_of = [&](const char* cvar) {
-    for (size_t i = 0; i < catalog.size(); ++i)
-      if (catalog[i].cvar == cvar) return PageOf(catalog[i], sections[i]);
+    for (const auto& s : catalog)
+      if (s.cvar == cvar) return s.page;
     assert(false && "not in the catalog");
     return LauncherPage::kMain;
   };
+  auto group_of = [&](const char* cvar) {
+    for (const auto& s : catalog)
+      if (s.cvar == cvar) return s.group;
+    assert(false && "not in the catalog");
+    return std::string();
+  };
   assert(page_of("fullscreen") == LauncherPage::kGraphics);
   assert(page_of("fov_offset") == LauncherPage::kGraphics);
-  // The 1.13.0 settings: anti-aliasing, sharpening and the pre-1.0 occlusion setting on Graphics, toggle aim on Controls.
   assert(page_of("anti_aliasing") == LauncherPage::kGraphics);
   assert(page_of("sharpening") == LauncherPage::kGraphics);
+  assert(page_of("ambient_occlusion") == LauncherPage::kGraphics && page_of("ambient_occlusion_strength") == LauncherPage::kGraphics);
+  assert(page_of("kbm_noise_gate_strict") == LauncherPage::kControls);
   assert(page_of("pre1_occlusion") == LauncherPage::kGraphics);
   assert(page_of("aim_toggle") == LauncherPage::kControls);
   assert(page_of("vulkan_hdr_peak") == LauncherPage::kHdr);
@@ -53,11 +61,44 @@ int main() {
   assert(page_of("coop_pads") == LauncherPage::kCoop);
   assert(page_of("check_updates") == LauncherPage::kUpdates);
   assert(page_of("diagnostic_logging") == LauncherPage::kAbout);
-  Setting future;
-  future.cvar = "some_new_option";
-  assert(PageOf(future, "Co-op") == LauncherPage::kCoop);
-  assert(PageOf(future, "Something else") == LauncherPage::kGame);
-  assert(PageOf(future, "") == LauncherPage::kGraphics);
+  assert(page_of("kbm_move_forward") == LauncherPage::kBindings);
+  // Groups: the movie volume sits with the intro movies, apart from the effects; frame rate, VSync and the FPS counter
+  // are together; aim assist and toggle aim (they work with the mouse too) are not under "Controller".
+  assert(group_of("movie_volume") == "Movies and audio" && group_of("intro_movies") == "Movies and audio");
+  assert(group_of("motion_blur") == "Effects" && group_of("screen_shake") == "Effects");
+  assert(group_of("achievement_popups") == "Notifications");
+  assert(group_of("framerate_limit") == group_of("present_vsync") && group_of("present_vsync") == group_of("fps_counter"));
+  assert(group_of("aim_assist") == "Aiming" && group_of("aim_toggle") == "Aiming");
+  assert(group_of("vibration") == "Controller" && group_of("kbm_invert_y") == "Keyboard and mouse");
+  // Pages and groups render in the order the catalog declares them, and a group's settings are together (so its
+  // heading shows once). This is the order the menu draws.
+  for (LauncherPage p : {LauncherPage::kGraphics, LauncherPage::kHdr, LauncherPage::kGame, LauncherPage::kControls,
+                         LauncherPage::kCoop, LauncherPage::kUpdates, LauncherPage::kAbout}) {
+    std::vector<std::string> groups;
+    assert(PageGroups(catalog, p, &groups) && "a group's settings are not together in the catalog");
+    std::string first_seen;  // concatenated, in catalog order
+    for (const auto& s : catalog)
+      if (s.page == p && first_seen.find("|" + s.group + "|") == std::string::npos) first_seen += "|" + s.group + "|";
+    std::string drawn;
+    for (const auto& g : groups) drawn += "|" + g + "|";
+    assert(drawn == first_seen);
+  }
+  {
+    std::vector<std::string> g;
+    PageGroups(catalog, LauncherPage::kGame, &g);
+    assert((g == std::vector<std::string>{"Movies and audio", "Effects", "Notifications"}));
+    PageGroups(catalog, LauncherPage::kControls, &g);
+    assert((g == std::vector<std::string>{"Aiming", "Controller", "Keyboard and mouse"}));
+    PageGroups(catalog, LauncherPage::kGraphics, &g);
+    assert((g == std::vector<std::string>{"Display", "Image quality", "Performance", "Renderer"}));
+  }
+  // A group split in two (a setting from another group between its members) is caught.
+  {
+    std::vector<Setting> bad(3);
+    for (auto& s : bad) s.page = LauncherPage::kGame;
+    bad[0].group = "A", bad[1].group = "B", bad[2].group = "A";
+    assert(!PageGroups(bad, LauncherPage::kGame, nullptr));
+  }
 
   // Section tabs wrap around; the bindings count as Controls.
   assert(NeighborPage(LauncherPage::kGraphics, -1) == LauncherPage::kAbout);

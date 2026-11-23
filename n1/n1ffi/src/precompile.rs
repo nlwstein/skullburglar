@@ -41,6 +41,11 @@ pub struct Opts {
     pub play_threads: usize,
 }
 
+/// Hash of the globals and fog WGSL snippets that `shader.rs` splices into the scene template.
+fn templates_hash(globals: &str, fog: &str) -> u64 {
+    fnv(globals.as_bytes()).rotate_left(9) ^ fnv(fog.as_bytes()).rotate_left(10)
+}
+
 /// The pieces a manifest depends on; any change makes it stale.
 fn header(db: &AssetDb, o: &Opts) -> String {
     // The templates and codegen that turn a material into WGSL: editing any of them changes shader identities.
@@ -51,6 +56,9 @@ fn header(db: &AssetDb, o: &Opts) -> String {
         // The WGSL templates the scene shaders are made from (B-189: a scene.wgsl edit kept the old SPIR-V).
         ^ fnv(matdef::shader::SCENE_WGSL.as_bytes()).rotate_left(4)
         ^ fnv(matdef::shader::ENVLIGHT_WGSL.as_bytes()).rotate_left(5)
+        // The shared globals and fog snippets spliced into every scene shader (and the AO shader): an edit to either
+        // changes all of their SPIR-V, same as a scene.wgsl edit (B-189).
+        ^ templates_hash(matdef::shader::GLOBALS_WGSL, matdef::shader::FOG_WGSL)
         // The material IR builder: its node shapes are the shader keys (B-203).
         ^ fnv(include_str!("../../ue3/src/matir.rs").as_bytes()).rotate_left(6)
         // The particle material compiler and its templates: their SPIR-V hashes are the particle pipeline keys (B-229).
@@ -58,12 +66,19 @@ fn header(db: &AssetDb, o: &Opts) -> String {
         ^ fnv(include_str!("../../scenefmt/src/particles/shader.rs").as_bytes()).rotate_left(8);
     // B-235: the PWL switches change which shaders the materials ask for.
     format!(
-        "v1 index={:016x} features={} bc5={} pwl={}{} code={code:016x}",
+        "v1 index={:016x} features={} bc5={} pwl={}{}{}{}{} code={code:016x}",
         db.index_stamp(),
         o.features,
         o.bc5_ok as u8,
         scenekit::scene_pwl() as u8,
-        scenekit::lm_linear() as u8
+        scenekit::lm_linear() as u8,
+        scenekit::tex_pwl() as u8,
+        scenekit::lm_pwl() as u8,
+        // B-392 diagnostics: the per-texture overrides change which materials ask for which shader.
+        ["BOTS_N1_PWL_PLAIN", "BOTS_N1_PWL_SRGB", "BOTS_N1_PWL_PWL"]
+            .iter()
+            .map(|k| std::env::var(k).map(|v| format!("-{:x}", fnv(v.as_bytes()))).unwrap_or_default())
+            .collect::<String>()
     )
 }
 
@@ -338,6 +353,14 @@ fn part_job_done(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_manifest_key_follows_the_globals_and_fog_snippets() {
+        let base = templates_hash("struct Globals {}", "fn apply_fog() {}");
+        assert_ne!(base, templates_hash("struct Globals { x: f32 }", "fn apply_fog() {}"), "globals.wgsl edit");
+        assert_ne!(base, templates_hash("struct Globals {}", "fn apply_fog() { return; }"), "fog.wgsl edit");
+        assert_ne!(base, 0);
+    }
 
     #[test]
     fn failed_particle_module_still_counts_its_pipe_unit() {
@@ -650,6 +673,7 @@ pub fn start(store: Arc<Store>, db: Arc<AssetDb>, mut o: Opts) -> Arc<Progress> 
             } else {
                 store.load_persisted_cache()
             };
+            store.precompile_ao();
             // B-223: the host may destroy the renderer while this thread runs (hybrid dual mode remakes it at startup).
             // The store's Vulkan calls are safe after that (see `Store::gate`); here we just stop early.
             let gone = || {

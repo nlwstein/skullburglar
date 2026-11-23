@@ -1,5 +1,7 @@
 //! Material IR types shared by the extractor (ue3) and the renderer (n8gfx). See `ue3::matir` for how they are built.
 
+pub mod pwl;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

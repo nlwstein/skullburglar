@@ -508,6 +508,32 @@ pub fn mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     r
 }
 
+/// Row-major inverse, with partial pivoting. Invalid or singular matrices return None.
+pub fn inverse(m: &[f32; 16]) -> Option<[f32; 16]> {
+    let mut a = [[0.0f64; 8]; 4];
+    for i in 0..4 {
+        for j in 0..4 { a[i][j] = f64::from(m[i * 4 + j]); }
+        a[i][i + 4] = 1.0;
+    }
+    for c in 0..4 {
+        let p = (c..4).max_by(|&x, &y| a[x][c].abs().total_cmp(&a[y][c].abs()))?;
+        let d = a[p][c];
+        if !d.is_finite() || d.abs() < 1.0e-12 { return None; }
+        a.swap(c, p);
+        for x in &mut a[c] { *x /= d; }
+        for r in 0..4 {
+            if r == c { continue; }
+            let f = a[r][c];
+            for j in 0..8 { a[r][j] -= f * a[c][j]; }
+        }
+    }
+    let mut out = [0.0; 16];
+    for i in 0..4 {
+        for j in 0..4 { out[i * 4 + j] = a[i][j + 4] as f32; }
+    }
+    out.iter().all(|v| v.is_finite()).then_some(out)
+}
+
 /// The reverse-Z view-projection for a UE3 view matrix and UE3 projection (only its x/y scales are used; the
 /// near plane is given: 5 in this game's FSceneView).
 pub fn view_proj(view: &[f32; 16], proj: &[f32; 16], near: f32) -> [f32; 16] {
@@ -521,6 +547,12 @@ pub fn scene_pwl() -> bool {
     *V.get_or_init(|| std::env::var("BOTS_N1_SCENE_PWL").map(|v| v != "0").unwrap_or(true))
 }
 
+/// B-392: the material colour textures' share of `scene_pwl`, switchable on its own (`BOTS_N1_TEX_PWL=0`: sRGB).
+pub fn tex_pwl() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| scene_pwl() && std::env::var("BOTS_N1_TEX_PWL").map(|v| v != "0").unwrap_or(true))
+}
+
 /// B-189: lightmaps are linearised (sRGB, or PWL with `scene_pwl`) before their scale vectors apply.
 /// `BOTS_N1_LM_SRGB=0` restores the old raw sampling.
 pub fn lm_linear() -> bool {
@@ -528,14 +560,46 @@ pub fn lm_linear() -> bool {
     *V.get_or_init(|| std::env::var("BOTS_N1_LM_SRGB").map(|v| v != "0").unwrap_or(true))
 }
 
-/// The lightmaps take the PWL curve in the scene shader (`ShaderFlags::lm_pwl`).
+/// The lightmaps take the PWL curve in the scene shader (`ShaderFlags::lm_pwl`). B-392: `BOTS_N1_LM_PWL=0` keeps the
+/// textures on PWL and samples the lightmaps as sRGB.
 pub fn lm_pwl() -> bool {
-    scene_pwl() && lm_linear()
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| scene_pwl() && lm_linear() && std::env::var("BOTS_N1_LM_PWL").map(|v| v != "0").unwrap_or(true))
 }
 
 /// B-235: does a material texture with these header facts take the PWL curve? The colour textures UE3 marks SRGB:
 /// its Xenon RHI makes their fetch formats gamma on RGB (the port logs signs 3,3,3,0 for them). Normal maps and BC5
 /// are never gamma.
 pub fn tex_gamma(srgb: bool, normal: bool, fmt: assetdb::TexFmt) -> bool {
-    scene_pwl() && srgb && !normal && fmt != assetdb::TexFmt::Bc5
+    tex_pwl() && srgb && !normal && fmt != assetdb::TexFmt::Bc5
+}
+
+/// B-392 diagnostics: `BOTS_N1_PWL_PLAIN` / `BOTS_N1_PWL_SRGB` / `BOTS_N1_PWL_PWL` are comma lists of tokens (a format
+/// `bc1 bc2 bc3 bc5 r8 bgra8`, or `n:<substring of the texture name>`); a texture matching one is read as plain
+/// linear, as an sRGB view, or through the PWL curve whatever its header says. Returns the (srgb, gamma) to upload.
+pub fn pwl_override(name: &str, fmt: assetdb::TexFmt, srgb: bool, gamma: bool) -> (bool, bool) {
+    static V: std::sync::OnceLock<[Vec<String>; 3]> = std::sync::OnceLock::new();
+    let v = V.get_or_init(|| {
+        let l = |k: &str| {
+            std::env::var(k)
+                .map(|s| s.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).collect())
+                .unwrap_or_default()
+        };
+        [l("BOTS_N1_PWL_PLAIN"), l("BOTS_N1_PWL_SRGB"), l("BOTS_N1_PWL_PWL")]
+    });
+    if v.iter().all(|l| l.is_empty()) {
+        return (srgb, gamma);
+    }
+    let f = format!("{fmt:?}").to_lowercase();
+    let n = name.to_lowercase();
+    let hit = |l: &[String]| l.iter().any(|t| t == &f || t.strip_prefix("n:").is_some_and(|s| n.contains(s)));
+    if hit(&v[0]) {
+        (false, false)
+    } else if hit(&v[1]) {
+        (true, false)
+    } else if hit(&v[2]) {
+        (false, true)
+    } else {
+        (srgb, gamma)
+    }
 }
