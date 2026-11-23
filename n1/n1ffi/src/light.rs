@@ -38,6 +38,12 @@ pub fn fog_volumes_on() -> bool {
     *ON.get_or_init(|| std::env::var("BOTS_N1_FOGVOL").map_or(true, |v| v != "0"))
 }
 
+/// B-392: `BOTS_N1_FOG_COLOR=old` restores the 1.13 height-fog colour, `LightColor^2.2` with the brightness ignored.
+fn fog_color_old() -> bool {
+    static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *S.get_or_init(|| std::env::var("BOTS_N1_FOG_COLOR").is_ok_and(|v| v == "old"))
+}
+
 /// Multiplier on every fog volume's density. The port's apply shader multiplies the integrated density by a
 /// texture-modulated factor; 0.22 is the value that matched the port's mean brightness and error in chapter 33250
 /// (`BOTS_N1_FOGVOL_SCALE` overrides it).
@@ -47,11 +53,14 @@ fn fog_volume_scale() -> f32 {
 }
 
 /// The colour the port's volume apply shader emits, measured from a capture (`BOTS_N1_FOGVOL_COL=r,g,b` overrides it);
-/// the game's own `ApproxFogLightColor` is not what is drawn.
+/// the game's own `ApproxFogLightColor` is not what is drawn. B-398: blue 0.4 -> 0.3. Chapter 33250's fog is a warm amber in the
+/// Pre-1.0 renderer; with 0.4 n1's was pink, and the fire heat glow (which multiplies the scene by (3, 1.5, 0.75)) turned it
+/// salmon: n1/Pre-1.0 channel ratios r 1.03, g 1.04, b 1.13 and chroma 0.89 (with 0.3: 1.04, 1.04, 1.04 and 1.04).
+/// `BOTS_N1_FOGVOL_COL=0.6,0.35,0.4` restores the earlier colour.
 fn fog_volume_color() -> Option<[f32; 3]> {
     static C: std::sync::OnceLock<Option<[f32; 3]>> = std::sync::OnceLock::new();
     *C.get_or_init(|| {
-        let d = [0.6, 0.35, 0.4];
+        let d = [0.6, 0.35, 0.3];
         match std::env::var("BOTS_N1_FOGVOL_COL") {
             Ok(v) => {
                 let p: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
@@ -182,7 +191,25 @@ impl Env {
             e.dyn_sun = fr.sun_dyn;
         }
         // W4: as the port's fog pass (draw 911 of capture f4420): colour LightColor^2.2, extinction distance in w.
-        e.fog = fr.fog.as_ref().map(|f| (f.light_color.map(|c| c.powf(2.2)), f.density, f.height, f.start, f.extinction));
+        // B-392: the colour of the port's fog pass (`Fog::pass_color`: LightColor^2.2 x LightBrightness x log2(e)).
+        // `BOTS_N1_FOG_COLOR=old` keeps the 1.13 model (LightColor^2.2 alone).
+        e.fog = fr.fog.as_ref().map(|f| {
+            let c = if fog_color_old() { f.light_color.map(|c| c.powf(2.2)) } else { f.pass_color() };
+            (c, f.density, f.height, f.start, f.extinction)
+        });
+        if let Some(f) = &fr.fog {
+            // B-392 diagnostics: the fog the feed carries, printed when it changes (`BOTS_N1_PWL_LOG=1`).
+            static LAST: std::sync::Mutex<Option<[f32; 10]>> = std::sync::Mutex::new(None);
+            let v = [f.light_color[0], f.light_color[1], f.light_color[2], f.color[0], f.color[1], f.color[2], f.density, f.height, f.start, f.extinction];
+            if std::env::var_os("BOTS_N1_PWL_LOG").is_some() {
+                if let Ok(mut l) = LAST.lock() {
+                    if *l != Some(v) {
+                        eprintln!("n1 fog light_color {:?} color(x brightness) {:?} density {} height {} start {} extinction {}", &v[0..3], &v[3..6], v[6], v[7], v[8], v[9]);
+                        *l = Some(v);
+                    }
+                }
+            }
+        }
         e
     }
 
@@ -223,6 +250,11 @@ impl Env {
                         x.1 = f;
                     }
                 }
+                "fogc" => {
+                    if let Some(x) = self.fog.as_mut() {
+                        x.0 = x.0.map(|c| c * f);
+                    }
+                }
                 "fogs" => {
                     if let Some(x) = self.fog.as_mut() {
                         x.3 = f;
@@ -255,6 +287,13 @@ impl Env {
     }
 }
 
+/// B-330: weight of the bloom-kernel blur in the composite, a fitted value (the port decodes 0.15, `BOTS_N1_POSTP=mix=0.15`).
+/// The blur texture is premultiplied by the blur amount, so at 0.15 every pixel is pulled toward black by `0.15 * (1 - a)`.
+/// Measured on the combined build (fog colour fix + fire glow clamp), n1/port luma over the scene set, dark chapter /
+/// door-like scenes: 0.15 gives 0.955 / 0.96 (4 to 4.5% under), 0.11 gives 0.98 / 0.96 but pushes chapter 33250 to 1.07.
+/// 0.13 keeps every scene within 4%.
+pub const BLOOM_MIX: f32 = 0.13;
+
 /// W4: the game's post chain (MaterialEffect grade, uber DOF + bloom, gamma 2.2), driven by the feed.
 #[derive(Clone, Debug)]
 pub struct PostParams {
@@ -264,7 +303,11 @@ pub struct PostParams {
     pub gamma: f32,
     /// Composite multiplier before saturate (1 / Scene_HighLights in UE3; white in every capture so far).
     pub inv_hi: [f32; 3],
-    /// Mix of the bloom-kernel blur into the composite when UseDifferentKernelForBloom (the port's c250.x).
+    /// Mix of the bloom-kernel blur into the composite when UseDifferentKernelForBloom (the port's c250.x is 0.15).
+    /// B-330: n1 uses `BLOOM_MIX` (a little under that). The blur texture is premultiplied by the blur amount, so at the
+    /// decoded 0.15 every pixel is pulled toward black by `0.15 * (1 - a)`; measured against the port that left the
+    /// scenes that use it 2 to 10% too dark, while leaving the blur out left them 3 to 5% too bright.
+    /// `BOTS_N1_POSTP=mix=0.15` restores the decoded value, `mix=0` leaves the blur out.
     pub bloom_mix: f32,
     /// DOF + bloom passes on (`BOTS_N1_POSTP=nodof` or `BOTS_N1_DOF=0` turn them off: grade + gamma only).
     pub dof: bool,
@@ -295,7 +338,7 @@ impl Default for PostParams {
             grade: None,
             gamma: 2.2,
             inv_hi: [1.0; 3],
-            bloom_mix: 0.15,
+            bloom_mix: BLOOM_MIX,
             dof: env_flag("BOTS_N1_DOF", true),
             mats: Vec::new(),
             god: None,
@@ -972,6 +1015,15 @@ mod post_tests {
         for (size, width) in [(0.0, 1280), (0.01, 1280), (0.001, 3840)] {
             assert_eq!(kernel_taps(size, width), vec![(0.0, 1.0)]);
         }
+    }
+
+    #[test]
+    fn bloom_mix_is_the_fitted_weight() {
+        // B-330: the decoded port constant is 0.15; the premultiplied blur needs a little less (see `BLOOM_MIX`).
+        assert_eq!(PostParams::default().bloom_mix, super::BLOOM_MIX);
+        let mut p = PostParams::default();
+        p.apply("mix=0.15");
+        assert_eq!(p.bloom_mix, 0.15);
     }
 
     #[test]

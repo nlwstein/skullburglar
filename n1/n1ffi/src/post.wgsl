@@ -442,7 +442,12 @@ fn fs_fireheat(i: VOut) -> @location(0) vec4<f32> {
     let uv = i.uv;
     let base = textureSample(src, smp, uv).rgb;
     let sh = min(mat_tex1(vec2<f32>(uv.x * 0.5, uv.y * 0.1 + 0.2 * t)).r, 0.0025);
-    let s = textureSample(src, smp, uv + vec2<f32>(sh, 0.0)).rgb;
+    var s = textureSample(src, smp, uv + vec2<f32>(sh, 0.0)).rgb;
+    // B-330: the port's material reads the composite from an 8-bit target (saturated); n1's linear target keeps values above 1
+    // (a lit window strip), which this multiplies into a blown-out veil. g0.y = 1 clamps the sampled scene to 1 like the port.
+    if (p.g0.y > 0.5) {
+        s = min(s, vec3<f32>(1.0));
+    }
     let wob = mat_tex0(uv * 0.05 + t * vec2<f32>(-0.35, 0.7)).rgb;
     return mat_out(base + s * 1.5 * vec3<f32>(2.0, 1.0, 0.5) * (wob + vec3<f32>(0.4)) * p.g0.x, i.pos);
 }
