@@ -4,9 +4,12 @@
 #include "ed25519.h"
 #include "update_install.h"
 
+#include "../path_utf8.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <thread>
 #include <vector>
 
@@ -172,22 +175,40 @@ UpdateInfo FetchUpdateInfo() {
   return ParseReleases(body, kUpdateUrl, SelfUpdateKeyConfigured() ? kPublicKey : "");
 }
 
-void OpenInBrowser(const std::string& url) {
-  if (!IsHttpUrl(url)) return;
-#if defined(_WIN32)
-  ShellExecuteW(nullptr, L"open", Widen(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-#else
+#if !defined(_WIN32)
+// Starts the system's opener for `target` and reaps it in the background.
+static void SpawnOpener(const std::string& target) {
 #if defined(__APPLE__)
   const char* opener = "open";
 #else
   const char* opener = "xdg-open";
 #endif
-  char* argv[] = {const_cast<char*>(opener), const_cast<char*>(url.c_str()), nullptr};
+  char* argv[] = {const_cast<char*>(opener), const_cast<char*>(target.c_str()), nullptr};
   pid_t pid;
   if (posix_spawnp(&pid, opener, nullptr, nullptr, argv, environ) == 0) {
     // xdg-open can stay around for a while; don't wait on it here.
     std::thread([pid] { waitpid(pid, nullptr, 0); }).detach();
   }
+}
+#endif
+
+void OpenInBrowser(const std::string& url) {
+  if (!IsHttpUrl(url)) return;
+#if defined(_WIN32)
+  ShellExecuteW(nullptr, L"open", Widen(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#else
+  SpawnOpener(url);
+#endif
+}
+
+void OpenFolder(const std::string& path) {
+  std::error_code ec;
+  const std::filesystem::path folder = bots::PathFromUtf8(path);
+  if (path.empty() || !std::filesystem::is_directory(folder, ec)) return;
+#if defined(_WIN32)
+  ShellExecuteW(nullptr, L"open", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#else
+  SpawnOpener(path);
 #endif
 }
 

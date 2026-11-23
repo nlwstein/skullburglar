@@ -1,0 +1,23 @@
+# Input parity for the end-to-end polish (lpolish): run with --state install-finish --sizes 1920x1080.
+# The install ends by itself after a few frames. Back from Game files must land on Play: Enter then plays.
+# Keyboard
+page:files
+frames:8
+key:Escape
+expect-page:main
+key:Enter
+expect-action:play
+# Controller
+page:files
+frames:8
+pad:B
+expect-page:main
+pad:A
+expect-action:play
+# Mouse: Back is the footer's Esc prompt; Play is the first entry (clicked by its row)
+page:files
+frames:8
+click:0.904,0.955
+expect-page:main
+click:0.1,0.32
+expect-action:play

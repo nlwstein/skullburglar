@@ -33,6 +33,9 @@ struct Setting {
   bool locked = false;            // set by env or command line: shown, not editable
 };
 
+// The curated list as data, without values (settings_catalog.cpp; no SDK needed).
+std::vector<Setting> SettingsCatalog();
+
 // The curated list, with current values read from the cvar registry.
 std::vector<Setting> LoadSettings();
 
@@ -40,6 +43,11 @@ std::vector<Setting> LoadSettings();
 // Returns an error message, empty on success.
 std::string SaveSettings(const std::vector<Setting>& settings,
                          const std::filesystem::path& config_path);
+
+// The same, but only for the settings whose value differs from `saved` (what was last written; the launcher's auto-save
+// passes its baseline). The file is replaced atomically (temp file + rename). nullptr = every setting.
+std::string SaveChangedSettings(const std::vector<Setting>& settings, const std::vector<Setting>* saved,
+                                const std::filesystem::path& config_path);
 
 // Puts every setting except the kept ones (settings_logic.h: ResetKeeps) back to this version's default: the value in
 // `settings` (the window shows it at once), the running value, and the key is removed from `config_path`, so a future

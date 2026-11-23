@@ -33,7 +33,8 @@ The launcher
 
 Every start opens the launcher. The first time it asks for your disc image or extracted disc and installs the
 game files (a few minutes). After that it holds the settings: resolution, VSync, frame cap, fullscreen, intro
-movies, renderer, mouse sensitivity and key bindings. Play saves them and starts the game.
+movies, renderer, mouse sensitivity and key bindings. Every change is saved as you make it (a brief "Saved" shows at
+the bottom), so you can quit without pressing Play; Play starts the game.
 
 To go straight in, press START on a controller (OPTIONS on a PlayStation pad) or Enter on the keyboard. The launcher
 also works with a controller throughout: the d-pad or left stick moves, A (Cross) selects and B (Circle) goes back.

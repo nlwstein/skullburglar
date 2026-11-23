@@ -1,0 +1,14 @@
+# The copy offer without enough free space (B-400): run with --state offer-nospace --sizes 1920x1080. Copy is greyed out:
+# focus starts on "Use a disc image", Left stays there, Enter and a click on Copy do nothing, the other answers work.
+key:Enter
+expect-action:offer-disc
+key:Left
+key:Enter
+expect-action:offer-disc
+click:0.284,0.69
+pad:Left
+pad:A
+expect-action:offer-disc
+key:Right
+key:Enter
+expect-action:offer-notnow

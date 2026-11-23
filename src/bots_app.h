@@ -447,10 +447,39 @@ class BotsApp : public rex::ReXApp {
   }
   bool picker_left_fullscreen_ = false;
 
-#if defined(_WIN32)
-  // The SDK's launcher font covers Latin-1 and Japanese, so a Cyrillic or Greek folder name (a Russian "Documents")
-  // drew as "?". Merge Segoe UI's Greek and Cyrillic glyphs into it; without the file the "?" stays.
+  // The launcher's own fonts (launcher_style.h), baked for the window's size and for the whole display (fullscreen), as
+  // the SDK's renderer can't add font sizes once the atlas is uploaded.
   void OnConfigureFonts(ImFontAtlas* atlas) override {
+#if defined(_WIN32)
+    MergeSegoeUi(atlas);  // first: it keeps Greek and Cyrillic out of every font already in the atlas
+#endif
+#if !TARGET_OS_IPHONE && !defined(__ANDROID__)
+    std::vector<float> scales;
+    auto add = [&scales](float physical_w, float physical_h, float dpi) {
+      if (physical_w > 0 && physical_h > 0 && dpi > 0)
+        scales.push_back(bots::setup::LauncherMenuScale(physical_w / dpi, physical_h / dpi, std::getenv("BOTS_UI_SCALE")) *
+                         dpi);
+    };
+    float dpi = 1.0f;
+    if (rex::ui::Window* w = window()) {
+      dpi = float(w->GetDpi()) / float(w->GetMediumDpi());
+      add(float(w->GetActualPhysicalWidth()), float(w->GetActualPhysicalHeight()), dpi);
+    }
+    if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay())) {
+      const float density = mode->pixel_density > 0 ? mode->pixel_density : 1.0f;
+      add(float(mode->w) * density, float(mode->h) * density, dpi);
+    }
+    if (scales.empty()) scales.push_back(1.0f);
+    const bool ok = bots::setup::LaunchFonts().Build(atlas, bots::setup::EmbeddedLauncherFontData(), scales);
+    REXLOG_INFO("setup: launcher fonts {} for {} size(s)", ok ? "baked" : "missing", scales.size());
+#endif
+  }
+
+#if defined(_WIN32)
+  // The SDK's overlay font covers Latin-1 and Japanese, so a Cyrillic or Greek folder name (a Russian "Documents")
+  // drew as "?" in the overlays. Merge Segoe UI's Greek and Cyrillic glyphs into it; without the file the "?" stays.
+  // (The launcher has its own fonts, which cover them.)
+  void MergeSegoeUi(ImFontAtlas* atlas) {
     wchar_t windir[MAX_PATH];
     const UINT n = GetWindowsDirectoryW(windir, MAX_PATH);
     if (n == 0 || n >= MAX_PATH) return;
@@ -662,7 +691,10 @@ class BotsApp : public rex::ReXApp {
   //    in level 1 (B-035, sweep 2026-10-01).
   // Closing the window (or Cmd-Q) while the launcher is replacing the program's files could leave an install half done:
   // refuse until the swap has finished.
-  bool OnWindowCloseRequested() override { return !bots::setup::UpdateSwapInProgress(); }
+  bool OnWindowCloseRequested() override {
+    bots::setup::FlushLauncherSettings();  // the launcher writes each change as it is made; this catches one still pending
+    return !bots::setup::UpdateSwapInProgress();
+  }
 
   void OnPreSetup(rex::RuntimeConfig& config) override {
     bots::ApplyCoopDefaults();  // --coop: before the window, input and profile read their cvars
@@ -800,9 +832,24 @@ class BotsApp : public rex::ReXApp {
   // Keyboard and mouse (mnk_input.h), and BOTS_INPUT=<script>: scripted controller as guest user 0
   // (script_input.h). --pad=N: only pad N drives this instance; --coop: player 1 starts player 2 here,
   // once the launcher (if any) has settled the game files and before the shader cache opens (coop.h).
+  // One log line with the launcher settings this run plays with that differ from the defaults, from the cvars as the game
+  // sees them after the launcher's Play (or bots.toml / the command line): what a bug report and the launcher's
+  // end-to-end test check.
+  static void LogSettingsInEffect() {
+    std::string changed;
+    int differ = 0, total = 0;
+    for (const auto& s : bots::setup::LoadSettings()) {
+      ++total;
+      if (bots::setup::ValuesEqual(s.value, s.default_value)) continue;
+      changed += (differ++ ? ", " : "") + s.cvar + "=" + s.value;
+    }
+    REXLOG_INFO("settings in effect: {} of {} differ from the defaults{}{}", differ, total, differ ? ": " : "", changed);
+  }
+
   void OnPostSetup() override {
     bots::StartThreadStats();
     SetLaunchCommandLine();
+    LogSettingsInEffect();
     RegisterFullscreenBind();
     RegisterDisplayBind();
     bots::SpawnPlayerTwo(game_data_root(), user_data_root(), cache_root());

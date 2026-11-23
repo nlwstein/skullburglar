@@ -39,6 +39,7 @@ struct ExtractProgress {
 struct ExtractResult {
   bool ok = false;
   std::string error;  // user-facing, when !ok
+  bool cancelled = false;  // the player cancelled: error says "Cancelled.", which is not a failure
 };
 
 // Blocking; run it on a worker thread. Safe to cancel through progress.cancel.

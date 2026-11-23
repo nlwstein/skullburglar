@@ -66,6 +66,40 @@ anyway. F11 toggles fullscreen; F3 shows the debug overlay. Debug environment va
 input, frame capture and console commands; `REX_*` for SDK settings) are read in `src/bots_app.h` and
 `src/game_hooks.cpp`.
 
+### Launcher screenshots and the launcher without the game
+
+The launcher (`src/setup/launcher_menu.h`) can draw itself into PNG files at any size and display scaling, which is
+how its changes get screenshots: no capture tool can see its window. The script steps are in
+`src/setup/launcher_shot.h`.
+
+```bash
+BOTS_SETUP_SHOT=run/shots BOTS_SETUP_SHOT_SIZES=1920x1080,1280x800,3840x2160@2 \
+  BOTS_SETUP_SCRIPT='shot:main;page:graphics;pad:Down;shot:graphics' BOTS_SETUP_SHOT_QUIT=1 \
+  ./out/build/mac-arm64-relwithdebinfo/bots --launcher --user_data_root=run/testuser
+```
+
+`BOTS_SETUP_SHOT` draws a copy and only logs what the menu asks for. To test the real flows (install from a disc image,
+update, Play), `BOTS_SETUP_LIVE=<steps>` drives the real window instead, with the same key, pad and click steps plus
+`pick-iso:`, `pick-folder:` (what Browse and Choose folder return), `until:`, `expect-live:`, `shot:` (a PNG of the window as
+it is, into `BOTS_SETUP_SHOT`) and file checks; the list is in `src/setup/setup_dialog.h`. A test of the update needs a
+build with `-DBOTS_ALLOW_HTTP_UPDATE_URL=ON`, a throwaway `BOTS_UPDATE_PUBKEY` (`tools/ci/ed25519_sign.py keygen`) and a
+packaged `.app` (`tools/ci/package.sh`), as `tools/update_probe_test.sh` does.
+
+The launcher saves every setting change to bots.toml as it is made (auto-save: switches and choices at once, sliders on release
+or after 300 ms, atomic temp file + rename, only the changed keys); `expect-live:save-count`, `save-error` and `offer` /
+`copying` read the state in a live script. `BOTS_SETUP_COPY=copy|iso|notnow|page|inplace` answers the portable copy offer (B-400)
+and `BOTS_SETUP_COPY_CANCEL_MB=<n>` presses Cancel once n MB are copied.
+
+`tools/launcher_preview.sh <imgui dir>` builds the menu without the game (only Dear ImGui's sources, at the SDK's
+version) and draws every page at nine screen sizes, failing on cut-off text or a selection out of view with
+`--check`; `--script @tests/launcher_input.script` checks that the keyboard, a controller and the mouse can each
+change every kind of setting. CI runs both, plus `tests/launcher_input_113.script` (anti-aliasing, sharpening,
+toggle aim and the pre-1.0 occlusion choice), and `tests/launcher_input_saves.script` with `--state misplaced-repeat`
+(the portable-mode "Move them to the user folder" notice; `--state misnamed` shows the portable.txt hint, `--state
+pre1` the greyed-out new-renderer settings). In the game, `BOTS_DATA_DIR=<folder>` with a `bots.toml` or a
+console-id folder in it (not in its `user` folder) shows that notice, and `BOTS_SETUP_MOVE=1` does what its button
+does as the window opens (test runs only).
+
 ## Linux and Windows
 
 Both build in throwaway Docker containers after codegen has produced `generated/` (on macOS as above).
