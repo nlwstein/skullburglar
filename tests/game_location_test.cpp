@@ -168,7 +168,7 @@ int main() {
     const fs::path dest = tmp / "cancel" / "game";
     su::ExtractProgress progress;
     auto r = su::CopyGameFiles(src, dest, progress, is_game, {}, [&] { progress.cancel = true; });
-    CHECK(!r.ok && r.error == "Cancelled.");
+    CHECK(!r.ok && r.error == "Cancelled." && r.cancelled);
     CHECK(!fs::exists(dest) && !fs::exists(dest.string() + ".partial"));
   }
   {  // a failed check (the title id): the copy is thrown away
