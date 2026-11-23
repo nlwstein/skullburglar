@@ -1,0 +1,10 @@
+[
+  "New launcher setting \"Ambient occlusion\" (Graphics, Image quality) adds soft contact shading where surfaces meet, with an \"AO strength\" slider. It works with the new renderer, is off by default, and was contributed by goldislead.",
+  "The launcher's settings pages now have group headings (for example Movie volume sits with Play intro movies under \"Movies and audio\"), aim assist and toggle aim are under their own \"Aiming\" heading, and frame rate, VSync and the FPS counter are together under Graphics.",
+  "New launcher setting \"Stricter noise gate (jittery gyros)\" for gyros that still twitch with the Mouse noise gate on, such as the DualSense Edge: slow motion must also keep one direction for a moment before it counts. Off by default; real turns pass as before.",
+  "Night scenes in the new renderer are no longer brighter than the original (the fog was too bright in Mission 1's streets); daytime fog is a little brighter in the mountain levels.",
+  "Some scenes (the dark city streets, the fog and sun views) no longer render slightly darker than the original game.",
+  "Fire glow no longer washes out bright windows near fires, and dark scenes are closer to the original game's brightness.",
+  "Fixed the pink tint of the fog in the burning-building chapter of the new renderer; it is amber again.",
+  "Fixed hard black shadows on the ground in parts of the Mall chapters in the new renderer."
+]
