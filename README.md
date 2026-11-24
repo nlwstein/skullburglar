@@ -115,8 +115,13 @@ Each has a GitHub issue: subscribe to it for progress, or comment there rather t
 ## Reporting problems
 
 Check the [open issues](https://github.com/nlwstein/skullburglar/issues) first: known problems and planned features
-are tracked there, and a comment on an existing issue helps more than a duplicate. Otherwise, open an issue with your platform, GPU, what you were doing and the game's log (run with `--log_file=<path>` to
-write one). On Windows a crash also writes `logs\crash-<pid>.dmp`; attach it if there is one. Every report is read,
+are tracked there, and a comment on an existing issue helps more than a duplicate. Otherwise, open an issue and attach **one file**: in the launcher, open **About & logs** and press
+**Save a diagnostics file** (it also opens the folder). It holds a summary of your computer and setup (system, CPU, memory,
+GPU, display and HDR, game folder and the drive it is on, controllers, and any `BOTS_*` switches you set) and the end of
+the newest logs, so we don't have to ask. No game files or saves go in it. Also say what you were doing. If the launcher
+doesn't open, attach the newest file from the log folder (`logs` next to the program, or `~/Library/Logs/Skullburglar` on
+macOS, `~/.local/state/bots-recomp/logs` for the Linux AppImage). Or run with `--log_file=<path>`; the log's `summary:` and `env:` lines at
+the top carry the same facts. On Windows a crash also writes `logs\crash-<pid>.dmp`; attach it if there is one. Every report is read,
 reproduced where possible and fixed.
 
 ## Compared with emulation

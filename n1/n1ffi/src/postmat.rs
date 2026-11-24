@@ -53,6 +53,12 @@ pub enum Kind {
     /// lift of everything on screen in proportion to its own brightness. n1 left it out (drawn as constant 0), so
     /// characters and the street beside a fire were 30 to 50% darker than in the Pre-1.0 renderer.
     FireHeat,
+    /// B-393 (#53), the pause menu's backdrop: the game's `UI_IngameMenus.PausePPEffect` chain, a `DOFAndBloomEffect`
+    /// (BlurKernelSize 16, FocusDistance 100000, so the whole frame is "near" and fully blurred; ModulateBlurColor
+    /// (0.90, 0.86, 0.72)) followed by `UI_IngameMenus.PauseMAT` (SceneTexture x (0.6, 0.6, 0.4) x 1.3). The game applies the chain
+    /// in the menu's own render, which the New renderer never sees, so the host names PauseMAT in the post materials while the
+    /// pause menu is open. The blur's width and the overall gain are fitted to the Pre-1.0 renderer's paused frames.
+    Pause,
 }
 
 impl Kind {
@@ -67,6 +73,7 @@ impl Kind {
             Kind::MerkFadeIn => &["FX_MerkYouSpaceRescource.FadeIn_MAT_MIC", "FX_MerkYouSpaceRescource.FadeIn_MAT"],
             Kind::MerkBurnOut => &["FX_MerkYouSpaceRescource.BurnOut_MIC", "FX_MerkYouSpaceRescource.BurnOut_MAT"],
             Kind::FireHeat => &["FX_EnvironmentLibrary.Fire.PostProcessIntensity_MIC", "FX_EnvironmentLibrary.Fire.PostProcessIntensity_MAT"],
+            Kind::Pause => &["UI_IngameMenus.PauseMAT"],
         }
     }
 
@@ -81,6 +88,7 @@ impl Kind {
             Kind::MerkFadeIn => "fs_merk_fadein",
             Kind::MerkBurnOut => "fs_merk_burnout",
             Kind::FireHeat => "fs_fireheat",
+            Kind::Pause => "fs_pause",
         }
     }
 
@@ -95,11 +103,12 @@ impl Kind {
             Kind::MerkFadeIn => ["FX_MerkYouSpaceRescource.GLogo_02", ""],
             Kind::MerkBurnOut => ["", ""],
             Kind::FireHeat => ["FX_Blood.Wobble_DIF", "FX_Smoke.SmokeLayer2NormalMap"],
+            Kind::Pause => ["", ""],
         }
     }
 
-    pub const ALL: [Kind; 8] =
-        [Kind::Gangsta, Kind::Death, Kind::Damage, Kind::Scope, Kind::MerkBkg, Kind::MerkFadeIn, Kind::MerkBurnOut, Kind::FireHeat];
+    pub const ALL: [Kind; 9] =
+        [Kind::Gangsta, Kind::Death, Kind::Damage, Kind::Scope, Kind::MerkBkg, Kind::MerkFadeIn, Kind::MerkBurnOut, Kind::FireHeat, Kind::Pause];
 
     /// The stylized counter-kill's effects (B-345), drawn only with `BOTS_N1_COUNTERKILL=native`.
     pub const fn is_merk(self) -> bool {
@@ -185,6 +194,13 @@ fn fire_heat_gain() -> f32 {
     *G.get_or_init(|| std::env::var("BOTS_N1_FIRE_HEAT_GAIN").ok().and_then(|v| v.parse().ok()).filter(|g: &f32| g.is_finite() && *g >= 0.0).unwrap_or(FIRE_HEAT_GAIN))
 }
 
+/// `BOTS_N1_PAUSE_FX=0` leaves the pause menu's blur and tint out (the pre-B-393 path: the paused scene is shown as it is).
+fn pause_fx_on() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BOTS_N1_PAUSE_FX").map_or(true, |v| v != "0"))
+}
+
 /// `BOTS_N1_SCOPE_FX=0` leaves the sniper scope overlay out (the pre-B-295 path: the scene is shown unmasked).
 fn scope_fx_on() -> bool {
     use std::sync::OnceLock;
@@ -249,6 +265,9 @@ pub fn effects_with(p: &PostFeed, merk: bool) -> Vec<Effect> {
         if kind == Kind::FireHeat && !fire_heat_on() {
             continue;
         }
+        if kind == Kind::Pause && !pause_fx_on() {
+            continue;
+        }
         if kind.is_merk() && !merk {
             continue;
         }
@@ -265,6 +284,8 @@ pub fn effects_with(p: &PostFeed, merk: bool) -> Vec<Effect> {
                     None
                 }
             }
+            // No parameters: the material in the chain means the pause menu is open.
+            Kind::Pause => Some(Effect { kind, params: [1.0, 0.0, 0.0, 0.0] }),
             Kind::FireHeat => {
                 // The game drives `Fade` from the player's distance to the fire; without it (or at zero) nothing is added.
                 let a = p.param(m, "Fade").unwrap_or(0.0);
@@ -355,6 +376,14 @@ mod tests {
         assert!(effects(&feed(&[m], &[(m, "Fade", 0.0)])).is_empty());
         assert!(effects(&feed(&[m], &[])).is_empty());
         assert!(effects(&feed(&[m], &[(m, "Fade", f32::NAN)])).is_empty());
+    }
+
+    #[test]
+    fn pause_in_chain() {
+        let m = "UI_IngameMenus.PauseMAT";
+        let e = effects(&feed(&["GEN_PostProcess.AmbushPP_MAT01", m], &[]));
+        assert_eq!(e, [Effect { kind: Kind::Pause, params: [1.0, 0.0, 0.0, 0.0] }]);
+        assert!(effects(&feed(&["GEN_PostProcess.AmbushPP_MAT01"], &[])).is_empty());
     }
 
     #[test]

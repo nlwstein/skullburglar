@@ -1021,6 +1021,13 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
                 st.particle_sprites, st.particle_meshes, st.particle_dropped, st.particle_skipped,
                 st.particle_mats_ready, st.particle_mats_failed, host->particles_ms / n, st.tree_placements, st.tree_instances,
                 st.tree_assets_ready, st.tree_assets_uncaptured, st.tree_assets_failed, st.tree_captured);
+    // One line a minute so a log shows at a glance whether textures failed to load (the reasons for the
+    // first failures are on stderr, from n1/assetdb).
+    // A few are normal (a disc texture in a format the renderer doesn't read); a warning when more than 1 in 20 failed.
+    if (st.tex_load_failed * 20 > st.tex_load_ok + st.tex_load_failed)
+      REXLOG_WARN("textures: {} loaded, {} failed", st.tex_load_ok, st.tex_load_failed);
+    else if (st.tex_load_ok || st.tex_load_failed)
+      REXLOG_INFO("textures: {} loaded, {} failed", st.tex_load_ok, st.tex_load_failed);
     if (st.decal_builds || st.decals)
       REXLOG_INFO("hybrid n1 decals: {} this frame -> {} pieces drawn, {} cached; {} built since start ({} tris), {:.3f} ms "
                   "this frame", st.decals, st.decal_draws, st.decal_cached, st.decal_builds, st.decal_triangles,

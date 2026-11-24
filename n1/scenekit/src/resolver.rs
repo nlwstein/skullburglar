@@ -16,7 +16,7 @@ use assetdb::{AssetDb, ComponentLight, MaterialAsset, MeshAsset, TexFmt, Texture
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SlotState {
@@ -33,6 +33,9 @@ struct Slot {
     last_used: u64,
     /// Requested by a preload (B-199), not by a draw.
     preload: bool,
+    /// B-395: a draw is waiting for it, so its request sits in the loader's urgent queue (a preload's request that a
+    /// draw then needs is sent again as urgent: `Resolver::note_wanted`).
+    urgent: bool,
     /// B-287: given back by eviction and not asked for since: not waiting for anything.
     idle: bool,
     /// The path names the engine's stand-in look (`WorldGrid`, `DefaultMaterial`): drawing it is never intended.
@@ -129,6 +132,60 @@ enum Request {
     Mesh(u32, String),
     Material(u32, String),
     Light(u32, String),
+}
+
+/// B-395: the loader's work queue. A draw that needs something (`urgent`) goes ahead of every background preload:
+/// after a level change the preload queues thousands of loads, and a character on screen used to wait behind all of
+/// them (drawn as the grey stand-in, no textures, until they had drained).
+struct WorkQueue {
+    state: Mutex<QueueState>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct QueueState {
+    urgent: VecDeque<Request>,
+    background: VecDeque<Request>,
+    closed: bool,
+}
+
+impl WorkQueue {
+    fn new() -> Arc<Self> {
+        Arc::new(Self { state: Mutex::new(QueueState::default()), ready: Condvar::new() })
+    }
+
+    fn push(&self, req: Request, urgent: bool) {
+        let mut s = self.state.lock().unwrap();
+        if urgent {
+            s.urgent.push_back(req);
+        } else {
+            s.background.push_back(req);
+        }
+        drop(s);
+        self.ready.notify_one();
+    }
+
+    /// The next request, urgent ones first; waits while there is none; `None` once the queue is closed.
+    fn pop(&self) -> Option<(Request, bool)> {
+        let mut s = self.state.lock().unwrap();
+        loop {
+            if s.closed {
+                return None;
+            }
+            if let Some(r) = s.urgent.pop_front() {
+                return Some((r, true));
+            }
+            if let Some(r) = s.background.pop_front() {
+                return Some((r, false));
+            }
+            s = self.ready.wait(s).unwrap();
+        }
+    }
+
+    fn close(&self) {
+        self.state.lock().unwrap().closed = true;
+        self.ready.notify_all();
+    }
 }
 
 /// B-287: what level-change eviction has done, cumulative since start (`Resolver::evict`).
@@ -260,8 +317,11 @@ pub struct Resolver {
     // renderer ids of things uploaded by path
     tex_ids: HashMap<String, u32>,
     mat_ids: HashMap<String, u32>,
-    tx: Option<mpsc::Sender<Request>>,
-    rx: Option<Mutex<mpsc::Receiver<Loaded>>>,
+    tx: Option<Arc<WorkQueue>>,
+    rx: Option<Mutex<mpsc::Receiver<(Loaded, bool)>>>,
+    /// B-395: loads taken off `rx` and not applied yet, urgent ones first (`pump_until`).
+    done_urgent: VecDeque<Loaded>,
+    done_background: VecDeque<Loaded>,
     pub ctr: LoadCounters,
     /// B-199: level packages whose lit components were all preloaded: a component of one that isn't in the list has
     /// no baked light, and is marked so without a loader round trip.
@@ -324,6 +384,14 @@ fn load_light(db: &AssetDb, component: &str) -> Loaded {
     Loaded::Light { handle: 0, light, lightmaps }
 }
 
+impl Drop for Resolver {
+    fn drop(&mut self) {
+        if let Some(q) = &self.tx {
+            q.close();
+        }
+    }
+}
+
 impl Resolver {
     pub fn new(db: Arc<AssetDb>) -> Self {
         Self {
@@ -338,6 +406,8 @@ impl Resolver {
             mat_ids: HashMap::new(),
             tx: None,
             rx: None,
+            done_urgent: VecDeque::new(),
+            done_background: VecDeque::new(),
             ctr: LoadCounters::default(),
             lights_complete: Default::default(),
             out_instances: Vec::new(),
@@ -358,17 +428,13 @@ impl Resolver {
 
     /// Load on `threads` background threads from now on (`pump` uploads what they finished).
     pub fn start_loader(&mut self, threads: usize) {
-        let (tx, rx) = mpsc::channel::<Request>();
-        let (ltx, lrx) = mpsc::channel::<Loaded>();
-        let rx = Arc::new(Mutex::new(rx));
+        let (queue, ltx) = self.install_queues();
         for _ in 0..threads.max(1) {
-            let (db, rx, ltx) = (self.db.clone(), rx.clone(), ltx.clone());
+            let (db, queue, ltx) = (self.db.clone(), queue.clone(), ltx.clone());
             std::thread::Builder::new()
                 .name("livescene-loader".into())
                 .spawn(move || {
-                    loop {
-                        let req = { rx.lock().unwrap().recv() };
-                        let Ok(req) = req else { break };
+                    while let Some((req, urgent)) = queue.pop() {
                         let out = match req {
                             Request::Mesh(h, p) => {
                                 let mesh = db.mesh(&p);
@@ -396,15 +462,38 @@ impl Resolver {
                                 l => l,
                             },
                         };
-                        if ltx.send(out).is_err() {
+                        if ltx.send((out, urgent)).is_err() {
                             break;
                         }
                     }
                 })
                 .expect("spawn loader");
         }
-        self.tx = Some(tx);
+    }
+
+    /// Sets up the request queue and the channel finished loads come back on (what `start_loader` does before it spawns
+    /// threads; the tests drive both ends by hand).
+    fn install_queues(&mut self) -> (Arc<WorkQueue>, mpsc::Sender<(Loaded, bool)>) {
+        let queue = WorkQueue::new();
+        let (ltx, lrx) = mpsc::channel::<(Loaded, bool)>();
+        self.tx = Some(queue.clone());
         self.rx = Some(Mutex::new(lrx));
+        (queue, ltx)
+    }
+
+    /// B-395: a draw needs the slot's asset and its request is already queued as a background preload: asks again, as
+    /// urgent, so it doesn't wait for the rest of the preload (the first result to arrive is applied, the other is
+    /// dropped). Called with the slot found pending and requested.
+    fn upgrade_request(tx: &Option<Arc<WorkQueue>>, slot: &mut Slot, req: impl FnOnce(String) -> Request) {
+        if slot.urgent {
+            return;
+        }
+        slot.urgent = true;
+        if slot.preload {
+            if let Some(tx) = tx {
+                tx.push(req(slot.path.clone()), true);
+            }
+        }
     }
 
     fn handle(slots: &mut Vec<Slot>, by_path: &mut HashMap<String, u32>, path: &str) -> u32 {
@@ -417,6 +506,7 @@ impl Resolver {
             requested: false,
             last_used: 0,
             preload: false,
+            urgent: false,
             idle: false,
             default_look: path.starts_with("EngineMaterials.") || path.contains("WorldGrid") || path.contains("DefaultMaterial"),
         });
@@ -525,12 +615,13 @@ impl Resolver {
         }
         slot.requested = true;
         slot.preload = true;
+        slot.urgent = false;
         let req = match kind {
             PreloadKind::Mesh => Request::Mesh(h, slot.path.clone()),
             PreloadKind::Material => Request::Material(h, slot.path.clone()),
             PreloadKind::Light => Request::Light(h, slot.path.clone()),
         };
-        let _ = self.tx.as_ref().unwrap().send(req);
+        self.tx.as_ref().unwrap().push(req, false);
         self.ctr.preload_requests += 1;
         true
     }
@@ -665,7 +756,20 @@ impl Resolver {
         (id, used, secs)
     }
 
-    fn apply(&mut self, r: &mut impl Backend, l: Loaded) {
+    /// Uploads one finished load. False (nothing done) for a result nobody waits for: the slot is ready already (a draw
+    /// asked again as urgent and the other result came first) or was given back by eviction since.
+    fn apply(&mut self, r: &mut impl Backend, l: Loaded) -> bool {
+        let wanted = |slots: &[Slot], h: u32| {
+            slots.get(h as usize).is_some_and(|s| s.state == SlotState::Pending && s.requested)
+        };
+        let keep = match &l {
+            Loaded::Mesh { handle, .. } => wanted(&self.meshes, *handle),
+            Loaded::Material { handle, .. } => wanted(&self.materials, *handle),
+            Loaded::Light { handle, .. } => wanted(&self.lights, *handle),
+        };
+        if !keep {
+            return false;
+        }
         match l {
             Loaded::Mesh {
                 handle,
@@ -709,6 +813,7 @@ impl Resolver {
                         Some(ComponentLight::Legacy(_)) => "legacy",
                         Some(ComponentLight::Dir { .. }) => "dir",
                         Some(ComponentLight::Map { .. }) => "map",
+                        Some(ComponentLight::Unbaked) => "unbaked",
                     };
                     eprintln!("n1 light {} {kind} lm_ids {:?}", self.lights[handle as usize].path, ids);
                 }
@@ -720,6 +825,7 @@ impl Resolver {
                 self.light_tex.insert(handle, ids);
             }
         }
+        true
     }
 
     /// Async mode: upload what the loader finished, at most `budget` assets. Sync mode: no-op.
@@ -729,20 +835,29 @@ impl Resolver {
 
     /// As `pump`, and stops once `deadline` has passed (at least one asset is taken per call when one is waiting).
     pub fn pump_until(&mut self, r: &mut impl Backend, budget: usize, deadline: Option<std::time::Instant>) -> usize {
+        // B-395: take everything the loader has finished, then apply what a draw is waiting for before the preloads.
+        if let Some(rx) = &self.rx {
+            let rx = rx.lock().unwrap();
+            while let Ok((l, urgent)) = rx.try_recv() {
+                if urgent {
+                    self.done_urgent.push_back(l);
+                } else {
+                    self.done_background.push_back(l);
+                }
+            }
+        }
         let mut n = 0;
         while n < budget {
             if n > 0 && deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 break;
             }
-            let l = match &self.rx {
-                Some(rx) => match rx.lock().unwrap().try_recv() {
-                    Ok(l) => l,
-                    Err(_) => break,
-                },
-                None => break,
+            let Some(l) = self.done_urgent.pop_front().or_else(|| self.done_background.pop_front()) else {
+                break;
             };
             let t0 = std::time::Instant::now();
-            self.apply(r, l);
+            if !self.apply(r, l) {
+                continue;
+            }
             let us = t0.elapsed().as_micros() as u64;
             self.ctr.uploads += 1;
             self.ctr.upload_us += us;
@@ -761,16 +876,19 @@ impl Resolver {
             SlotState::Missing => return None,
             SlotState::Pending if slot.requested => {
                 self.ctr.late_skips += slot.preload as u64;
+                Self::upgrade_request(&self.tx, slot, |p| Request::Mesh(h, p));
                 return None;
             }
             SlotState::Pending => {}
         }
         slot.requested = true;
+        slot.preload = false;
+        slot.urgent = true;
         let path = slot.path.clone();
         if let Some(tx) = &self.tx {
             self.ctr.lazy_meshes += 1;
             lazy_log("mesh", &path);
-            let _ = tx.send(Request::Mesh(h, path));
+            tx.push(Request::Mesh(h, path), true);
             return None;
         }
         let mesh = self.db.mesh(&path);
@@ -783,7 +901,7 @@ impl Resolver {
                 (mp, m)
             })
             .collect();
-        self.apply(
+        let _ = self.apply(
             r,
             Loaded::Mesh {
                 handle: h,
@@ -836,11 +954,16 @@ impl Resolver {
         match slot.state {
             SlotState::Ready(id) => return id,
             SlotState::Missing => return NONE,
-            SlotState::Pending if slot.requested => return pending,
+            SlotState::Pending if slot.requested => {
+                Self::upgrade_request(&self.tx, slot, |p| Request::Material(h, p));
+                return pending;
+            }
             SlotState::Pending => {}
         }
         let path = slot.path.clone();
-        self.materials[h as usize].requested = true;
+        slot.requested = true;
+        slot.preload = false;
+        slot.urgent = true;
         if let Some(tx) = &self.tx {
             // A variant still loading is skipped, not drawn with its base: a bullet tracer's base is the cooked
             // full-length, unfaded slab (B-200).
@@ -850,11 +973,11 @@ impl Resolver {
                 self.ctr.lazy_materials += 1;
                 lazy_log("material", &path);
             }
-            let _ = tx.send(Request::Material(h, path));
+            tx.push(Request::Material(h, path), true);
             return pending;
         }
         let material = load_material_assets(&self.db, &path);
-        self.apply(r, Loaded::Material { handle: h, material });
+        let _ = self.apply(r, Loaded::Material { handle: h, material });
         match self.materials[h as usize].state {
             SlotState::Ready(id) => id,
             _ => NONE,
@@ -1039,10 +1162,15 @@ impl Resolver {
         match slot.state {
             SlotState::Ready(id) => return id,
             SlotState::Missing => return NONE,
-            SlotState::Pending if slot.requested => return NONE,
+            SlotState::Pending if slot.requested => {
+                Self::upgrade_request(&self.tx, slot, |p| Request::Light(h, p));
+                return NONE;
+            }
             SlotState::Pending => {}
         }
         slot.requested = true;
+        slot.preload = false;
+        slot.urgent = true;
         let path = slot.path.clone();
         // Components of actors spawned at run time (`Transient.*`) never have baked lighting.
         if path.split('.').next().is_some_and(|pkg| pkg == "Transient" || self.lights_complete.contains(pkg)) {
@@ -1052,11 +1180,11 @@ impl Resolver {
         if let Some(tx) = &self.tx {
             self.ctr.lazy_lights += 1;
             lazy_log("light", &path);
-            let _ = tx.send(Request::Light(h, path));
+            tx.push(Request::Light(h, path), true);
             return NONE;
         }
         if let Loaded::Light { light, lightmaps, .. } = load_light(&self.db, &path) {
-            self.apply(r, Loaded::Light { handle: h, light, lightmaps });
+            let _ = self.apply(r, Loaded::Light { handle: h, light, lightmaps });
         }
         match self.lights[h as usize].state {
             SlotState::Ready(id) => id,
@@ -1314,5 +1442,164 @@ mod tests {
         assert!(live_sections(&secs, &[], 0, &[]).is_empty());
         // Several pairs: each base picks its own variant.
         assert_eq!(live_sections(&secs, &[], 0, &[(11, 5), (10, 6)]), vec![(0, 6), (1, 5), (2, 6)]);
+    }
+}
+
+/// B-395: eviction must hand a character's textures back quickly, whatever else is queued. The loader and the renderer
+/// are played by hand here (a recording backend; finished loads fed in the order the loader would produce them).
+#[cfg(test)]
+mod load_order_tests {
+    use super::*;
+    use crate::{MeshDesc, TextureDesc};
+
+    #[derive(Default)]
+    struct Rec {
+        textures_added: u32,
+        textures_freed: u32,
+        materials: u32,
+        next: u32,
+    }
+
+    impl Backend for Rec {
+        fn add_texture(&mut self, _: &TextureDesc) -> u32 {
+            self.textures_added += 1;
+            self.next += 1;
+            self.next
+        }
+        fn add_material(&mut self, _: &MaterialDesc) -> u32 {
+            self.materials += 1;
+            self.materials
+        }
+        fn free_texture(&mut self, _: u32) -> bool {
+            self.textures_freed += 1;
+            true
+        }
+        fn add_mesh(&mut self, _: &MeshDesc) -> u32 {
+            0
+        }
+        fn add_light(&mut self, _: &[[f32; 3]]) -> u32 {
+            0
+        }
+    }
+
+    fn resolver() -> Resolver {
+        let dir = std::env::temp_dir().join(format!("scenekit-b395-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let cooked = dir.join("cooked");
+        std::fs::create_dir_all(&cooked).unwrap();
+        Resolver::new(Arc::new(AssetDb::open(&cooked, &dir.join("cache")).expect("empty asset db")))
+    }
+
+    fn textured(name: &str) -> MatLoad {
+        let tex = TextureAsset {
+            name: name.into(),
+            fmt: TexFmt::Bgra8,
+            srgb: false,
+            width: 2,
+            height: 2,
+            mips: vec![vec![255; 16]],
+            normal: false,
+            unpack: None,
+            addr: Default::default(),
+        };
+        let material = MaterialAsset { diffuse: Some(name.into()), ..Default::default() };
+        MatLoad { material: Arc::new(material), diffuse: Some(Arc::new(tex)), textures: vec![] }
+    }
+
+    /// Plays the loader: takes every queued request in the order it would and sends the finished load back.
+    fn run_loader(q: &WorkQueue, tx: &mpsc::Sender<(Loaded, bool)>, tex: &str) -> Vec<(u32, bool)> {
+        let mut order = vec![];
+        loop {
+            let popped = {
+                let mut s = q.state.lock().unwrap();
+                s.urgent.pop_front().map(|r| (r, true)).or_else(|| s.background.pop_front().map(|r| (r, false)))
+            };
+            let Some((req, urgent)) = popped else { break };
+            if let Request::Material(h, _) = req {
+                order.push((h, urgent));
+                tx.send((Loaded::Material { handle: h, material: textured(&format!("{tex}{h}")) }, urgent)).unwrap();
+            }
+        }
+        order
+    }
+
+    /// The bug: a level's preload queued thousands of loads; the character on screen asked for its materials after,
+    /// waited behind them all and was drawn as the grey stand-in. Now a draw's request goes first, in the loader's queue
+    /// and in the order results are applied (one upload per frame here, as in the low-budget stress setting).
+    #[test]
+    fn a_drawn_material_is_not_stuck_behind_a_preload() {
+        let (mut r, mut gpu) = (resolver(), Rec::default());
+        let (q, tx) = r.install_queues();
+        for i in 0..500 {
+            assert!(r.preload(PreloadKind::Material, &format!("Level.Mat{i}")));
+        }
+        let skin = r.material_handle("Chars.Skin");
+        assert_eq!(r.material_id(&mut gpu, skin), NONE, "not loaded yet");
+        let order = run_loader(&q, &tx, "T");
+        assert_eq!(order[0], (skin, true), "the loader takes the draw's request first");
+        assert_eq!(r.pump_until(&mut gpu, 1, None), 1);
+        assert_ne!(r.material_id(&mut gpu, skin), NONE, "applied by the first upload, ahead of 500 preloads");
+        assert_eq!(gpu.textures_added, 1);
+    }
+
+    /// A draw needs something a preload already queued: it is asked for again, urgent, and the second result is dropped.
+    #[test]
+    fn a_draw_upgrades_a_queued_preload() {
+        let (mut r, mut gpu) = (resolver(), Rec::default());
+        let (q, tx) = r.install_queues();
+        for i in 0..20 {
+            r.preload(PreloadKind::Material, &format!("Level.Mat{i}"));
+        }
+        let skin = r.material_handle("Level.Mat7");
+        assert_eq!(r.material_id(&mut gpu, skin), NONE);
+        assert_eq!(r.material_id(&mut gpu, skin), NONE, "asking again every frame queues nothing more");
+        let order = run_loader(&q, &tx, "T");
+        assert_eq!(order.len(), 21, "20 preloads plus one urgent copy of Mat7");
+        assert_eq!(order[0], (skin, true));
+        assert_eq!(r.pump_until(&mut gpu, 100, None), 20, "the late copy of Mat7 is dropped, not uploaded twice");
+        assert_eq!(gpu.textures_added, 20);
+        assert_ne!(r.material_id(&mut gpu, skin), NONE);
+    }
+
+    /// Evict everything (keep = 1: nothing survives the level change), draw again: the textures come back with the
+    /// first upload after the draw, and each is uploaded once.
+    #[test]
+    fn evicted_textures_come_back_when_drawn() {
+        let (mut r, mut gpu) = (resolver(), Rec::default());
+        let (q, tx) = r.install_queues();
+        let skin = r.material_handle("Chars.Skin");
+        r.frame += 1;
+        assert_eq!(r.material_id(&mut gpu, skin), NONE);
+        run_loader(&q, &tx, "T");
+        assert_eq!(r.pump_until(&mut gpu, 1, None), 1);
+        assert_ne!(r.material_id(&mut gpu, skin), NONE);
+        assert_eq!((gpu.textures_added, gpu.textures_freed), (1, 0));
+
+        assert!(r.level_boundary(&mut gpu, 1), "a sweep ran");
+        assert_eq!(gpu.textures_freed, 1, "its texture went back");
+        r.frame += 1;
+        assert_eq!(r.material_id(&mut gpu, skin), NONE, "evicted: requested again by the draw");
+        let order = run_loader(&q, &tx, "T");
+        assert_eq!(order, vec![(skin, true)]);
+        assert_eq!(r.pump_until(&mut gpu, 1, None), 1);
+        assert_ne!(r.material_id(&mut gpu, skin), NONE);
+        assert_eq!(gpu.textures_added, 2, "the texture was uploaded again");
+    }
+
+    /// The copy of a load a draw asked for twice (preload, then urgent) that arrives after the slot was given back by
+    /// eviction is dropped: nothing asked for it again, so it must not sit in GPU memory.
+    #[test]
+    fn a_late_duplicate_after_eviction_is_dropped() {
+        let (mut r, mut gpu) = (resolver(), Rec::default());
+        let (q, tx) = r.install_queues();
+        let a = r.material_handle("Chars.A");
+        assert!(r.preload(PreloadKind::Material, "Chars.A"));
+        r.frame += 1;
+        assert_eq!(r.material_id(&mut gpu, a), NONE, "upgraded to urgent");
+        let order = run_loader(&q, &tx, "T");
+        assert_eq!(order, vec![(a, true), (a, false)]);
+        assert_eq!(r.pump_until(&mut gpu, 1, None), 1);
+        assert!(r.level_boundary(&mut gpu, 1));
+        assert_eq!(r.pump_until(&mut gpu, 10, None), 0, "the preload's copy arrives for a slot nobody wants");
+        assert_eq!((gpu.textures_added, gpu.textures_freed), (1, 1));
     }
 }

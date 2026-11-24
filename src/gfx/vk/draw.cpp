@@ -4,6 +4,8 @@
 // shaders depend on - modifications, system constants, constant buffer packing, descriptor layout - and does
 // its own thing for render targets (renderer.h) and indices (built on the CPU, already byte-swapped).
 #include <algorithm>
+#include <array>
+#include <map>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -23,6 +25,7 @@
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 
+#include "depth_bias.h"
 #include "renderer.h"
 #include "draw_dump.h"
 #include "../../hybrid_state.h"
@@ -1617,18 +1620,86 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
   // BOTS_GFX_DEPTH_BIAS_SCALE=f: multiplies the constant depth bias (decals on walls: +2e-5 guest units, about 335
   // float32 ULPs at the primitive's depth). A test knob for decal flicker reports: if a larger value (16) stops it,
   // the decal and its wall don't get the same depth on that GPU; if 0 changes nothing, they do and the bias is unused.
-  static const float bias_scale = [] {
+  // BOTS_GFX_BIAS_FILE=<path>: a file "<bias scale> <decal slope>" re-read every 30 presents, so one boot can step through
+  // settings at the same camera pose (test rigs). Without it the two env values are read once.
+  static float bias_scale = [] {
     const char* v = std::getenv("BOTS_GFX_DEPTH_BIAS_SCALE");
-    return v && *v ? float(std::atof(v)) : 1.0f;
+    return v && *v ? float(std::atof(v)) : kDecalBiasScale;
   }();
-  bias_constant *= bias_scale;
+  static float decal_slope = [] {
+    const char* v = std::getenv("BOTS_GFX_DECAL_SLOPE");
+    return v && *v ? float(std::atof(v)) : kDecalSlope;
+  }();
+  static const char* const bias_file = std::getenv("BOTS_GFX_BIAS_FILE");
+  if (bias_file && *bias_file) {
+    static uint64_t next_read = 0;
+    if (stats_.presents >= next_read) {
+      next_read = stats_.presents + 30;
+      float a, b;
+      if (FILE* f = std::fopen(bias_file, "r")) {
+        if (std::fscanf(f, "%f %f", &a, &b) == 2 && (a != bias_scale || b != decal_slope)) {
+          REXLOG_INFO("gfx native: depth bias scale {} decal slope {} (from the bias file)", a, b);
+          bias_scale = a, decal_slope = b;
+        }
+        std::fclose(f);
+      }
+    }
+  }
+  static const bool bias_logged = [] {
+    REXLOG_INFO("gfx native: decal depth bias: constant x{}, slope {} (BOTS_GFX_DEPTH_BIAS_SCALE, BOTS_GFX_DECAL_SLOPE)", bias_scale, decal_slope);
+    return true;
+  }();
+  (void)bias_logged;
+  const bool offset_draw = bias_constant != 0.0f;  // the game offsets this draw's depth: a decal piece or similar
+  const float guest_constant = bias_constant, guest_slope = bias_slope;
+  // Decal pieces are separate triangles on top of the surface they land on: clipped, with their own vertices, so their
+  // depth plane sits a hair off the surface's wherever the rasterizer snaps the two to different sub-pixel positions.
+  // That difference grows with the surface's depth slope (grazing roads, long walls), and a constant bias cannot
+  // cover it (reports: decals dropping out per triangle on an NVIDIA GPU, still on roads after a 16x constant).
+  // So offset draws also get a slope-scaled bias: BOTS_GFX_DECAL_SLOPE (default kDecalSlope), times the larger depth
+  // gradient per pixel. 0 turns it off. Draws the game does not offset are untouched (depth_bias.h, tests/).
+  const DepthBias host_bias = HostDepthBias(bias_constant, bias_slope * xe::kPolygonOffsetScaleSubpixelUnit, bias_scale, decal_slope);
+  bias_constant = host_bias.constant;
+  const float host_slope = host_bias.slope;
+  static const bool log_decals = [] {
+    const char* v = std::getenv("BOTS_GFX_LOG_DECALS");
+    return v && *v && *v != '0';
+  }();
+  if (log_decals) {
+    // BOTS_GFX_LOG_DECALS=1: which draws carry a depth offset (guest constant and slope, depth func, depth write), once
+    // per distinct combination, and the counts per combination every 600 presents.
+    static std::map<std::array<uint32_t, 5>, uint64_t> seen;
+    static uint64_t last_report = 0;
+    uint32_t b[5];
+    std::memcpy(&b[0], &guest_constant, 4);
+    std::memcpy(&b[1], &guest_slope, 4);
+    b[2] = uint32_t(depth_control.z_enable ? depth_control.zfunc : xe::CompareFunction::kAlways);
+    b[3] = depth_control.z_enable && depth_control.z_write_enable;
+    b[4] = uint32_t(depth_info.depth_format);
+    if (offset_draw || guest_slope != 0.0f) {
+      auto [it, fresh] = seen.try_emplace({b[0], b[1], b[2], b[3], b[4]}, 0);
+      ++it->second;
+      if (fresh && seen.size() <= 64)
+        REXLOG_INFO("gfx native: depth offset draw: constant {} slope {} func {} write {} format {}", guest_constant, guest_slope, b[2], b[3], b[4]);
+    }
+    if (stats_.presents >= last_report + 600) {
+      last_report = stats_.presents;
+      for (const auto& [k, n] : seen) {
+        float c, sl;
+        std::memcpy(&c, &k[0], 4);
+        std::memcpy(&sl, &k[1], 4);
+        REXLOG_INFO("gfx native: depth offset draws so far (present {}): constant {} slope {} func {} write {} format {}: {}",
+                    stats_.presents, c, sl, k[2], k[3], k[4], n);
+      }
+    }
+  }
   const auto ref_front = regs.Get<reg::RB_STENCILREFMASK>();
   const auto ref_back = polygonal && depth_control.backface_enable
                             ? regs.Get<reg::RB_STENCILREFMASK>(rg::XE_GPU_REG_RB_STENCILREFMASK_BF)
                             : ref_front;
   const DynamicState state{vp,
                            scissor_rect,
-                           {bias_constant, bias_slope * xe::kPolygonOffsetScaleSubpixelUnit},
+                           {bias_constant, host_slope},
                            {regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_RED), regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_GREEN),
                             regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_BLUE), regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_ALPHA)},
                            {ref_front.stencilref, ref_back.stencilref, ref_front.stencilmask, ref_back.stencilmask,

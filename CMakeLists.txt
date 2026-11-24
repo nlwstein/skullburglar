@@ -52,6 +52,7 @@ set(BOTS_SOURCES
     src/movie_volume.cpp
     src/hybrid.cpp
     src/instr.cpp
+    src/diagnostics.cpp
     src/test_range.cpp
     src/idle_backoff.cpp
     src/scene_feed.cpp

@@ -66,6 +66,15 @@ anyway. F11 toggles fullscreen; F3 shows the debug overlay. Debug environment va
 input, frame capture and console commands; `REX_*` for SDK settings) are read in `src/bots_app.h` and
 `src/game_hooks.cpp`.
 
+**What a log tells you up front (B-390, B-403, `src/diagnostics.h`).** Every log starts with `env: NAME=value` lines (each
+`BOTS_*` and `REX_*` variable that is set; paths shortened, anything named like a token, key or secret hidden) and a
+`summary:` block: build, OS, CPU, memory, how the game was started (Steam Deck Game Mode, gamescope, Steam, Proton), install kind, data
+folder and portable mode, game folder (real path, filesystem, links), renderer, display, HDR and controllers. The GPU is the
+`Vulkan device` line right after. Pull it out with `grep -E 'summary: |env: ' <log>`. The renderer logs `textures: N loaded, M failed`
+once a minute. Players get the same block, plus the end of the newest logs, from the launcher's About & logs page (**Save a diagnostics
+file**, `skullburglar-diagnostics.txt` in the log folder), and the bug report form asks for that file. A new probe goes in
+`src/diagnostics.cpp` (keep it off the main thread) and its parsing in `src/diagnostics.h`, with a case in `tests/diagnostics_test.cpp`.
+
 ### Launcher screenshots and the launcher without the game
 
 The launcher (`src/setup/launcher_menu.h`) can draw itself into PNG files at any size and display scaling, which is

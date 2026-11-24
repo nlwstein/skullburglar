@@ -284,7 +284,7 @@ fn fs(i: VOut, @builtin(front_facing) ff: bool) -> @location(0) vec4<f32> {
             let wu = Nw.y * 0.5 + 0.5;
             let wd = 0.5 - Nw.y * 0.5;
             irr = wu * wu * g.dsky_up.rgb + wd * wd * g.dsky_dn.rgb
-                + g.sun_col.rgb * g.sun_dir.w * g.dsky_dn.w * max(dot(Nw, g.sun_dir.xyz), 0.0);
+                + g.sun_col.rgb * g.sun_dir.w * select(g.dsky_dn.w, 1.0, inst.p1 == 1u) * max(dot(Nw, g.sun_dir.xyz), 0.0);
         }
         if (DYN_ON) {
             let ev = inst_dyn[i.inst].y;

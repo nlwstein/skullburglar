@@ -556,6 +556,9 @@ pub struct Knobs {
     /// (the sky subset and the sun's `N.L`), as the port's base pass does, instead of the all-skies hemisphere + sun.
     /// `BOTS_N1_DYNSKY=0` restores the old lighting.
     pub dyn_sky: bool,
+    /// B-399: a level-placed static mesh with no baked light gets the sun whether or not it reaches dynamic objects (as the
+    /// port does). `BOTS_N1_UNBAKED=0` keeps the 1.15.0 lighting for them.
+    pub unbaked: bool,
     /// Clamp mesh particles' instance colour rgb to 1 like the original's 8-bit colour (B-246). `BOTS_N1_MESH_VCOL_CLAMP=0` off.
     pub mesh_vcol_clamp: bool,
     /// B-264: the vertex-light buffer grows by a GPU copy of the old words (the CPU writes only the new ones) and syncs on
@@ -631,6 +634,7 @@ impl Knobs {
             refl_ts: env_flag("BOTS_N1_REFL_TS", true),
             fresnel_ts: env_flag("BOTS_N1_FRESNEL_TS", true),
             dyn_sky: env_flag("BOTS_N1_DYNSKY", true),
+            unbaked: env_flag("BOTS_N1_UNBAKED", true),
             light_grow: env_flag("BOTS_N1_LIGHT_GROW", true),
             lod_bones: env_flag("BOTS_N1_LOD_BONES", true),
             outline: env_num("BOTS_N1_OUTLINE", 1u32),

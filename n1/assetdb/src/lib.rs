@@ -155,6 +155,10 @@ pub struct MaterialAsset {
 /// then directional vertex light, then the legacy single colour).
 #[derive(Clone, Debug)]
 pub enum ComponentLight {
+    /// B-399: a level-placed static mesh actor whose component has no baked light at all (lightmap type 0). The port lights
+    /// it with the level's sun and the skies as it does a dynamic object, but the sun reaches it whether or not the sun
+    /// reaches dynamic objects (CarParkBuilding00's `C1StaticMeshActor_6` in chapter 32215).
+    Unbaked,
     /// Per-vertex linear colour.
     Legacy(Vec<[f32; 3]>),
     /// Per-vertex directional light: three FColor words per vertex (bytes A, R, G, B) and an RGB scale per word.
@@ -233,6 +237,10 @@ pub struct AssetDb {
     pub verbose: bool,
     /// Textures whose load failed (see `texture`).
     texture_errors: std::sync::atomic::AtomicU32,
+    /// Textures loaded and not loaded this session (each path counts once; a missing or unsupported texture counts as
+    /// not loaded), for the log's "textures: N loaded, M failed" line.
+    tex_loaded: std::sync::atomic::AtomicU64,
+    tex_failed: std::sync::atomic::AtomicU64,
     pub max_tex: u32,
 }
 
@@ -341,6 +349,8 @@ impl AssetDb {
             path_maps: Mutex::new(HashMap::new()),
             verbose: std::env::var("ASSETDB_VERBOSE").is_ok(),
             texture_errors: Default::default(),
+            tex_loaded: Default::default(),
+            tex_failed: Default::default(),
             max_tex: std::env::var("BOTS_N1_MAXTEX").ok().and_then(|v| v.parse().ok()).unwrap_or(2048).max(64),
         })
     }
@@ -396,6 +406,12 @@ impl AssetDb {
     pub fn level_placements(&self, pkg_name: &str) -> Vec<ue3::level::Placement> {
         let Ok(pkg) = self.package(pkg_name) else { return Vec::new() };
         ue3::level::placements(&pkg).into_iter().filter(|(_, e)| e.is_none()).map(|(p, _)| p).collect()
+    }
+
+    /// The SpeedTree placements a package holds (those `ue3::speedtree::tree_placements` returns), for tools.
+    pub fn level_tree_placements(&self, pkg_name: &str) -> Vec<ue3::speedtree::TreePlacement> {
+        let Ok(pkg) = self.package(pkg_name) else { return Vec::new() };
+        ue3::speedtree::tree_placements(&pkg)
     }
 
     /// The class of an object and the bytes that follow its property list in its export (native serialization), for
@@ -872,6 +888,12 @@ impl AssetDb {
         h
     }
 
+    /// Textures this session loaded and failed to load (see `tex_loaded`).
+    pub fn texture_counts(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (self.tex_loaded.load(Relaxed), self.tex_failed.load(Relaxed))
+    }
+
     /// A Texture2D by object path, untiled; `None` if missing or in an unsupported format.
     pub fn texture(&self, path: &str) -> Option<Arc<TextureAsset>> {
         if let Some(t) = self.textures.lock().unwrap().get(path) {
@@ -890,6 +912,8 @@ impl AssetDb {
             }
             None
         });
+        let counter = if r.is_some() { &self.tex_loaded } else { &self.tex_failed };
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.textures
             .lock()
             .unwrap()
@@ -1008,6 +1032,8 @@ impl AssetDb {
                 ComponentLight::Dir { words, scale: sc }
             } else if let Some(v) = pl.vertex_light {
                 ComponentLight::Legacy(v)
+            } else if pl.lightmap_kind == 0 && pl.actor_class.ends_with("StaticMeshActor") {
+                ComponentLight::Unbaked
             } else {
                 continue;
             };
@@ -1430,7 +1456,7 @@ fn decode_tree_lights(b: &[u8]) -> Result<HashMap<String, Arc<TreeLight>>> {
     Ok(out)
 }
 
-const LIGHT2_MAGIC: u32 = 0x5447_4C32;
+const LIGHT2_MAGIC: u32 = 0x5447_4C33; // "TGL3": B-399 added `Unbaked` (type 3)
 
 fn encode_light_full(m: &HashMap<String, Arc<ComponentLight>>) -> Vec<u8> {
     let mut w = W(Vec::new());
@@ -1440,6 +1466,7 @@ fn encode_light_full(m: &HashMap<String, Arc<ComponentLight>>) -> Vec<u8> {
     for (k, v) in m {
         w.str(k);
         match &**v {
+            ComponentLight::Unbaked => w.u32(3),
             ComponentLight::Legacy(c) => {
                 w.u32(0);
                 w.u32(c.len() as u32);
@@ -1505,6 +1532,7 @@ fn decode_light_full(b: &[u8]) -> Result<HashMap<String, Arc<ComponentLight>>> {
                 let coord_bias = [r.f32()?, r.f32()?];
                 ComponentLight::Map { textures, scale, coord_scale, coord_bias }
             }
+            3 => ComponentLight::Unbaked,
             x => bail!("light kind {x}"),
         };
         out.insert(k, Arc::new(l));
@@ -1813,5 +1841,21 @@ mod symlink_tests {
             assert_eq!(got, vec![("A".to_string(), 123_456), ("Real".to_string(), 7)], "{}", dir.display());
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod unbaked_light_tests {
+    use super::*;
+
+    #[test]
+    fn unbaked_survives_the_light_cache() {
+        // B-399: a static mesh with no baked light is its own cache entry, next to real ones.
+        let mut m = HashMap::new();
+        m.insert("Pkg.A".to_string(), Arc::new(ComponentLight::Unbaked));
+        m.insert("Pkg.B".to_string(), Arc::new(ComponentLight::Legacy(vec![[0.5, 0.25, 0.125]])));
+        let back = decode_light_full(&encode_light_full(&m)).unwrap();
+        assert!(matches!(&*back["Pkg.A"], ComponentLight::Unbaked));
+        assert!(matches!(&*back["Pkg.B"], ComponentLight::Legacy(v) if v.len() == 1));
     }
 }
