@@ -1645,6 +1645,11 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
       }
     }
   }
+  static const bool bias_logged = [] {
+    REXLOG_INFO("gfx native: decal depth bias: constant x{}, slope {} (BOTS_GFX_DEPTH_BIAS_SCALE, BOTS_GFX_DECAL_SLOPE)", bias_scale, decal_slope);
+    return true;
+  }();
+  (void)bias_logged;
   const bool offset_draw = bias_constant != 0.0f;  // the game offsets this draw's depth: a decal piece or similar
   const float guest_constant = bias_constant, guest_slope = bias_slope;
   // Decal pieces are separate triangles on top of the surface they land on: clipped, with their own vertices, so their
