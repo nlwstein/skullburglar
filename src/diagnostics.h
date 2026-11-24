@@ -245,6 +245,108 @@ inline std::vector<std::string> LinesContaining(std::string_view text, const std
 }
 
 
+// ---- Scrubbing the bundle ----
+// The diagnostics file is attached to public issues, and old log lines carry full paths, so every name that identifies a
+// person or a machine is replaced before it is written.
+
+struct ScrubInfo {
+  std::string home;      // this account's home folder (the OS's profile folder)
+  std::string user;      // the account name
+  std::string computer;  // the computer's name
+};
+
+inline bool IsSep(char c) { return c == '/' || c == '\\'; }
+inline bool IsWordChar(char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '~'; }
+inline char Lower(char c) { return char(std::tolower(static_cast<unsigned char>(c))); }
+
+// Whether `needle` is at text[pos]: case-insensitive, '/' and '\\' alike.
+inline bool MatchAt(std::string_view text, size_t pos, std::string_view needle) {
+  if (pos + needle.size() > text.size()) return false;
+  for (size_t i = 0; i < needle.size(); ++i) {
+    const char a = text[pos + i], b = needle[i];
+    if (IsSep(a) && IsSep(b)) continue;
+    if (Lower(a) != Lower(b)) return false;
+  }
+  return true;
+}
+
+// Replaces `needle` with `with` where `ok(text, start, end)` accepts the match.
+template <class Ok>
+inline std::string ReplaceMatches(std::string_view text, std::string_view needle, std::string_view with, Ok ok) {
+  if (needle.empty()) return std::string(text);
+  std::string out;
+  for (size_t i = 0; i < text.size();) {
+    if (MatchAt(text, i, needle) && ok(text, i, i + needle.size())) {
+      out += with;
+      i += needle.size();
+    } else {
+      out += text[i++];
+    }
+  }
+  return out;
+}
+
+// "C:\Users\<name>", "/Users/<name>" and "/home/<name>" (any drive, either separator, a name up to the next separator or
+// space, so 8.3 short names too) become "~".
+inline std::string ScrubHomePatterns(std::string_view text) {
+  std::string out;
+  for (size_t i = 0; i < text.size();) {
+    size_t j = i;
+    if (j + 1 < text.size() && std::isalpha(static_cast<unsigned char>(text[j])) && text[j + 1] == ':') j += 2;
+    const bool start_ok = i == 0 || IsSep(text[i]) || !IsWordChar(text[i - 1]);  // a link in a longer path still counts
+    size_t k = j;
+    while (k < text.size() && IsSep(text[k])) ++k;
+    bool hit = false;
+    if (start_ok && k > j) {
+      for (std::string_view root : {"Users", "home"}) {
+        if (MatchAt(text, k, root) && k + root.size() < text.size() && IsSep(text[k + root.size()])) {
+          size_t n = k + root.size();
+          while (n < text.size() && IsSep(text[n])) ++n;
+          size_t e = n;
+          while (e < text.size() && !IsSep(text[e]) && !std::isspace(static_cast<unsigned char>(text[e])) &&
+                 text[e] != '"' && text[e] != '\'' && text[e] != ':' && text[e] != '<' && text[e] != '>' && text[e] != '|')
+            ++e;
+          if (e > n) {
+            out += "~";
+            i = e;
+            hit = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!hit) out += text[i++];
+  }
+  return out;
+}
+
+inline std::string ScrubText(std::string_view text, const ScrubInfo& info) {
+  std::string t(text);
+  auto boundary_after = [](std::string_view s, size_t, size_t end) { return end >= s.size() || !IsWordChar(s[end]); };
+  if (info.home.size() > 3) {  // not "/" or "C:\"
+    t = ReplaceMatches(t, "\\\\?\\" + info.home, "~", boundary_after);  // the long-path form first
+    t = ReplaceMatches(t, info.home, "~", boundary_after);
+  }
+  t = ScrubHomePatterns(t);
+  std::string user = info.user;
+  if (user.empty() && info.home.size() > 3) {  // the home folder's last part
+    size_t end = info.home.size();
+    while (end && IsSep(info.home[end - 1])) --end;
+    size_t b = end;
+    while (b && !IsSep(info.home[b - 1])) --b;
+    user = info.home.substr(b, end - b);
+  }
+  // The bare account name only as a whole path component, so a user called "test" or "games" leaves other text alone.
+  if (user.size() >= 2) {
+    t = ReplaceMatches(t, user, "<user>", [](std::string_view s, size_t start, size_t end) {
+      return start > 0 && IsSep(s[start - 1]) && (end >= s.size() || !IsWordChar(s[end]));
+    });
+  }
+  // The computer's name anywhere.
+  if (info.computer.size() >= 3) t = ReplaceMatches(t, info.computer, "<computer>", [](std::string_view, size_t, size_t) { return true; });
+  return t;
+}
+
 // ---- Probes (diagnostics.cpp; the game only) ----
 
 // What the app tells the startup summary.

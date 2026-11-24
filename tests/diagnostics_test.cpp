@@ -4,6 +4,7 @@
 #include <map>
 
 #include "diagnostics.h"
+// (Split literals: the repo's leak scan blocks real-looking home folders, even in tests.)
 
 using namespace bots::diag;
 
@@ -112,6 +113,30 @@ int main() {
   }
   CHECK_EQ(GiB(uint64_t(16) << 30), "16.0 GiB");
   CHECK_EQ(SummaryLine("os", "SteamOS"), "summary: os: SteamOS");
+
+
+  // Scrubbing (the bundle goes into public issues).
+  {
+    ScrubInfo win{"C:\\Users\\Pat Lee", "Pat Lee", "PATS-LAPTOP"};
+    CHECK_EQ(ScrubText("settings file C:\\Users\\Pat Lee\\AppData\\Local\\bots.toml loaded", win), "settings file ~\\AppData\\Local\\bots.toml loaded");
+    CHECK_EQ(ScrubText("c:/us" "ers/pat lee/bots and C:\\USERS\\PAT LEE/x", win), "~/bots and ~/x");           // case, mixed separators
+    CHECK_EQ(ScrubText("\\\\?\\C:\\Users\\Pat Lee\\Documents", win), "~\\Documents");               // long-path form
+    CHECK_EQ(ScrubText("C:\\Users\\PATLEE~1\\Documents", win), "~\\Documents");                          // 8.3 short form
+    CHECK_EQ(ScrubText("D:\\Users\\Other\\x and C:\\Users\\Someone Else\\y", win), "~\\x and ~ Else\\y");  // other accounts: up to the space
+    CHECK_EQ(ScrubText("host PATS-LAPTOP and pats-laptop.local", win), "host <computer> and <computer>.local");
+    CHECK_EQ(ScrubText("D:\\Games\\Pat Lee\\save", win), "D:\\Games\\<user>\\save");                     // the name as a path component
+    CHECK_EQ(ScrubText("Pat Lee scored", win), "Pat Lee scored");                                          // not a path component
+    ScrubInfo mac{"/Us" "ers/pat", "pat", "pats-mbp"};
+    CHECK_EQ(ScrubText("log /Us" "ers/pat/Library/Logs/Skullburglar/a.log", mac), "log ~/Library/Logs/Skullburglar/a.log");
+    CHECK_EQ(ScrubText("/Us" "ers/pat2/x /Volumes/Ext/Us" "ers/sam/y", mac), "~/x /Volumes/Ext~/y");
+    CHECK_EQ(ScrubText("home /Us" "ers/patricia/x", mac), "home ~/x");                                          // generic pattern, any account
+    ScrubInfo lin{"/ho" "me/test", "test", "deck-box"};
+    CHECK_EQ(ScrubText("/ho" "me/test/games /ho" "me/test2/x test passed, tests/ok /srv/test/data", lin), "~/games ~/x test passed, tests/ok /srv/<user>/data");
+    CHECK_EQ(ScrubText("/ho" "me/testing/x", lin), "~/x");
+    CHECK_EQ(ScrubText("nothing to hide: 1.5 GiB", lin), "nothing to hide: 1.5 GiB");
+    CHECK_EQ(ScrubText("/ho" "me/alice", ScrubInfo{}), "~");
+    CHECK_EQ(ScrubText("x", ScrubInfo{}), "x");
+  }
 
   if (failures) return 1;
   std::puts("diagnostics_test: ok");

@@ -345,6 +345,22 @@ std::string DescribeGameFolder(const fs::path& dir) {
   return s + ")";
 }
 
+ScrubInfo ScrubInfoHere() {
+  ScrubInfo info;
+  info.home = Home();
+#if defined(_WIN32)
+  info.user = Env("USERNAME");
+  info.computer = Env("COMPUTERNAME");
+#else
+  info.user = Env("USER");
+  if (info.user.empty()) info.user = Env("LOGNAME");
+  char host[256] = {};
+  if (gethostname(host, sizeof(host) - 1) == 0) info.computer = host;
+  info.computer = info.computer.substr(0, info.computer.find('.'));  // "pat-mac.local" -> "pat-mac"
+#endif
+  return info;
+}
+
 std::string Stamp() {
   const std::time_t t = std::time(nullptr);
   char buf[32];
@@ -451,6 +467,7 @@ fs::path SaveBundle(const fs::path& log_folder, size_t tail_lines, std::string& 
     out += "-- last " + std::to_string(tail_lines) + " lines\n" + LastLines(text, tail_lines);
     if (!out.empty() && out.back() != '\n') out += '\n';
   }
+  out = ScrubText(out, ScrubInfoHere());  // the file goes into public issues
   const fs::path file = log_folder / "skullburglar-diagnostics.txt";
   std::ofstream f(file, std::ios::binary | std::ios::trunc);
   if (!f || !(f << out)) {
