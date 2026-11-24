@@ -231,6 +231,8 @@ pub struct AssetDb {
     /// every export of the package building paths: ~30 ms a call on the big ones).
     path_maps: Mutex<HashMap<String, Arc<HashMap<(bool, String), i32>>>>,
     pub verbose: bool,
+    /// Textures whose load failed (see `texture`).
+    texture_errors: std::sync::atomic::AtomicU32,
     pub max_tex: u32,
 }
 
@@ -244,6 +246,27 @@ fn cache_name(path: &str) -> String {
             }
         })
         .collect()
+}
+
+/// The `.xxx` packages of the cooked folder (the audio ones left out) as (name, size, path), sorted by name.
+///
+/// A game folder can be a symlink, and so can any file in it (a game installed on an external drive and linked back
+/// into place): `std::fs::metadata` follows links where `DirEntry::metadata` stats the link itself (the length of the
+/// target's path, not the package's size), so the sizes that key the index cache are the packages' own.
+fn list_packages(cooked: &Path) -> Result<Vec<(String, u64, PathBuf)>> {
+    let mut files: Vec<(String, u64, PathBuf)> = std::fs::read_dir(cooked)
+        .with_context(|| format!("read {}", cooked.display()))?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let p = e.path();
+            let stem = p.file_stem()?.to_string_lossy().into_owned();
+            // A link that points nowhere is skipped: nothing could be read from it.
+            let size = std::fs::metadata(&p).ok().filter(|m| m.is_file())?.len();
+            (p.extension()? == "xxx" && !stem.contains("Audio")).then(|| (stem, size, p))
+        })
+        .collect();
+    files.sort();
+    Ok(files)
 }
 
 const INDEX_CLASSES: &[&str] = &[
@@ -260,6 +283,8 @@ const INDEX_CLASSES: &[&str] = &[
     "ParticleSpriteEmitter",
     "ParticleMeshEmitter",
 ];
+/// Textures that failed to load and get a line each in the log; later ones only with ASSETDB_VERBOSE.
+const TEXTURE_ERROR_LOG: u32 = 20;
 /// Bump when `INDEX_CLASSES` changes.
 const INDEX_REV: u32 = 4;
 
@@ -267,17 +292,7 @@ impl AssetDb {
     /// Opens (or builds) the index. `cooked` is `game/C1Game/CookedXenon`.
     pub fn open(cooked: &Path, cache: &Path) -> Result<Self> {
         std::fs::create_dir_all(cache).with_context(|| format!("create {}", cache.display()))?;
-        let mut files: Vec<(String, u64, PathBuf)> = std::fs::read_dir(cooked)
-            .with_context(|| format!("read {}", cooked.display()))?
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let p = e.path();
-                let stem = p.file_stem()?.to_string_lossy().into_owned();
-                (p.extension()? == "xxx" && !stem.contains("Audio"))
-                    .then(|| (stem, e.metadata().map(|m| m.len()).unwrap_or(0), p))
-            })
-            .collect();
-        files.sort();
+        let files = list_packages(cooked)?;
         let key: Vec<(String, u64)> = files.iter().map(|(n, s, _)| (n.clone(), *s)).collect();
         let index_path = cache.join("index.json");
         let index = match std::fs::read(&index_path)
@@ -325,6 +340,7 @@ impl AssetDb {
             preferred: Mutex::new(HashSet::new()),
             path_maps: Mutex::new(HashMap::new()),
             verbose: std::env::var("ASSETDB_VERBOSE").is_ok(),
+            texture_errors: Default::default(),
             max_tex: std::env::var("BOTS_N1_MAXTEX").ok().and_then(|v| v.parse().ok()).unwrap_or(2048).max(64),
         })
     }
@@ -862,7 +878,14 @@ impl AssetDb {
             return t.clone();
         }
         let r = self.load_texture(path).unwrap_or_else(|e| {
-            if self.verbose {
+            // A texture that could not be read (not one that is simply absent) is drawn as the flat stand-in, so say
+            // which and why: the first few, then a count (a game folder on a failing or unplugged drive shows here).
+            let n = self.texture_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < TEXTURE_ERROR_LOG {
+                eprintln!("assetdb: texture {path} could not be loaded: {e:#}");
+            } else if n == TEXTURE_ERROR_LOG {
+                eprintln!("assetdb: more textures could not be loaded; not logging them one by one (ASSETDB_VERBOSE=1 does)");
+            } else if self.verbose {
                 eprintln!("assetdb: texture {path}: {e:#}");
             }
             None
@@ -1755,5 +1778,40 @@ mod coord_set_tests {
     fn a_set_the_mesh_lacks_falls_back_to_set_one() {
         assert_eq!(pick_coord_set(2, 2), 1);
         assert_eq!(pick_coord_set(-1, 3), 1);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod symlink_tests {
+    use super::list_packages;
+    use std::os::unix::fs::symlink;
+
+    /// A game installed on another drive: the cooked folder holds links to the packages and is itself reached through a
+    /// link. The packages must be listed with their own sizes (not the link's), and a link to nothing is left out.
+    #[test]
+    fn lists_packages_through_symlinks() {
+        let root = std::env::temp_dir().join(format!("assetdb-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ext = root.join("external");
+        let cooked = root.join("cooked");
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::create_dir_all(&cooked).unwrap();
+        std::fs::write(ext.join("A.xxx"), vec![0u8; 123_456]).unwrap();
+        std::fs::write(ext.join("B_Audio.xxx"), b"audio").unwrap();
+        std::fs::write(ext.join("notes.txt"), b"x").unwrap();
+        std::fs::write(cooked.join("Real.xxx"), vec![0u8; 7]).unwrap();
+        for n in ["A.xxx", "B_Audio.xxx", "notes.txt"] {
+            symlink(ext.join(n), cooked.join(n)).unwrap();
+        }
+        symlink(root.join("nowhere.xxx"), cooked.join("Gone.xxx")).unwrap();
+        let through_link = root.join("game-link");
+        symlink(&cooked, &through_link).unwrap();
+
+        for dir in [&cooked, &through_link] {
+            let got: Vec<(String, u64)> =
+                list_packages(dir).unwrap().into_iter().map(|(n, s, _)| (n, s)).collect();
+            assert_eq!(got, vec![("A".to_string(), 123_456), ("Real".to_string(), 7)], "{}", dir.display());
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

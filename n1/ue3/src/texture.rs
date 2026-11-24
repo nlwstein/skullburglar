@@ -461,8 +461,8 @@ mod tfc_tests {
     use crate::package::PACKAGE_TAG;
 
     /// A tfc with a raw run at 100 and a two-block LZO chunk at 200, then trailing bytes the chunk reader must not need.
-    fn sample() -> (PathBuf, Vec<u8>, Vec<u8>) {
-        let dir = std::env::temp_dir().join(format!("tfc-test-{}", std::process::id()));
+    fn sample(tag: &str) -> (PathBuf, Vec<u8>, Vec<u8>) {
+        let dir = std::env::temp_dir().join(format!("tfc-test-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let raw: Vec<u8> = (0..50u8).collect();
         let plain: Vec<u8> = (0..100u32).map(|i| (i * 7 % 13) as u8).collect();
@@ -489,7 +489,7 @@ mod tfc_tests {
 
     #[test]
     fn reads_by_offset_match_the_whole_file() {
-        let (dir, raw, plain) = sample();
+        let (dir, raw, plain) = sample("offsets");
         for slurp in [false, true] {
             let c = TfcCache { dir: dir.clone(), files: Mutex::new(HashMap::new()), slurp };
             assert_eq!(c.read("T", 100, 50).unwrap(), raw, "raw run, slurp {slurp}");
@@ -501,6 +501,25 @@ mod tfc_tests {
             let (files, held) = c.mem();
             assert_eq!(files, 1);
             assert_eq!(held > 0, slurp, "only the old mode keeps the file in memory");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The texture file cache on another drive, linked into the cooked folder (a game folder moved to an external SSD).
+    #[cfg(unix)]
+    #[test]
+    fn reads_through_a_symlinked_tfc() {
+        let (dir, raw, _) = sample("symlink");
+        let linked = dir.join("linked");
+        let _ = std::fs::remove_dir_all(&linked);
+        std::fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(dir.join("T.tfc"), linked.join("T.tfc")).unwrap();
+        let via_dir = dir.join("dirlink");
+        let _ = std::fs::remove_file(&via_dir);
+        std::os::unix::fs::symlink(&linked, &via_dir).unwrap();
+        for d in [&linked, &via_dir] {
+            let c = TfcCache { dir: d.clone(), files: Mutex::new(HashMap::new()), slurp: false };
+            assert_eq!(c.read("T", 100, 50).unwrap(), raw, "{}", d.display());
         }
         let _ = std::fs::remove_dir_all(dir);
     }
