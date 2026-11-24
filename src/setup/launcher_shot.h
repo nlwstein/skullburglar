@@ -29,7 +29,8 @@
 //   page:<name>             open a page directly: main graphics hdr game controls coop files updates about bindings
 //   focus:<cvar>            select a setting (opens its page)
 //   device:<kbm|pad>        show keyboard or controller prompts until the other kind is used
-//   padkind:<xbox|ps4|ps5>  the kind of controller connected (for its glyphs)
+//   glyphs[:off]  a row of the Start and Back glyphs in the corner (preview only)
+//   padkind:<xbox|x360|ps4|ps5>  the kind of controller connected (for its glyphs)
 //   frames:<n>              draw n more frames
 //   expect:<cvar>=<value>   log PASS or FAIL: the setting's value (the shot run's own copy) is that
 //   expect-page:<name>      log PASS or FAIL: the page shown

@@ -68,12 +68,7 @@ class PadNav {
   // The kind of the first connected controller, for the launcher's button glyphs (launcher_logic.h).
   PadKind Kind() const {
     if (pads_.empty()) return PadKind::kNone;
-    switch (SDL_GetGamepadType(pads_.front().pad)) {
-      case SDL_GAMEPAD_TYPE_PS3:
-      case SDL_GAMEPAD_TYPE_PS4: return PadKind::kPlayStation4;
-      case SDL_GAMEPAD_TYPE_PS5: return PadKind::kPlayStation5;
-      default: return PadKind::kXbox;
-    }
+    return PadKindForType(TypeOf(SDL_GetGamepadType(pads_.front().pad)));
   }
 
   // A PlayStation pad is connected (the window names its buttons: Cross, Circle, Options).
@@ -85,6 +80,16 @@ class PadNav {
   }
 
  private:
+  static PadType TypeOf(SDL_GamepadType t) {
+    switch (t) {
+      case SDL_GAMEPAD_TYPE_XBOX360: return PadType::kXbox360;
+      case SDL_GAMEPAD_TYPE_PS3: return PadType::kPlayStation3;
+      case SDL_GAMEPAD_TYPE_PS4: return PadType::kPlayStation4;
+      case SDL_GAMEPAD_TYPE_PS5: return PadType::kPlayStation5;
+      default: return PadType::kOther;
+    }
+  }
+
   struct Pad {
     SDL_JoystickID id;
     SDL_Gamepad* pad;

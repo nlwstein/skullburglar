@@ -165,6 +165,18 @@ int main() {
   assert(LauncherPromptDevice(LastInput::kController, PadKind::kPlayStation5, "xbox") == PromptDevice::kXbox);
   assert(LauncherPromptDevice(LastInput::kController, PadKind::kXbox, "ps4") == PromptDevice::kPlayStation4);
   assert(LauncherPromptDevice(LastInput::kController, PadKind::kNone, "auto") == PromptDevice::kXbox);
+  // B-401: an Xbox 360 pad gets the 360's Back and Start glyphs; "xbox" in pad_prompts still forces the One/Series ones,
+  // and the keyboard wins as before.
+  assert(LauncherPromptDevice(LastInput::kController, PadKind::kXbox360, "auto") == PromptDevice::kXbox360);
+  assert(LauncherPromptDevice(LastInput::kController, PadKind::kXbox360, "xbox") == PromptDevice::kXbox);
+  assert(LauncherPromptDevice(LastInput::kController, PadKind::kXbox360, "ps5") == PromptDevice::kPlayStation5);
+  assert(LauncherPromptDevice(LastInput::kKeyboardMouse, PadKind::kXbox360, "auto") == PromptDevice::kKeyboardMouse);
+  // SDL's pad type to the launcher's pad kind (pad_nav.h maps SDL_GAMEPAD_TYPE_* to PadType).
+  assert(PadKindForType(PadType::kXbox360) == PadKind::kXbox360);
+  assert(PadKindForType(PadType::kOther) == PadKind::kXbox);
+  assert(PadKindForType(PadType::kPlayStation3) == PadKind::kPlayStation4);
+  assert(PadKindForType(PadType::kPlayStation4) == PadKind::kPlayStation4);
+  assert(PadKindForType(PadType::kPlayStation5) == PadKind::kPlayStation5);
 
   // Key bindings.
   const auto keys = SplitKeys("E, F,Backspace");

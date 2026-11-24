@@ -203,7 +203,22 @@ inline std::string ValueLabel(const Setting& s, const std::string& value) {
 // ---- Button prompts ----
 
 enum class LastInput { kKeyboardMouse, kController };
-enum class PadKind { kNone, kXbox, kPlayStation4, kPlayStation5 };  // kXbox: any pad that isn't a PlayStation one
+// kXbox: any pad that isn't one of the others (Xbox One, Series, Steam Deck, generic). kXbox360: SDL says Xbox 360.
+enum class PadKind { kNone, kXbox, kXbox360, kPlayStation4, kPlayStation5 };
+
+// The pad families SDL tells apart that change the glyphs (SDL_GetGamepadType, mapped in pad_nav.h; kept here so the
+// mapping has a unit test without SDL).
+enum class PadType { kOther, kXbox360, kPlayStation3, kPlayStation4, kPlayStation5 };
+
+inline PadKind PadKindForType(PadType type) {
+  switch (type) {
+    case PadType::kXbox360: return PadKind::kXbox360;
+    case PadType::kPlayStation3:  // no glyphs of its own: the DualShock 4's
+    case PadType::kPlayStation4: return PadKind::kPlayStation4;
+    case PadType::kPlayStation5: return PadKind::kPlayStation5;
+    default: return PadKind::kXbox;
+  }
+}
 
 // Which glyphs the launcher's prompts use, by the game's own rule for in-game prompts (mnk_input.h, B-105/B-160): the
 // device used last wins; a controller's prompts follow pad_prompts, or with "auto" the kind of pad connected.
@@ -216,6 +231,7 @@ inline PromptDevice LauncherPromptDevice(LastInput last, PadKind pad, std::strin
   if (pad_prompts == "ps5") return PromptDevice::kPlayStation5;
   if (pad == PadKind::kPlayStation4) return PromptDevice::kPlayStation4;
   if (pad == PadKind::kPlayStation5) return PromptDevice::kPlayStation5;
+  if (pad == PadKind::kXbox360) return PromptDevice::kXbox360;
   return PromptDevice::kXbox;
 }
 

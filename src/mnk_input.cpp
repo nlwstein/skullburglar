@@ -109,7 +109,7 @@ const bool g_prompt_state_published = [] {
 void MouseKeyboardDriver::SetPromptDevice(PromptDevice device) {
   if (g_prompt_state.device.exchange(uint32_t(device)) == uint32_t(device)) return;
   g_prompt_state.generation.fetch_add(1);
-  static constexpr const char* kNames[] = {"Xbox controller", "keyboard/mouse", "DualShock 4", "DualSense"};
+  static constexpr const char* kNames[] = {"Xbox controller", "keyboard/mouse", "DualShock 4", "DualSense", "Xbox 360 controller"};
   REXLOG_INFO("prompts: {}", kNames[uint32_t(device)]);
 }
 
