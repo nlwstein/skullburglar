@@ -21,8 +21,11 @@
 
 namespace bots {
 
-// What the prompts show. kXbox is the game's own atlas; the others are drawn by prompt_atlas.cpp.
-enum class PromptDevice : uint32_t { kXbox = 0, kKeyboardMouse = 1, kPlayStation4 = 2, kPlayStation5 = 3 };
+// What the prompts show. kXbox is the game's own atlas (which is the 360's art, so the in game prompts of a 360 pad
+// already match; kXbox360 only changes the launcher's glyphs, the game never selects it); the others are drawn by
+// prompt_atlas.cpp.
+enum class PromptDevice : uint32_t { kXbox = 0, kKeyboardMouse = 1, kPlayStation4 = 2, kPlayStation5 = 3,
+                                    kXbox360 = 4 };
 
 inline bool IsPlayStation(PromptDevice device) {
   return device == PromptDevice::kPlayStation4 || device == PromptDevice::kPlayStation5;

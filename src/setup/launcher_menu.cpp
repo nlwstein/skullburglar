@@ -15,7 +15,7 @@ namespace bots::setup {
 namespace {
 
 // Button prompts: what each glyph stands for. kKey draws a key cap with the given text.
-enum Btn { kA, kB, kX, kY, kLB, kRB, kLT, kRT, kStart, kDpadLR, kKey };
+enum Btn { kA, kB, kX, kY, kLB, kRB, kLT, kRT, kStart, kBack, kDpadLR, kKey };
 
 // Firewall states (firewall.h FirewallState), kept as numbers so the menu doesn't need that header.
 enum Firewall { kFwNotApplicable, kFwChecking, kFwAllowed, kFwNotAsked, kFwBlocked, kFwPublic, kFwUnknown };
@@ -190,7 +190,7 @@ float LauncherMenu::GlyphWidth(float h, int button, const char* key) const {
   }
   switch (button) {
     case kLB: case kRB: case kLT: case kRT: return h * 1.45f;
-    case kStart: return h * 1.3f;
+    case kStart: case kBack: return device_ == PromptDevice::kXbox360 ? h : h * 1.3f;
     default: return h;
   }
 }
@@ -254,7 +254,25 @@ float LauncherMenu::Glyph(ImDrawList* dl, ImVec2 p, float h, int button, const c
       centered(ps ? kPs[i] : kXbox[i], h * 0.56f, color::kText);
       return w;
     }
-    case kStart: {
+    case kStart: case kBack: {
+      if (device_ == PromptDevice::kXbox360) {
+        // The 360's two small round buttons: Start points right, Back (the 360 calls it Back, not View) points left.
+        dl->AddCircleFilled(c, r, color::Rgb(40, 38, 40), 32);
+        dl->AddCircle(c, r - line * 0.5f, color::Rgb(130, 122, 116), 32, line);
+        const float s = r * 0.46f, d = button == kStart ? 1.0f : -1.0f;
+        dl->AddTriangleFilled(ImVec2(c.x + d * s * 0.9f, c.y), ImVec2(c.x - d * s * 0.6f, c.y - s),
+                              ImVec2(c.x - d * s * 0.6f, c.y + s), color::kText);
+        return w;
+      }
+      if (button == kBack) {
+        // Xbox One / Series View: two overlapping windows.
+        dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), color::Rgb(40, 38, 40), h * 0.5f);
+        dl->AddRect(p, ImVec2(p.x + w, p.y + h), color::Rgb(130, 122, 116), h * 0.5f, 0, line);
+        const float q = h * 0.2f;
+        dl->AddRect(ImVec2(c.x - q * 1.5f, c.y - q * 0.7f), ImVec2(c.x + q * 0.7f, c.y + q * 1.5f), color::kText, 0, 0, line * 1.2f);
+        dl->AddRect(ImVec2(c.x - q * 0.7f, c.y - q * 1.5f), ImVec2(c.x + q * 1.5f, c.y + q * 0.7f), color::kText, 0, 0, line * 1.2f);
+        return w;
+      }
       dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), color::Rgb(40, 38, 40), h * 0.5f);
       dl->AddRect(p, ImVec2(p.x + w, p.y + h), color::Rgb(130, 122, 116), h * 0.5f, 0, line);
       for (int i = -1; i <= 1; ++i) {
@@ -1499,6 +1517,13 @@ void LauncherMenu::DrawFooter(const LauncherStatus& st, Intent& in, float top) {
   const float gh = S(24);
   const float cy = top + (size.y - top) * 0.5f;
   const bool kbm = device_ == PromptDevice::kKeyboardMouse;
+  if (glyph_strip_) {  // preview only: Start and Back for the pad kind in use
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+    const float sh = S(40);
+    float gx = size.x * 0.5f;
+    gx += Glyph(fg, ImVec2(gx, top - sh * 1.6f), sh, kStart, "") + S(16);
+    Glyph(fg, ImVec2(gx, top - sh * 1.6f), sh, kBack, "");
+  }
 
   float left = mx;
   if (page_ != LauncherPage::kMain) {

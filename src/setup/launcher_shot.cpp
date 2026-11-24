@@ -506,7 +506,13 @@ int RunShotScript(const ShotHost& host, const std::filesystem::path& dir, const 
         menu.SetLastInput(step.arg == "pad" ? LastInput::kController : LastInput::kKeyboardMouse);
         frame();
       } else if (v == "padkind") {
-        pad = step.arg == "ps4" ? PadKind::kPlayStation4 : step.arg == "ps5" ? PadKind::kPlayStation5 : PadKind::kXbox;
+        pad = step.arg == "ps4" ? PadKind::kPlayStation4
+            : step.arg == "ps5" ? PadKind::kPlayStation5
+            : step.arg == "x360" ? PadKind::kXbox360
+                                 : PadKind::kXbox;
+        frame();
+      } else if (v == "glyphs") {
+        menu.ShowGlyphStrip(step.arg != "off");
         frame();
       } else if (v == "frames") {
         for (int i = 0; i < std::max(1, std::atoi(step.arg.c_str())); ++i) frame();
