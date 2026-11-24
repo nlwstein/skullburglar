@@ -1,6 +1,6 @@
 # Changes every launcher setting once, alternating keyboard and controller (tests/launcher_every_setting.script).
 # Run in the game with BOTS_SETUP_SHOT_SAVE=1 and check that bots.toml then holds every key; generated from
-# src/setup/settings_catalog.cpp (70 settings with the 1.13.0 ones and Pause background blur), except check_updates (development builds don't have it; tests/launcher_input.script
+# src/setup/settings_catalog.cpp (every setting, Pause background blur included), except check_updates (development builds don't have it; tests/launcher_input.script
 # covers the same kind of switch).
 shot:before
 focus:fullscreen
