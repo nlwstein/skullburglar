@@ -1,8 +1,10 @@
 #include "../../path_utf8.h"
+#include "resolve_size.h"
 #include "renderer.h"
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -1049,9 +1051,22 @@ Renderer::Image* Renderer::Own(const SurfaceKey& key, Image* image) {
   return image;
 }
 
+bool Renderer::SmallResolve(uint32_t width, uint32_t height) const {
+  static const bool on = [] {
+    const char* v = std::getenv("BOTS_GFX_SMALL_RESOLVE");
+    return !(v && *v == '0');
+  }();
+  // Quarter-resolution buffers only (352x182 in the DOF/pause blur chain). Below 256 wide are the tiny tracking textures
+  // (damage 128x64, god rays 128x128) that the n1 interop looks up by their host size; above, half-resolution buffers
+  // and bigger are left scaled.
+  return on && scale_ > 1.0f && SmallResolveSize(width, height);
+}
+
 Renderer::Image* Renderer::ResolveTexture(uint32_t address, uint32_t format, uint32_t width, uint32_t height,
-                                          bool depth_value, bool is_signed, bool hdr) {
-  const TextureKey key{address, format | (depth_value ? 0x100 : 0) | (is_signed ? 0x200 : 0) | (hdr ? 0x400 : 0),
+                                          bool depth_value, bool is_signed, bool hdr, bool guest_size) {
+  const TextureKey key{address,
+                       format | (depth_value ? 0x100 : 0) | (is_signed ? 0x200 : 0) | (hdr ? 0x400 : 0) |
+                           (guest_size ? 0x800 : 0),
                        width, height};
   auto& slot = textures_[key];
   if (!slot) {
@@ -1059,9 +1074,11 @@ Renderer::Image* Renderer::ResolveTexture(uint32_t address, uint32_t format, uin
     // Shaders sample 2D textures as arrays.
     const VkFormat host_format = hdr ? VK_FORMAT_R16G16B16A16_SFLOAT
                                     : depth_value ? VK_FORMAT_R32_SFLOAT : TextureFormat(format, is_signed);
-    if (!CreateImage(*image, host_format, Host(width), Host(height), false, VK_IMAGE_VIEW_TYPE_2D_ARRAY)) {
+    if (!CreateImage(*image, host_format, guest_size ? width : Host(width), guest_size ? height : Host(height), false,
+                     VK_IMAGE_VIEW_TYPE_2D_ARRAY)) {
       return nullptr;
     }
+    image->guest_size = guest_size;
     slot = std::move(image);
   }
   if (depth_value) {
@@ -1225,10 +1242,16 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
     const auto number = dest_info.copy_dest_number;
     const bool is_signed = number == xe::SurfaceNumberFormat::kSignedRepeatingFraction ||
                            number == xe::SurfaceNumberFormat::kSignedInteger;
+    const bool small = SmallResolve(dest_pitch.copy_dest_pitch, dest_pitch.copy_dest_height);
     Image* dest = ResolveTexture(dest_address, format, dest_pitch.copy_dest_pitch, dest_pitch.copy_dest_height,
-                                 false, is_signed, source->hdr && format == uint32_t(xe::TextureFormat::k_8_8_8_8));
+                                 false, is_signed, source->hdr && format == uint32_t(xe::TextureFormat::k_8_8_8_8), small);
     int32_t w, h, dw, dh;
-    if (dest && clamp_rect(*source, w, h) && clamp_rect(*dest, dw, dh)) {
+    // Kept at guest size: the dest rect is the guest rect, the source rect the scaled one.
+    const bool fits = small ? clamp_rect(*source, w, h) && (dw = std::min(guest_x1, int32_t(dest->width)) - guest_x0,
+                                                            dh = std::min(guest_y1, int32_t(dest->height)) - guest_y0,
+                                                            dw > 0 && dh > 0)
+                            : clamp_rect(*source, w, h) && clamp_rect(*dest, dw, dh);
+    if (dest && fits) {
       // The resolve converts through the shader into the destination's format and signedness, with the exponent
       // bias (UE3 copies its HDR scene out at 1/8). Fixed-point 16-bit surfaces hold value / 32 on the host. The
       // red/blue swap is not applied: the host image keeps red first and remembers the swap for sampling.
@@ -1237,7 +1260,8 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
               .color_format);
       const bool fixed = source_format == xe::ColorRenderTargetFormat::k_16_16 ||
                          source_format == xe::ColorRenderTargetFormat::k_16_16_16_16;
-      const VkRect2D rect{{x0, y0}, {uint32_t(std::min(w, dw)), uint32_t(std::min(h, dh))}};
+      const VkRect2D rect = small ? VkRect2D{{guest_x0, guest_y0}, {uint32_t(dw), uint32_t(dh)}}
+                                  : VkRect2D{{x0, y0}, {uint32_t(std::min(w, dw)), uint32_t(std::min(h, dh))}};
       if (dest->raw_depth_from) MaterializeRawDepth(*dest);  // outside this rect it still holds that depth
       // B-313: UE3's god-rays occlusion mask is drawn into the alpha channel only (colour mask 8) of an 8888 target and
       // resolved with the swap flag into an 8-bit texture. A red-only resolve left that texture black, so the port drew no
@@ -1251,7 +1275,7 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
       const bool to_alpha = k8_alpha && dest->format == VK_FORMAT_R8_UNORM && dest_info.copy_dest_swap &&
                             source_format == xe::ColorRenderTargetFormat::k_8_8_8_8;
       Transfer(*source, 0, *dest, to_alpha ? kTransferResolveAlpha : kTransferResolve, &rect,
-               std::ldexp(1.0f, int(dest_info.copy_dest_exp_bias) + (fixed ? 5 : 0)));
+               std::ldexp(1.0f, int(dest_info.copy_dest_exp_bias) + (fixed ? 5 : 0)), small ? int(std::ceil(scale_)) : 1);
       dest->swapped = dest_info.copy_dest_swap;
       if (dest->width == 128 && dest->height == 128) (dest->format == VK_FORMAT_R8_UNORM ? god_mask_ : god_rays_) = dest;
       dest->written = ++write_clock_;
@@ -1352,6 +1376,10 @@ void Renderer::DumpResolve(const Image& image, uint32_t address) {
     if (v) std::sscanf(v, "%f,%d", &at, &count);
     return std::pair<float, int>(v ? at : -1.0f, count);
   }();
+  // BOTS_DUMP_RESOLVES_FILE=<path>: only while that file exists (a scene creates it, waits, deletes it): the resolves of
+  // the frame a test is looking at (a paused menu), whatever the time since boot.
+  static const char* const trigger = std::getenv("BOTS_DUMP_RESOLVES_FILE");
+  if (trigger && *trigger && !std::filesystem::exists(trigger)) return;
   static const auto first = std::chrono::steady_clock::now();
   static int dumped = 0;
   if (window.first >= 0 &&

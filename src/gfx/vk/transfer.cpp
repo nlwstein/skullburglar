@@ -45,7 +45,7 @@ layout(set = 0, binding = 0) uniform sampler2D source;
 #if SRC == 100 || SRC == 101
 layout(set = 0, binding = 1) uniform usampler2D stencil;
 #endif
-layout(push_constant) uniform Constants { ivec2 dest_size; float scale; };
+layout(push_constant) uniform Constants { ivec2 dest_size; float scale; int box; };
 layout(location = 0) out vec4 result;
 
 uint To7e3(float f) {
@@ -68,6 +68,14 @@ uint ToUnorm(float f, float scale) { return uint(round(clamp(f, 0.0, 1.0) * scal
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy) * SOURCE_SIZE / dest_size;
   vec4 v = FETCH(p);
+#if DST == 300
+  if (box > 1) {  // a resolve kept at guest size: the average of the box x box block of the scaled target
+    v = vec4(0.0);
+    for (int y = 0; y < box; ++y)
+      for (int x = 0; x < box; ++x) v += FETCH(min(p + ivec2(x, y), SOURCE_SIZE - 1));
+    v /= float(box * box);
+  }
+#endif
 #if DST == 200
   result = vec4(v.r, 0.0, 0.0, 0.0);
   return;
@@ -192,7 +200,7 @@ bool Renderer::InitTransfers() {
       r_ != VK_SUCCESS)
     return Fail("vkCreateDescriptorSetLayout failed", r_);
   VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-  const VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 12};
+  const VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16};
   layout_info.setLayoutCount = 1;
   layout_info.pSetLayouts = &transfer_set_layout_;
   layout_info.pushConstantRangeCount = 1;
@@ -276,7 +284,7 @@ VkPipeline Renderer::FullscreenPipeline(VkShaderModule fs, VkFormat format, VkPi
 }
 
 void Renderer::Transfer(Image& source, uint32_t source_format, Image& dest, uint32_t dest_format,
-                        const VkRect2D* rect, float scale) {
+                        const VkRect2D* rect, float scale, int box) {
   const VkPipeline pipeline = TransferPipeline(source_format, dest_format, dest.format);
   if (!pipeline) return;
   BeginCommands(kGpuTransfer);
@@ -332,10 +340,15 @@ void Renderer::Transfer(Image& source, uint32_t source_format, Image& dest, uint
   const VkViewport vp{0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f};
   vk_.vkCmdSetViewport(cmd_, 0, 1, &vp);
   vk_.vkCmdSetScissor(cmd_, 0, 1, &rendering.renderArea);
+  // Box mode: the source is read at the dest position times source / guest size (a resolve kept at guest size).
+  const auto guest = [&](uint32_t v) { return int32_t(float(v) / scale_ + 0.5f); };
   struct {
     int32_t dest_size[2];
     float scale;
-  } constants{{int32_t(rect ? source.width : width), int32_t(rect ? source.height : height)}, scale};
+    int32_t box;
+  } constants{{int32_t(box > 1 ? guest(source.width) : rect ? source.width : width),
+               int32_t(box > 1 ? guest(source.height) : rect ? source.height : height)},
+              scale, box};
   vk_.vkCmdPushConstants(cmd_, transfer_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(constants), &constants);
   vk_.vkCmdDraw(cmd_, 3, 1, 0, 0);
   vk_.vkCmdEndRendering(cmd_);

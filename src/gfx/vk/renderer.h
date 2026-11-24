@@ -252,6 +252,7 @@ class Renderer : public Pm4Sink {
     std::map<uint32_t, VkImageView> swizzled_views;  // sampled images: by host swizzle | other signedness << 12
     bool swapped = false;  // resolve destinations: red and blue swapped (RB_COPY_DEST_INFO copy_dest_swap)
     bool hdr = false;  // n1 extended gamma, optional
+    bool guest_size = false;  // a resolve kept at guest size under a render scale (Renderer::SmallResolve)
     // Surfaces reach to the end of EDRAM (often 1328+ rows for a 720-row target), and on tiling GPUs every render
     // pass loads and stores its whole render area. used_*: the extent from the origin that anything has written
     // (format transfers copy only that). area_*: the same over viewport-bounded draws only, the render area a pass
@@ -342,8 +343,14 @@ class Renderer : public Pm4Sink {
   bool ReadImage(const Image& image, std::vector<uint8_t>& rgb, uint32_t& width, uint32_t& height);
   void DumpResolve(const Image& image, uint32_t address);
   Image* Own(const SurfaceKey& key, Image* image);
+  // guest_size: kept at the guest's own size under a render scale (see SmallResolve).
   Image* ResolveTexture(uint32_t address, uint32_t format, uint32_t width, uint32_t height, bool depth_value = false,
-                        bool is_signed = false, bool hdr = false);
+                        bool is_signed = false, bool hdr = false, bool guest_size = false);
+  // Under render scale > 1, a colour resolve into a quarter-resolution buffer (UE3's depth-of-field and blur chain, 352x182)
+  // is stored at guest size, box-filtered down from the scaled target. The guest's blurs sample such buffers with bilinear
+  // taps placed between guest texels; on a texture scale times denser a tap between two host texels blends two texels of the
+  // same guest texel, the blur narrows and a grid appears (pause menu, GitHub #36). BOTS_GFX_SMALL_RESOLVE=0 turns it off.
+  bool SmallResolve(uint32_t width, uint32_t height) const;
   // depth_or_layers: Z size of 3D images, array layers otherwise (6 for cubes).
   bool CreateImage(Image& image, VkFormat format, uint32_t width, uint32_t height, bool depth,
                    VkImageViewType view_type = VK_IMAGE_VIEW_TYPE_2D, bool attachment = true,
@@ -496,8 +503,10 @@ class Renderer : public Pm4Sink {
   // A full-screen triangle (transfer_vs_) into one colour attachment, dynamic viewport and scissor.
   VkPipeline FullscreenPipeline(VkShaderModule fs, VkFormat format, VkPipelineLayout layout);
   bool InitPresent();
+  // box > 1: dest texels are the average of box x box source texels (a resolve stored at guest size, see SmallResolve);
+  // `rect` is then in dest texels and the source is read at the dest position times source/guest size.
   void Transfer(Image& source, uint32_t source_format, Image& dest, uint32_t dest_format,
-                const VkRect2D* rect = nullptr, float scale = 1.0f);
+                const VkRect2D* rect = nullptr, float scale = 1.0f, int box = 1);
   // Hybrid spike (hybrid_fill.cpp): draws the queued stand-in scene into `target`; false if there was none to draw.
   bool DrawSceneFill(Image& target);
   void DestroySceneFill();
