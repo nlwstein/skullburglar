@@ -391,11 +391,12 @@ fs::path SaveBundle(const fs::path& log_folder, size_t tail_lines, std::string& 
     const fs::path& path = logs[li].second;
     const std::string text = ReadFile(path, 16 << 20);
     out += "\n== " + path.filename().string() + (li == 0 ? " (newest)" : " (the one before)") + "\n";
-    if (li == 0) {
-      std::vector<std::string> gpu = LinesContaining(text, {"Vulkan device '", "VulkanPresenter: Created", "driverName:", "driverInfo:", "env: "}, 40);
-      if (!gpu.empty()) {
-        out += "-- GPU and switches, from the top of this log\n";
-        for (const std::string& l : gpu) out += l + "\n";
+    {  // what each run said about itself at the top: summary, env switches and the GPU
+      std::vector<std::string> head = LinesContaining(
+          text, {"summary: ", "env: ", "Vulkan device '", "VulkanPresenter: Created", "driverName:", "driverInfo:"}, 60);
+      if (!head.empty()) {
+        out += "-- summary, switches and GPU lines from this log\n";
+        for (const std::string& l : head) out += l + "\n";
         out += "-- end\n";
       }
     }

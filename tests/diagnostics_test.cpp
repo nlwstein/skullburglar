@@ -49,7 +49,7 @@ int main() {
   // The environment block: only BOTS_ and REX_, sorted, odd entries skipped.
   {
     const auto lines = EnvSwitchLines({"PATH=/usr/bin", "REX_FRAMERATE_LIMIT=0", "BOTS_N1_MAXTEX=1024", "=C:=C:\\", "BOTSX=1",
-                                       "BOTS_GFX_VS_CONTRACTION=", "BOTS_PASSWORD=hunter2", "NOEQUALS"});
+                                       "BOTS_GFX_VS_CONTRACTION=", "BOTS_PASSWORD=hunter2", "NOEQUALS", "BOTS_HYBRID_STATE=55bc7a8a6ee0"});
     CHECK(lines.size() == 4);
     CHECK_EQ(lines[0], "env: BOTS_GFX_VS_CONTRACTION=(empty)");
     CHECK_EQ(lines[1], "env: BOTS_N1_MAXTEX=1024");

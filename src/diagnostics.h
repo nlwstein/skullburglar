@@ -72,7 +72,9 @@ inline std::string SanitizeEnvValue(std::string_view name, std::string_view valu
 }
 
 // Whether a variable is one of ours to log.
+// The game sets two BOTS_ variables itself to hand pointers between its modules; they are not switches.
 inline bool IsOurSwitch(std::string_view name) {
+  if (name == "BOTS_HYBRID_STATE" || name == "BOTS_PROMPT_STATE") return false;
   return name.rfind("BOTS_", 0) == 0 || name.rfind("REX_", 0) == 0;
 }
 
@@ -271,8 +273,8 @@ void AddGameSummary(const GameInfo& info, std::function<void(const std::string&)
 // The summary lines gathered so far (each "summary: key: value"), waiting briefly for the startup thread.
 std::vector<std::string> SummaryLines();
 
-// Writes <folder>/skullburglar-diagnostics.txt: the summary block, the GPU lines from the newest log, and the end of
-// the newest logs (`tail_lines` each, at most two). Returns the file's path, or an error message in `error`.
+// Writes <folder>/skullburglar-diagnostics.txt: the summary block, each log's summary, switch and GPU lines, and the
+// end of the newest logs (`tail_lines` each, at most two). Returns the file's path, or an error message in `error`.
 std::filesystem::path SaveBundle(const std::filesystem::path& log_folder, size_t tail_lines, std::string& error);
 
 }  // namespace bots::diag
