@@ -250,4 +250,8 @@ class LauncherMenu {
   bool help_locked_ = false;
 };
 
+// The launcher's dusk sky, sun and dunes, drawn into `dl` over `size` (page: the plainer sky behind a settings page).
+// The loading screen draws the same picture so the hand-over from the launcher to the game has no cut.
+void DrawDuskBackdrop(ImDrawList* dl, const ImVec2& size, bool page, float alpha = 1.0f);
+
 }  // namespace bots::setup

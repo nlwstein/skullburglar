@@ -100,6 +100,16 @@ pre1` the greyed-out new-renderer settings). In the game, `BOTS_DATA_DIR=<folder
 console-id folder in it (not in its `user` folder) shows that notice, and `BOTS_SETUP_MOVE=1` does what its button
 does as the window opens (test runs only).
 
+### The loading screen
+
+Between Play and the game's first frame the game shows a loading screen in the launcher's look (`src/setup/loading_screen.h`,
+fed by `src/shader_progress.h`): three steps (starting up, preparing shaders with a count and a time estimate, loading the
+game) and a bar that only moves forward. `tools/launcher_preview.sh <imgui dir> --loading --check --out <dir>` draws it in
+each state (starting, three points of a first-start shader build, loading the game, the hand-over fade, a warm start) at the
+nine sizes. `BOTS_LOADING_SHOT=<dir>` in the game writes a PNG of the real screen at the window's size at the first frame,
+every ten percent of the bar, each phase change and while it fades out; the log has the same moments as `loading screen:`
+lines. `BOTS_PRECOMPILE_HOLD=0` leaves the screen out (scripted runs).
+
 ## Linux and Windows
 
 Both build in throwaway Docker containers after codegen has produced `generated/` (on macOS as above).
