@@ -68,6 +68,7 @@ set(BOTS_SOURCES
     src/setup/settings_catalog.cpp
     src/setup/launcher_menu.cpp
     src/setup/launcher_shot.cpp
+    src/setup/loading_screen.cpp
     src/setup/launcher_fonts.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/launcher_font_data.cpp
     src/setup/config_migrate.cpp

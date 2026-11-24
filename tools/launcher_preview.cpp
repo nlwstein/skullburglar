@@ -23,6 +23,7 @@
 
 #include "setup/launcher_menu.h"
 #include "setup/launcher_shot.h"
+#include "setup/loading_screen.h"
 #include "setup/settings.h"
 
 using namespace bots::setup;
@@ -72,7 +73,7 @@ int main(int argc, char** argv) {
   std::string script = kDefaultScript;
   std::string state = "installed";
   std::filesystem::path fonts_dir = std::filesystem::path(__FILE__).parent_path().parent_path() / "assets" / "fonts";
-  bool check = false;
+  bool check = false, loading = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -82,9 +83,10 @@ int main(int argc, char** argv) {
     else if (a == "--state") state = next();
     else if (a == "--fonts") fonts_dir = next();
     else if (a == "--check") check = true;
+    else if (a == "--loading") loading = true;
     else {
       std::fprintf(stderr, "usage: launcher_preview [--out DIR] [--sizes LIST] [--script STEPS] [--state NAME] "
-                           "[--fonts DIR] [--check]\n");
+                           "[--fonts DIR] [--check] [--loading]\n");
       return 2;
     }
   }
@@ -95,6 +97,21 @@ int main(int argc, char** argv) {
   if (inter_r.empty() || inter_sb.empty() || oswald.empty()) {
     std::fprintf(stderr, "launcher_preview: fonts not found in %s\n", fonts_dir.string().c_str());
     return 2;
+  }
+
+  if (loading) {  // the loading screen (setup/loading_screen.h) in each of its states, at every size
+    LauncherFontData data;
+    data.inter_regular = inter_r.data(), data.inter_regular_size = inter_r.size();
+    data.inter_semibold = inter_sb.data(), data.inter_semibold_size = inter_sb.size();
+    data.oswald_semibold = oswald.data(), data.oswald_semibold_size = oswald.size();
+    ImGui::CreateContext();
+    std::error_code lec;
+    std::filesystem::create_directories(out, lec);
+    std::filesystem::remove(out / "shots.txt", lec);
+    const int bad = WriteLoadingScenarioShots(data, out, ParseShotSizes(sizes), "1.15.0",
+                                              [](const std::string& line) { std::printf("%s\n", line.c_str()); });
+    std::printf("launcher_preview: loading screen, %d problem(s)\n", bad);
+    return (check && bad) ? 1 : 0;
   }
 
   const std::vector<Setting> pristine = [&] {

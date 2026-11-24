@@ -290,36 +290,40 @@ void LauncherMenu::Toggle(ImDrawList* dl, ImVec2 min, ImVec2 max, bool on, bool 
 
 // ---- Background: original shapes only (no game art) ----
 
-void LauncherMenu::DrawBackground(ImDrawList* dl, const ImVec2& size, bool page) {
+void LauncherMenu::DrawBackground(ImDrawList* dl, const ImVec2& size, bool page) { DrawDuskBackdrop(dl, size, page); }
+
+// `alpha` fades the whole picture (the loading screen's handover to the game).
+void DrawDuskBackdrop(ImDrawList* dl, const ImVec2& size, bool page, float alpha) {
+  auto F = [alpha](ImU32 c) { return Fade(c, alpha); };
   const float w = size.x, h = size.y;
-  dl->AddRectFilled(ImVec2(0, 0), size, color::kBackground);
+  dl->AddRectFilled(ImVec2(0, 0), size, F(color::kBackground));
   // A dusk sky: dark at the top, warm toward the horizon on the right.
   const float horizon = h * (page ? 0.98f : 0.72f);
-  dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(w, horizon), color::Rgb(14, 11, 9), color::Rgb(34, 22, 14),
-                              color::Rgb(120, 62, 24), color::Rgb(20, 14, 10));
+  dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(w, horizon), F(color::Rgb(14, 11, 9)), F(color::Rgb(34, 22, 14)),
+                              F(color::Rgb(120, 62, 24)), F(color::Rgb(20, 14, 10)));
   if (!page) {
     // The sun, low on the right, then the dunes in front of it.
     const ImVec2 sun(w * 0.80f, horizon - h * 0.10f);
-    dl->AddCircleFilled(sun, h * 0.20f, color::Rgb(214, 150, 66, 60), 96);
-    dl->AddCircleFilled(sun, h * 0.15f, color::Rgb(232, 172, 84, 150), 96);
-    dl->AddRectFilledMultiColor(ImVec2(0, horizon - h * 0.08f), ImVec2(w, horizon), color::Rgb(0, 0, 0, 0),
-                                color::Rgb(180, 96, 36, 0), color::Rgb(180, 96, 36, 110), color::Rgb(0, 0, 0, 0));
+    dl->AddCircleFilled(sun, h * 0.20f, F(color::Rgb(214, 150, 66, 60)), 96);
+    dl->AddCircleFilled(sun, h * 0.15f, F(color::Rgb(232, 172, 84, 150)), 96);
+    dl->AddRectFilledMultiColor(ImVec2(0, horizon - h * 0.08f), ImVec2(w, horizon), F(color::Rgb(0, 0, 0, 0)),
+                                F(color::Rgb(180, 96, 36, 0)), F(color::Rgb(180, 96, 36, 110)), F(color::Rgb(0, 0, 0, 0)));
     auto dune = [&](float x0, float x1, float top, float base, ImU32 col) {
       dl->PathClear();
       dl->PathLineTo(ImVec2(x0, base));
       dl->PathBezierCubicCurveTo(ImVec2(x0 + (x1 - x0) * 0.3f, top), ImVec2(x0 + (x1 - x0) * 0.7f, top),
                                  ImVec2(x1, base), 48);
-      dl->PathFillConvex(col);
+      dl->PathFillConvex(F(col));
     };
     dune(-w * 0.3f, w * 0.75f, horizon - h * 0.03f, h * 1.05f, color::Rgb(30, 19, 12));
     dune(w * 0.35f, w * 1.4f, horizon - h * 0.07f, h * 1.05f, color::Rgb(22, 15, 10));
-    dl->AddRectFilled(ImVec2(0, horizon + h * 0.12f), ImVec2(w, h), color::Rgb(16, 11, 8));
+    dl->AddRectFilled(ImVec2(0, horizon + h * 0.12f), ImVec2(w, h), F(color::Rgb(16, 11, 8)));
     // Shade behind the menu column so its text keeps its contrast over the sky.
-    dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(w * 0.55f, h), color::Rgb(8, 6, 5, 200), color::Rgb(8, 6, 5, 0),
-                                color::Rgb(8, 6, 5, 0), color::Rgb(8, 6, 5, 200));
+    dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(w * 0.55f, h), F(color::Rgb(8, 6, 5, 200)), F(color::Rgb(8, 6, 5, 0)),
+                                F(color::Rgb(8, 6, 5, 0)), F(color::Rgb(8, 6, 5, 200)));
   } else {
-    dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(w, h * 0.22f), color::Rgb(60, 34, 16, 140),
-                                color::Rgb(110, 58, 22, 160), color::Rgb(0, 0, 0, 0), color::Rgb(0, 0, 0, 0));
+    dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(w, h * 0.22f), F(color::Rgb(60, 34, 16, 140)),
+                                F(color::Rgb(110, 58, 22, 160)), F(color::Rgb(0, 0, 0, 0)), F(color::Rgb(0, 0, 0, 0)));
   }
 }
 

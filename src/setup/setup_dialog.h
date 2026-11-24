@@ -1349,6 +1349,9 @@ class DisplayDialog : public rex::ui::ImGuiDialog {
   bool close_ = false;
 };
 
+// True while the launcher window is up: the loading screen (shader_progress.h) waits until it closes.
+inline bool LauncherOpen() { return SetupDialog::Instance() != nullptr; }
+
 // The window is closing (the X, Cmd-Q, Alt-F4) while the launcher is up: write any change still pending first.
 inline void FlushLauncherSettings() {
   if (SetupDialog* dialog = SetupDialog::Instance()) dialog->FlushSettings();
