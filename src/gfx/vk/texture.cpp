@@ -323,8 +323,9 @@ Renderer::Image* Renderer::ResolvedTexture(const rg::xenos::xe_gpu_texture_fetch
     image = it->second;
   }
   // The fetch's size, not the resolve's pitch, is what normalized coordinates span.
-  const uint32_t width = std::min(Host(uint32_t(fetch.size_2d.width) + 1), image->width);
-  const uint32_t height = std::min(Host(uint32_t(fetch.size_2d.height) + 1), image->height);
+  const uint32_t fetch_w = uint32_t(fetch.size_2d.width) + 1, fetch_h = uint32_t(fetch.size_2d.height) + 1;
+  const uint32_t width = std::min(image->guest_size ? fetch_w : Host(fetch_w), image->width);
+  const uint32_t height = std::min(image->guest_size ? fetch_h : Host(fetch_h), image->height);
   if (image->raw_depth_from) MaterializeRawDepth(*image);
   if (width == image->width && height == image->height) return image;
   return Crop(*image, width, height);
