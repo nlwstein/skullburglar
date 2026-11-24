@@ -331,6 +331,50 @@ ExecState* Exec() {
 void RunPlayerCommand(PPCContext& ctx, uint8_t* base, ExecState& st, uint32_t player, const std::string& cmd,
                       bool log = true);
 
+namespace mouse_inject {
+// A queue run one entry per game frame (actions, which take no frame, run in the same frame as the next entry), so a
+// whole measurement is deterministic in frames: counts, idle frames to settle, a setting changed between steps.
+struct Job {
+  double dx = 0, dy = 0;
+  int frames = 0, done = 0;
+  std::string flag, value;  // a queued setflag
+  std::string key;          // a queued key press (name), with key_down
+  bool key_down = false;
+};
+std::mutex mutex;
+std::deque<Job> jobs;
+void Queue(Job j) {
+  std::lock_guard lock(mutex);
+  jobs.push_back(std::move(j));
+}
+// Once per ProcessInput, before the driver is drained.
+void Tick(bots::MouseKeyboardDriver& kbm) {
+  std::lock_guard lock(mutex);
+  while (!jobs.empty() && jobs.front().frames == 0) {
+    const Job& j = jobs.front();
+    if (!j.flag.empty())
+      REXLOG_INFO("MOUSEINJ setflag {} = {} -> {}", j.flag, j.value, rex::cvar::SetFlagByName(j.flag, j.value) ? "ok" : "failed");
+    if (!j.key.empty()) {
+      kbm.TestKey(uint16_t(rex::ui::ParseVirtualKey(j.key)), j.key_down);
+      REXLOG_INFO("MOUSEINJ key {} {}", j.key, j.key_down ? "down" : "up");
+    }
+    jobs.pop_front();
+  }
+  if (jobs.empty()) return;
+  Job& j = jobs.front();
+  const auto at = [&](int k) { return std::pair{std::llround(j.dx * k / j.frames), std::llround(j.dy * k / j.frames)}; };
+  const auto a = at(j.done), b = at(j.done + 1);
+  if (j.done == 0) REXLOG_INFO("MOUSEINJ start dx {} dy {} over {} frames", j.dx, j.dy, j.frames);
+  ++j.done;
+  const float fx = float(b.first - a.first), fy = float(b.second - a.second);
+  if (fx != 0 || fy != 0) kbm.InjectMouse(fx, fy);
+  if (j.done >= j.frames) {
+    REXLOG_INFO("MOUSEINJ end dx {} dy {}", j.dx, j.dy);
+    jobs.pop_front();
+  }
+}
+}  // namespace mouse_inject
+
 void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std::string& cmd) {
   bots::instr::NoteCommand(cmd);
   // "mousefeed <spec>" (B-269): synthetic mouse motion through the driver's path, see mouse_pattern.h; "mousefeed off".
@@ -363,6 +407,40 @@ void RunConsoleCommand(PPCContext& ctx, uint8_t* base, ExecState& st, const std:
       for (const auto& c : expand) RunConsoleCommand(ctx, base, st, c);
       return;
     }
+  }
+  // Mouse calibration (B-311), test aids. All of these queue and then run one step per game frame:
+  //   "mouse <dx> <dy> [frames]"  feed that many raw mouse counts (a sensor's units) through the real mouse path,
+  //                               spread over `frames` frames (default 1 = all at once; 0 0 N = N idle frames); the
+  //                               totals are exact (a frame gets the difference of the rounded running sums)
+  //   "mflag <name> <value>"      setflag, in step (a launcher setting such as kbm_sensitivity)
+  //   "mkey <name> d|u"           press / release a key as if typed (RMB = aim), in step
+  if (cmd.rfind("mouse ", 0) == 0) {
+    mouse_inject::Job j;
+    j.frames = 1;
+    std::sscanf(cmd.c_str() + 6, "%lf %lf %d", &j.dx, &j.dy, &j.frames);
+    j.frames = std::max(1, j.frames);
+    mouse_inject::Queue(std::move(j));
+    return;
+  }
+  if (cmd.rfind("mflag ", 0) == 0) {
+    char name[64] = {}, value[64] = {};
+    if (std::sscanf(cmd.c_str() + 6, "%63s %63s", name, value) == 2) {
+      mouse_inject::Job j;
+      j.flag = name;
+      j.value = value;
+      mouse_inject::Queue(std::move(j));
+    }
+    return;
+  }
+  if (cmd.rfind("mkey ", 0) == 0) {
+    char name[32] = {}, action = 0;
+    if (std::sscanf(cmd.c_str() + 5, "%31s %c", name, &action) == 2) {
+      mouse_inject::Job j;
+      j.key = name;
+      j.key_down = action == 'd';
+      mouse_inject::Queue(std::move(j));
+    }
+    return;
   }
   if (split_screen::Command(cmd) || debug::Command(base, cmd) || bots::scenefeed::Command(base, cmd)) return;
   if (!st.buffer) st.buffer = rex::system::kernel_memory()->SystemHeapAlloc(0x400);
@@ -3056,6 +3134,49 @@ void Apply(uint8_t* base, float dt) {
                   (LoadU32(base, pin + f.smooth_off) & f.smooth_mask) != 0, prop("aMouseX"), prop("aMouseY"),
                   prop("RawJoyUp"), using_pad, int32_t(LoadU32(base, player + 0x60)));  // LocalPlayer.ControllerId
     }
+    // BOTS_CAM_LOG=1 (test only): every frame, what moves the view when nothing moves the mouse. The controller's
+    // Rotation (what aiming changes), the pawn's Drift and ShakenView (the weapon's per-shot view drift and the shaken
+    // view the pawn reports) and the camera's final POV rotation, all pitch/yaw in 65536 per turn, with the loaded
+    // clip so each shot is visible. The values lag the real frame by one (the camera is updated after input).
+    static const bool cam_trace = [] { const char* v = std::getenv("BOTS_CAM_LOG"); return v && *v == '1'; }();
+    if (cam_trace && i == 0) {
+      auto rot = [&](uint32_t obj, const char* name, int32_t& pitch, int32_t& yaw) {
+        const uint32_t o = obj ? split_screen::Prop(base, obj, name) : 0xFFFFFFFF;
+        if (o == 0xFFFFFFFF) return;
+        pitch = int32_t(LoadU32(base, obj + o));
+        yaw = int32_t(LoadU32(base, obj + o + 4));
+      };
+      int32_t pcp = 0, pcy = 0, drp = 0, dry = 0, shp = 0, shy = 0, cap = 0, cay = 0, cmp = 0, cmy = 0;
+      float fov = 0;
+      int32_t clip = -1;
+      rot(pc, "Rotation", pcp, pcy);
+      const uint32_t pawn_o = split_screen::Prop(base, pc, "Pawn");
+      const uint32_t pawn = pawn_o != 0xFFFFFFFF ? LoadU32(base, pc + pawn_o) : 0;
+      if (debug::Readable(pawn)) {
+        rot(pawn, "Drift", drp, dry);
+        rot(pawn, "ShakenView", shp, shy);
+        rot(pawn, "Rotation", cap, cay);
+        const uint32_t wo = split_screen::Prop(base, pawn, "Weapon");
+        const uint32_t weapon = wo != 0xFFFFFFFF ? LoadU32(base, pawn + wo) : 0;
+        const uint32_t ml = debug::Readable(weapon) ? split_screen::Prop(base, weapon, "FireModeList") : 0xFFFFFFFF;
+        if (ml != 0xFFFFFFFF && LoadU32(base, weapon + ml + 4)) {
+          const uint32_t mode = LoadU32(base, LoadU32(base, weapon + ml));
+          const uint32_t ao = debug::Readable(mode) ? split_screen::Prop(base, mode, "AmmoInClip") : 0xFFFFFFFF;
+          if (ao != 0xFFFFFFFF) clip = int32_t(LoadU32(base, mode + ao));
+        }
+      }
+      const uint32_t co = split_screen::Prop(base, pc, "PlayerCamera");
+      const uint32_t cam = co != 0xFFFFFFFF ? LoadU32(base, pc + co) : 0;
+      const uint32_t cc = debug::Readable(cam) ? split_screen::Prop(base, cam, "CameraCache") : 0xFFFFFFFF;
+      if (cc != 0xFFFFFFFF) {
+        const uint32_t pov = cam + cc + 4;  // TCameraCache {float TimeStamp; TPOV POV}
+        cmp = int32_t(LoadU32(base, pov + 12));
+        cmy = int32_t(LoadU32(base, pov + 16));
+        fov = F(base, pov + 24);
+      }
+      REXLOG_INFO("CAMLOG dt={:.6f} pc={},{} drift={},{} shaken={},{} pawn={},{} cam={},{} fov={:.2f} clip={}", dt, pcp, pcy,
+                  drp, dry, shp, shy, cap, cay, cmp, cmy, fov, clip);
+    }
     if (logged_pin[i] != pin) {
       logged_pin[i] = pin;
       REXLOG_INFO("controller feel: player {} PlayerInput {:08X}: mouse smoothing off, stick acceleration {}, stick "
@@ -3108,6 +3229,7 @@ extern "C" void sub_82BC86F0(PPCContext& __restrict ctx, uint8_t* base) {
   float dx = 0, dy = 0;
   if (auto* kbm = bots::MouseKeyboardDriver::instance()) {
     KeyTest(*kbm, dt);
+    mouse_inject::Tick(*kbm);
     kbm->TakeMouseDelta(dx, dy);
     static std::vector<bool> enter;
     kbm->TakeEnterEvents(enter);
