@@ -49,7 +49,14 @@ class LoadingProgress {
     }
     if (shaders_finished && total > 0) done = total;
     done_ = std::max(done_, done);
-    if (shaders_finished && !shaders_done_) shaders_done_at_ = now, shaders_done_ = true;
+    if (shaders_finished) {
+      if (!shaders_done_) shaders_done_at_ = now, shaders_done_ = true;
+    } else if (shaders_done_ && total > 0 && total > finished_total_) {
+      // The count grew after it completed (the port's pipelines done, the new renderer's queued behind them): back to
+      // building. The bar stays where it was.
+      shaders_done_ = false;
+    }
+    if (shaders_done_) finished_total_ = total_;
     // Rate: a smoothed rate over a window, so one slow or fast pipeline doesn't swing the estimate.
     if (compile_start_ >= 0 && !shaders_done_) {
       if (last_sample_t_ < 0) {
@@ -102,7 +109,11 @@ class LoadingProgress {
     if (since < 6.0 || done_ < 8 || double(done_) < 0.02 * double(total_)) return -1;
     const double rate = rate_ > 0 ? rate_ : double(done_) / since;
     if (!(rate > 0)) return -1;
-    return double(total_ - done_) / rate;
+    double left = double(total_ - done_) / rate;
+    // Pipelines vary a lot in cost (a run of cheap ones can be followed by slow ones), so a short estimate early on
+    // is a promise the build breaks: below 90 % it never says less than a minute.
+    if (double(done_) < 0.9 * double(total_)) left = std::max(left, 60.0);
+    return left;
   }
 
   // The hint about the first start shows once the build is clearly a long one.
@@ -127,7 +138,7 @@ class LoadingProgress {
   bool started_ = false, graphics_ = false, saw_compile_ = false, shaders_done_ = false;
   double t0_ = 0, now_ = 0, compile_start_ = -1, last_sample_t_ = -1, rate_ = -1;
   double shaders_done_at_ = -1;
-  uint32_t done_ = 0, total_ = 0, last_sample_done_ = 0;
+  uint32_t done_ = 0, total_ = 0, last_sample_done_ = 0, finished_total_ = 0;
   float bar_ = 0.0f;
 };
 

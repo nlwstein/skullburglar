@@ -41,7 +41,8 @@ int main() {
           assert(r <= last_remaining + 2.0);  // steady rate: never jumps up
           last_remaining = r;
           const double truth = double(3000 - done) / 12.0;
-          assert(r > truth * 0.8 - 2.0 && r < truth * 1.2 + 2.0);
+          if (done >= 2700) assert(r > truth * 0.8 - 2.0 && r < truth * 1.2 + 2.0);
+          else assert(r >= 60.0);  // never "less than a minute" this early
         }
         if (p.show_first_start_hint()) saw_hint = true;
       }
@@ -80,6 +81,19 @@ int main() {
     assert(p.bar() >= b && p.done() >= 500);
     p.Observe(2.0, true, 600, 800, false);
     assert(p.total() >= 1000);
+  }
+  // The count growing after it completed (the new renderer's pipelines queue behind the port's): building again, bar kept.
+  {
+    LoadingProgress p;
+    p.Observe(0.0, true, 0, 0, false);
+    p.Observe(1.0, true, 1000, 2000, false);
+    p.Observe(2.0, true, 2000, 2000, true);
+    assert(p.phase() == LoadPhase::kGame);
+    const float b = p.bar();
+    p.Observe(3.0, true, 2100, 4000, false);
+    assert(p.phase() == LoadPhase::kShaders && p.bar() >= b && p.total() == 4000);
+    p.Observe(4.0, true, 4000, 4000, true);
+    assert(p.phase() == LoadPhase::kGame);
   }
   // Wording.
   assert(RemainingText(-1).empty());
