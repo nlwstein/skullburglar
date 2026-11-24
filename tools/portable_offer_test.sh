@@ -37,7 +37,10 @@ check() { if [ "$1" = ok ]; then passes=$((passes + 1)); echo "ok: $2"; else fai
 install_copy() { rm -rf "$1"; mkdir -p "$1"; if [ "$OS" = Darwin ]; then cp -cR "$DIST/." "$1/"; else cp -a "$DIST/." "$1/"; fi; }
 start() {  # name appdir [env...]: runs to the end (the launcher quits itself), log in out/<name>.log
   name=$1; app=$2; shift 2
-  env -u XDG_CACHE_HOME -u XDG_CONFIG_HOME -u XDG_DATA_HOME -u XDG_STATE_HOME -u XDG_RUNTIME_DIR HOME="$W/home" TMPDIR="$W/tmp" \
+  # One bots process at a time: wait (bounded) for a foreign one to end, right before launching.
+  i=0; while pgrep -x bots >/dev/null 2>&1 && [ $i -lt 180 ]; do sleep 2; i=$((i + 2)); done
+  pgrep -x bots >/dev/null 2>&1 && fail "a foreign bots process kept running; not launching $name"
+  env -u XDG_CACHE_HOME -u XDG_CONFIG_HOME -u XDG_DATA_HOME -u XDG_STATE_HOME HOME="$W/home" TMPDIR="$W/tmp" \
       BOTS_LAUNCHER=1 BOTS_SETUP_LIVE="wait:5;quit" "$@" ${BOTS_ISO_WRAP:-} "$app/bots" --log_file="$W/out/$name.log" > "$W/out/$name.out" 2>&1 &
   pid=$!
   i=0; while kill -0 "$pid" 2>/dev/null && [ $i -lt 90 ]; do sleep 1; i=$((i + 1)); done

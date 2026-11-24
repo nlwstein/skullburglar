@@ -1106,6 +1106,9 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     if (!portable_offer_open_) return;
     const char* v = std::getenv("BOTS_SETUP_PORTABLE");
     if (!v) return;
+    // A player can't answer in the first frame, and quitting that early trips a teardown race in the SDK's immediate
+    // drawer (vkDestroyBuffer on a buffer from a frame that never finished): answer after the window has been up a moment.
+    if (++portable_hook_frames_ < 90) return;
     if (std::strcmp(v, "yes") == 0) Do(LauncherAction::kPortableYes);
     else if (std::strcmp(v, "no") == 0) Do(LauncherAction::kPortableNo);
     else if (std::strcmp(v, "later") == 0) Do(LauncherAction::kPortableLater);
@@ -1385,6 +1388,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   bool portable_offer_open_ = false;  // the "keep everything on this drive?" offer (B-408)
   std::filesystem::path portable_base_;  // where portable.txt goes: next to the program
   std::string portable_offer_error_;
+  int portable_hook_frames_ = 0;
   GameSize shared_size_;
   uint64_t offer_free_ = 0;
   bool cancel_hook_done_ = false, page_hook_done_ = false;

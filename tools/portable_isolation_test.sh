@@ -83,7 +83,7 @@ run_game() {  # name, extra env..., -- game args
   name=$1; shift
   : > "$OUT/$name.log"
   # shellcheck disable=SC2086
-  env -u XDG_CACHE_HOME -u XDG_CONFIG_HOME -u XDG_DATA_HOME -u XDG_STATE_HOME -u XDG_RUNTIME_DIR \
+  env -u XDG_CACHE_HOME -u XDG_CONFIG_HOME -u XDG_DATA_HOME -u XDG_STATE_HOME \
       HOME="$H" TMPDIR="$T" TEMP="$T" TMP="$T" BOTS_INSTR="$PORT" $ISOENV ${BOTS_ISO_ENV:-} "$@" \
       ${BOTS_ISO_WRAP:-} $PREFIX "$APP/$EXE" --log_level=info ${BOTS_ISO_ARGS:-} > "$OUT/$name.out" 2>&1 &
   PID=$!
