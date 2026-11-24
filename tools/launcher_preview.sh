@@ -10,7 +10,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 BIN=${PREVIEW_BIN:-$(mktemp -d)/launcher_preview}
 ${CXX:-c++} -std=c++20 -O2 -Wall -Werror -I "$REPO/src" -I "$IMGUI" \
   "$REPO/tools/launcher_preview.cpp" "$REPO/src/setup/launcher_menu.cpp" "$REPO/src/setup/launcher_shot.cpp" \
-  "$REPO/src/setup/settings_catalog.cpp" \
+  "$REPO/src/setup/settings_catalog.cpp" "$REPO/src/setup/loading_screen.cpp" \
   "$IMGUI/imgui.cpp" "$IMGUI/imgui_draw.cpp" "$IMGUI/imgui_widgets.cpp" "$IMGUI/imgui_tables.cpp" \
   -o "$BIN"
 exec "$BIN" "$@"

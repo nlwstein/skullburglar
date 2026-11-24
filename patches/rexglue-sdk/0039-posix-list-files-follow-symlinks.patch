@@ -1,0 +1,26 @@
+diff --git a/src/core/filesystem_posix.cpp b/src/core/filesystem_posix.cpp
+index 2ef3c88..411e01b 100644
+--- a/src/core/filesystem_posix.cpp
++++ b/src/core/filesystem_posix.cpp
+@@ -303,13 +303,19 @@ std::vector<FileInfo> ListFiles(const std::filesystem::path& path) {
+     FileInfo info;
+ 
+     info.name = ent->d_name;
++    // stat follows links, and d_type does not: a folder reached through a symlink (a game kept on another drive and
++    // linked into place) has d_type DT_LNK and is still a folder to the guest. Some filesystems (network and FUSE
++    // mounts) report no d_type at all (DT_UNKNOWN). The type therefore comes from stat; an entry stat can't reach (a
++    // link to nothing) has nothing to list and is left out.
+     struct stat st;
+-    stat((path / info.name).c_str(), &st);
++    if (stat((path / info.name).c_str(), &st) != 0) {
++      continue;
++    }
+     info.create_timestamp = convertUnixtimeToWinFiletime(st.st_ctime);
+     info.access_timestamp = convertUnixtimeToWinFiletime(st.st_atime);
+     info.write_timestamp = convertUnixtimeToWinFiletime(st.st_mtime);
+     info.path = path;
+-    if (ent->d_type == DT_DIR) {
++    if (S_ISDIR(st.st_mode)) {
+       info.type = FileInfo::Type::kDirectory;
+       info.total_size = 0;
+     } else {

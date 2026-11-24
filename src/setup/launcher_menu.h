@@ -164,6 +164,7 @@ class LauncherMenu {
   bool FocusSetting(const std::string& cvar);  // opens its page and selects it
   void FocusRow(int row);
   void SetLastInput(LastInput input) { last_input_ = input; forced_input_ = true; }
+  void ShowGlyphStrip(bool on) { glyph_strip_ = on; }  // Start and Back drawn in a corner, for previews
   void OpenResetConfirm() { confirm_reset_ = true; confirm_focus_ = 1; }
   void OpenMoveConfirm() { confirm_move_ = true; confirm_focus_ = 1; }
 
@@ -237,6 +238,7 @@ class LauncherMenu {
   bool focus_text_input_ = false;
   LastInput last_input_ = LastInput::kKeyboardMouse;
   bool forced_input_ = false;
+  bool glyph_strip_ = false;
   PromptDevice device_ = PromptDevice::kKeyboardMouse;
   ImVec2 last_mouse_{-1e9f, -1e9f};
   float scale_ = 1.0f;
@@ -249,5 +251,9 @@ class LauncherMenu {
   std::string help_title_, help_text_, help_default_, help_note_;
   bool help_locked_ = false;
 };
+
+// The launcher's dusk sky, sun and dunes, drawn into `dl` over `size` (page: the plainer sky behind a settings page).
+// The loading screen draws the same picture so the hand-over from the launcher to the game has no cut.
+void DrawDuskBackdrop(ImDrawList* dl, const ImVec2& size, bool page, float alpha = 1.0f);
 
 }  // namespace bots::setup

@@ -165,6 +165,42 @@ int main() {
   assert(LauncherPromptDevice(LastInput::kController, PadKind::kPlayStation5, "xbox") == PromptDevice::kXbox);
   assert(LauncherPromptDevice(LastInput::kController, PadKind::kXbox, "ps4") == PromptDevice::kPlayStation4);
   assert(LauncherPromptDevice(LastInput::kController, PadKind::kNone, "auto") == PromptDevice::kXbox);
+  // B-401: an Xbox 360 pad gets the 360's Back and Start glyphs; "xbox" in pad_prompts still forces the One/Series ones,
+  // and the keyboard wins as before.
+  assert(LauncherPromptDevice(LastInput::kController, PadKind::kXbox360, "auto") == PromptDevice::kXbox360);
+  assert(LauncherPromptDevice(LastInput::kController, PadKind::kXbox360, "xbox") == PromptDevice::kXbox);
+  assert(LauncherPromptDevice(LastInput::kController, PadKind::kXbox360, "ps5") == PromptDevice::kPlayStation5);
+  assert(LauncherPromptDevice(LastInput::kKeyboardMouse, PadKind::kXbox360, "auto") == PromptDevice::kKeyboardMouse);
+  // SDL's pad type to the launcher's pad kind (pad_nav.h maps SDL_GAMEPAD_TYPE_* to PadType).
+  assert(PadKindForType(PadType::kXbox360) == PadKind::kXbox360);
+  assert(PadKindForType(PadType::kOther) == PadKind::kXbox);
+  assert(PadKindForType(PadType::kPlayStation3) == PadKind::kPlayStation4);
+  assert(PadKindForType(PadType::kPlayStation4) == PadKind::kPlayStation4);
+  assert(PadKindForType(PadType::kPlayStation5) == PadKind::kPlayStation5);
+  // Steam Input and the Steam Deck: 360 glyphs only for a real 360 pad off the Deck.
+  {
+    const PadInfo real360{PadType::kXbox360, "Xbox 360 Controller", 0x045E, 0x028E, false};
+    assert(PadKindFor(real360, false) == PadKind::kXbox360);
+    assert(PadKindFor(real360, true) == PadKind::kXbox);  // on a Deck, its own glyphs
+    const PadInfo virt{PadType::kXbox360, "Steam Virtual Gamepad", 0x28DE, 0x11FF, false};
+    assert(PadKindFor(virt, false) == PadKind::kXbox);
+    assert(PadKindFor(virt, true) == PadKind::kXbox);
+    // Steam Input under another name or ids: caught by the name, the vendor or SDL's Steam handle.
+    assert(PadKindFor({PadType::kXbox360, "Steam Virtual Gamepad", 0x045E, 0x028E, false}, false) == PadKind::kXbox);
+    assert(PadKindFor({PadType::kXbox360, "Xbox 360 Controller", 0x28DE, 0x11FF, false}, false) == PadKind::kXbox);
+    assert(PadKindFor({PadType::kXbox360, "Xbox 360 Controller", 0x045E, 0x028E, true}, false) == PadKind::kXbox);
+    // The Deck's own pad: SDL's type is "other" (not 360), vendor Valve.
+    assert(PadKindFor({PadType::kOther, "Steam Deck Controller", 0x28DE, 0x1205, false}, true) == PadKind::kXbox);
+    // Other families are unchanged by any of it.
+    assert(PadKindFor({PadType::kPlayStation5, "DualSense", 0x054C, 0x0CE6, false}, false) == PadKind::kPlayStation5);
+    assert(PadKindFor({PadType::kPlayStation5, "DualSense", 0x054C, 0x0CE6, false}, true) == PadKind::kPlayStation5);
+    assert(PadKindFor({PadType::kOther, "Xbox Series X Controller", 0x045E, 0x0B12, false}, false) == PadKind::kXbox);
+    assert(!IsSteamPad(real360) && IsSteamPad(virt));
+    // The Deck host: SteamDeck=1, or the board name with or without a trailing newline.
+    assert(IsSteamDeckHost("1", ""));
+    assert(IsSteamDeckHost("", "Jupiter\n") && IsSteamDeckHost("", "Galileo"));
+    assert(!IsSteamDeckHost("", "") && !IsSteamDeckHost("0", "MS-7C94") && !IsSteamDeckHost("", "Jupiterx"));
+  }
 
   // Key bindings.
   const auto keys = SplitKeys("E, F,Backspace");

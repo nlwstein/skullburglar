@@ -335,6 +335,31 @@ class BotsApp : public rex::ReXApp {
     return bots::savebackup::NewestLog(rex::filesystem::GetExecutableFolder() / "logs", "bots_");
   }
 
+  // B-402: a game folder moved to another drive is often reached through links (the whole folder, or the folders and
+  // files in it). Says where the files really are, so a log from such a setup shows it: the folder's real path when it
+  // differs, and the links directly in the folder, in C1Game and in CookedXenon (the first few by name, then a count).
+  static void LogGameFolderLinks(const std::filesystem::path& dir) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path real = fs::canonical(dir, ec);
+    if (!ec && real.lexically_normal() != fs::absolute(dir, ec).lexically_normal())
+      REXLOG_INFO("game folder is a link: the files are in {}", bots::PathUtf8(real));
+    int links = 0;
+    for (const fs::path& sub : {fs::path{}, fs::path{"C1Game"}, fs::path{"C1Game"} / "CookedXenon"}) {
+      std::error_code e;
+      for (fs::directory_iterator it(dir / sub, e), end; !e && it != end; it.increment(e)) {
+        std::error_code e2;
+        if (!it->is_symlink(e2)) continue;
+        if (++links <= 8) {
+          const fs::path target = fs::canonical(it->path(), e2);
+          REXLOG_INFO("game folder: {} is a link to {}", bots::PathUtf8(sub / it->path().filename()),
+                      e2 ? std::string("(nothing: ") + e2.message() + ")" : bots::PathUtf8(target));
+        }
+      }
+    }
+    if (links > 8) REXLOG_INFO("game folder: {} links in all (8 listed)", links);
+  }
+
   // The first lines of the log: which build this is (B-125). On the desktop, also say where a crash will be archived.
   void LogBuildInfo() {
     REXLOG_INFO("Skullburglar {} (commit {})", bots::setup::AppVersion(), bots::setup::AppCommit());
@@ -349,6 +374,7 @@ class BotsApp : public rex::ReXApp {
       if (!loc.dir.empty())
         REXLOG_INFO("game folder: {} ({}{})", bots::PathUtf8(loc.dir), bots::setup::WhyText(loc.why),
                     loc.portable && loc.why == bots::setup::GameDirWhy::kShared ? ", outside the portable folder" : "");
+      if (!loc.dir.empty()) LogGameFolderLinks(loc.dir);
     }
     if (!bots::setup::ActiveMarkerHint().empty()) REXLOG_WARN("{}", bots::setup::ActiveMarkerHint());  // B-389
     if (!user_data_root().empty()) {  // B-389: which folder the saves are read from and whether any are there

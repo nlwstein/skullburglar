@@ -7,6 +7,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <vector>
 
 #include <SDL3/SDL.h>
@@ -68,12 +71,38 @@ class PadNav {
   // The kind of the first connected controller, for the launcher's button glyphs (launcher_logic.h).
   PadKind Kind() const {
     if (pads_.empty()) return PadKind::kNone;
-    switch (SDL_GetGamepadType(pads_.front().pad)) {
-      case SDL_GAMEPAD_TYPE_PS3:
-      case SDL_GAMEPAD_TYPE_PS4: return PadKind::kPlayStation4;
-      case SDL_GAMEPAD_TYPE_PS5: return PadKind::kPlayStation5;
-      default: return PadKind::kXbox;
+    SDL_Gamepad* pad = pads_.front().pad;
+    const char* name = SDL_GetGamepadName(pad);
+    PadInfo info;
+    info.type = TypeOf(SDL_GetGamepadType(pad));
+    info.name = name ? name : "";
+    info.vendor = SDL_GetGamepadVendor(pad);
+    info.product = SDL_GetGamepadProduct(pad);
+    info.steam_handle = SDL_GetGamepadSteamHandle(pad) != 0;
+    const PadKind kind = PadKindFor(info, OnSteamDeck());
+    if (!logged_) {  // once per pad: what a "wrong glyphs" report needs
+      logged_ = true;
+      REXLOG_INFO("setup: pad '{}' type {} vendor {:04x} product {:04x} steam {} deck {} -> glyphs {}", info.name,
+                  int(info.type), info.vendor, info.product, info.steam_handle, OnSteamDeck(), int(kind));
     }
+    return kind;
+  }
+
+  // Steam Deck host (launcher_logic.h IsSteamDeckHost); read once.
+  static bool OnSteamDeck() {
+    static const bool deck = [] {
+      const char* env = std::getenv("SteamDeck");
+      std::string dmi;
+#if defined(__linux__)
+      if (FILE* f = std::fopen("/sys/devices/virtual/dmi/id/product_name", "r")) {
+        char buf[64] = {};
+        if (std::fgets(buf, sizeof(buf), f)) dmi = buf;
+        std::fclose(f);
+      }
+#endif
+      return IsSteamDeckHost(env ? env : "", dmi);
+    }();
+    return deck;
   }
 
   // A PlayStation pad is connected (the window names its buttons: Cross, Circle, Options).
@@ -85,6 +114,18 @@ class PadNav {
   }
 
  private:
+  static PadType TypeOf(SDL_GamepadType t) {
+    switch (t) {
+      case SDL_GAMEPAD_TYPE_XBOX360: return PadType::kXbox360;
+      case SDL_GAMEPAD_TYPE_PS3: return PadType::kPlayStation3;
+      case SDL_GAMEPAD_TYPE_PS4: return PadType::kPlayStation4;
+      case SDL_GAMEPAD_TYPE_PS5: return PadType::kPlayStation5;
+      default: return PadType::kOther;
+    }
+  }
+
+  mutable bool logged_ = false;
+
   struct Pad {
     SDL_JoystickID id;
     SDL_Gamepad* pad;

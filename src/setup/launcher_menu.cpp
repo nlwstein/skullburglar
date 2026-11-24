@@ -15,7 +15,7 @@ namespace bots::setup {
 namespace {
 
 // Button prompts: what each glyph stands for. kKey draws a key cap with the given text.
-enum Btn { kA, kB, kX, kY, kLB, kRB, kLT, kRT, kStart, kDpadLR, kKey };
+enum Btn { kA, kB, kX, kY, kLB, kRB, kLT, kRT, kStart, kBack, kDpadLR, kKey };
 
 // Firewall states (firewall.h FirewallState), kept as numbers so the menu doesn't need that header.
 enum Firewall { kFwNotApplicable, kFwChecking, kFwAllowed, kFwNotAsked, kFwBlocked, kFwPublic, kFwUnknown };
@@ -190,7 +190,7 @@ float LauncherMenu::GlyphWidth(float h, int button, const char* key) const {
   }
   switch (button) {
     case kLB: case kRB: case kLT: case kRT: return h * 1.45f;
-    case kStart: return h * 1.3f;
+    case kStart: case kBack: return device_ == PromptDevice::kXbox360 ? h : h * 1.3f;
     default: return h;
   }
 }
@@ -254,7 +254,25 @@ float LauncherMenu::Glyph(ImDrawList* dl, ImVec2 p, float h, int button, const c
       centered(ps ? kPs[i] : kXbox[i], h * 0.56f, color::kText);
       return w;
     }
-    case kStart: {
+    case kStart: case kBack: {
+      if (device_ == PromptDevice::kXbox360) {
+        // The 360's two small round buttons: Start points right, Back (the 360 calls it Back, not View) points left.
+        dl->AddCircleFilled(c, r, color::Rgb(40, 38, 40), 32);
+        dl->AddCircle(c, r - line * 0.5f, color::Rgb(130, 122, 116), 32, line);
+        const float s = r * 0.46f, d = button == kStart ? 1.0f : -1.0f;
+        dl->AddTriangleFilled(ImVec2(c.x + d * s * 0.9f, c.y), ImVec2(c.x - d * s * 0.6f, c.y - s),
+                              ImVec2(c.x - d * s * 0.6f, c.y + s), color::kText);
+        return w;
+      }
+      if (button == kBack) {
+        // Xbox One / Series View: two overlapping windows.
+        dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), color::Rgb(40, 38, 40), h * 0.5f);
+        dl->AddRect(p, ImVec2(p.x + w, p.y + h), color::Rgb(130, 122, 116), h * 0.5f, 0, line);
+        const float q = h * 0.2f;
+        dl->AddRect(ImVec2(c.x - q * 1.5f, c.y - q * 0.7f), ImVec2(c.x + q * 0.7f, c.y + q * 1.5f), color::kText, 0, 0, line * 1.2f);
+        dl->AddRect(ImVec2(c.x - q * 0.7f, c.y - q * 1.5f), ImVec2(c.x + q * 1.5f, c.y + q * 0.7f), color::kText, 0, 0, line * 1.2f);
+        return w;
+      }
       dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), color::Rgb(40, 38, 40), h * 0.5f);
       dl->AddRect(p, ImVec2(p.x + w, p.y + h), color::Rgb(130, 122, 116), h * 0.5f, 0, line);
       for (int i = -1; i <= 1; ++i) {
@@ -290,36 +308,40 @@ void LauncherMenu::Toggle(ImDrawList* dl, ImVec2 min, ImVec2 max, bool on, bool 
 
 // ---- Background: original shapes only (no game art) ----
 
-void LauncherMenu::DrawBackground(ImDrawList* dl, const ImVec2& size, bool page) {
+void LauncherMenu::DrawBackground(ImDrawList* dl, const ImVec2& size, bool page) { DrawDuskBackdrop(dl, size, page); }
+
+// `alpha` fades the whole picture (the loading screen's handover to the game).
+void DrawDuskBackdrop(ImDrawList* dl, const ImVec2& size, bool page, float alpha) {
+  auto F = [alpha](ImU32 c) { return Fade(c, alpha); };
   const float w = size.x, h = size.y;
-  dl->AddRectFilled(ImVec2(0, 0), size, color::kBackground);
+  dl->AddRectFilled(ImVec2(0, 0), size, F(color::kBackground));
   // A dusk sky: dark at the top, warm toward the horizon on the right.
   const float horizon = h * (page ? 0.98f : 0.72f);
-  dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(w, horizon), color::Rgb(14, 11, 9), color::Rgb(34, 22, 14),
-                              color::Rgb(120, 62, 24), color::Rgb(20, 14, 10));
+  dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(w, horizon), F(color::Rgb(14, 11, 9)), F(color::Rgb(34, 22, 14)),
+                              F(color::Rgb(120, 62, 24)), F(color::Rgb(20, 14, 10)));
   if (!page) {
     // The sun, low on the right, then the dunes in front of it.
     const ImVec2 sun(w * 0.80f, horizon - h * 0.10f);
-    dl->AddCircleFilled(sun, h * 0.20f, color::Rgb(214, 150, 66, 60), 96);
-    dl->AddCircleFilled(sun, h * 0.15f, color::Rgb(232, 172, 84, 150), 96);
-    dl->AddRectFilledMultiColor(ImVec2(0, horizon - h * 0.08f), ImVec2(w, horizon), color::Rgb(0, 0, 0, 0),
-                                color::Rgb(180, 96, 36, 0), color::Rgb(180, 96, 36, 110), color::Rgb(0, 0, 0, 0));
+    dl->AddCircleFilled(sun, h * 0.20f, F(color::Rgb(214, 150, 66, 60)), 96);
+    dl->AddCircleFilled(sun, h * 0.15f, F(color::Rgb(232, 172, 84, 150)), 96);
+    dl->AddRectFilledMultiColor(ImVec2(0, horizon - h * 0.08f), ImVec2(w, horizon), F(color::Rgb(0, 0, 0, 0)),
+                                F(color::Rgb(180, 96, 36, 0)), F(color::Rgb(180, 96, 36, 110)), F(color::Rgb(0, 0, 0, 0)));
     auto dune = [&](float x0, float x1, float top, float base, ImU32 col) {
       dl->PathClear();
       dl->PathLineTo(ImVec2(x0, base));
       dl->PathBezierCubicCurveTo(ImVec2(x0 + (x1 - x0) * 0.3f, top), ImVec2(x0 + (x1 - x0) * 0.7f, top),
                                  ImVec2(x1, base), 48);
-      dl->PathFillConvex(col);
+      dl->PathFillConvex(F(col));
     };
     dune(-w * 0.3f, w * 0.75f, horizon - h * 0.03f, h * 1.05f, color::Rgb(30, 19, 12));
     dune(w * 0.35f, w * 1.4f, horizon - h * 0.07f, h * 1.05f, color::Rgb(22, 15, 10));
-    dl->AddRectFilled(ImVec2(0, horizon + h * 0.12f), ImVec2(w, h), color::Rgb(16, 11, 8));
+    dl->AddRectFilled(ImVec2(0, horizon + h * 0.12f), ImVec2(w, h), F(color::Rgb(16, 11, 8)));
     // Shade behind the menu column so its text keeps its contrast over the sky.
-    dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(w * 0.55f, h), color::Rgb(8, 6, 5, 200), color::Rgb(8, 6, 5, 0),
-                                color::Rgb(8, 6, 5, 0), color::Rgb(8, 6, 5, 200));
+    dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(w * 0.55f, h), F(color::Rgb(8, 6, 5, 200)), F(color::Rgb(8, 6, 5, 0)),
+                                F(color::Rgb(8, 6, 5, 0)), F(color::Rgb(8, 6, 5, 200)));
   } else {
-    dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(w, h * 0.22f), color::Rgb(60, 34, 16, 140),
-                                color::Rgb(110, 58, 22, 160), color::Rgb(0, 0, 0, 0), color::Rgb(0, 0, 0, 0));
+    dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(w, h * 0.22f), F(color::Rgb(60, 34, 16, 140)),
+                                F(color::Rgb(110, 58, 22, 160)), F(color::Rgb(0, 0, 0, 0)), F(color::Rgb(0, 0, 0, 0)));
   }
 }
 
@@ -1495,6 +1517,13 @@ void LauncherMenu::DrawFooter(const LauncherStatus& st, Intent& in, float top) {
   const float gh = S(24);
   const float cy = top + (size.y - top) * 0.5f;
   const bool kbm = device_ == PromptDevice::kKeyboardMouse;
+  if (glyph_strip_) {  // preview only: Start and Back for the pad kind in use
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+    const float sh = S(40);
+    float gx = size.x * 0.5f;
+    gx += Glyph(fg, ImVec2(gx, top - sh * 1.6f), sh, kStart, "") + S(16);
+    Glyph(fg, ImVec2(gx, top - sh * 1.6f), sh, kBack, "");
+  }
 
   float left = mx;
   if (page_ != LauncherPage::kMain) {
