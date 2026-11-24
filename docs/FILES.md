@@ -93,6 +93,7 @@ only things outside it. The registry and the Start menu entry point at the folde
 | Crash archives | `~/.local/share/bots-crashes` | **No** |
 | Player 2 folders | `~/.local/share/bots-p2` | **No** |
 | Logs | `~/Library/Logs/Skullburglar` | **No** |
+| Metal shader cache | `/var/folders/.../C/com.apple.metal`, kept by macOS for every Metal program | **No**, and macOS cleans it itself |
 | A tiny preferences file | `~/Library/Preferences/org.skullburglar.Skullburglar.plist` (one setting that turns off the "hold a key for accents" popup in the game) | **No** |
 
 **macOS hides these folders.** In Finder choose **Go > Go to Folder...** (Shift-Command-G) and paste the path. The
@@ -119,7 +120,9 @@ unpacks nothing onto your disk: it is one file.
 
 **Steam Deck:** it is the AppImage on Linux, so the table above applies. In Desktop Mode, press **Ctrl + H** in
 Dolphin to show hidden folders like `.local`. Skullburglar does not create Steam shortcuts: the entry in your library is
-the one you made with **Add to Steam** (or **Add a Non-Steam Game**), and you remove it in Steam.
+the one you made with **Add to Steam** (or **Add a Non-Steam Game**), and you remove it in Steam. Steam also keeps a
+shader cache for that shortcut (`steamapps/shadercache/<number>` in the library the game's compatibility data is in, if you use
+Proton, or none for a native game): it is Steam's, not Skullburglar's, and Steam removes it with the shortcut.
 If you chose an SD card or another folder for the game files in the launcher, the `game` folder is there instead.
 
 ## iPhone, iPad, Apple TV and Android
@@ -180,6 +183,15 @@ another drive or a USB stick.
    `cache`, `logs`, `game` (the game files), `save-backups` and `crashes`. Delete `portable.txt` and the game goes back to
    the normal folders.
 
+**On an SD card or USB drive, the game offers this itself.** The first time you start Skullburglar from removable or
+external storage (the Steam Deck's SD card, a USB drive) on a computer that has no Skullburglar install yet, the launcher
+asks **Keep everything on this drive?** **Yes** creates `portable.txt` next to the program for you and restarts the game
+into portable mode, so the game files, your saves and your settings all live on the drive. Your saves are then on the
+drive too: keep a copy of `bots-data\user` somewhere safe. **No** keeps the normal folders and never asks again. **Esc** (or
+**B** on a controller) decides next time. The answer is a file next to the program: `portable.txt` for Yes,
+`portable-declined.txt` for No (delete it to be asked again). A copy on internal storage, or on a computer that already has an
+install, is never asked.
+
 **Your existing game files (1.13.1 and later):** if this computer already has them from a normal install, the first
 portable start offers to **copy** them into `bots-data\game`. It shows the size and your free space, you can cancel, and
 the original stays where it is. **Not now** is remembered and the game keeps using the shared copy. You can copy later
@@ -198,11 +210,26 @@ never saves somewhere else without telling you.
 - The game looks for `portable.txt` next to the program you start, not the folder a shortcut or Steam starts it from,
   so shortcuts and Steam entries keep working.
 - On a Mac, an app run straight from the Downloads folder may not see `portable.txt`. Drag it somewhere first.
-- On Windows, a crash dump is still written in the program's `logs` folder. The copy that matters, with the log, is in
-  `bots-data\crashes`.
+- A crash dump (Windows) and the crash archive go in `bots-data\logs` and `bots-data\crashes`. On macOS and Linux a
+  portable copy that crashes ends quietly instead of letting the system write its own crash report outside the folder.
 - **Another folder of your choice:** set the environment variable `BOTS_DATA_DIR` to it (in Steam Launch Options:
   `BOTS_DATA_DIR=/mnt/games/bots %command%`). It beats `portable.txt` and uses the same layout.
 - The Windows setup, "Update now" and the Linux updater leave `portable.txt` and `bots-data` alone.
+
+**What portable mode can't move.** Portable mode writes nothing outside its folder, with these exceptions that belong to
+the system, not to Skullburglar:
+
+| What | Where | Why it stays |
+|---|---|---|
+| macOS Metal shader cache | `/var/folders/.../C/com.apple.metal` (the per-user cache folder) | Apple's graphics runtime keeps it for every Metal program, and nothing moves it. macOS cleans it itself. |
+| Windows graphics driver caches | `%LOCALAPPDATA%\NVIDIA\DXCache`, `%LOCALAPPDATA%\AMD\VkCache`, `%LOCALAPPDATA%\D3DSCache` | The driver keeps them, for every game. |
+| Windows Firewall rules | Inbound rules for the program | Windows writes them when you allow network access for co-op, or when you press **Fix it** in the launcher. |
+| Steam's shader cache for the shortcut | `steamapps/shadercache/<shortcut id>` in your Steam library | Steam makes it for every non-Steam shortcut; Skullburglar doesn't write it. |
+| Steam's shortcut itself | `shortcuts.vdf` in your Steam user folder | It is the entry you made with **Add to Steam**. |
+| Windows setup program | Start menu entry and the two registry entries | A setup install is an install: the setup program writes them. Portable mode switches the launcher's **Update now** off for it (the setup program would write outside the folder); download the new version instead. |
+
+On Linux, Mesa and NVIDIA shader caches go to `bots-data\cache\drivers` in portable mode, and temporary files (update
+downloads) go to `bots-data\tmp`.
 
 ## Back up your saves
 
