@@ -1,0 +1,8 @@
+[
+  "About & logs has a new \"Save a diagnostics file\" button: attach that one file to a bug report. It records your computer, display, HDR and game folder setup, and hides your user name, computer name and home folder.",
+  "The pause menu now blurs and tints the game behind it in the New renderer, as in the original.",
+  "Pre-1.0 renderer: the blurred background of the pause menu looks the same at higher render resolutions as at 720p instead of showing a dotted grid.",
+  "Pre-1.0 renderer: a larger depth margin for graffiti, bullet holes, blood and burn marks, aimed at the one-frame flicker some players see on an RTX 4060.",
+  "A building in the car park chapter that was too dark in the New renderer is now lit by the sun like the rest of the level.",
+  "On a first visit to a level, trees that come into view now appear within a second or two instead of up to a minute later."
+]
