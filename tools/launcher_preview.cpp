@@ -193,6 +193,12 @@ int main(int argc, char** argv) {
     if (state == "offer-nospace") st.offer_free_text = "3.0 GB", st.offer_enough = false;
     if (state == "offer-error") st.offer_error = "Can't read the shared game folder to size it.", st.offer_enough = false;
   }
+  if (state.rfind("portable-offer", 0) == 0) {  // B-408: the first-start offer on removable storage; -repeat keeps it up after each answer
+    st.portable_offer_open = true;
+    st.portable_offer_where = "/run/media/deck/SD/Games/bots-data";
+    st.installed = false;
+    if (state == "portable-offer-error") st.portable_offer_error = "Can't create /run/media/deck/SD/Games/portable.txt. Is the drive locked?";
+  }
   if (state == "copying") {
     st.installed = false, st.extracting = true, st.copying = true, st.extract_fraction = 0.42f;
     st.extract_progress = "2.9 / 6.8 GB";
@@ -247,6 +253,8 @@ int main(int argc, char** argv) {
     }
     if (a == LauncherAction::kDismissSaves && state != "misplaced-repeat") st.saves_warning.clear(), st.saves_can_move = false, st.saves_note.clear();
     // The offer's answers, as the window handles them (the preview keeps the offer up for the other devices in "offer-repeat").
+    if (state == "portable-offer" && (a == LauncherAction::kPortableYes || a == LauncherAction::kPortableNo || a == LauncherAction::kPortableLater))
+      st.portable_offer_open = false;
     if (state.rfind("offer", 0) == 0 && a != LauncherAction::kNone && state != "offer-repeat" && state != "offer-nospace") {
       if (a == LauncherAction::kOfferCopy) st.offer_open = false, st.installed = false, st.extracting = true, st.copying = true, st.extract_fraction = 0.1f;
       if (a == LauncherAction::kOfferDisc || a == LauncherAction::kOfferNotNow) st.offer_open = false;

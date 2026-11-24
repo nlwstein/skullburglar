@@ -21,6 +21,8 @@
 
 #include <iterator>
 
+#include "setup/portable.h"
+#include "setup/portable_io.h"
 #include "setup/update_check.h"
 #include "setup/update_install.h"
 
@@ -61,6 +63,15 @@ static int FakeSetup(int argc, char** argv) {
 #endif
 
 int main(int argc, char** argv) {
+  // B-408: like the game's portable mode, BOTS_DATA_DIR makes this a portable run, whose scratch files (update downloads,
+  // the disk image mount) go under <data>/tmp. tests/portable_probe_test.sh checks that the system temp stays untouched.
+  if (const char* data = std::getenv("BOTS_DATA_DIR"); data && *data) {
+    DataRoot r;
+    r.source = DataSource::kEnv;
+    r.root = data;
+    ActiveDataRoot() = r;
+    ApplyPortableEnvironment(r.root);
+  }
 #if defined(_WIN32)
   for (int i = 1; i < argc; ++i)
     if (!std::strcmp(argv[i], "/UPDATE")) return FakeSetup(argc, argv);

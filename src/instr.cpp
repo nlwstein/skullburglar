@@ -40,6 +40,7 @@
 //   objs CLASS [n] | elems 0xOBJ PROP [stride] [n]      live objects of a class / an array's elements
 //   log [n] [filter]           the last log lines
 //   quit                       quit the game cleanly;  close: close this connection;  help
+//   crash                      test hook: a deliberate host fault 0.3 s later (where does the crash archive go?)
 //
 // Status line (type "status", v 1): t (s since start), pid, phase (boot, precompile, loading, hung, dialog, paused,
 // movie, cutscene, front_end, in_play, dead, menu), phase_s, game {..., objective {...}, hotspot {...}, prompt {...}}, precompile
@@ -2650,12 +2651,20 @@ std::string Handle(Client& c, const std::string& line) {
     }).detach();
     return Ok();
   }
+  if (cmd == "crash") {  // test hook (B-408): a deliberate host fault, to see where the crash archive and dump go
+    Event("crash");
+    std::thread([] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(300));
+      *static_cast<volatile int*>(nullptr) = 1;
+    }).detach();
+    return Ok();
+  }
   if (cmd == "close") {
     c.alive = false;
     return {};
   }
   if (cmd == "help") return Ok(Str("help", "status keys watch hist press hold release stick trigger pad exec wait shot "
-                                           "burst dualshot macro enemies trace floor pathdrop pathflags inspect objs elems log quit close"));
+                                           "burst dualshot macro enemies trace floor pathdrop pathflags inspect objs elems log quit crash close"));
   return Fail("unknown command " + cmd);
 }
 

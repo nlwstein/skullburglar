@@ -77,6 +77,7 @@ set(BOTS_SOURCES
     src/setup/ed25519.cpp
     src/setup/update_logic.cpp
     src/setup/update_install.cpp
+    src/setup/portable_offer.cpp
 )
 # The launcher's fonts (assets/fonts: Inter and Oswald, SIL Open Font License; src/setup/launcher_style.h) compiled in
 # as byte arrays. Written through configure_file so unchanged fonts don't rebuild.
@@ -183,7 +184,7 @@ if(CMAKE_SYSTEM_NAME MATCHES "^(iOS|tvOS)$")
     # The app bundle (tools/ios/build.sh) keeps the dylibs next to the executable, as on macOS.
     set_target_properties(bots PROPERTIES INSTALL_RPATH "@executable_path" BUILD_WITH_INSTALL_RPATH ON)
 elseif(APPLE)
-    target_link_libraries(bots PRIVATE "-framework AppKit")
+    target_link_libraries(bots PRIVATE "-framework AppKit" "-framework DiskArbitration")
     # The precompiled header is C++ only.
     set_source_files_properties(src/setup/file_picker_mac.mm PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 elseif(ANDROID)

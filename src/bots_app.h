@@ -63,6 +63,7 @@
 #include "renderer_choice.h"
 #include "script_input.h"
 #include "setup/portable.h"
+#include "setup/portable_io.h"
 #include "setup/game_location.h"
 #include "setup/occlusion_choice.h"
 #include "save_backup.h"
@@ -76,6 +77,7 @@
 
 #if defined(_WIN32)
 void InstallWindowsCrashLogger();  // src/crash_win.cpp
+void SetWindowsCrashDumpFolder(const std::filesystem::path& dir);  // src/crash_win.cpp (B-408: portable mode)
 void SetWindowsCrashArchive(const std::filesystem::path& dir, const std::string& stamp,
                             const std::filesystem::path& log);  // src/crash_win.cpp (B-065)
 #endif
@@ -279,12 +281,18 @@ class BotsApp : public rex::ReXApp {
       rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, message);
       std::exit(2);
     }
+    // B-408: scratch files (update downloads, disk image mounts) and driver shader caches go in the data folder too,
+    // so nothing but the player's own copy of existing game files is ever written outside it.
+    if (!su::ApplyPortableEnvironment(data.root)) std::fprintf(stderr, "portable: couldn't prepare tmp/ and cache/drivers/ in %s\n", bots::PathUtf8(data.root).c_str());
     if (!user_given) {
       paths.user_data_root = layout.user;
       paths.config_path = layout.user / "bots.toml";
     }
     if (!cache_given) paths.cache_root = layout.cache;
     if (!log_given) UseLogDir(layout.logs);
+#if defined(_WIN32)
+    if (su::PortableIsolationOn()) SetWindowsCrashDumpFolder(layout.logs);  // B-408: the minidump goes with the logs, not next to bots.exe
+#endif
   }
 
   // In the macOS app bundle, log to ~/Library/Logs/Skullburglar/bots-<time>.log (newest 10 kept) unless --log_file
@@ -616,6 +624,11 @@ class BotsApp : public rex::ReXApp {
       close(fd);
       bots::savebackup::CopyLog();
     }
+    // B-408: in portable mode the crash archive above is the report. Dying by the signal would also make the system
+    // write its own (macOS: ~/Library/Logs/DiagnosticReports, Linux: a core file or the distribution's crash
+    // reporter), outside the portable folder, so the program just ends with the signal's exit status.
+    if (bots::setup::ActiveDataRoot().source != bots::setup::DataSource::kDefault && bots::setup::PortableIsolationOn())
+      _exit(128 + sig);
     signal(sig, SIG_DFL);
     raise(sig);
   }

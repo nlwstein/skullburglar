@@ -1,0 +1,4 @@
+# What a portable session may still write outside its folder (tools/portable_isolation_test.sh), one line each:
+#   <Darwin|Linux|all> <extended regex on the full path>  # why it can't be avoided
+# An entry needs a reason a player could accept; anything the game itself chooses to write belongs in the portable folder instead.
+Darwin /var/folders/[^/]+/[^/]+/C/com\.apple\.metal/  # Apple's Metal runtime caches every shader it compiles under the per-user cache folder (confstr DARWIN_USER_CACHE_DIR). The game's own process writes it, for every Metal program, and neither an environment variable nor an API moves it (tried MTL_SHADER_CACHE_PATH, _DISABLE, _ENABLE, MTL_ENABLE_SHADER_CACHE, _DIRECTORY on 2026-11-24: no effect). It is the system's cache, kept small and cleaned by macOS.

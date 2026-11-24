@@ -328,6 +328,9 @@ const char* ActionName(LauncherAction a) {
     case LauncherAction::kOfferCopy: return "offer-copy";
     case LauncherAction::kOfferDisc: return "offer-disc";
     case LauncherAction::kOfferNotNow: return "offer-notnow";
+    case LauncherAction::kPortableYes: return "portable-yes";
+    case LauncherAction::kPortableNo: return "portable-no";
+    case LauncherAction::kPortableLater: return "portable-later";
   }
   return "?";
 }

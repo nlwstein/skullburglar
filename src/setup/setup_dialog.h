@@ -45,6 +45,8 @@
 #include "app_paths.h"
 #include "game_location.h"
 #include "portable.h"
+#include "portable_io.h"
+#include "portable_offer.h"
 #include "file_picker.h"
 #include "iso_extract.h"
 #include "launcher_menu.h"
@@ -181,6 +183,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     // tests/launcher_input_saves.script covers the button).
     if (const char* move = std::getenv("BOTS_SETUP_MOVE"); move && std::strcmp(move, "1") == 0) Do(LauncherAction::kMoveSaves);
     StartCopyOffer();
+    StartPortableOffer();
   }
 
   ~SetupDialog() override {
@@ -199,6 +202,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     if (pad_) pad_->Update(io);
     PollWorker();
     CopyTestHooks();
+    PortableTestHook();
+    if (quit_requested_) return;  // the hook's Yes restarted the program: nothing more to draw
     if (auto_) RunAuto();
     if (!shots_done_) RunShots(io);
     RunLive(io);
@@ -293,6 +298,11 @@ class SetupDialog : public rex::ui::ImGuiDialog {
                                                 [](const std::filesystem::path& p) { return IsGameDir(p); });
     st.portable_game_note = PortableGameNote();
     st.shared_note = SharedNote();
+    if (portable_offer_open_) {
+      st.portable_offer_open = true;
+      st.portable_offer_where = bots::PlainPathUtf8(portable_base_ / kPortableDirName);
+      st.portable_offer_error = portable_offer_error_;
+    }
     if (offer_open_) {
       const bool measured = shared_size_.error.empty();
       st.offer_open = true;
@@ -457,6 +467,18 @@ class SetupDialog : public rex::ui::ImGuiDialog {
       case LauncherAction::kOfferNotNow:
         if (offer_open_) AnswerOffer(OfferAnswer::kNotNow);
         return;
+      case LauncherAction::kPortableYes:
+        if (portable_offer_open_) AnswerPortableOffer(true);
+        return;
+      case LauncherAction::kPortableNo:
+        if (portable_offer_open_) AnswerPortableOffer(false);
+        return;
+      case LauncherAction::kPortableLater:
+        if (portable_offer_open_) {
+          portable_offer_open_ = false;
+          REXLOG_INFO("setup: portable offer: decide next time (nothing remembered)");
+        }
+        return;
       case LauncherAction::kOpenLogFolder: {
         const std::filesystem::path folder = LogFolder();
         std::error_code ec;
@@ -592,6 +614,7 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     if (key == "page") return ScriptPageName(menu_.page());
     if (key == "action") return ScriptActionName(live_.last_action);
     if (key == "offer") return b(offer_open_);
+    if (key == "portable-offer") return b(portable_offer_open_);
     if (key == "copying") return b(copying_ && Extracting());
     if (key == "save-count") return std::to_string(save_count_);
     if (key == "save-error") return save_error_;
@@ -993,6 +1016,101 @@ class SetupDialog : public rex::ui::ImGuiDialog {
                 bots::PathUtf8(loc.data_root), offer_prior_use_ ? "; this data folder has been used before" : "");
   }
 
+  // ---- The portable-mode offer on removable storage (B-408, setup/portable_offer.h) ----
+
+  // Called once from the constructor: decide whether this is the first start of a program on removable or external
+  // storage, with no install on this computer, and open the offer. BOTS_PORTABLE_OFFER=0 never offers; =force (tests)
+  // skips the storage, existing-install and command-line checks (an answer or portable mode still stops it).
+  void StartPortableOffer() {
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
+    return;
+#else
+    const char* env = std::getenv("BOTS_PORTABLE_OFFER");
+    const bool force = env && std::strcmp(env, "force") == 0;
+    const std::filesystem::path exe_dir = rex::filesystem::GetExecutableFolder();
+    const char* appimage = std::getenv("APPIMAGE");
+    portable_base_ = PortableBaseDir(exe_dir, appimage ? appimage : "");
+    OfferInput in;
+    in.disabled_by_env = env && std::strcmp(env, "0") == 0;
+    in.portable_already = ActiveDataRoot().source != DataSource::kDefault;
+    in.answered = IsAnswered(portable_base_);
+    in.game_dir_given = game_dir_locked_ && !force;
+    StorageFacts facts;
+    if (!in.portable_already && !in.answered && !in.disabled_by_env) {
+      facts = ProbeStorage(portable_base_);
+      in.removable_or_external = force || IsRemovableOrExternal(facts);
+      in.existing = force ? ExistingInstall{} : ProbeExistingInstall(DefaultGameDir(), DefaultUserDataDir(), PortableGameDir(exe_dir), exe_dir);
+    }
+    const OfferDecision d = DecideOffer(in);
+    REXLOG_INFO("setup: portable offer: {} ({}; folder {}, media mount {}, removable {}, internal {}, same volume as home or boot {}, read-only {}, existing install {})",
+                d == OfferDecision::kShow ? "shown" : "not shown", WhyNoOffer(d), bots::PathUtf8(portable_base_),
+                facts.under_media_mount, facts.device_removable, facts.device_internal, facts.same_as_home_or_boot,
+                facts.read_only, in.existing.Any());
+    portable_offer_open_ = d == OfferDecision::kShow;
+#endif
+  }
+
+  void AnswerPortableOffer(bool yes) {
+    portable_offer_error_.clear();
+    if (!yes) {
+      portable_offer_error_ = AnswerNo(portable_base_);
+      if (!portable_offer_error_.empty()) REXLOG_WARN("setup: portable offer: {} (asking again next start)", portable_offer_error_);
+      else REXLOG_INFO("setup: portable offer: No ({} written; not asked again)", kOfferDeclinedFile);
+      portable_offer_error_.clear();
+      portable_offer_open_ = false;
+      return;
+    }
+    portable_offer_error_ = AnswerYes(portable_base_);
+    if (!portable_offer_error_.empty()) {
+      REXLOG_WARN("setup: portable offer: Yes failed: {}", portable_offer_error_);
+      return;  // stays open, with the reason
+    }
+    REXLOG_INFO("setup: portable offer: Yes ({} written next to the program); restarting into portable mode", kPortableMarker);
+    portable_offer_open_ = false;
+    FlushSettings();
+    RemoveSessionLogOutsidePortableFolder();
+    if (std::getenv("BOTS_SETUP_PORTABLE_NO_RESTART")) return;  // tests: the run is over, the next start is portable
+    std::string why;
+    if (!RestartThisProgram(why)) {
+      error_ = "Portable mode is on, but the game couldn't restart itself (" + why + "). Start it again to use it.";
+      REXLOG_WARN("setup: portable offer: {}", error_);
+      return;
+    }
+    quit_requested_ = true;
+    pad_.reset();
+    quit_();
+  }
+
+  // This run started before portable mode was chosen, so its log is in the default place (the AppImage's and the macOS
+  // app's log folder). The restart writes its own in the portable folder; this one would be left behind outside it, so
+  // it goes now, and the log folders that become empty with it. Windows can't delete an open file: there the log is
+  // next to the program already, inside the portable folder. Only a bots-*.log file in a folder named logs or Skullburglar.
+  void RemoveSessionLogOutsidePortableFolder() {
+    namespace fs = std::filesystem;
+    const std::string file = rex::cvar::Query<std::string>("log_file");
+    if (file.empty()) return;
+    const fs::path log = bots::PathFromUtf8(file), dir = log.parent_path();
+    const std::string name = bots::PathUtf8(log.filename()), leaf = bots::PathUtf8(dir.filename());
+    if (name.rfind("bots-", 0) != 0 || log.extension() != ".log" || (leaf != "logs" && leaf != "Skullburglar")) return;
+    if (IsInside(dir, portable_base_)) return;  // already in the portable folder
+    std::error_code ec;
+    fs::remove(log, ec);
+    if (fs::is_empty(dir, ec)) fs::remove(dir, ec);
+    const fs::path up = dir.parent_path();
+    if (bots::PathUtf8(up.filename()) == "bots-recomp" && fs::is_empty(up, ec)) fs::remove(up, ec);
+    REXLOG_INFO("setup: portable offer: removed this run's log from {}", bots::PathUtf8(dir));
+  }
+
+  // BOTS_SETUP_PORTABLE=yes|no|later answers the offer as a player would (test runs).
+  void PortableTestHook() {
+    if (!portable_offer_open_) return;
+    const char* v = std::getenv("BOTS_SETUP_PORTABLE");
+    if (!v) return;
+    if (std::strcmp(v, "yes") == 0) Do(LauncherAction::kPortableYes);
+    else if (std::strcmp(v, "no") == 0) Do(LauncherAction::kPortableNo);
+    else if (std::strcmp(v, "later") == 0) Do(LauncherAction::kPortableLater);
+  }
+
   bool CopyTestHook(const char* value) const {
     const char* env = std::getenv("BOTS_SETUP_COPY");
     return env && std::strcmp(env, value) == 0;
@@ -1264,6 +1382,9 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   bool portable_ = false;
   bool copying_ = false;              // the worker is copying the shared files, not extracting a disc
   bool offer_open_ = false, offer_popup_opened_ = false, offer_prior_use_ = false;
+  bool portable_offer_open_ = false;  // the "keep everything on this drive?" offer (B-408)
+  std::filesystem::path portable_base_;  // where portable.txt goes: next to the program
+  std::string portable_offer_error_;
   GameSize shared_size_;
   uint64_t offer_free_ = 0;
   bool cancel_hook_done_ = false, page_hook_done_ = false;
