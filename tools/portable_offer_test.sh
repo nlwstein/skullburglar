@@ -11,6 +11,7 @@
 #   later      Esc / B (later): nothing is written, and the next start asks again
 #   internal   the same program on internal storage: no offer
 #   existing   an existing install (saves in the default folder): no offer
+# BOTS_OFFER_ONLY="removable-yes removable-no removable-later internal existing" runs only those sections.
 # The run ends by itself (BOTS_SETUP_LIVE quits). One bots process at a time: refuses if one is running.
 set -u
 DIST=${1:?usage: portable_offer_test.sh <dist dir> <work dir> [volume dir]}
@@ -50,8 +51,9 @@ start() {  # name appdir [env...]: runs to the end (the launcher quits itself), 
   i=0; while pgrep -x bots >/dev/null 2>&1 && [ $i -lt 60 ]; do sleep 1; i=$((i + 1)); done
 }
 has() { grep -q -- "$2" "$W/out/$1.log"; }
+sec() { [ -z "${BOTS_OFFER_ONLY:-}" ] && return 0; case " $BOTS_OFFER_ONLY " in *" $1 "*) return 0 ;; esac; return 1; }
 APP=$VOL/Games/Skullburglar-b408
-
+if sec removable-yes; then
 echo "== removable: Yes =="
 install_copy "$APP"
 start yes "$APP" BOTS_SETUP_PORTABLE=yes
@@ -61,11 +63,15 @@ check ok "offer shown on $VOL ($(grep 'portable offer: shown' "$W/out/yes.log" |
 has yes "restarting into portable mode" && check ok "restart requested" || check bad "no restart line"
 [ -d "$APP/bots-data" ] && check ok "the restarted copy made bots-data next to the program" || check bad "no bots-data after the restart"
 ls "$APP"/bots-data/logs/bots-*.log >/dev/null 2>&1 && check ok "the restarted copy logs in bots-data/logs" || echo "note: no bots-data/logs log (the restarted copy had no --log_file of its own)"
+fi
+if sec removable-yes; then
 echo "== removable: second start after Yes =="
 start yes2 "$APP"
 has yes2 "portable offer: not shown (portable mode is already on" && check ok "no offer once portable" || check bad "second start: $(grep 'portable offer' "$W/out/yes2.log" | head -1)"
 has yes2 "data folder: .*bots-data (portable.txt)" && check ok "second start reads portable.txt" || check bad "second start is not portable"
 
+fi
+if sec removable-no; then
 echo "== removable: No =="
 install_copy "$APP"
 start no "$APP" BOTS_SETUP_PORTABLE=no
@@ -74,6 +80,8 @@ start no "$APP" BOTS_SETUP_PORTABLE=no
 start no2 "$APP"
 has no2 "not shown (answered before" && check ok "not asked again" || check bad "asked again: $(grep 'portable offer' "$W/out/no2.log" | head -1)"
 
+fi
+if sec removable-later; then
 echo "== removable: later (Esc / B) =="
 install_copy "$APP"
 start later "$APP" BOTS_SETUP_PORTABLE=later
@@ -81,18 +89,23 @@ start later "$APP" BOTS_SETUP_PORTABLE=later
 start later2 "$APP"
 has later2 "portable offer: shown" && check ok "asked again next start" || check bad "not asked again after later"
 
+fi
+if sec internal; then
 echo "== internal storage =="
 install_copy "$W/internal/app"
 start internal "$W/internal/app"
 has internal "not shown (not on removable or external storage" && check ok "no offer on internal storage" || check bad "internal: $(grep 'portable offer' "$W/out/internal.log" | head -1)"
 
+fi
+if sec existing; then
 echo "== existing install =="
 install_copy "$APP"
-mkdir -p "$W/home/.local/share/bots"; echo x > "$W/home/.local/share/bots/bots.toml"
+mkdir -p "$W/home/.local/share/bots"; echo "# an existing install" > "$W/home/.local/share/bots/bots.toml"
 start existing "$APP"
 has existing "not shown (an existing install" && check ok "no offer with an existing install" || check bad "existing: $(grep 'portable offer' "$W/out/existing.log" | head -1)"
 rm -rf "$W/home/.local"
 
+fi
 echo "== read-only volume (no offer) is covered by the unit tests (IsRemovableOrExternal) =="
 cleanup
 echo "PASS: $passes checks"
