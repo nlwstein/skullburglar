@@ -195,9 +195,9 @@ int main(int argc, char** argv) {
   }
   if (state.rfind("portable-offer", 0) == 0) {  // B-408: the first-start offer on removable storage; -repeat keeps it up after each answer
     st.portable_offer_open = true;
-    st.portable_offer_where = "/run/media/deck/SD/Games/bots-data";
+    st.portable_offer_where = "/run/media/player/SD-card/Games/bots-data";
     st.installed = false;
-    if (state == "portable-offer-error") st.portable_offer_error = "Can't create /run/media/deck/SD/Games/portable.txt. Is the drive locked?";
+    if (state == "portable-offer-error") st.portable_offer_error = "Can't create /run/media/player/SD-card/Games/portable.txt. Is the drive locked?";
   }
   if (state == "copying") {
     st.installed = false, st.extracting = true, st.copying = true, st.extract_fraction = 0.42f;
