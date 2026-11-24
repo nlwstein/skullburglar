@@ -876,16 +876,20 @@ class BotsApp : public rex::ReXApp {
       d = pw && ph ? std::to_string(pw) + "x" + std::to_string(ph) : std::string("size not known yet");
       d += full ? " fullscreen" : " windowed";
       if (w) d += ", display scale " + std::to_string(int(100.0 * w->GetDpi() / w->GetMediumDpi() + 0.5)) + "%";
+      std::string os_hdr = "unknown";  // SDL's answer where it has a display (not on every platform at this point)
       if (const SDL_DisplayID display = SDL_GetPrimaryDisplay()) {
-        if (const char* name = SDL_GetDisplayName(display)) d += std::string(", display \"") + name + "\"";
+        const char* name = SDL_GetDisplayName(display);
+        if (name && *name) d += std::string(", display \"") + name + "\"";
         if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(display))
           d += ", desktop " + std::to_string(mode->w) + "x" + std::to_string(mode->h) + " at " +
                std::to_string(int(mode->refresh_rate + 0.5f)) + " Hz";
-        const bool os_hdr = SDL_GetBooleanProperty(SDL_GetDisplayProperties(display), SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN, false);
-        const bool want = rex::cvar::Query<bool>("vulkan_hdr");
-        g.hdr = std::string(want ? "game HDR on" : "game HDR off") + ", the display reports HDR " + (os_hdr ? "on" : "off");
-        if (want) g.hdr += ", paper white " + std::to_string(int(rex::cvar::Query<double>("vulkan_hdr_paper_white") + 0.5)) + " nits, peak " + std::to_string(int(rex::cvar::Query<double>("vulkan_hdr_peak") + 0.5)) + " nits";
+        os_hdr = SDL_GetBooleanProperty(SDL_GetDisplayProperties(display), SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN, false) ? "on" : "off";
       }
+      const bool want = rex::cvar::Query<bool>("vulkan_hdr");
+      g.hdr = std::string(want ? "game HDR on" : "game HDR off") + ", SDL reports display HDR " + os_hdr;
+      if (want)
+        g.hdr += ", paper white " + std::to_string(int(rex::cvar::Query<double>("vulkan_hdr_paper_white") + 0.5)) +
+                 " nits, peak " + std::to_string(int(rex::cvar::Query<double>("vulkan_hdr_peak") + 0.5)) + " nits";
       g.display = d;
     }
     {

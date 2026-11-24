@@ -17,6 +17,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <dxgi1_6.h>
 #else
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
@@ -269,6 +270,52 @@ void Memory(uint64_t& total, uint64_t& available) {
 #endif
 }
 
+#if defined(_WIN32)
+// Each display attached to the desktop as DXGI sees it: size, and whether Windows has HDR on for it (the BT.2020 PQ color
+// space) with its peak, full-frame and minimum luminance (what an OLED or HDR monitor reports). Loaded at run time so
+// the game doesn't link dxgi.
+std::string DisplayDetails() {
+  using CreateFactory = HRESULT(WINAPI*)(REFIID, void**);
+  HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
+  if (!dxgi) return "";
+  std::string out;
+  if (auto create = reinterpret_cast<CreateFactory>(reinterpret_cast<void*>(GetProcAddress(dxgi, "CreateDXGIFactory1")))) {
+    IDXGIFactory1* factory = nullptr;
+    if (SUCCEEDED(create(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory)))) {
+      IDXGIAdapter1* adapter = nullptr;
+      for (UINT a = 0; factory->EnumAdapters1(a, &adapter) != DXGI_ERROR_NOT_FOUND; ++a) {
+        IDXGIOutput* output = nullptr;
+        for (UINT o = 0; adapter->EnumOutputs(o, &output) != DXGI_ERROR_NOT_FOUND; ++o) {
+          DXGI_OUTPUT_DESC d{};
+          IDXGIOutput6* o6 = nullptr;
+          if (SUCCEEDED(output->GetDesc(&d)) && d.AttachedToDesktop && SUCCEEDED(output->QueryInterface(__uuidof(IDXGIOutput6), reinterpret_cast<void**>(&o6)))) {
+            DXGI_OUTPUT_DESC1 d1{};
+            if (SUCCEEDED(o6->GetDesc1(&d1))) {
+              char buf[256];
+              const bool hdr = d1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+              std::snprintf(buf, sizeof(buf), "%s%ldx%ld, %s, peak %.0f nits, full-frame %.0f nits, black %.4f nits, %u bit",
+                            out.empty() ? "" : "; ", long(d1.DesktopCoordinates.right - d1.DesktopCoordinates.left),
+                            long(d1.DesktopCoordinates.bottom - d1.DesktopCoordinates.top),
+                            hdr ? "Windows HDR on" : "Windows HDR off", double(d1.MaxLuminance), double(d1.MaxFullFrameLuminance),
+                            double(d1.MinLuminance), d1.BitsPerColor);
+              out += buf;
+            }
+            o6->Release();
+          }
+          output->Release();
+        }
+        adapter->Release();
+      }
+      factory->Release();
+    }
+  }
+  FreeLibrary(dxgi);
+  return out;
+}
+#else
+std::string DisplayDetails() { return ""; }
+#endif
+
 fs::path RealPath(const fs::path& p) {
   std::error_code ec;
   fs::path r = fs::canonical(p, ec);
@@ -353,6 +400,7 @@ void AddGameSummary(const GameInfo& info, std::function<void(const std::string&)
     ++St().pending;
   }
   std::thread([info, log = std::move(log)] {
+    if (const std::string displays = DisplayDetails(); !displays.empty()) Add(log, "displays", displays);
     Add(log, "game folder", info.game_dir.empty() ? "unknown" : DescribeGameFolder(info.game_dir));
     std::lock_guard lock(St().mu);
     --St().pending;
