@@ -445,7 +445,7 @@ pub trait Backend {
                     .collect();
                 self.add_light(&c)
             }
-            assetdb::ComponentLight::Map { .. } => NONE,
+            assetdb::ComponentLight::Map { .. } | assetdb::ComponentLight::Unbaked => NONE,
         }
     }
 }

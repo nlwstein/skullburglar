@@ -19,6 +19,7 @@ fn main() {
             Some(assetdb::ComponentLight::Legacy(v)) => format!("legacy {} verts, first {:?}", v.len(), v.first()),
             Some(assetdb::ComponentLight::Dir { words, scale }) => format!("dir {} words scale {scale:?}", words.len()),
             Some(assetdb::ComponentLight::Map { scale, .. }) => format!("map scale {scale:?}"),
+            Some(assetdb::ComponentLight::Unbaked) => "unbaked static mesh".to_string(),
         };
         println!("{} class {} comp {} mesh {} -> {kind}", pl.actor, pl.actor_class, pl.component, pl.mesh);
     }

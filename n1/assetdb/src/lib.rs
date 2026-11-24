@@ -155,6 +155,10 @@ pub struct MaterialAsset {
 /// then directional vertex light, then the legacy single colour).
 #[derive(Clone, Debug)]
 pub enum ComponentLight {
+    /// B-399: a level-placed static mesh actor whose component has no baked light at all (lightmap type 0). The port lights
+    /// it with the level's sun and the skies as it does a dynamic object, but the sun reaches it whether or not the sun
+    /// reaches dynamic objects (CarParkBuilding00's `C1StaticMeshActor_6` in chapter 32215).
+    Unbaked,
     /// Per-vertex linear colour.
     Legacy(Vec<[f32; 3]>),
     /// Per-vertex directional light: three FColor words per vertex (bytes A, R, G, B) and an RGB scale per word.
@@ -1028,6 +1032,8 @@ impl AssetDb {
                 ComponentLight::Dir { words, scale: sc }
             } else if let Some(v) = pl.vertex_light {
                 ComponentLight::Legacy(v)
+            } else if pl.lightmap_kind == 0 && pl.actor_class.ends_with("StaticMeshActor") {
+                ComponentLight::Unbaked
             } else {
                 continue;
             };
@@ -1450,7 +1456,7 @@ fn decode_tree_lights(b: &[u8]) -> Result<HashMap<String, Arc<TreeLight>>> {
     Ok(out)
 }
 
-const LIGHT2_MAGIC: u32 = 0x5447_4C32;
+const LIGHT2_MAGIC: u32 = 0x5447_4C33; // "TGL3": B-399 added `Unbaked` (type 3)
 
 fn encode_light_full(m: &HashMap<String, Arc<ComponentLight>>) -> Vec<u8> {
     let mut w = W(Vec::new());
@@ -1460,6 +1466,7 @@ fn encode_light_full(m: &HashMap<String, Arc<ComponentLight>>) -> Vec<u8> {
     for (k, v) in m {
         w.str(k);
         match &**v {
+            ComponentLight::Unbaked => w.u32(3),
             ComponentLight::Legacy(c) => {
                 w.u32(0);
                 w.u32(c.len() as u32);
@@ -1525,6 +1532,7 @@ fn decode_light_full(b: &[u8]) -> Result<HashMap<String, Arc<ComponentLight>>> {
                 let coord_bias = [r.f32()?, r.f32()?];
                 ComponentLight::Map { textures, scale, coord_scale, coord_bias }
             }
+            3 => ComponentLight::Unbaked,
             x => bail!("light kind {x}"),
         };
         out.insert(k, Arc::new(l));
@@ -1833,5 +1841,21 @@ mod symlink_tests {
             assert_eq!(got, vec![("A".to_string(), 123_456), ("Real".to_string(), 7)], "{}", dir.display());
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod unbaked_light_tests {
+    use super::*;
+
+    #[test]
+    fn unbaked_survives_the_light_cache() {
+        // B-399: a static mesh with no baked light is its own cache entry, next to real ones.
+        let mut m = HashMap::new();
+        m.insert("Pkg.A".to_string(), Arc::new(ComponentLight::Unbaked));
+        m.insert("Pkg.B".to_string(), Arc::new(ComponentLight::Legacy(vec![[0.5, 0.25, 0.125]])));
+        let back = decode_light_full(&encode_light_full(&m)).unwrap();
+        assert!(matches!(&*back["Pkg.A"], ComponentLight::Unbaked));
+        assert!(matches!(&*back["Pkg.B"], ComponentLight::Legacy(v) if v.len() == 1));
     }
 }
