@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -218,6 +219,40 @@ inline PadKind PadKindForType(PadType type) {
     case PadType::kPlayStation5: return PadKind::kPlayStation5;
     default: return PadKind::kXbox;
   }
+}
+
+// What SDL tells us about a connected pad, for choosing its glyphs (pad_nav.h fills it in; plain data so the choice is
+// unit-testable). `steam_handle`: SDL_GetGamepadSteamHandle() is non-zero, i.e. the pad comes through Steam Input.
+struct PadInfo {
+  PadType type = PadType::kOther;
+  std::string_view name;
+  uint16_t vendor = 0, product = 0;
+  bool steam_handle = false;
+};
+
+// Valve's USB vendor id: the Steam Deck's own controller (0x1205) and Steam Input's virtual gamepad (0x11FF).
+inline constexpr uint16_t kValveVendor = 0x28DE;
+
+// A pad that is really Steam Input's: SDL names its virtual gamepad "Steam Virtual Gamepad" (vendor Valve), and it
+// usually reports the Xbox 360 type whatever the real pad underneath is.
+inline bool IsSteamPad(const PadInfo& pad) {
+  if (pad.steam_handle || pad.vendor == kValveVendor) return true;
+  return pad.name.find("Steam") != std::string_view::npos;
+}
+
+// Running on a Steam Deck: Steam sets SteamDeck=1 for the games it launches; the board name ("Jupiter" LCD, "Galileo" OLED,
+// /sys/devices/virtual/dmi/id/product_name) covers a launch outside Steam. Either input may be empty.
+inline bool IsSteamDeckHost(std::string_view steamdeck_env, std::string_view dmi_product) {
+  if (steamdeck_env == "1") return true;
+  while (!dmi_product.empty() && (dmi_product.back() == '\n' || dmi_product.back() == ' ')) dmi_product.remove_suffix(1);
+  return dmi_product == "Jupiter" || dmi_product == "Galileo";
+}
+
+// The glyph family for a pad. 360 glyphs only for a real 360 pad: Steam Input's virtual pad reports as a 360 for any
+// real pad behind it, and on a Steam Deck the Deck's own glyphs (Menu, View) are the right ones whatever SDL says.
+inline PadKind PadKindFor(const PadInfo& pad, bool steam_deck) {
+  if (pad.type == PadType::kXbox360 && (steam_deck || IsSteamPad(pad))) return PadKind::kXbox;
+  return PadKindForType(pad.type);
 }
 
 // Which glyphs the launcher's prompts use, by the game's own rule for in-game prompts (mnk_input.h, B-105/B-160): the
