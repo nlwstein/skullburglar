@@ -391,6 +391,11 @@ void MouseKeyboardDriver::TakeMouseDelta(float& dx, float& dy) {
     const char* v = std::getenv("BOTS_MOUSE_GATE_STRICT");
     return v && *v ? std::atoi(v) : -1;
   }();
+  static const double env_cap = [] {  // 0 = release the whole held-back sum when the gate opens (1.15.0)
+    const char* v = std::getenv("BOTS_MOUSE_GATE_CAP");
+    return v && *v ? std::atof(v) : bots::input::MouseGate{}.backlog_cap;
+  }();
+  gate_.backlog_cap = env_cap;
   const bool strict = env_strict >= 0 ? env_strict != 0 : REXCVAR_GET(kbm_noise_gate_strict);
   const double gate = env_gate >= 0 ? env_gate : REXCVAR_GET(kbm_noise_gate);
   // Seconds of wall time since the last frame: motion arrives in wall time, whatever the game's clock does.
