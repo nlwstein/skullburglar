@@ -148,6 +148,10 @@ Portable mode (keep everything in one folder)
   from the Downloads folder may run from a temporary read-only copy that can't see portable.txt: drag it somewhere
   first. The Windows setup, the launcher's updates and the Linux updater all leave portable.txt and bots-data alone.
 
+The full list of folders (shader cache, save backups, crash archives, registry and Start menu entries, phone and TV
+apps), how to move everything to another drive, how to back up your saves and how to uninstall completely is at
+https://github.com/nlwstein/skullburglar/blob/main/docs/FILES.md
+
 Updating: the launcher's "Update now" button does it for the Windows setup, the macOS app, the Linux AppImage and an
 unpacked Linux .tar.xz (the folder is swapped as a whole; the game folder, logs and any files you added stay). Otherwise,
 or if you prefer, replace the AppImage, folder or app with the new version from https://skullburglar.stz.sh. Game
@@ -163,7 +167,7 @@ Linux    Delete the AppImage or the unpacked folder.
 Steam Deck  In Steam: the game's gear icon > Manage > Remove non-Steam game from your library, then delete the
             .AppImage (in Desktop Mode).
 
-That leaves the game files and your saves. Delete the folders listed under "Where things are kept" to
+That leaves the game files and your saves (and, on Windows, the logs folder). Delete the folders listed under "Where things are kept" to
 remove them as well: on the Steam Deck and Linux, ~/.local/share/bots-recomp (the game files),
 ~/.local/state/bots-recomp (the AppImage's logs) and ~/.local/share/bots (saves, settings, shader cache). Back up the
 saves folder first if you might play again. (In Desktop Mode, Ctrl+H shows those hidden folders in Dolphin.)

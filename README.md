@@ -112,6 +112,23 @@ Each has a GitHub issue: subscribe to it for progress, or comment there rather t
 - **Online co-op** ([#6](https://github.com/nlwstein/skullburglar/issues/6)). Co-op over the internet without a VPN,
   not just on a local network.
 
+## Where your files are, and uninstalling
+
+Skullburglar keeps three things apart: the program, the game files the launcher copies from your disc image (about
+6.5 GB), and your saves and settings. Uninstalling the program leaves the other two, so an update or reinstall never costs
+you progress.
+
+| | Windows | Mac | Linux and Steam Deck |
+|---|---|---|---|
+| Game files | `%LOCALAPPDATA%\bots-recomp\game` | `~/Library/Application Support/bots-recomp/game` | `~/.local/share/bots-recomp/game` |
+| Saves and settings | `Documents\bots` | `~/.local/share/bots` | `~/.local/share/bots` |
+| Logs | `logs` in the install folder | `~/Library/Logs/Skullburglar` | `~/.local/state/bots-recomp/logs` (AppImage), `logs` next to `bots` (tarball) |
+
+[docs/FILES.md](docs/FILES.md) lists every folder (what is in it, how big, whether you can delete it), including the
+shader cache, save backups, crash archives, the registry and Start menu entries on Windows, and the iPhone, Apple TV and
+Android app folders. It also explains how to move everything to another drive (portable mode), how to back up your saves,
+and how to uninstall completely, step by step.
+
 ## Reporting problems
 
 Check the [open issues](https://github.com/nlwstein/skullburglar/issues) first: known problems and planned features
