@@ -1242,12 +1242,12 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
     const auto number = dest_info.copy_dest_number;
     const bool is_signed = number == xe::SurfaceNumberFormat::kSignedRepeatingFraction ||
                            number == xe::SurfaceNumberFormat::kSignedInteger;
-    const bool small = SmallResolve(dest_pitch.copy_dest_pitch, dest_pitch.copy_dest_height);
+    const bool small_resolve = SmallResolve(dest_pitch.copy_dest_pitch, dest_pitch.copy_dest_height);
     Image* dest = ResolveTexture(dest_address, format, dest_pitch.copy_dest_pitch, dest_pitch.copy_dest_height,
-                                 false, is_signed, source->hdr && format == uint32_t(xe::TextureFormat::k_8_8_8_8), small);
+                                 false, is_signed, source->hdr && format == uint32_t(xe::TextureFormat::k_8_8_8_8), small_resolve);
     int32_t w, h, dw, dh;
     // Kept at guest size: the dest rect is the guest rect, the source rect the scaled one.
-    const bool fits = small ? clamp_rect(*source, w, h) && (dw = std::min(guest_x1, int32_t(dest->width)) - guest_x0,
+    const bool fits = small_resolve ? clamp_rect(*source, w, h) && (dw = std::min(guest_x1, int32_t(dest->width)) - guest_x0,
                                                             dh = std::min(guest_y1, int32_t(dest->height)) - guest_y0,
                                                             dw > 0 && dh > 0)
                             : clamp_rect(*source, w, h) && clamp_rect(*dest, dw, dh);
@@ -1260,7 +1260,7 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
               .color_format);
       const bool fixed = source_format == xe::ColorRenderTargetFormat::k_16_16 ||
                          source_format == xe::ColorRenderTargetFormat::k_16_16_16_16;
-      const VkRect2D rect = small ? VkRect2D{{guest_x0, guest_y0}, {uint32_t(dw), uint32_t(dh)}}
+      const VkRect2D rect = small_resolve ? VkRect2D{{guest_x0, guest_y0}, {uint32_t(dw), uint32_t(dh)}}
                                   : VkRect2D{{x0, y0}, {uint32_t(std::min(w, dw)), uint32_t(std::min(h, dh))}};
       if (dest->raw_depth_from) MaterializeRawDepth(*dest);  // outside this rect it still holds that depth
       // B-313: UE3's god-rays occlusion mask is drawn into the alpha channel only (colour mask 8) of an 8888 target and
@@ -1275,7 +1275,7 @@ void Renderer::Resolve(const rg::RegisterFile& regs) {
       const bool to_alpha = k8_alpha && dest->format == VK_FORMAT_R8_UNORM && dest_info.copy_dest_swap &&
                             source_format == xe::ColorRenderTargetFormat::k_8_8_8_8;
       Transfer(*source, 0, *dest, to_alpha ? kTransferResolveAlpha : kTransferResolve, &rect,
-               std::ldexp(1.0f, int(dest_info.copy_dest_exp_bias) + (fixed ? 5 : 0)), small ? int(std::ceil(scale_)) : 1);
+               std::ldexp(1.0f, int(dest_info.copy_dest_exp_bias) + (fixed ? 5 : 0)), small_resolve ? int(std::ceil(scale_)) : 1);
       dest->swapped = dest_info.copy_dest_swap;
       if (dest->width == 128 && dest->height == 128) (dest->format == VK_FORMAT_R8_UNORM ? god_mask_ : god_rays_) = dest;
       dest->written = ++write_clock_;
