@@ -201,6 +201,18 @@ fn pause_fx_on() -> bool {
     *ON.get_or_init(|| std::env::var("BOTS_N1_PAUSE_FX").map_or(true, |v| v != "0"))
 }
 
+/// #56: the "Pause background blur" setting (the host calls `n1_set_pause_blur` every frame). Off keeps the pause menu's tint and leaves
+/// the blur out, so the paused frame costs one cheap pass.
+static PAUSE_BLUR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_pause_blur(on: bool) {
+    PAUSE_BLUR.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn pause_blur_on() -> bool {
+    PAUSE_BLUR.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// `BOTS_N1_SCOPE_FX=0` leaves the sniper scope overlay out (the pre-B-295 path: the scene is shown unmasked).
 fn scope_fx_on() -> bool {
     use std::sync::OnceLock;
@@ -249,6 +261,11 @@ pub fn effects(p: &PostFeed) -> Vec<Effect> {
 
 /// [`effects`] with the counter-kill switch given (`merk`: draw the stylized counter-kill's effects).
 pub fn effects_with(p: &PostFeed, merk: bool) -> Vec<Effect> {
+    effects_opts(p, merk, pause_blur_on())
+}
+
+/// [`effects_with`] with the pause backdrop's blur given (`pause_blur`: blur it; otherwise only the tint).
+pub fn effects_opts(p: &PostFeed, merk: bool, pause_blur: bool) -> Vec<Effect> {
     let mut out = Vec::new();
     if !p.present {
         return out;
@@ -284,8 +301,8 @@ pub fn effects_with(p: &PostFeed, merk: bool) -> Vec<Effect> {
                     None
                 }
             }
-            // No parameters: the material in the chain means the pause menu is open.
-            Kind::Pause => Some(Effect { kind, params: [1.0, 0.0, 0.0, 0.0] }),
+            // No parameters: the material in the chain means the pause menu is open. params[1]: 1 = blur it (once, see `pause`).
+            Kind::Pause => Some(Effect { kind, params: [1.0, if pause_blur { 1.0 } else { 0.0 }, 0.0, 0.0] }),
             Kind::FireHeat => {
                 // The game drives `Fade` from the player's distance to the fire; without it (or at zero) nothing is added.
                 let a = p.param(m, "Fade").unwrap_or(0.0);
@@ -382,8 +399,11 @@ mod tests {
     fn pause_in_chain() {
         let m = "UI_IngameMenus.PauseMAT";
         let e = effects(&feed(&["GEN_PostProcess.AmbushPP_MAT01", m], &[]));
-        assert_eq!(e, [Effect { kind: Kind::Pause, params: [1.0, 0.0, 0.0, 0.0] }]);
+        assert_eq!(e, [Effect { kind: Kind::Pause, params: [1.0, 1.0, 0.0, 0.0] }]);
         assert!(effects(&feed(&["GEN_PostProcess.AmbushPP_MAT01"], &[])).is_empty());
+        // The "Pause background blur" setting off: the same pass with the blur flag clear (the tint stays).
+        let e = effects_opts(&feed(&["GEN_PostProcess.AmbushPP_MAT01", m], &[]), true, false);
+        assert_eq!(e, [Effect { kind: Kind::Pause, params: [1.0, 0.0, 0.0, 0.0] }]);
     }
 
     #[test]
@@ -475,6 +495,16 @@ mod tests {
         let src = crate::shaders::post_source();
         for k in Kind::ALL {
             assert!(src.contains(&format!("fn {}(", k.fs())), "{}", k.fs());
+        }
+    }
+
+    #[test]
+    fn the_pause_backdrop_passes_compile() {
+        // #56: the blur's two passes and the one that shows it are entry points of the post module, which compiles.
+        let w = crate::shaders::spirv(&crate::shaders::post_source()).expect("post.wgsl");
+        let names: Vec<String> = crate::shaders::entry_points(&w).into_iter().map(|e| e.1).collect();
+        for n in ["fs_pause_down", "fs_pause_blur", "fs_pause"] {
+            assert!(names.iter().any(|x| x == n), "missing {n}: {names:?}");
         }
     }
 }

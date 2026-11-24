@@ -59,6 +59,11 @@ std::vector<Setting> SettingsCatalog() {
                "A small readout in the top-left corner: frames per second, milliseconds per frame, and which renderer "
                "is drawing. Handy for bug reports. Takes effect the next time the game starts.",
                {}});
+  add(LauncherPage::kGraphics, "Performance", {"pause_blur", "", "Pause background blur",
+               "Blurs and dims the game behind the pause menu, as the original does. Turn it off if the pause menu "
+               "feels slow on a weak graphics card: the background is then only dimmed, which costs almost nothing. "
+               "Requires the new renderer.",
+               {}});
   // Page Graphics: Renderer
   add(LauncherPage::kGraphics, "Renderer", {"renderer", "", "Renderer",
                "The new renderer draws the 3D world with the game's rebuilt scene renderer. The pre-1.0 renderer is "

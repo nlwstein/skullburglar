@@ -10,6 +10,7 @@
 //   fs_blur   quarter res gaussian, bilinear pairs, taps from the uniform (BlurKernelSize, then BloomKernelSize)
 //   fs_comp   DOF lerp, the 15% mix of the bloom-kernel blur, saturate, gamma 2.2
 //   fs_copy   low-end path: gamma only
+//   fs_pause_down, fs_pause_blur   the pause backdrop's blur, made once per pause (#56), see fs_pause
 //   fs_comp_lin  fs_comp without the gamma, into a full-res target, when post materials follow (B-266)
 //   fs_gangsta, fs_death, fs_damage, fs_scope, fs_fireheat, fs_pause   post materials (B-266, n1ffi/src/postmat.rs): read the linear scene, write linear or (the last one)
 //             gamma_out into the target. Their block: g0 the material's parameters, g1.x time (the game's world
@@ -456,22 +457,48 @@ fn fs_fireheat(i: VOut) -> @location(0) vec4<f32> {
 // blurred: BlurKernelSize 16, FocusDistance 100000; ModulateBlurColor (0.90, 0.86, 0.72)) then PauseMAT (SceneTexture x
 // (0.6, 0.6, 0.4) x 1.3). Fitted to the Pre-1.0 renderer's paused frames (10 poses, linear light, saturated pixels left out): a Gaussian
 // of sigma 8 px at 720 lines, times (1.60, 1.58, 1.00). The tint's ratio is the material's, the overall level is not derived.
+//
+// #56: the paused picture doesn't change, so the blur is made once, when the pause starts (and again after a resize or a render scale
+// change), at a quarter of the resolution (the result is blurry anyway): fs_pause_down (4x4 box into the quarter-resolution target),
+// then fs_pause_blur twice (horizontal, then vertical with the gain), into a target that stays between frames. Every paused frame
+// is then fs_pause: one tap of that target (bloom binding, g0.y = 1). g0.y = 0 (the "Pause background blur" setting off): the
+// sharp scene with the same gain, no blur.
 @fragment
-fn fs_pause(i: VOut) -> @location(0) vec4<f32> {
-    let dims = vec2<f32>(textureDimensions(src));
-    let sigma = 8.0 * dims.y / 720.0;
-    let stp = sigma * 0.5;
+fn fs_pause_down(i: VOut) -> @location(0) vec4<f32> {
+    let base = vec2<i32>(i.pos.xy) * 4;
+    let lim = vec2<i32>(textureDimensions(src)) - 1;
     var acc = vec3<f32>(0.0);
-    var wsum = 0.0;
-    for (var y = -6; y <= 6; y++) {
-        for (var x = -6; x <= 6; x++) {
-            let o = vec2<f32>(f32(x), f32(y)) * stp;
-            let w = exp(-dot(o, o) / (2.0 * sigma * sigma));
-            acc += textureSampleLevel(src, smp, i.uv + o / dims, 0.0).rgb * w;
-            wsum += w;
+    for (var y = 0; y < 4; y++) {
+        for (var x = 0; x < 4; x++) {
+            acc += textureLoad(src, min(base + vec2<i32>(x, y), lim), 0).rgb;
         }
     }
-    return mat_out(acc / wsum * vec3<f32>(1.60, 1.58, 1.00), i.pos);
+    return vec4<f32>(acc / 16.0, 1.0);
+}
+
+// One direction of the Gaussian at quarter resolution: c.xy the direction, g0.x sigma and g0.y the radius in texels, g1.xyz a
+// multiplier (1 on the horizontal pass, the tint's gain on the vertical one).
+@fragment
+fn fs_pause_blur(i: VOut) -> @location(0) vec4<f32> {
+    let sg = max(p.g0.x, 0.01);
+    let r = i32(p.g0.y);
+    let d = p.c.xy * p.a.zw;
+    var acc = vec3<f32>(0.0);
+    var wsum = 0.0;
+    for (var k = -r; k <= r; k++) {
+        let w = exp(-f32(k * k) / (2.0 * sg * sg));
+        acc += textureSampleLevel(src, smp, i.uv + d * f32(k), 0.0).rgb * w;
+        wsum += w;
+    }
+    return vec4<f32>(acc / wsum * p.g1.xyz, 1.0);
+}
+
+@fragment
+fn fs_pause(i: VOut) -> @location(0) vec4<f32> {
+    if (p.g0.y > 0.5) {
+        return mat_out(textureSampleLevel(bloom, smp, i.uv, 0.0).rgb, i.pos);
+    }
+    return mat_out(textureSampleLevel(src, smp, i.uv, 0.0).rgb * vec3<f32>(1.60, 1.58, 1.00), i.pos);
 }
 
 const DAMAGE_GAMMA: f32 = 1.12;
