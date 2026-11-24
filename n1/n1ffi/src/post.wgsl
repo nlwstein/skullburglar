@@ -11,7 +11,7 @@
 //   fs_comp   DOF lerp, the 15% mix of the bloom-kernel blur, saturate, gamma 2.2
 //   fs_copy   low-end path: gamma only
 //   fs_comp_lin  fs_comp without the gamma, into a full-res target, when post materials follow (B-266)
-//   fs_gangsta, fs_death, fs_damage, fs_scope, fs_fireheat   post materials (B-266, n1ffi/src/postmat.rs): read the linear scene, write linear or (the last one)
+//   fs_gangsta, fs_death, fs_damage, fs_scope, fs_fireheat, fs_pause   post materials (B-266, n1ffi/src/postmat.rs): read the linear scene, write linear or (the last one)
 //             gamma_out into the target. Their block: g0 the material's parameters, g1.x time (the game's world
 //             time, the clock the materials' parameters use), g1.w real time (seconds, any origin), g1.y/z 1 = tex0/tex1
 //             take Xenos's gamma curve (raw upload), comp.w 1 = last pass. tex0/tex1 sit in the bloom bindings.
@@ -450,6 +450,28 @@ fn fs_fireheat(i: VOut) -> @location(0) vec4<f32> {
     }
     let wob = mat_tex0(uv * 0.05 + t * vec2<f32>(-0.35, 0.7)).rgb;
     return mat_out(base + s * 1.5 * vec3<f32>(2.0, 1.0, 0.5) * (wob + vec3<f32>(0.4)) * p.g0.x, i.pos);
+}
+
+// UI_IngameMenus.PausePPEffect (B-393, #53): the pause menu's backdrop. The game's chain is a DOFAndBloomEffect (everything fully
+// blurred: BlurKernelSize 16, FocusDistance 100000; ModulateBlurColor (0.90, 0.86, 0.72)) then PauseMAT (SceneTexture x
+// (0.6, 0.6, 0.4) x 1.3). Fitted to the Pre-1.0 renderer's paused frames (10 poses, linear light, saturated pixels left out): a Gaussian
+// of sigma 8 px at 720 lines, times (1.60, 1.58, 1.00). The tint's ratio is the material's, the overall level is not derived.
+@fragment
+fn fs_pause(i: VOut) -> @location(0) vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(src));
+    let sigma = 8.0 * dims.y / 720.0;
+    let stp = sigma * 0.5;
+    var acc = vec3<f32>(0.0);
+    var wsum = 0.0;
+    for (var y = -6; y <= 6; y++) {
+        for (var x = -6; x <= 6; x++) {
+            let o = vec2<f32>(f32(x), f32(y)) * stp;
+            let w = exp(-dot(o, o) / (2.0 * sigma * sigma));
+            acc += textureSampleLevel(src, smp, i.uv + o / dims, 0.0).rgb * w;
+            wsum += w;
+        }
+    }
+    return mat_out(acc / wsum * vec3<f32>(1.60, 1.58, 1.00), i.pos);
 }
 
 const DAMAGE_GAMMA: f32 = 1.12;

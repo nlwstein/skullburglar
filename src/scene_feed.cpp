@@ -2464,6 +2464,17 @@ void PostBin(HybridLighting& out) {
       }
     }
   }
+  // B-393: the pause menu's blur and tint are its own scene's post chain (UI_IngameMenus.PausePPEffect), applied in the
+  // menu's render, which the New renderer never sees; naming PauseMAT in the chain makes n1 draw them (postmat.rs).
+  // C1HUD.OpenedPauseScene is set while the menu is up (a plain `Pause`, a cutscene or a loading screen leave it empty).
+  if (IsObject(lp) && out.post_materials.size() < kMaxPostMaterials) {
+    const uint32_t pc = PropU32(lp, "Actor"), hud = IsObject(pc) ? PropU32(pc, "myHUD") : 0;
+    static const bool pause_fx = [] {
+      const char* v = std::getenv("BOTS_N1_PAUSE_FX");
+      return !(v && v[0] == '0');
+    }();
+    if (pause_fx && IsObject(hud) && IsObject(PropU32(hud, "OpenedPauseScene"))) out.post_materials.push_back(Intern("UI_IngameMenus.PauseMAT"));
+  }
   if (!IsObject(lp)) return;
   const FieldEx cur = FindEx(U32(lp + 0x34), "CurrentPPInfo");
   const FieldEx last = Member(cur, "LastSettings");
