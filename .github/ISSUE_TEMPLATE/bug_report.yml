@@ -1,0 +1,34 @@
+name: Bug report
+description: Something looks wrong, runs slowly or crashes
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks. Please check the [open issues](https://github.com/nlwstein/skullburglar/issues) first; a comment on an existing issue helps more than a new one.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you were doing, what you expected and what you saw. A screenshot helps for anything visual.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics file
+      description: |
+        Drag **one file** in here. In the launcher, open **About & logs** and press **Save a diagnostics file** (it opens the folder).
+        It has your system, CPU, memory, GPU, display and HDR, game folder and drive, controllers, any `BOTS_*` switches and the end of the newest logs, so we don't have to ask. No game files or saves go in it.
+        If the launcher doesn't open, attach the newest `.log` from the log folder instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The number on the launcher's About & logs page (also in the diagnostics file).
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Changes you made (settings, `.bat` files, mods), whether it happens every time, what you already tried.

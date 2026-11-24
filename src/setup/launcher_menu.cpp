@@ -1365,6 +1365,14 @@ void LauncherMenu::DrawAboutRows(std::vector<Setting>& settings, const LauncherS
                       "you report a problem.",
                       in, width))
           action_ = LauncherAction::kOpenLogFolder;
+        if (ActionRow("##save_diagnostics", "Save a diagnostics file", "",
+                      "Writes one small text file into the log folder and shows the folder: what computer and settings "
+                      "this is (a summary block) plus the end of the newest logs. Attach that one file when you report a "
+                      "problem. Your user name, computer name and home folder are hidden in it.",
+                      in, width))
+          action_ = LauncherAction::kSaveDiagnostics;
+        if (!st.diagnostics_note.empty())
+          Note(st.diagnostics_note, st.diagnostics_note_is_error ? color::kBad : color::kGood, width, FontRole::kSmall);
       }
     }
   GroupHeading("Reset", width);

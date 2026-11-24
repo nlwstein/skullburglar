@@ -1,0 +1,16 @@
+# Input parity for "Save a diagnostics file" on About & logs (B-390): run with --sizes 1920x1080,1280x800.
+# Keyboard: About, Down to the row under Diagnostic logging (Open the log folder), Down once more, Enter
+page:about
+key:Down
+key:Down
+key:Enter
+expect-action:save-diagnostics
+# Controller: up to the log folder row and down again, A
+pad:Up
+pad:Down
+pad:A
+expect-action:save-diagnostics
+# Mouse: click the row, a row below "Open the log folder"
+click:0.3,0.555
+expect-action:save-diagnostics
+shot:about-diag

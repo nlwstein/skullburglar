@@ -180,6 +180,8 @@ typedef struct N1Stats {
    * and the log lines written. */
   uint64_t suspect_frames, suspect_missing, suspect_default, suspect_skin_grey, suspect_skin_zero;
   uint32_t suspect_lines;
+  /* Textures loaded and failed to load this session (each path once; missing or unsupported counts as failed). */
+  uint64_t tex_load_ok, tex_load_failed;
 } N1Stats;
 
 /* NULL on failure; see n1_last_error. */
