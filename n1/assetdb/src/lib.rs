@@ -382,6 +382,12 @@ impl AssetDb {
         ue3::level::placements(&pkg).into_iter().filter(|(_, e)| e.is_none()).map(|(p, _)| p).collect()
     }
 
+    /// The SpeedTree placements a package holds (those `ue3::speedtree::tree_placements` returns), for tools.
+    pub fn level_tree_placements(&self, pkg_name: &str) -> Vec<ue3::speedtree::TreePlacement> {
+        let Ok(pkg) = self.package(pkg_name) else { return Vec::new() };
+        ue3::speedtree::tree_placements(&pkg)
+    }
+
     /// The class of an object and the bytes that follow its property list in its export (native serialization), for
     /// tools that decode what the property reader skips (`mictail`).
     pub fn object_tail(&self, path: &str) -> Option<(String, Vec<u8>)> {

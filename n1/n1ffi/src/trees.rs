@@ -690,6 +690,14 @@ pub struct TreeSystem {
     cooldown: u32,
     /// Sessions in a row that captured nothing (B-199): each doubles the cooldown before the next one.
     empty_sessions: u32,
+    /// B-405: the placements (component handles) that looked visible while a session captured nothing, and those that look
+    /// visible now. A placement that was never tried ends the backoff: the player went somewhere new, and a tree there may
+    /// be drawn (`BOTS_N1_TREE_RESTART=0` keeps the old backoff in every case).
+    tried: HashSet<u32>,
+    visible_comps: HashSet<u32>,
+    restart_on_new: bool,
+    /// When this system started (log timestamps).
+    born: std::time::Instant,
     /// Frames the game drew its own scene for capture sessions, this run.
     pub capture_frames: u64,
     stall: u32,
@@ -821,6 +829,10 @@ impl TreeSystem {
             survey_frames: env_num("BOTS_N1_TREE_SURVEY", 6u32),
             cooldown: 0,
             empty_sessions: 0,
+            tried: HashSet::new(),
+            visible_comps: HashSet::new(),
+            restart_on_new: env_num("BOTS_N1_TREE_RESTART", 1u32) != 0,
+            born: std::time::Instant::now(),
             capture_frames: 0,
             stall: 0,
             saw: false,
@@ -932,6 +944,9 @@ impl TreeSystem {
                     let (center, radius) = t.geom.bounds();
                     match r.tree_add(&t) {
                         Ok(gpu) => {
+                            if self.log {
+                                eprintln!("n1ffi: [{:.1} s] tree asset ready: {}", self.born.elapsed().as_secs_f32(), self.asset_paths[h as usize]);
+                            }
                             self.info.insert(h, AInfo { center, radius, gpu });
                             self.asset[h as usize] = AssetSt::Ready(gpu);
                         }
@@ -979,6 +994,7 @@ impl TreeSystem {
         let planes = scenekit::frustum_planes(view_proj);
         let mut wanted: HashSet<u32> = HashSet::new();
         let mut wanted_visible: HashSet<u32> = HashSet::new();
+        self.visible_comps.clear();
         let cap_dist = env_num("BOTS_N1_TREE_CAPTURE_DIST", 15_000f32);
         let cap_radius = env_num("BOTS_N1_TREE_CAPTURE_RADIUS", 2_000f32);
         let mut by_asset: Vec<(u32, Vec<TInst>)> = Vec::new();
@@ -1010,6 +1026,7 @@ impl TreeSystem {
                 let d = ((p[0] - eye[0]).powi(2) + (p[1] - eye[1]).powi(2) + (p[2] - eye[2]).powi(2)).sqrt();
                 if d - cap_radius <= cap_dist && !planes.iter().any(|q| q[0] * p[0] + q[1] * p[1] + q[2] * p[2] + q[3] < -cap_radius) {
                     wanted_visible.insert(t.asset);
+                    self.visible_comps.insert(t.component);
                 }
             }
             let (AssetSt::Ready(_), CompSt::Ready { base, scale }) = (&*a, &*c) else { continue };
@@ -1057,6 +1074,17 @@ impl TreeSystem {
     pub fn end_frame(&mut self) -> u32 {
         let total = env_num("BOTS_N1_TREE_CAPTURE_FRAMES", 30u32).max(self.survey_frames + 2);
         if self.phase == Phase::Idle {
+            // B-405: an empty session backs the next one off (B-199), which is right while the player stands where nothing
+            // is drawn but wrong once a tree that was not in view then is: the flare's palm waited out the cooldown that
+            // three empty sessions at the spawn had built (about 30 s at 30 fps, 960 frames), long after the player was
+            // looking at it. Each placement ends the backoff once.
+            if self.cooldown > 0 && self.restart_on_new && untried_in_view(&self.visible_comps, &self.tried) {
+                if self.log {
+                    eprintln!("n1ffi: [{:.1} s] tree capture backoff dropped: a placement in view was not tried by the last empty session", self.born.elapsed().as_secs_f32());
+                }
+                self.cooldown = 0;
+                self.empty_sessions = 0;
+            }
             if self.cooldown > 0 {
                 self.cooldown -= 1;
                 return 0;
@@ -1078,8 +1106,8 @@ impl TreeSystem {
             self.capture_sessions += 1;
             if self.log {
                 eprintln!(
-                    "n1ffi: tree capture session {} starts ({} assets wanted, {} in view)",
-                    self.capture_sessions, self.last.wanted, self.last.wanted_visible
+                    "n1ffi: [{:.1} s] tree capture session {} starts ({} assets wanted, {} in view)",
+                    self.born.elapsed().as_secs_f32(), self.capture_sessions, self.last.wanted, self.last.wanted_visible
                 );
             }
             return total;
@@ -1108,6 +1136,11 @@ impl TreeSystem {
             self.commit();
             self.phase = Phase::Idle;
             self.empty_sessions = if self.captured > before { 0 } else { (self.empty_sessions + 1).min(4) };
+            if self.captured > before {
+                self.tried.clear();
+            } else {
+                self.tried.extend(self.visible_comps.iter().copied());
+            }
             self.cooldown = 120 << self.empty_sessions;
             return 0;
         }
@@ -1332,8 +1365,8 @@ impl TreeSystem {
         }
         if self.log {
             eprintln!(
-                "n1ffi: tree capture session ended: {done} assets sent to capture, {} total, {} capture frames this run; probe {:.2} ms in total; {:?}",
-                self.captured, self.capture_frames, self.probe_ns as f64 / 1e6, self.dbg
+                "n1ffi: [{:.1} s] tree capture session ended: {done} assets sent to capture, {} total, {} capture frames this run; probe {:.2} ms in total; {:?}",
+                self.born.elapsed().as_secs_f32(), self.captured, self.capture_frames, self.probe_ns as f64 / 1e6, self.dbg
             );
         }
         self.grid.clear();
@@ -1361,6 +1394,11 @@ impl TreeSystem {
     pub fn pending_jobs(&self) -> usize {
         self.comp.iter().filter(|c| matches!(c, CompSt::Loading)).count() + self.asset.iter().filter(|a| matches!(a, AssetSt::Loading)).count()
     }
+}
+
+/// B-405: is a placement in view that no empty capture session has tried yet?
+fn untried_in_view(visible: &HashSet<u32>, tried: &HashSet<u32>) -> bool {
+    visible.iter().any(|c| !tried.contains(c))
 }
 
 /// `TreeSystem::find_placement` over a grid of placement indices keyed by the floor of their translation.
@@ -1411,6 +1449,17 @@ fn cell_of(t: &[f32; 16]) -> (i32, i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backoff_ends_for_a_placement_no_empty_session_tried() {
+        // B-405: nothing in view or all of it tried: the backoff stands; one new placement ends it.
+        let tried: HashSet<u32> = [1, 2].into();
+        assert!(!untried_in_view(&HashSet::new(), &tried));
+        assert!(!untried_in_view(&[1].into(), &tried));
+        assert!(!untried_in_view(&[1, 2].into(), &tried));
+        assert!(untried_in_view(&[2, 3].into(), &tried));
+        assert!(untried_in_view(&[3].into(), &HashSet::new()));
+    }
 
     fn tree(x: f32, y: f32, z: f32) -> N1Tree {
         let mut transform = [0.0; 16];
