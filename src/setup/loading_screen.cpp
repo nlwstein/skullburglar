@@ -103,7 +103,7 @@ LoadingView MakeLoadingView(const LoadingProgress& progress, const std::string& 
   v.done = progress.done();
   v.total = progress.total();
   v.show_counts = progress.saw_compile() && progress.total() > 0;
-  v.remaining_seconds = progress.remaining_seconds();
+  v.remaining_text = progress.remaining_text();
   v.first_start_hint = progress.show_first_start_hint();
   v.version = version;
   v.time = time;
@@ -196,7 +196,7 @@ void DrawLoadingScreen(const LoadingView& view, const LauncherFonts& fonts) {
     // Under the bar: the time left, and the percentage.
     std::string left;
     if (view.phase == LoadPhase::kShaders && view.show_counts) {
-      left = RemainingText(view.remaining_seconds);
+      left = view.remaining_text;
       if (left.empty()) left = "Estimating the time left...";
     }
     char pct[16] = "";

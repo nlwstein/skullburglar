@@ -7,6 +7,58 @@
 
 using namespace bots::setup;
 
+// Two recorded starts (the game's "loading screen:" log lines, seconds since the screen appeared, shaders done / total):
+// a cold first start (169 s) and one with the system's shader cache warm (12 s).
+struct Pt { double t; uint32_t done, total; };
+static const Pt kCold[] = {{0.5, 0, 2286}, {6.3, 414, 4653}, {11.8, 931, 4653}, {15.3, 1451, 4653}, {19.7, 1967, 4653},
+                           {22.6, 2484, 4653}, {56.9, 2999, 4653}, {101.1, 3516, 4653}, {145.6, 4033, 4653},
+                           {165.8, 4550, 4653}, {168.5, 4653, 4653}};
+static const Pt kWarm[] = {{0.6, 0, 2286}, {2.7, 427, 4653}, {3.4, 933, 4653}, {3.9, 1456, 4653}, {4.5, 1966, 4653},
+                           {5.1, 2489, 4653}, {5.6, 2999, 4653}, {7.2, 3519, 4653}, {8.6, 4037, 4653}, {11.3, 4557, 4653},
+                           {12.1, 4653, 4653}};
+
+// Replays a trace at 4 frames a second (counts interpolated between the log lines) and checks the rules that matter on screen.
+// Returns the largest bucket level shown.
+template <size_t N>
+static int Replay(const Pt (&pts)[N], bool* hint_seen, int* max_level_after_half) {
+  LoadingProgress p;
+  p.Observe(0.0, false, 0, 0, false);
+  int shown = -1, max_level = -1;
+  double changed = 0;
+  *hint_seen = false;
+  *max_level_after_half = -1;
+  for (double t = pts[0].t; t <= pts[N - 1].t; t += 0.25) {
+    size_t i = 0;
+    while (i + 2 < N && pts[i + 1].t < t) ++i;
+    const double f = std::clamp((t - pts[i].t) / (pts[i + 1].t - pts[i].t), 0.0, 1.0);
+    const uint32_t done = uint32_t(pts[i].done + f * (pts[i + 1].done - pts[i].done));
+    p.Observe(t, true, done, pts[i + 1].total, done >= pts[i + 1].total);
+    const std::string& text = p.remaining_text();
+    if (text.empty()) continue;
+    // Not before 3 s and 5 %.
+    assert(t - pts[0].t >= 3.0 - 1e-9 && double(done) >= 0.05 * double(p.total()));
+    int level = -1;
+    for (int l = 0; l < 20; ++l) if (LevelText(l) == text) level = l;
+    assert(level >= 0);
+    // Never rises by more than one bucket within 10 s of the last change.
+    if (shown >= 0 && level != shown) {
+      assert(level <= shown + 1 || t - changed >= 10.0 - 1e-9);
+      changed = t;
+    } else if (shown < 0) {
+      changed = t;
+    }
+    shown = level;
+    max_level = std::max(max_level, level);
+    // Past half way, never more than twice the time spent.
+    if (double(done) > 0.5 * double(p.total())) {
+      assert(p.remaining_seconds() <= 2.0 * (t - pts[0].t) + 1e-6);
+      *max_level_after_half = std::max(*max_level_after_half, level);
+    }
+    if (p.show_first_start_hint()) *hint_seen = true;
+  }
+  return max_level;
+}
+
 int main() {
   // Before the graphics exist: starting up, bar at zero, nothing to estimate.
   {
@@ -35,14 +87,13 @@ int main() {
         assert(p.steps().shaders == StepState::kActive && p.steps().starting == StepState::kDone);
         assert(p.determinate() && p.building());
         const double r = p.remaining_seconds();
-        if (t < 6) assert(r < 0);
+        if (t < 4) assert(r < 0);  // not before 3 s
         if (r >= 0) {
           saw_estimate = true;
           assert(r <= last_remaining + 2.0);  // steady rate: never jumps up
           last_remaining = r;
           const double truth = double(3000 - done) / 12.0;
-          if (done >= 2700) assert(r > truth * 0.8 - 2.0 && r < truth * 1.2 + 2.0);
-          else assert(r >= 60.0);  // never "less than a minute" this early
+          assert(r > truth * 0.85 - 1.0 && r < truth * 1.15 + 1.0);  // steady rate: the estimate is right
         }
         if (p.show_first_start_hint()) saw_hint = true;
       }
@@ -95,12 +146,25 @@ int main() {
     p.Observe(4.0, true, 4000, 4000, true);
     assert(p.phase() == LoadPhase::kGame);
   }
+  // The two recorded starts.
+  {
+    bool hint = false;
+    int after_half = 0;
+    Replay(kCold, &hint, &after_half);
+    assert(hint);  // a long first start explains itself
+    bool warm_hint = true;
+    const int warm_max = Replay(kWarm, &warm_hint, &after_half);
+    assert(!warm_hint);                          // a fast start doesn't
+    assert(warm_max <= 1 && after_half <= 1);    // and never claims minutes
+  }
   // Wording.
   assert(RemainingText(-1).empty());
+  assert(RemainingText(5) == "a few seconds left");
   assert(RemainingText(20) == "less than a minute left");
   assert(RemainingText(60) == "about 1 minute left");
-  assert(RemainingText(61) == "about 2 minutes left");
-  assert(RemainingText(500) == "about 9 minutes left");
+  assert(RemainingText(89) == "about 1 minute left");
+  assert(RemainingText(91) == "about 2 minutes left");
+  assert(RemainingText(500) == "about 8 minutes left");
   assert(CountText(0) == "0" && CountText(812) == "812" && CountText(2686) == "2,686" && CountText(1234567) == "1,234,567");
   std::puts("loading_logic_test: ok");
   return 0;

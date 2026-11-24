@@ -27,7 +27,7 @@ struct LoadingView {
   bool determinate = false;  // false: a moving stripe instead of a fraction (nothing to count)
   uint32_t done = 0, total = 0;
   bool show_counts = false;  // "812 / 2,686" on the shader step
-  double remaining_seconds = -1;
+  std::string remaining_text;  // "about 2 minutes left", or empty
   bool first_start_hint = false;
   std::string version;
   double time = 0;           // seconds, for the animation
