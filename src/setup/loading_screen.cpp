@@ -103,7 +103,6 @@ LoadingView MakeLoadingView(const LoadingProgress& progress, const std::string& 
   v.done = progress.done();
   v.total = progress.total();
   v.show_counts = progress.saw_compile() && progress.total() > 0;
-  v.remaining_text = progress.remaining_text();
   v.first_start_hint = progress.show_first_start_hint();
   v.version = version;
   v.time = time;
@@ -160,8 +159,7 @@ void DrawLoadingScreen(const LoadingView& view, const LauncherFonts& fonts) {
     // Hint under the card; its room is reserved so it appearing moves nothing.
     const float hint_gap = p.S(14);
     const float hint_w = pw;
-    const std::string hint =
-        "The first start prepares shaders for your graphics card; later starts are fast.";
+    const std::string hint = kFirstStartHint;
     const float hint_h = p.Measure(FontRole::kBody, hint, hint_w).y;
     const float footer = p.S(34);
     float y = std::max(title_bottom + p.S(36), size.y * 0.47f);
@@ -193,12 +191,8 @@ void DrawLoadingScreen(const LoadingView& view, const LauncherFonts& fonts) {
     }
     cy += bar_h + p.S(8);
 
-    // Under the bar: the time left, and the percentage.
-    std::string left;
-    if (view.phase == LoadPhase::kShaders && view.show_counts) {
-      left = view.remaining_text;
-      if (left.empty()) left = "Estimating the time left...";
-    }
+    // Under the bar: the percentage (no time estimate: see loading_logic.h).
+    const std::string left;
     char pct[16] = "";
     if (view.determinate) std::snprintf(pct, sizeof(pct), "%d%%", int(std::clamp(view.bar, 0.0f, 1.0f) * 100.0f));
     const float pct_w = p.TextRight(FontRole::kBody, ix + iw, cy, color::kTextDim, pct);

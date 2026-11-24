@@ -228,8 +228,7 @@ class ShaderProgressDialog : public rex::ui::ImGuiDialog {
     const int tenth = int(view.bar * 10.0f);
     const bool changed = tenth > logged_tenth_ || std::string(phase) != logged_phase_;
     if (changed) {
-      REXLOG_INFO("loading screen: {} (shaders {} / {}, bar {}%, {}){}", phase, view.done, view.total, int(view.bar * 100.0f),
-                  view.remaining_text.empty() ? std::string("no estimate yet") : view.remaining_text,
+      REXLOG_INFO("loading screen: {} (shaders {} / {}, bar {}%){}", phase, view.done, view.total, int(view.bar * 100.0f),
                   view.alpha < 1.0f ? ", fading out" : "");
     }
     if (!shot_dir_.empty() && (changed || (view.alpha < 1.0f && shots_ < 400))) {
