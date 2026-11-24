@@ -1021,8 +1021,8 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
                 st.particle_sprites, st.particle_meshes, st.particle_dropped, st.particle_skipped,
                 st.particle_mats_ready, st.particle_mats_failed, host->particles_ms / n, st.tree_placements, st.tree_instances,
                 st.tree_assets_ready, st.tree_assets_uncaptured, st.tree_assets_failed, st.tree_captured);
-    // B-404: one line a minute so a log shows at a glance whether textures failed to load (the first failures, with
-    // their reasons, go to stderr: see ASSETDB in n1/assetdb).
+    // One line a minute so a log shows at a glance whether textures failed to load (the reasons for the
+    // first failures are on stderr, from n1/assetdb).
     if (st.tex_load_failed) REXLOG_WARN("textures: {} loaded, {} failed", st.tex_load_ok, st.tex_load_failed);
     else if (st.tex_load_ok) REXLOG_INFO("textures: {} loaded, 0 failed", st.tex_load_ok);
     if (st.decal_builds || st.decals)
