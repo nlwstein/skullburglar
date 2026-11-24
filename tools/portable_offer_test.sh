@@ -19,7 +19,7 @@ VOL=${3:-}
 OS=$(uname -s)
 fail() { echo "FAIL: $*" >&2; cleanup; exit 1; }
 DEV=""
-cleanup() { [ -n "$DEV" ] && hdiutil detach -quiet "$DEV" >/dev/null 2>&1; DEV=""; }
+cleanup() { [ -n "$DEV" ] && { hdiutil detach -quiet "$DEV" >/dev/null 2>&1 || { sleep 3; hdiutil detach -force -quiet "$DEV" >/dev/null 2>&1; }; }; DEV=""; }
 [ -x "$DIST/bots" ] || fail "no $DIST/bots"
 pgrep -x bots >/dev/null 2>&1 && fail "another bots process is running"
 case $WORK in /|""|"$HOME") fail "refusing work dir $WORK" ;; esac
