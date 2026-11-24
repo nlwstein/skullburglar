@@ -231,6 +231,10 @@ pub struct AssetDb {
     /// every export of the package building paths: ~30 ms a call on the big ones).
     path_maps: Mutex<HashMap<String, Arc<HashMap<(bool, String), i32>>>>,
     pub verbose: bool,
+    /// Textures loaded and not loaded this session (each path counts once; a missing or unsupported texture counts as
+    /// not loaded), for the log's "textures: N loaded, M failed" line.
+    tex_loaded: std::sync::atomic::AtomicU64,
+    tex_failed: std::sync::atomic::AtomicU64,
     pub max_tex: u32,
 }
 
@@ -325,6 +329,8 @@ impl AssetDb {
             preferred: Mutex::new(HashSet::new()),
             path_maps: Mutex::new(HashMap::new()),
             verbose: std::env::var("ASSETDB_VERBOSE").is_ok(),
+            tex_loaded: Default::default(),
+            tex_failed: Default::default(),
             max_tex: std::env::var("BOTS_N1_MAXTEX").ok().and_then(|v| v.parse().ok()).unwrap_or(2048).max(64),
         })
     }
@@ -856,6 +862,12 @@ impl AssetDb {
         h
     }
 
+    /// Textures this session loaded and failed to load (see `tex_loaded`).
+    pub fn texture_counts(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (self.tex_loaded.load(Relaxed), self.tex_failed.load(Relaxed))
+    }
+
     /// A Texture2D by object path, untiled; `None` if missing or in an unsupported format.
     pub fn texture(&self, path: &str) -> Option<Arc<TextureAsset>> {
         if let Some(t) = self.textures.lock().unwrap().get(path) {
@@ -867,6 +879,8 @@ impl AssetDb {
             }
             None
         });
+        let counter = if r.is_some() { &self.tex_loaded } else { &self.tex_failed };
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.textures
             .lock()
             .unwrap()

@@ -322,6 +322,7 @@ const char* ActionName(LauncherAction a) {
     case LauncherAction::kMoveSaves: return "move-saves";
     case LauncherAction::kDismissSaves: return "dismiss-saves";
     case LauncherAction::kOpenLogFolder: return "open-logs";
+    case LauncherAction::kSaveDiagnostics: return "save-diagnostics";
     case LauncherAction::kCopyFromShared: return "copy-shared";
     case LauncherAction::kUseSharedInPlace: return "use-shared";
     case LauncherAction::kOfferCopy: return "offer-copy";

@@ -41,6 +41,7 @@
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/window.h>
 
+#include "../diagnostics.h"
 #include "app_paths.h"
 #include "game_location.h"
 #include "portable.h"
@@ -319,6 +320,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
     }
     st.log_folder = bots::PlainPathUtf8(LogFolder());
     st.reset_note = reset_note_;
+    st.diagnostics_note = diagnostics_note_;
+    st.diagnostics_note_is_error = diagnostics_note_is_error_;
     // Portable mode (B-386, B-389): saves or bots.toml in the data folder instead of its user/ folder, or a portable.txt
     // that Windows named portable.txt.txt. Never moves anything by itself.
     if (!misplaced_.empty()) {
@@ -460,6 +463,16 @@ class SetupDialog : public rex::ui::ImGuiDialog {
         std::filesystem::create_directories(folder, ec);  // nothing may have been logged there yet
         REXLOG_INFO("setup: open the log folder {}", bots::PlainPathUtf8(folder));
         if (!live_.init) OpenFolder(bots::PathUtf8(folder));  // test runs (BOTS_SETUP_LIVE) never open a window
+        return;
+      }
+      case LauncherAction::kSaveDiagnostics: {
+        const std::filesystem::path folder = LogFolder();
+        std::string err;
+        const std::filesystem::path file = bots::diag::SaveBundle(folder, 300, err);
+        diagnostics_note_is_error_ = file.empty();
+        diagnostics_note_ = file.empty() ? err : "Saved " + bots::PlainPathUtf8(file) + ". Attach it to your bug report.";
+        REXLOG_INFO("setup: diagnostics file {}", file.empty() ? err : bots::PlainPathUtf8(file));
+        if (!file.empty() && !live_.init) OpenFolder(bots::PathUtf8(folder));  // test runs (BOTS_SETUP_LIVE) never open a window
         return;
       }
       case LauncherAction::kMoveSaves: {
@@ -1240,6 +1253,8 @@ class SetupDialog : public rex::ui::ImGuiDialog {
   float logged_width_ = 0, logged_height_ = 0, logged_scale_ = 0;
   LauncherMenu menu_;
   std::string reset_note_;
+  std::string diagnostics_note_;  // B-390: Save a diagnostics file's result
+  bool diagnostics_note_is_error_ = false;
   bool update_logged_ = false;
   bool shots_done_ = false;
   int shot_quit_frames_ = 0;

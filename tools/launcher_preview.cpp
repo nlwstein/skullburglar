@@ -221,6 +221,8 @@ int main(int argc, char** argv) {
         if (!s.locked && s.cvar != "check_updates") s.value = s.default_value;
       st.reset_note = "Settings reset to this version's defaults.";
     }
+    if (a == LauncherAction::kSaveDiagnostics)  // the window's own result (setup_dialog.h)
+      st.diagnostics_note = "Saved " + st.log_folder + "/skullburglar-diagnostics.txt. Attach it to your bug report.";
     if (a == LauncherAction::kMoveSaves && state != "misplaced-repeat") {
       st.saves_warning.clear(), st.saves_can_move = false;
       st.saves_note = "Moved. Your saves are used from now on.";

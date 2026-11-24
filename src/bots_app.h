@@ -42,6 +42,9 @@
 #include <rex/system/xmemory.h>
 
 #include "thread_stats.h"
+#include "diagnostics.h"
+#include <SDL3/SDL_gamepad.h>
+#include <SDL3/SDL_video.h>
 #include "instr.h"
 #include <rex/ui/presenter.h>
 #include <rex/input/input_system.h>
@@ -349,6 +352,16 @@ class BotsApp : public rex::ReXApp {
       if (!loc.dir.empty())
         REXLOG_INFO("game folder: {} ({}{})", bots::PathUtf8(loc.dir), bots::setup::WhyText(loc.why),
                     loc.portable && loc.why == bots::setup::GameDirWhy::kShared ? ", outside the portable folder" : "");
+    }
+    {  // B-390, B-403: the BOTS_*/REX_* switches in effect and the "summary:" block (diagnostics.h), probed off this thread
+      bots::diag::StartInfo info;
+      info.version = std::string(bots::setup::AppVersion()) + " (commit " + bots::setup::AppCommit() + ")";
+      if (const auto& data = bots::setup::ActiveDataRoot(); data.source != bots::setup::DataSource::kDefault) {
+        info.data_root = data.root;
+        info.data_source = data.source == bots::setup::DataSource::kEnv ? "BOTS_DATA_DIR" : "portable.txt";
+      }
+      info.program = rex::filesystem::GetExecutablePath();
+      bots::diag::StartStartupSummary(info, [](const std::string& line) { REXLOG_INFO("{}", line); });
     }
     if (!bots::setup::ActiveMarkerHint().empty()) REXLOG_WARN("{}", bots::setup::ActiveMarkerHint());  // B-389
     if (!user_data_root().empty()) {  // B-389: which folder the saves are read from and whether any are there
@@ -846,7 +859,54 @@ class BotsApp : public rex::ReXApp {
     REXLOG_INFO("settings in effect: {} of {} differ from the defaults{}{}", differ, total, differ ? ": " : "", changed);
   }
 
+  // B-390: the second half of the "summary:" block, once the game folder is final and the window exists (the first half,
+  // OS / CPU / memory / how the game was started, comes from LogBuildInfo). Cheap questions only; the folder's
+  // filesystem and links are looked at off this thread (diagnostics.cpp).
+  void LogGameSummary() {
+#if !TARGET_OS_IPHONE && !defined(__ANDROID__)
+    bots::diag::GameInfo g;
+    g.game_dir = game_data_root();
+    g.renderer = bots::UseN1() ? "new (n1)" : (bots::kHasN1 ? "pre-1.0 (the old renderer)" : "pre-1.0 (this build has no new renderer)");
+    {
+      std::string d;
+      rex::ui::Window* w = window();
+      const bool full = w ? w->IsFullscreen() : rex::cvar::Query<bool>("fullscreen");
+      uint32_t pw = w ? w->GetActualPhysicalWidth() : 0, ph = w ? w->GetActualPhysicalHeight() : 0;
+      if (!pw || !ph) pw = uint32_t(std::max(0, int(rex::cvar::Query<int32_t>("window_width")))), ph = uint32_t(std::max(0, int(rex::cvar::Query<int32_t>("window_height"))));
+      d = pw && ph ? std::to_string(pw) + "x" + std::to_string(ph) : std::string("size not known yet");
+      d += full ? " fullscreen" : " windowed";
+      if (w) d += ", display scale " + std::to_string(int(100.0 * w->GetDpi() / w->GetMediumDpi() + 0.5)) + "%";
+      if (const SDL_DisplayID display = SDL_GetPrimaryDisplay()) {
+        if (const char* name = SDL_GetDisplayName(display)) d += std::string(", display \"") + name + "\"";
+        if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(display))
+          d += ", desktop " + std::to_string(mode->w) + "x" + std::to_string(mode->h) + " at " +
+               std::to_string(int(mode->refresh_rate + 0.5f)) + " Hz";
+        const bool os_hdr = SDL_GetBooleanProperty(SDL_GetDisplayProperties(display), SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN, false);
+        const bool want = rex::cvar::Query<bool>("vulkan_hdr");
+        g.hdr = std::string(want ? "game HDR on" : "game HDR off") + ", the display reports HDR " + (os_hdr ? "on" : "off");
+        if (want) g.hdr += ", paper white " + std::to_string(int(rex::cvar::Query<double>("vulkan_hdr_paper_white") + 0.5)) + " nits, peak " + std::to_string(int(rex::cvar::Query<double>("vulkan_hdr_peak") + 0.5)) + " nits";
+      }
+      g.display = d;
+    }
+    {
+      int count = 0;
+      SDL_JoystickID* ids = SDL_GetGamepads(&count);
+      std::string pads;
+      for (int i = 0; ids && i < count && i < 4; ++i) {
+        static const char* const kTypes[] = {"unknown", "standard", "Xbox 360", "Xbox One", "PS3", "PS4", "PS5", "Switch Pro", "Joy-Con left", "Joy-Con right", "Joy-Con pair", "Switch"};
+        const int type = int(SDL_GetGamepadTypeForID(ids[i]));
+        const char* name = SDL_GetGamepadNameForID(ids[i]);
+        pads += std::string(i ? "; " : "") + std::to_string(i + 1) + ": " + (type >= 0 && type < int(sizeof(kTypes) / sizeof(*kTypes)) ? kTypes[type] : "?") + " (" + (name ? name : "unnamed") + ")";
+      }
+      SDL_free(ids);
+      g.controllers = pads.empty() ? "none connected at startup (they can be plugged in later)" : std::to_string(count) + " connected: " + pads;
+    }
+    bots::diag::AddGameSummary(g, [](const std::string& line) { REXLOG_INFO("{}", line); });
+#endif
+  }
+
   void OnPostSetup() override {
+    LogGameSummary();
     bots::StartThreadStats();
     SetLaunchCommandLine();
     LogSettingsInEffect();

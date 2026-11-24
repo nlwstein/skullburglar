@@ -47,6 +47,7 @@ enum class LauncherAction {
   kMoveSaves,       // portable mode: move the misplaced saves and settings into user/, confirmed (B-386)
   kDismissSaves,    // "Not now" on the misplaced-saves notice
   kOpenLogFolder,   // About & logs: show the logs folder in the system's file browser
+  kSaveDiagnostics, // About & logs: save the diagnostics file (summary block + newest logs) in the logs folder and show it
   // Portable mode keeps the game files in its own folder (B-400)
   kCopyFromShared,  // Game files: copy the shared install into the portable folder
   kUseSharedInPlace,  // Game files: keep playing from the shared folder
@@ -98,6 +99,8 @@ struct LauncherStatus {
   std::string config_path;
   std::string portable_note;  // portable mode: where everything is kept
   std::string log_folder;
+  std::string diagnostics_note;  // after Save a diagnostics file: where it went, or what failed
+  bool diagnostics_note_is_error = false;
   std::string reset_note;     // after Reset to defaults
   // Portable-mode notices (B-386, B-389). The window checks the data folder; the menu shows them on About & logs, with a
   // card and a badge on the main menu.

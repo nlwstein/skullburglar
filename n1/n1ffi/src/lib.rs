@@ -275,6 +275,9 @@ pub struct N1Stats {
     pub suspect_skin_grey: u64,
     pub suspect_skin_zero: u64,
     pub suspect_lines: u32,
+    /// Textures loaded and failed to load this session (assetdb), for the log's per-minute "textures: N loaded, M failed".
+    pub tex_load_ok: u64,
+    pub tex_load_failed: u64,
 }
 
 /// B-199: one package's worth of things to load, found on a scan thread.
@@ -464,6 +467,7 @@ impl Inner {
         out.evict_max_ms = e.max_ms;
         out.repreload_levels = self.preload.repreload_levels;
         out.repreload_requests = self.preload.repreload_requests;
+        (out.tex_load_ok, out.tex_load_failed) = self.resolver.db.texture_counts();
     }
 }
 
