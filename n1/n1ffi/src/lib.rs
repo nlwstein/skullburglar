@@ -17,6 +17,7 @@ pub mod decals;
 pub mod godref;
 pub mod light;
 pub mod particles;
+pub mod pause;
 pub mod plan;
 pub mod postmat;
 pub mod precompile;
@@ -1230,6 +1231,13 @@ pub unsafe extern "C" fn n1_set_fade(r: *const N1Renderer, scale: *const f32, ov
         [[f(s[0], 1.0), f(s[1], 1.0), f(s[2], 1.0)], [f(o[0], 0.0), f(o[1], 0.0), f(o[2], 0.0)]]
     };
     with(r, (), |i| i.renderer.fade = fade);
+}
+
+/// #56: the "Pause background blur" setting. On (the default): the pause menu's backdrop is blurred (once per pause) and tinted;
+/// off: tinted only. The host calls it every frame with the setting's current value.
+#[unsafe(no_mangle)]
+pub extern "C" fn n1_set_pause_blur(on: u32) {
+    postmat::set_pause_blur(on != 0);
 }
 
 /// B-292: the picture of the game's `DamageEffectTexture` render target (the hit-direction marks), `w` x `h` texels of

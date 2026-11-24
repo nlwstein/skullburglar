@@ -1106,7 +1106,7 @@ void LauncherMenu::DrawPageRows(std::vector<Setting>& settings, const LauncherSt
     // pre-1.0 renderer's visibility test is the other way round.
     const bool pre1 = value("renderer") == "pre1";
     const bool n1_only = (s.cvar == "anti_aliasing" || s.cvar == "sharpening" || s.cvar == "ambient_occlusion" ||
-                          s.cvar == "ambient_occlusion_strength") &&
+                          s.cvar == "ambient_occlusion_strength" || s.cvar == "pause_blur") &&
                          pre1;
     const bool pre1_only = s.cvar == "pre1_occlusion" && !pre1;
     const char* why = kbm_dependent ? "Turn on Keyboard and mouse to change this."
