@@ -1,6 +1,6 @@
 # Changes every launcher setting once, alternating keyboard and controller (tests/launcher_every_setting.script).
 # Run in the game with BOTS_SETUP_SHOT_SAVE=1 and check that bots.toml then holds every key; generated from
-# src/setup/settings_catalog.cpp (69 settings with the 1.13.0 ones), except check_updates (development builds don't have it; tests/launcher_input.script
+# src/setup/settings_catalog.cpp (70 settings with the 1.13.0 ones), except check_updates (development builds don't have it; tests/launcher_input.script
 # covers the same kind of switch).
 shot:before
 focus:fullscreen
@@ -69,6 +69,8 @@ focus:aim_assist
 key:Enter
 focus:aim_toggle
 pad:A
+focus:weapon_kick
+key:Left
 focus:right_stick_deadzone
 pad:Left
 focus:stick_acceleration

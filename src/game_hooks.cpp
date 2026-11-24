@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <set>
 #include <vector>
 #include <cmath>
 
@@ -47,6 +49,7 @@
 #include "instr.h"
 #include "test_range.h"
 #include "input_math.h"
+#include "kick_math.h"
 #include "mnk_input.h"
 #include "prompt_state.h"
 #include "scene_feed.h"
@@ -72,6 +75,11 @@ REXCVAR_DEFINE_DOUBLE(stick_look_speed, 1.0, "bots/Input",
                       "still applies on top). 1 is as shipped; 3 turns three times as fast at every stick position. "
                       "BOTS_STICK_LOOK_SPEED=<x> overrides.")
     .range(1.0, 3.0);
+REXCVAR_DEFINE_DOUBLE(weapon_kick, 100.0, "bots/Input",
+                      "Weapon kick in percent of the game's own: the push each shot gives the aim (up, and a little "
+                      "sideways) and the slide back that follows it. 100 is as shipped, 0 turns it off. Separate from "
+                      "screen shake. BOTS_WEAPON_KICK=<percent> overrides, BOTS_KICK_TRACE=1 logs the curves")
+    .range(0.0, 100.0);
 REXCVAR_DEFINE_BOOL(vibration, true, "bots/Input", "Controller vibration (rumble)");
 
 extern "C" void __imp__sub_82E1AC28(PPCContext& __restrict ctx, uint8_t* base);
@@ -3047,6 +3055,75 @@ struct Fields {
 float F(uint8_t* base, uint32_t at) { return menu_pointer::LoadF32(base, at); }
 void SetF(uint8_t* base, uint32_t at, float v) { StoreU32(base, at, std::bit_cast<uint32_t>(v)); }
 
+// Weapon kick (GitHub #21): scale the current weapon's FireDriftPerShotInDeg curves (kick_math.h). The curves are
+// shared data of the fire mode, so the shipped values are remembered the first time one is seen, and the scaled ones
+// are written again whenever they read back differently (a reloaded level makes new objects).
+struct KickCurve {
+  std::vector<uint32_t> original, written;  // the float bits, kFloatsPerPoint per point, in order (bits: NaN != NaN)
+  float factor = 1.0f;
+};
+std::map<uint32_t, KickCurve> g_kick;  // keyed by the guest address of the points array
+
+void ApplyKick(uint8_t* base, uint32_t pawn, float factor) {
+  static const bool trace = [] { const char* v = std::getenv("BOTS_KICK_TRACE"); return v && *v == '1'; }();
+  if (g_kick.empty() && factor >= 1.0f && !trace) return;  // the default: nothing to do, nothing to remember
+  const uint32_t wo = split_screen::Prop(base, pawn, "Weapon");
+  const uint32_t weapon = wo != 0xFFFFFFFF ? LoadU32(base, pawn + wo) : 0;
+  if (!debug::Readable(weapon)) return;
+  const uint32_t ml = split_screen::Prop(base, weapon, "FireModeList");
+  if (ml == 0xFFFFFFFF) return;
+  const uint32_t modes = LoadU32(base, weapon + ml), count = LoadU32(base, weapon + ml + 4);
+  if (!debug::Readable(modes) || count == 0 || count > 8) return;
+  for (uint32_t m = 0; m < count; ++m) {
+    const uint32_t mode = LoadU32(base, modes + 4 * m);
+    if (!debug::Readable(mode)) continue;
+    const uint32_t co = split_screen::Prop(base, mode, "FireDriftPerShotInDeg");
+    if (co == 0xFFFFFFFF) continue;
+    const uint32_t points = LoadU32(base, mode + co), n = LoadU32(base, mode + co + 4);  // TArray {Data, Num, Max}
+    if (!debug::Readable(points) || n == 0 || n > bots::kick::kMaxPoints) continue;
+    std::vector<float> in_vals(n);
+    for (uint32_t i = 0; i < n; ++i) in_vals[i] = F(base, points + i * bots::kick::kPointSize);
+    if (!bots::kick::PlausibleCurve(in_vals)) continue;
+    auto read = [&] {
+      std::vector<uint32_t> v;
+      for (uint32_t i = 0; i < n; ++i)
+        for (uint32_t k = 0; k < bots::kick::kFloatsPerPoint; ++k)
+          v.push_back(LoadU32(base, points + i * bots::kick::kPointSize + bots::kick::kFirstScaledOffset + 4 * k));
+      return v;
+    };
+    KickCurve& c = g_kick[points];
+    const std::vector<uint32_t> now = read();
+    if (c.original.size() != now.size() || (c.written != now && c.original != now)) {
+      c.original = now;  // first sight, or the game rebuilt it
+      c.written = now;
+      c.factor = 1.0f;
+      static std::set<uint32_t> logged_curves;
+      if (trace && logged_curves.insert(points).second) {
+        std::string line;
+        for (uint32_t i = 0; i < n; ++i) {
+          char buf[96];
+          std::snprintf(buf, sizeof buf, " [t=%.3f out=(%.3f,%.3f,%.3f)]", in_vals[i], std::bit_cast<float>(now[9 * i]),
+                        std::bit_cast<float>(now[9 * i + 1]), std::bit_cast<float>(now[9 * i + 2]));
+          line += buf;
+        }
+        REXLOG_INFO("weapon kick: mode {:08X} curve {:08X}, {} points:{}", mode, points, n, line);
+      }
+    }
+    if (c.factor == factor && c.written == now) continue;
+    for (size_t i = 0; i < c.original.size(); ++i) {
+      const uint32_t point = uint32_t(i) / bots::kick::kFloatsPerPoint, k = uint32_t(i) % bots::kick::kFloatsPerPoint;
+      SetF(base, points + point * bots::kick::kPointSize + bots::kick::kFirstScaledOffset + 4 * k,
+           bots::kick::Scaled(std::bit_cast<float>(c.original[i]), factor));
+    }
+    c.written = read();
+    c.factor = factor;
+    if (trace) REXLOG_INFO("weapon kick: curve {:08X} now {:.0f}% of the game's own", points, factor * 100.0f);
+  }
+  if (factor >= 1.0f) {  // back at 100%: forget what is restored
+    for (auto it = g_kick.begin(); it != g_kick.end();) it = it->second.factor >= 1.0f && it->second.written == it->second.original ? g_kick.erase(it) : std::next(it);
+  }
+}
+
 void Apply(uint8_t* base, float dt) {
   static const bool trace = [] { const char* v = std::getenv("BOTS_FEEL_LOG"); return v && *v == '1'; }();
   static Fields f;
@@ -3176,6 +3253,15 @@ void Apply(uint8_t* base, float dt) {
       }
       REXLOG_INFO("CAMLOG dt={:.6f} pc={},{} drift={},{} shaken={},{} pawn={},{} cam={},{} fov={:.2f} clip={}", dt, pcp, pcy,
                   drp, dry, shp, shy, cap, cay, cmp, cmy, fov, clip);
+    }
+    {
+      static const double kick_env = [] {
+        const char* v = std::getenv("BOTS_WEAPON_KICK");
+        return v && *v ? std::atof(v) : -1.0;
+      }();
+      const uint32_t pawn_o = split_screen::Prop(base, pc, "Pawn");
+      const uint32_t pawn = pawn_o != 0xFFFFFFFF ? LoadU32(base, pc + pawn_o) : 0;
+      if (debug::Readable(pawn)) ApplyKick(base, pawn, bots::kick::Factor(kick_env >= 0 ? kick_env : REXCVAR_GET(weapon_kick)));
     }
     if (logged_pin[i] != pin) {
       logged_pin[i] = pin;

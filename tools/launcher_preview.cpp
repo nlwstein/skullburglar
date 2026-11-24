@@ -40,7 +40,7 @@ const std::map<std::string, std::string> kDefaults = {
     {"motion_blur", "true"}, {"screen_shake", "100.00"}, {"movie_volume", "100.00"}, {"framerate_limit", "60"},
     {"anti_aliasing", "smaa"}, {"sharpening", "0.00"}, {"ambient_occlusion", "false"}, {"ambient_occlusion_strength", "3.00"}, {"pre1_occlusion", "auto"}, {"aim_toggle", "false"},
     {"present_vsync", "true"}, {"fps_counter", "false"}, {"check_updates", "true"}, {"diagnostic_logging", "false"},
-    {"pad_prompts", "auto"}, {"aim_assist", "true"}, {"right_stick_deadzone", "20.00"},
+    {"pad_prompts", "auto"}, {"aim_assist", "true"}, {"weapon_kick", "100.00"}, {"right_stick_deadzone", "20.00"},
     {"stick_acceleration", "true"}, {"stick_response", "original"}, {"stick_look_speed", "1.00"},
     {"vibration", "true"}, {"user_signin_live", "true"}, {"split_screen", "false"}, {"coop", "false"},
     {"coop_pads", "1,2"}, {"kbm", "true"}, {"kbm_sensitivity", "1.00"}, {"kbm_aim_sensitivity", "1.00"},
