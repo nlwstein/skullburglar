@@ -709,6 +709,7 @@ impl Resolver {
                         Some(ComponentLight::Legacy(_)) => "legacy",
                         Some(ComponentLight::Dir { .. }) => "dir",
                         Some(ComponentLight::Map { .. }) => "map",
+                        Some(ComponentLight::Unbaked) => "unbaked",
                     };
                     eprintln!("n1 light {} {kind} lm_ids {:?}", self.lights[handle as usize].path, ids);
                 }

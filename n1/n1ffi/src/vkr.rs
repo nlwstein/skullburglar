@@ -295,6 +295,8 @@ enum LightInfo {
         sc: [[f32; 4]; 3],
         xf: [f32; 4],
     },
+    /// B-399: a static mesh with no baked light (`ComponentLight::Unbaked`): lit like a lightless object, with the sun.
+    Unbaked,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -2075,6 +2077,8 @@ impl Renderer {
                     g.lm_xf = *xf;
                     lm = *set;
                 }
+                // Static instances don't read `p1` (the first bone of a skinned one): 1 = unbaked static mesh.
+                Some(LightInfo::Unbaked) => g.p1 = 1,
                 _ => {}
             }
             let ii = self.gpu_insts.len() as u32;
@@ -4003,6 +4007,8 @@ impl Backend for Renderer {
     }
     fn add_component_light(&mut self, l: &ComponentLight, lightmaps: [u32; 3]) -> u32 {
         match l {
+            ComponentLight::Unbaked if !self.knobs.unbaked => NONE,
+            ComponentLight::Unbaked => self.alloc_light(LightInfo::Unbaked),
             ComponentLight::Legacy(c) => self.add_light(c),
             ComponentLight::Dir { words, scale } => {
                 let base = self.alloc_words(&words[..words.len() / 3 * 3]);
