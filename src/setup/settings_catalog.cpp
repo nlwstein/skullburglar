@@ -171,9 +171,11 @@ std::vector<Setting> SettingsCatalog() {
   // Page Controls: Keyboard and mouse
   add(LauncherPage::kControls, "Keyboard and mouse", {"kbm", "", "Keyboard and mouse", "Play with keyboard and mouse. A controller always works too.", {}});
   add(LauncherPage::kControls, "Keyboard and mouse", {"kbm_sensitivity", "", "Mouse sensitivity",
-               "How fast the camera turns, when not aiming. 1 is the game's own speed. Ctrl-click to type a value.",
+               "How fast the camera turns, when not aiming. 1 is the game's own speed, and one mouse count then turns the "
+               "view 0.33 degrees. A gyro (Steam Input gyro to mouse) wants a lower value, 0.1 to 0.25, so each count is "
+               "a finer step: set the gyro's dots per 360 to 65536 / (60 x this value). Ctrl-click to type a value.",
                {}});
-  s.back().slider_min = 0.1, s.back().slider_max = 4;
+  s.back().slider_min = 0.05, s.back().slider_max = 4;
   add(LauncherPage::kControls, "Keyboard and mouse", {"kbm_aim_sensitivity", "", "Aiming sensitivity",
                "How fast the camera turns while you hold Aim (the game already slows it as it zooms in). Ctrl-click "
                "to type a value.",
@@ -189,6 +191,12 @@ std::vector<Setting> SettingsCatalog() {
                "For a gyro that still twitches with the noise gate on, such as a DualSense Edge: slow motion must also "
                "keep one direction for a moment before it counts. Real turns pass as before. Needs the noise gate above 0.",
                {}});
+  add(LauncherPage::kControls, "Keyboard and mouse", {"kbm_rest_deadband", "", "Gyro rest deadband (degrees)",
+               "0 = off. If the camera ticks or twitches while your gyro lies still, try 0.3 to 0.6: the view stays "
+               "put until your motion adds up to this angle in one direction. It works in degrees, so it keeps its "
+               "meaning when you change Mouse sensitivity. Ctrl-click to type a value.",
+               {}});
+  s.back().slider_min = 0, s.back().slider_max = 1, s.back().slider_linear = true, s.back().slider_format = "%.2f";
   add(LauncherPage::kControls, "Keyboard and mouse", {"kbm_prompts", "", "Keyboard and mouse button prompts",
                "Show keys instead of controller buttons in prompts while you play with keyboard and mouse.", {}});
   // Page Coop: Over your network
