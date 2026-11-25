@@ -254,8 +254,12 @@ void* Renderer::EnsureN1(VkFormat format) {
   init.msaa = msaa == "4x" || msaa == "4x-sgssaa" ? 4 : msaa == "2x" || msaa == "2x-sgssaa" ? 2 : 1;
   if (msaa == "2x-sgssaa" || msaa == "4x-sgssaa") {
     init.sgssaa = device_->properties().sampleRateShading;
-    if (!init.sgssaa) REXLOG_INFO("hybrid n1: per-sample shading unavailable, using MSAA");
+    if (!init.sgssaa) {
+      REXLOG_INFO("hybrid n1: per-sample shading unavailable, using MSAA");
+      msaa_per_sample_unavailable_ = true;
+    }
   }
+  msaa_started_ = msaa;
   // n1's state messages (aa plan, AO and cache failures, ...) go to the game log, which the diagnostics file reads.
   n1_set_log(+[](uint32_t level, const char* message) {
     if (level >= 2) REXLOG_ERROR("{}", message);
@@ -1580,6 +1584,10 @@ void Renderer::NoteGraphics(uint32_t internal_w, uint32_t internal_h) {
   g.fov_offset_setting = std::clamp(Query<double>("fov_offset"), 0.0, 40.0);
   g.anti_aliasing_setting = GetFlagByName("anti_aliasing");
   g.sharpening_setting = Query<double>("sharpening");
+  g.msaa_setting = GetFlagByName("msaa");
+  g.msaa_started = msaa_started_.empty() ? g.msaa_setting : msaa_started_;
+  g.msaa_per_sample_unavailable = msaa_per_sample_unavailable_;
+  g.weapon_kick_setting = Query<double>("weapon_kick");
   g.ambient_occlusion_setting = Query<bool>("ambient_occlusion");
   g.ambient_occlusion_strength = std::clamp(Query<double>("ambient_occlusion_strength"), 0.0, 6.0);
   g.framerate_limit = Query<uint32_t>("framerate_limit");

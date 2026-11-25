@@ -42,6 +42,10 @@ struct GraphicsApplied {
   // Image quality (the new renderer's filters).
   std::string anti_aliasing_setting = "smaa";
   double sharpening_setting = 0;
+  std::string msaa_setting = "off";   // the `msaa` setting now
+  std::string msaa_started = "off";   // the `msaa` setting when the renderer started (it applies at start only)
+  bool msaa_per_sample_unavailable = false;  // SGSSAA asked for, but the GPU has no per-sample shading (plain MSAA)
+  double weapon_kick_setting = 100;   // the `weapon_kick` setting (percent; Controls page, shown here with the picture settings)
   bool ambient_occlusion_setting = false;
   double ambient_occlusion_strength = 3.0;
   // What the new renderer reports it applied (valid only when n1_reported).
@@ -130,6 +134,18 @@ inline std::string AntiAliasingText(const GraphicsApplied& g) {
   return applied == g.anti_aliasing_setting ? applied : applied + " (setting is " + g.anti_aliasing_setting + ", applies at the next 3D frame)";
 }
 
+// Multisampling is chosen when the renderer starts, so a change in the launcher applies at the next start.
+inline std::string MsaaText(const GraphicsApplied& g) {
+  if (!g.n1_active) return g.msaa_setting == "off" ? "off" : "off (needs the new renderer; setting is " + g.msaa_setting + ")";
+  std::string t = g.msaa_started;
+  if (g.msaa_per_sample_unavailable) t += " (per-sample shading unavailable on this GPU: plain MSAA)";
+  if (g.msaa_setting != g.msaa_started) t += " (setting is " + g.msaa_setting + ", applies at the next start)";
+  if (g.msaa_started != "off") t += "; if the device lacks the sample count the log has a 'summary: n1:' line and the picture is 1x";
+  return t;
+}
+
+inline std::string WeaponKickText(const GraphicsApplied& g) { return Num(g.weapon_kick_setting) + "% of the game's own" ; }
+
 inline std::string SharpeningText(const GraphicsApplied& g) {
   if (!g.n1_active) return "off (needs the new renderer)";
   const double v = g.n1_reported ? g.n1_sharpen : g.sharpening_setting;
@@ -178,6 +194,7 @@ inline std::vector<std::pair<std::string, std::string>> GraphicsFields(const Gra
       {"aspect_ratio", AspectText(g)},
       {"fov_offset", "+" + Num(g.fov_offset_setting) + " degrees"},
       {"anti_aliasing", AntiAliasingText(g)},
+      {"msaa", MsaaText(g)},
       {"sharpening", SharpeningText(g)},
       {"ambient_occlusion", AmbientOcclusionText(g)},
       {"ambient_occlusion_strength", Num(g.ambient_occlusion_strength)},
@@ -187,6 +204,7 @@ inline std::vector<std::pair<std::string, std::string>> GraphicsFields(const Gra
       {"pause_blur", PauseBlurText(g)},
       {"fullscreen", OnOff(g.fullscreen)},
       {"motion_blur", OnOff(g.motion_blur)},
+      {"weapon_kick", WeaponKickText(g)},
       {"pre1_occlusion", g.pre1_occlusion + (g.n1_active ? " (only the pre-1.0 renderer uses it)" : "")},
       {"vulkan_hdr", HdrText(g)},
       {"vulkan_hdr_paper_white", Num(g.hdr_paper_white) + " nits" + (hdr ? "" : " (not used: HDR is off)")},

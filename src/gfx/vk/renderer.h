@@ -542,6 +542,8 @@ class Renderer : public Pm4Sink {
   std::string n1_cooked_dir_, n1_cache_dir_;
   uint32_t graphics_checks_ = 0;
   bots::diag::GraphicsLogGate graphics_gate_;
+  std::string msaa_started_;                    // the msaa setting n1 started with (applies at start only)
+  bool msaa_per_sample_unavailable_ = false;   // SGSSAA asked for without per-sample shading
   void PumpN1Warmup();
   void* n1_host_ = nullptr;
   // Dual render (BOTS_HYBRID_DUAL, parity harness): the port's scene stays, n1 draws the same frame offscreen and

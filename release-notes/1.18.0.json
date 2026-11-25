@@ -1,0 +1,7 @@
+[
+  "Portable mode now keeps everything in its own folder: saves, settings, logs, caches, crash reports and update downloads. When you start Skullburglar for the first time from an SD card or external drive, it offers to keep everything on that drive.",
+  "There is a new anti-aliasing option, MSAA and SGSSAA, in Graphics > Image quality (restart required). Thanks to @goldislead.",
+  "There is a new \"Weapon kick\" setting in Controls > Aiming: lower it to reduce how far each shot pushes your aim, or set it to 0% to turn the kick off.",
+  "Gyro and mouse aiming are smoother: a noise filter no longer lets a small burst of movement through all at once.",
+  "The diagnostics file now includes your graphics settings, so reports show what the game is really using."
+]

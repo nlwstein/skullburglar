@@ -10,6 +10,8 @@ pad:A
 focus:achievement_popups
 key:Enter
 # Anti-aliasing and sharpening are new-renderer settings: changed before the renderer switches to the pre-1.0 one.
+focus:msaa
+key:Enter
 focus:anti_aliasing
 key:Enter
 focus:sharpening

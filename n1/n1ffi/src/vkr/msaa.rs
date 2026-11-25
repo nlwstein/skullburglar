@@ -1,6 +1,7 @@
 use anyhow::Result;
 use ash::vk;
 
+use crate::log::{self, n1log};
 use super::{DEPTH_FORMAT, Garbage, HDR_FORMAT, Renderer, Rt};
 
 const COLOR_USAGE: vk::ImageUsageFlags = vk::ImageUsageFlags::COLOR_ATTACHMENT;
@@ -22,10 +23,10 @@ pub(super) fn samples(instance: &ash::Instance, device: vk::PhysicalDevice, requ
     if standard && resolve.supported_depth_resolve_modes.contains(vk::ResolveModeFlags::SAMPLE_ZERO)
         && supports(HDR_FORMAT, COLOR_USAGE) && supports(DEPTH_FORMAT, DEPTH_USAGE)
     {
-        eprintln!("[n1] {requested}x MSAA");
+        n1log!(log::INFO, "summary: n1: {requested}x MSAA");
         count
     } else {
-        eprintln!("[n1] {requested}x MSAA unavailable on this device");
+        n1log!(log::WARN, "summary: n1: {requested}x MSAA unavailable on this device, drawing at 1x");
         vk::SampleCountFlags::TYPE_1
     }
 }

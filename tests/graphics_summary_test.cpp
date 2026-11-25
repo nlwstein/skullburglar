@@ -38,7 +38,7 @@ int main() {
     for (const auto& s : bots::setup::SettingsCatalog()) {
       using bots::setup::LauncherPage;
       // The Graphics and HDR pages, plus the one graphics setting that sits on the Game page (Effects).
-      if (s.page == LauncherPage::kGraphics || s.page == LauncherPage::kHdr || s.cvar == "motion_blur") launcher.insert(s.cvar);
+      if (s.page == LauncherPage::kGraphics || s.page == LauncherPage::kHdr || s.cvar == "motion_blur" || s.cvar == "weapon_kick") launcher.insert(s.cvar);
     }
     CHECK(launcher.size() >= 20);  // the catalog really was read
     for (const std::string& key : launcher) {
@@ -110,6 +110,20 @@ int main() {
     CHECK_HAS(PauseBlurText(g), "BOTS_N1_PAUSE_FX=0");
     g.pause_blur_setting = false;
     CHECK(PauseBlurText(g) == "off");
+
+    g = GraphicsApplied{};
+    CHECK(MsaaText(g) == "off");
+    g.msaa_setting = "4x", g.msaa_started = "4x";
+    CHECK_HAS(MsaaText(g), "4x");
+    g.msaa_setting = "2x-sgssaa";
+    CHECK_HAS(MsaaText(g), "setting is 2x-sgssaa, applies at the next start");
+    g.msaa_setting = g.msaa_started = "4x-sgssaa", g.msaa_per_sample_unavailable = true;
+    CHECK_HAS(MsaaText(g), "plain MSAA");
+    g.n1_active = false;
+    CHECK_HAS(MsaaText(g), "needs the new renderer");
+    g = GraphicsApplied{};
+    g.weapon_kick_setting = 0;
+    CHECK(WeaponKickText(g) == "0% of the game's own");
 
     g = GraphicsApplied{};
     g.present_vsync = true;
