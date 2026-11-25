@@ -71,6 +71,8 @@ focus:aim_assist
 key:Enter
 focus:aim_toggle
 pad:A
+focus:weapon_kick
+key:Left
 focus:right_stick_deadzone
 pad:Left
 focus:stick_acceleration
