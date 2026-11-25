@@ -1,6 +1,9 @@
 # Windows half of the portable-mode isolation test (B-408): what a session left outside its portable folder.
 #   powershell -File tools\portable_isolation_snapshot.ps1 before <work dir>     records the marker, the registry and the firewall
 #   powershell -File tools\portable_isolation_snapshot.ps1 after  <work dir>     lists what changed (exit 1 if anything did)
+#   powershell -File tools\portable_isolation_snapshot.ps1 canary <work dir>    the script's own check: a file written inside run\app
+#       must not be listed, one written in run\ (the folder above the portable folder) must be; exit 1 when that is not so
+# The portable root is the folder the program was started from (run\app: the executable, portable.txt and bots-data).
 # <work dir> holds run\app (the portable copy), run\home, run\appdata, run\local, run\temp (the sandbox the session ran in:
 # USERPROFILE, APPDATA, LOCALAPPDATA and TEMP were pointed there, only for the game's process). "after" lists
 #   - every file the sandbox holds (nothing should be there),
@@ -24,6 +27,15 @@ if ($Mode -eq 'before') {
   Fw-Rules | Set-Content (Join-Path $state 'fw.txt')
   Get-ChildItem $start -Recurse -File | % { $_.FullName } | Sort-Object | Set-Content (Join-Path $state 'start.txt')
   exit 0
+}
+if ($Mode -eq 'canary') {
+  $in = Join-Path $Work 'run\app\.iso-canary-in'; $up = Join-Path $Work 'run\.iso-canary-out'
+  Set-Content $in 'x'; Set-Content $up 'x'
+  $listed = @(Get-ChildItem (Join-Path $Work 'run') -Recurse -File | ? { $_.FullName -notlike (Join-Path $Work 'run\app\*') } | % { $_.FullName })
+  Remove-Item $in, $up -Force
+  $okUp = $listed -contains $up; $okIn = -not ($listed -contains $in)
+  if ($okUp -and $okIn) { Write-Output 'canary: PASS (a write above the portable folder is listed, one inside is not)'; exit 0 }
+  Write-Output "canary: FAIL (above listed: $okUp, inside not listed: $okIn)"; exit 1
 }
 $marker = [datetime]::Parse((Get-Content (Join-Path $state 'marker.txt')))
 $out = New-Object System.Collections.ArrayList

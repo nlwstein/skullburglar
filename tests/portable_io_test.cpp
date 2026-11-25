@@ -60,6 +60,10 @@ int main() {
   CHECK(su::PortableUpdateBlocker(false, true).empty());
   CHECK(su::PortableUpdateBlocker(true, false).empty());
 
+  // Asking whether an update could run never creates files outside the folder in portable mode.
+  CHECK(su::PortableMayNotProbeOutside(true));
+  CHECK(!su::PortableMayNotProbeOutside(false));
+
   // Applying it to this process creates the folders and sets the variables.
   {
     const fs::path tmp = fs::temp_directory_path() / ("bots-portable-io-test-" + std::to_string(std::rand()));

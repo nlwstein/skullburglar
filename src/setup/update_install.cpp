@@ -166,6 +166,20 @@ bool Writable(const fs::path& dir) {
 #endif
 }
 
+// Whether files could be created in `dir`, judged from its permissions alone: nothing is created, so it is safe to ask
+// about a folder a portable install must not touch (Windows has no such folder to ask about and probes).
+[[maybe_unused]] bool WritableByPermission(const fs::path& dir) {
+  std::error_code ec;
+  if (!fs::is_directory(dir, ec)) return false;
+#if defined(_WIN32)
+  return Writable(dir);
+#else
+  struct statvfs sv {};
+  if (statvfs(dir.c_str(), &sv) == 0 && (sv.f_flag & ST_RDONLY)) return false;
+  return access(dir.c_str(), W_OK | X_OK) == 0;
+#endif
+}
+
 #if defined(__APPLE__) && TARGET_OS_OSX
 // An app that is still quarantined (run from Downloads, or its first launches after being copied out of a disk image)
 // runs from a random read-only copy under .../AppTranslocation/. Security.framework's (undocumented, but long-standing
@@ -996,7 +1010,7 @@ fs::path InstallTarget(InstallKind kind) {
   }
 }
 
-std::string SelfUpdateBlockerAt(InstallKind kind, const fs::path& target) {
+std::string SelfUpdateBlockerAt(InstallKind kind, const fs::path& target, [[maybe_unused]] bool probe_outside) {
   if (kind == InstallKind::kNone || target.empty()) return "this install can't update itself";
   // B-408: portable mode never writes outside its folder, and the Windows setup program does.
   if (std::string why = PortableUpdateBlocker(ActiveDataRoot().source != DataSource::kDefault, kind == InstallKind::kWindowsSetup);
@@ -1009,6 +1023,10 @@ std::string SelfUpdateBlockerAt(InstallKind kind, const fs::path& target) {
     // two trade places) must be writable, and the file system must be able to trade them.
     if (!target.has_parent_path() || target == target.root_path()) return "the install folder has no parent folder";
     if (!Writable(target)) return target.string() + " isn't writable";
+    // Portable mode asks (when it only has to know whether to offer the button) without creating anything in the parent:
+    // the folder swap itself is tried when the player presses Update now.
+    if (!probe_outside)
+      return WritableByPermission(target.parent_path()) ? std::string() : target.parent_path().string() + " isn't writable";
     if (!Writable(target.parent_path())) return target.parent_path().string() + " isn't writable";
     return CheckExchange(target.parent_path());
   }
@@ -1019,7 +1037,12 @@ std::string SelfUpdateBlockerAt(InstallKind kind, const fs::path& target) {
   return {};
 }
 
-std::string SelfUpdateBlocker(InstallKind kind) { return SelfUpdateBlockerAt(kind, InstallTarget(kind)); }
+std::string SelfUpdateBlocker(InstallKind kind) {
+  // B-408: a portable session writes nothing outside the folder it was started from, so asking whether an update could
+  // run must not create probe files in the folder above it (the Linux tarball's swap happens there).
+  const bool portable = ActiveDataRoot().source != DataSource::kDefault;
+  return SelfUpdateBlockerAt(kind, InstallTarget(kind), !PortableMayNotProbeOutside(portable));
+}
 
 bool InstallUpdate(InstallKind kind, const Asset& asset, InstallProgress& progress, std::string& error) {
   return InstallUpdateAt(kind, InstallTarget(kind), asset, progress, error, AppVersion());

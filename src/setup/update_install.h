@@ -47,7 +47,9 @@ std::filesystem::path InstallTarget(InstallKind kind);
 // Why this install can't update itself ("" when it can): not a release-type install, or its folder isn't writable.
 // The launcher then keeps only the "Download it" button.
 std::string SelfUpdateBlocker(InstallKind kind);
-std::string SelfUpdateBlockerAt(InstallKind kind, const std::filesystem::path& target);
+// probe_outside false: create nothing outside the executable's folder to find out (the Linux tarball's parent folder is
+// judged from its permissions); InstallUpdateAt always runs the full check.
+std::string SelfUpdateBlockerAt(InstallKind kind, const std::filesystem::path& target, bool probe_outside = true);
 
 // True from the moment files are being replaced until the install has finished or failed. The window must not close
 // then (bots_app.h refuses the close request), or an install could be left half done.

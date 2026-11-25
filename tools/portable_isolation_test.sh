@@ -8,7 +8,8 @@
 #   launcher   the launcher alone: settings changed and changed back (auto-save), then quit
 #   play       launcher -> Play -> game boot -> a short run in a chapter (BOTS_ISO_CHAPTER, default 11010) -> clean quit
 #   crash      launcher -> Play -> front end -> a deliberate host fault, to see where the crash archive goes
-# Every write the game and its children make outside <work>/run/app (and the harness's own <work>/out) is recorded: on macOS
+# The portable root is the folder the program was started from: the one holding the executable, portable.txt and bots-data
+# (<work>/run/app here). Every write the game and its children make outside it (and the harness's own <work>/out) is recorded: on macOS
 # by running the game under sandbox-exec with an allow-and-report rule for writes (the kernel's own log, read back with
 # `log show`; nothing is blocked), on Linux by strace -f (BOTS_ISO_STRACE=1; the container needs SYS_PTRACE). Writes made
 # for the game by system services (macOS cfprefsd's preferences, the Metal compiler service's cache) don't show in the
@@ -19,7 +20,8 @@
 # Env: BOTS_ISO_ISOLATE=0 runs the build with BOTS_PORTABLE_ISOLATE=0 (what leaked before B-408), BOTS_ISO_WRAP="xvfb-run -a"
 # (a prefix for the game command, Linux without a display), BOTS_ISO_PORT (control port, default 47480),
 # BOTS_ISO_EXE_NAME=<name> (rename the program in the copy: the macOS preferences file is named after it, so a new name shows a first run),
-# BOTS_ISO_ENV="NAME=value ..." (extra environment for the game), BOTS_ISO_CHAPTER, BOTS_ISO_PLAY_SECS (default 15), BOTS_ISO_PHASES (default "launcher play crash"), BOTS_ISO_KEEP=1 (keep <work>).
+# BOTS_ISO_ENV="NAME=value ..." (extra environment for the game), BOTS_ISO_CHAPTER, BOTS_ISO_PLAY_SECS (default 15), BOTS_ISO_PHASES (default "launcher play crash"; "canary" is the harness's own check: a file written inside the
+# portable folder must pass and one written in the folder above it must be reported, run it alone or with the others), BOTS_ISO_KEEP=1 (keep <work>).
 # Never touches a player's folders: the run's HOME is the sandbox, and the real places are only listed.
 set -u
 DIST=${1:?usage: portable_isolation_test.sh <dist dir> <game dir> <work dir>}
@@ -74,7 +76,7 @@ if [ "$OS" = Darwin ]; then
 SB
   PREFIX="sandbox-exec -f $OUT/sandbox.sb"
 elif [ "${BOTS_ISO_STRACE:-0}" = 1 ]; then
-  PREFIX="strace -f -qq -e trace=%file,%desc,rename,renameat,renameat2,mkdir,mkdirat,symlink,symlinkat,link,linkat,unlink,unlinkat,rmdir,truncate,chmod -s 300 -o $OUT/strace.txt"
+  PREFIX="strace -f -qq -e trace=%file,%desc,rename,renameat,renameat2,mkdir,mkdirat,symlink,symlinkat,link,linkat,unlink,unlinkat,rmdir,truncate,chmod -s 300 -o $OUT/strace-@NAME@.txt"  # one file per session
 fi
 ISOENV=""; [ "$ISOLATE" = 0 ] && ISOENV="BOTS_PORTABLE_ISOLATE=0"
 
@@ -82,10 +84,11 @@ ctl() { python3 "$HERE/instr/botsctl.py" --port "$PORT" --connect-timeout "${CTL
 run_game() {  # name, extra env..., -- game args
   name=$1; shift
   : > "$OUT/$name.log"
+  PFX=$(printf '%s' "$PREFIX" | sed "s|@NAME@|$name|")
   # shellcheck disable=SC2086
   env -u XDG_CACHE_HOME -u XDG_CONFIG_HOME -u XDG_DATA_HOME -u XDG_STATE_HOME \
       HOME="$H" TMPDIR="$T" TEMP="$T" TMP="$T" BOTS_INSTR="$PORT" $ISOENV ${BOTS_ISO_ENV:-} "$@" \
-      ${BOTS_ISO_WRAP:-} $PREFIX "$APP/$EXE" --log_level=info ${BOTS_ISO_ARGS:-} > "$OUT/$name.out" 2>&1 &
+      ${BOTS_ISO_WRAP:-} $PFX "$APP/$EXE" --log_level=info ${BOTS_ISO_ARGS:-} > "$OUT/$name.out" 2>&1 &
   PID=$!
   echo "$name: started pid $PID" | tee -a "$OUT/steps.txt"
 }
@@ -116,6 +119,13 @@ for phase in $PHASES; do
       ctl wait -t 240 'phase==front_end || phase==in_play' >> "$OUT/ctl.txt" 2>&1 || echo "  front end not reached" | tee -a "$OUT/steps.txt"
       ctl crash >> "$OUT/ctl.txt" 2>&1
       wait_exit 60 ;;
+    canary)
+      # The harness's own check, run under the same trace as the game: one write inside the portable folder (must not be
+      # reported) and one in the folder above it (must be).
+      PFX=$(printf '%s' "$PREFIX" | sed "s|@NAME@|canary|")
+      # shellcheck disable=SC2086
+      env HOME="$H" TMPDIR="$T" $PFX /bin/sh -c ': > "$1/.iso-canary-in"; : > "$1/../.iso-canary-out"' sh "$APP" > "$OUT/canary.out" 2>&1
+      echo "canary: wrote $APP/.iso-canary-in and $APP/../.iso-canary-out" | tee -a "$OUT/steps.txt" ;;
     *) fail "unknown phase $phase" ;;
   esac
 done
@@ -129,14 +139,14 @@ if [ "$OS" = Darwin ]; then
   sleep 3
   /usr/bin/log show --start "$T0" --style compact --predicate 'eventMessage CONTAINS "allow file-write"' 2>/dev/null |
     sed -n 's/.*Sandbox: \([^(]*\)([0-9]*) allow \(file-write[a-z-]*\) \(.*\)$/TRACE \1 \2 \3/p' |
-    grep -E "^TRACE (bots[a-z]*|curl|hdiutil|ditto|codesign|open|sh|sleep|python3?|xattr|mount_apfs|diskutil) " > "$OUT/writes-raw.txt"
+    grep -E "^TRACE (bots[a-z]*|curl|hdiutil|ditto|codesign|open|sh|sleep|python3?|xattr|mount_apfs|diskutil|bash|zsh|dash) " > "$OUT/writes-raw.txt"
   # The log also holds other programs that run under their own report rules; ours are the ones whose path is not in /dev and
   # whose process is bots or something bots started. Keep every process name: the reader sees them.
   awk '{ $1=""; print }' "$OUT/writes-raw.txt" | sort | uniq -c | sort -rn > "$OUT/writes-summary.txt"
   sed 's/^TRACE [^ ]* [^ ]* /TRACE /' "$OUT/writes-raw.txt" | sort -u >> "$OUT/leaks.txt"
-elif [ -f "$OUT/strace.txt" ]; then
+elif ls "$OUT"/strace-*.txt >/dev/null 2>&1; then
   # opens for writing, and the calls that create, move or delete something, outside the portable folder and our output
-  grep -E ' (open|openat|creat|mkdir|mkdirat|rename|renameat|renameat2|unlink|unlinkat|rmdir|symlink|symlinkat|link|linkat|truncate|chmod|fchmodat)\(' "$OUT/strace.txt" |
+  cat "$OUT"/strace-*.txt | grep -E ' (open|openat|creat|mkdir|mkdirat|rename|renameat|renameat2|unlink|unlinkat|rmdir|symlink|symlinkat|link|linkat|truncate|chmod|fchmodat)\(' |
     grep -v ' = -1 ' | grep -E ' (creat|mkdir|mkdirat|rename|renameat|renameat2|unlink|unlinkat|rmdir|symlink|symlinkat|link|linkat|truncate|chmod|fchmodat)\(|O_WRONLY|O_RDWR|O_CREAT' |
     grep -oE '"/[^"]*"' | tr -d '"' | grep -v "^/dev/\|^/proc/\|^/sys/\|^$APP/\|^$OUT/" |
     sort -u | sed 's|^|TRACE |' >> "$OUT/leaks.txt"
@@ -146,6 +156,17 @@ while IFS= read -r d; do
     { if [ "$OS" = Darwin ]; then grep -iE 'skullburglar|/bots(iso)?(\.|/|$)|bots-recomp' | grep -v 'bots-review'; else cat; fi; } |
     sed 's|^|REAL |' >> "$OUT/leaks.txt"
 done < "$WATCHFILE"
+# The canary check: the write above the portable folder must be in the list, the one inside it must not. Both are then
+# removed so the real result is not about them (a run that lists the canary above fails when it should not).
+if [ -f "$W/run/.iso-canary-out" ] || [ -f "$APP/.iso-canary-in" ]; then
+  canary_ok=1
+  grep -q "iso-canary-out" "$OUT/leaks.txt" || { echo "FAIL: the harness did not report a write one level above the portable folder"; canary_ok=0; }
+  grep -q "iso-canary-in" "$OUT/leaks.txt" && { echo "FAIL: the harness reported a write inside the portable folder"; canary_ok=0; }
+  [ "$canary_ok" = 1 ] && echo "canary: PASS (a write above the portable folder is reported, one inside is not)"
+  rm -f "$W/run/.iso-canary-out" "$APP/.iso-canary-in"
+  grep -v "iso-canary" "$OUT/leaks.txt" > "$OUT/leaks.tmp"; mv "$OUT/leaks.tmp" "$OUT/leaks.txt"
+  [ "$canary_ok" = 1 ] || exit 1
+fi
 # Files inside the portable folder are fine; a crash archive, logs and bots.toml must be there.
 echo "portable folder (allowed) now holds:" > "$OUT/portable-folder.txt"
 (cd "$APP" && find bots-data ! -type d | sort) >> "$OUT/portable-folder.txt"

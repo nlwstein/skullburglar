@@ -139,4 +139,8 @@ inline std::string PortableUpdateBlocker(bool portable, bool windows_setup_insta
   return {};
 }
 
+// Whether checking if an update could run must avoid creating files outside the folder the program was started from
+// (B-408): true in portable mode with isolation on. The check then reads permissions; the real swap tries the rest.
+inline bool PortableMayNotProbeOutside(bool portable) { return portable && PortableIsolationOn(); }
+
 }  // namespace bots::setup
