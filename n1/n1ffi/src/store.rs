@@ -11,6 +11,7 @@
 //! - The startup step (`precompile.rs`) enumerates every shader and pipeline the disc can ask for and builds them here
 //!   before the first level; whatever still turns up missing in play is counted (`late_*`) and logged.
 
+use crate::log::{self, n1log};
 use crate::shaders;
 use anyhow::{Result, anyhow};
 use ash::vk;
@@ -291,7 +292,7 @@ impl Store {
                     self.device.destroy_pipeline_cache(c, None);
                 }
                 Err(e) => {
-                    eprintln!("n1ffi: pipeline cache not loaded: {e}");
+                    n1log!(log::WARN, "summary: n1: pipeline cache not loaded: {e}");
                     mark_loaded();
                 }
             }
@@ -354,7 +355,7 @@ impl Store {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task(&self)));
             if r.is_err() {
                 self.ctr.failed.fetch_add(1, Relaxed);
-                eprintln!("n1ffi: compile worker task panicked");
+                n1log!(log::WARN, "n1ffi: compile worker task panicked");
             }
             let mut q = self.queue.lock().unwrap();
             q.running -= 1;
@@ -412,7 +413,7 @@ impl Store {
         self.ao.get_or_init(|| {
             let _use = self.cache_use.read().unwrap_or_else(|p| p.into_inner());
             AmbientOcclusion::new(&self.device, self.cache)
-                .inspect_err(|e| eprintln!("n1ffi: ambient occlusion pipelines: {e}"))
+                .inspect_err(|e| n1log!(log::WARN, "summary: n1: ambient occlusion pipelines failed: {e}"))
                 .ok()
         });
     }
@@ -601,7 +602,7 @@ impl Store {
             Err(e) => {
                 i.by_key.insert(key, MState::Failed);
                 self.ctr.failed.fetch_add(1, Relaxed);
-                eprintln!("n1ffi: shader {key:016x}: {e:#}");
+                n1log!(log::WARN, "n1ffi: shader {key:016x}: {e:#}");
                 None
             }
         }
@@ -755,7 +756,7 @@ impl Store {
             Err(e) => {
                 i.pipes.insert(k, PState::Failed);
                 self.ctr.failed.fetch_add(1, Relaxed);
-                eprintln!("n1ffi: pipeline {k:?}: {e:#}");
+                n1log!(log::WARN, "n1ffi: pipeline {k:?}: {e:#}");
                 None
             }
         }

@@ -102,6 +102,26 @@ namespace bots::levelstream {
 void Start(const std::filesystem::path& user_root);  // level_stream.cpp (B-226 level-start prefetch)
 }
 
+// Keeps HybridState's window size and fullscreen flag current for the graphics summary line (graphics_summary.h): the
+// renderer plugin only knows the size of the picture it draws, not the window it is shown in.
+class WindowSizeNote final : public rex::ui::WindowListener {
+ public:
+  explicit WindowSizeNote(rex::ui::Window* window) : window_(window) {}
+  void Publish() const {
+    bots::HybridState* hs = bots::FindHybridState();
+    if (!hs || !window_) return;
+    hs->window_w.store(window_->GetActualPhysicalWidth(), std::memory_order_relaxed);
+    hs->window_h.store(window_->GetActualPhysicalHeight(), std::memory_order_relaxed);
+    hs->window_fullscreen.store(window_->IsFullscreen(), std::memory_order_relaxed);
+  }
+  void OnOpened(rex::ui::UISetupEvent&) override { Publish(); }
+  void OnResize(rex::ui::UISetupEvent&) override { Publish(); }
+  void OnDpiChanged(rex::ui::UISetupEvent&) override { Publish(); }
+
+ private:
+  rex::ui::Window* window_;
+};
+
 class BotsApp : public rex::ReXApp {
  public:
   using rex::ReXApp::ReXApp;
@@ -774,6 +794,8 @@ class BotsApp : public rex::ReXApp {
       }
     }
     SetCvarDefault("depth_float24_convert_in_pixel_shader", "REX_DEPTH_FLOAT24_CONVERT_IN_PIXEL_SHADER", "true");
+    // The graphics summary line reports HDR as asked for next to HDR as applied, so keep what the player chose.
+    if (bots::HybridState* hs = bots::FindHybridState()) hs->hdr_requested.store(rex::cvar::Query<bool>("vulkan_hdr"));
     if (!bots::UseN1()) rex::cvar::SetFlagByName("vulkan_hdr", "false");
     // MoltenVK: plain Metal binding instead of Metal3 argument buffers for descriptor sets —
     // gameplay 18.4 → 22.1 fps on M2 Pro (B-032, run 38). Read at VkInstance creation, which
@@ -936,6 +958,13 @@ class BotsApp : public rex::ReXApp {
   }
 
   void OnPostSetup() override {
+    if (bots::HybridState* hs = bots::FindHybridState())  // the renderer's "summary: graphics:" line, for the diagnostics file
+      hs->graphics_summary.store(+[](const char* line) { bots::diag::SetGraphicsSummary(line); });
+    if (rex::ui::Window* window = runtime() ? runtime()->display_window() : nullptr) {
+      auto* note = new WindowSizeNote(window);  // lives as long as the window
+      window->AddListener(note);
+      note->Publish();
+    }
     LogGameSummary();
     bots::StartThreadStats();
     SetLaunchCommandLine();

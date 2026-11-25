@@ -207,6 +207,7 @@ bool Renderer::Present(uint32_t address, VkImage target, VkImageView target_view
     return false;
   }
   const Image& source = *it->second;
+  NoteGraphics(source.width, source.height);
 
   BeginCommands(kGpuPresent);
   EndRendering("present");

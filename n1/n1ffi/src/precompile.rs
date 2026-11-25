@@ -11,6 +11,7 @@
 //!
 //! Either way the work is a list of jobs on the store's worker pool; `Progress` counts them for the progress UI.
 
+use crate::log::{self, n1log};
 use crate::particles;
 use crate::plan::{self, fnv};
 use crate::store::{Origin, PartKey, SceneKey, Snapshot, Store};
@@ -557,7 +558,7 @@ fn enumerate_and_build(store: &Arc<Store>, db: &AssetDb, o: &Opts, prog: &Arc<Pr
     wait_done(store, prog);
     let missing = st.missing.load(Relaxed);
     if missing > 0 {
-        eprintln!("n1ffi: precompile: {missing} shaders failed to build");
+        n1log!(log::WARN, "summary: n1: precompile: {missing} shaders failed to build");
     }
 }
 
@@ -640,7 +641,7 @@ pub fn start(store: Arc<Store>, db: Arc<AssetDb>, mut o: Opts) -> Arc<Progress> 
             let h = header(&db, &o);
             // B-248: each phase's start time, so a slow first launch says where it went.
             let set = |s: &str| {
-                eprintln!("n1ffi: precompile phase '{s}' at {:.1} s", t0.elapsed().as_secs_f64());
+                n1log!(log::INFO, "n1ffi: precompile phase '{s}' at {:.1} s", t0.elapsed().as_secs_f64());
                 *p.phase.lock().unwrap() = s.to_string();
             };
             // B-248 (b): the compile workers start first and the persisted cache loads on its own thread beside them. On
@@ -678,7 +679,7 @@ pub fn start(store: Arc<Store>, db: Arc<AssetDb>, mut o: Opts) -> Arc<Progress> 
             // The store's Vulkan calls are safe after that (see `Store::gate`); here we just stop early.
             let gone = || {
                 if store.stopping() {
-                    eprintln!("n1ffi: precompile abandoned: the renderer was destroyed");
+                    n1log!(log::WARN, "n1ffi: precompile abandoned: the renderer was destroyed");
                 }
                 store.stopping()
             };
@@ -701,7 +702,7 @@ pub fn start(store: Arc<Store>, db: Arc<AssetDb>, mut o: Opts) -> Arc<Progress> 
             }
             if !from_manifest || missing > 0 {
                 if missing > 0 {
-                    eprintln!("n1ffi: precompile: {missing} manifest entries missing from the cache; enumerating");
+                    n1log!(log::INFO, "n1ffi: precompile: {missing} manifest entries missing from the cache; enumerating");
                 }
                 if gone() {
                     return;
@@ -732,9 +733,9 @@ pub fn start(store: Arc<Store>, db: Arc<AssetDb>, mut o: Opts) -> Arc<Progress> 
             set("done");
             p.finished.store(true, Relaxed);
             let c = &store.ctr;
-            eprintln!("n1ffi: pipeline cache: {:.1} MB loaded in {secs:.1} s", bytes as f64 / 1e6);
-            eprintln!(
-                "n1ffi: precompile done in {:.1} s ({}): {} shaders, {} pipelines ({} spv cache hits, {} naga builds, {:.1} s naga, {:.1} s in the driver, worst pipeline {:.0} ms), {} failed",
+            n1log!(log::INFO, "summary: n1: pipeline cache: {:.1} MB loaded in {secs:.1} s", bytes as f64 / 1e6);
+            n1log!(log::INFO,
+                "summary: n1: precompile done in {:.1} s ({}): {} shaders, {} pipelines ({} spv cache hits, {} naga builds, {:.1} s naga, {:.1} s in the driver, worst pipeline {:.0} ms), {} failed",
                 t0.elapsed().as_secs_f64(),
                 if from_manifest { "manifest" } else { "enumerated" },
                 c.shaders_startup.load(Relaxed),

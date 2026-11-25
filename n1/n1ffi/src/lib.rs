@@ -16,6 +16,7 @@ pub mod bcdec;
 pub mod decals;
 pub mod godref;
 pub mod light;
+pub mod log;
 pub mod particles;
 pub mod pause;
 pub mod plan;
@@ -30,6 +31,7 @@ pub mod trees;
 pub mod xenos_vs;
 
 use ash::vk;
+use crate::log::n1log;
 use assetdb::AssetDb;
 use scenekit::{Instance, Resolver};
 use std::cell::RefCell;
@@ -118,6 +120,49 @@ pub unsafe extern "C" fn n1_set_aa(r: *const N1Renderer, mode: u32, sharpen: f32
         i.renderer.aa_mode = mode;
         i.renderer.aa_sharpen = sharpen;
     });
+}
+
+/// The host's log sink for n1's state messages (`void (*)(uint32_t level, const char* message)`, level 0 info, 1 warning,
+/// 2 error). Without one they go to stderr. May be called before `n1_create`; null clears it.
+#[unsafe(no_mangle)]
+pub extern "C" fn n1_set_log(sink: Option<log::Sink>) {
+    log::set_sink(sink);
+}
+
+/// What the renderer is doing with the player's settings, as applied (not as asked for): the host's startup summary line.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct N1Applied {
+    /// 1 once a frame has been recorded (the rest is then valid), else 0.
+    pub valid: u32,
+    /// Anti-aliasing mode in effect (0 off, 1 FXAA, 2 SMAA 1x) and the sharpening strength (0 off).
+    pub aa_mode: u32,
+    pub sharpen: f32,
+    /// Ambient occlusion drawn in the last frame that asked for it (1), and whether its setup failed for this session (1).
+    pub ao_active: u32,
+    pub ao_failed: u32,
+    /// The pause menu's backdrop blurs (the setting on and `BOTS_N1_PAUSE_FX` not 0).
+    pub pause_blur: u32,
+    /// The size of the last frame's view rectangle: the render resolution.
+    pub render_w: u32,
+    pub render_h: u32,
+}
+
+/// Fills `out` with the settings as the last `n1_record` applied them. Returns 0, or -1 when `r` or `out` is null.
+///
+/// # Safety
+/// `out` null or valid for one `N1Applied`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn n1_applied(r: *const N1Renderer, out: *mut N1Applied) -> i32 {
+    let Some(out) = (unsafe { out.as_mut() }) else {
+        return -1;
+    };
+    *out = N1Applied::default();
+    with(r, -1, |i| {
+        *out = i.renderer.applied;
+        out.pause_blur = postmat::pause_blur_applied() as u32;
+        0
+    })
 }
 
 #[repr(C)]
@@ -842,7 +887,7 @@ impl Inner {
                         Some(a) => {
                             let _ = tx.send((t.to_string(), a));
                         }
-                        None => eprintln!("n1ffi: post material texture {t} not found"),
+                        None => n1log!(log::WARN, "n1ffi: post material texture {t} not found"),
                     }
                 }
             });
@@ -1627,7 +1672,7 @@ pub unsafe extern "C" fn n1_record(
         if let Some(rx) = &i.post_tex_rx {
             while let Ok((name, t)) = rx.try_recv() {
                 if let Err(e) = i.renderer.post_tex_add(&name, &t) {
-                    eprintln!("n1ffi: post material texture {name}: {e:#}");
+                    n1log!(log::WARN, "n1ffi: post material texture {name}: {e:#}");
                 }
             }
         }

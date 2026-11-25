@@ -39,6 +39,7 @@
 
 #include <glslang/Public/ShaderLang.h>
 
+#include "../../graphics_summary.h"
 #include "../../hybrid_state.h"
 #include "../../instr_state.h"
 #include "../image_diff.h"
@@ -249,6 +250,12 @@ void* Renderer::EnsureN1(VkFormat format) {
   init.cache_dir = EnvOr("BOTS_N1_CACHE", n1_cache_dir_.empty() ? "cache/n1" : n1_cache_dir_.c_str());
   init.loader_threads = uint32_t(std::atoi(EnvOr("BOTS_N1_THREADS", "2")));
   init.hdr = hdr_ && format == VK_FORMAT_R16G16B16A16_SFLOAT;
+  // n1's state messages (aa plan, AO and cache failures, ...) go to the game log, which the diagnostics file reads.
+  n1_set_log(+[](uint32_t level, const char* message) {
+    if (level >= 2) REXLOG_ERROR("{}", message);
+    else if (level == 1) REXLOG_WARN("{}", message);
+    else REXLOG_INFO("{}", message);
+  });
   const auto t0 = std::chrono::steady_clock::now();
   // The new renderer has no fallback: a start failure ends in the renderer start-failure box (native.cpp), whose text
   // points the player at the pre-1.0 renderer in the launcher. BOTS_TEST_N1_FAIL=1 forces it (tests).
@@ -1545,6 +1552,74 @@ void Renderer::PrepareSceneN1() {}
 void Renderer::HoldN1Preload(void*, bool) {}
 double Renderer::n1_seconds_since_resume() const { return -1; }
 #endif
+
+void Renderer::NoteGraphics(uint32_t internal_w, uint32_t internal_h) {
+  if (graphics_checks_++ % 30 != 0) return;  // the line only changes with a setting or the window: twice a second is plenty
+  using rex::cvar::GetFlagByName;
+  using rex::cvar::Query;
+  bots::diag::GraphicsApplied g;
+  HybridState* hs = FindHybridState();
+  g.renderer_setting = GetFlagByName("renderer");
+  g.n1_active = hs && hs->fill.load(std::memory_order_relaxed) == 4;
+  g.render_scale_setting = GetFlagByName("render_scale");
+  if (const char* env = std::getenv("BOTS_GFX_RENDER_SCALE"); env && *env) g.render_scale_env = env;
+  g.scale = scale_;
+  g.internal_w = internal_w, g.internal_h = internal_h;
+  if (hs && hs->window_w.load(std::memory_order_relaxed)) {
+    g.window_known = true;
+    g.window_w = hs->window_w.load(std::memory_order_relaxed), g.window_h = hs->window_h.load(std::memory_order_relaxed);
+  }
+  g.guest_height = internal_h && scale_ > 0.0f ? uint32_t(float(internal_h) / scale_ + 0.5f) : 720;
+  g.aspect_setting = GetFlagByName("aspect_ratio");
+  g.fov_offset_setting = std::clamp(Query<double>("fov_offset"), 0.0, 40.0);
+  g.anti_aliasing_setting = GetFlagByName("anti_aliasing");
+  g.sharpening_setting = Query<double>("sharpening");
+  g.ambient_occlusion_setting = Query<bool>("ambient_occlusion");
+  g.ambient_occlusion_strength = std::clamp(Query<double>("ambient_occlusion_strength"), 0.0, 6.0);
+  g.framerate_limit = Query<uint32_t>("framerate_limit");
+  g.present_vsync = Query<bool>("present_vsync");
+  for (const char* cvar : {"vulkan_allow_present_mode_immediate", "vulkan_allow_present_mode_mailbox",
+                           "vulkan_allow_present_mode_fifo_relaxed"}) {
+    const auto source = rex::cvar::GetFlagSource(cvar);
+    g.present_mode_from_launch |= source == rex::cvar::Source::kEnvironment || source == rex::cvar::Source::kCommandLine;
+  }
+  g.fps_counter = Query<bool>("fps_counter");
+  g.pause_blur_setting = Query<bool>("pause_blur");
+  g.fullscreen = g.window_known ? hs->window_fullscreen.load(std::memory_order_relaxed) : Query<bool>("fullscreen");
+  g.motion_blur = Query<bool>("motion_blur");
+  g.pre1_occlusion = GetFlagByName("pre1_occlusion");
+  g.hdr_requested = hs ? hs->hdr_requested.load(std::memory_order_relaxed) : Query<bool>("vulkan_hdr");
+  g.hdr_active = hdr_;
+  g.hdr_paper_white = std::clamp(Query<double>("vulkan_hdr_paper_white"), 80.0, 500.0);
+  g.hdr_peak = std::max(std::clamp(Query<double>("vulkan_hdr_peak"), 200.0, 10000.0), g.hdr_paper_white);
+  g.hdr_ui_white = std::clamp(Query<double>("vulkan_hdr_ui_white"), 40.0, 500.0);
+  g.hdr_exposure = std::clamp(Query<double>("vulkan_hdr_exposure"), -4.0, 4.0);
+  g.hdr_middle_gray = std::clamp(Query<double>("vulkan_hdr_middle_gray"), 0.05, 0.5);
+  g.hdr_contrast = std::clamp(Query<double>("vulkan_hdr_contrast"), 0.25, 2.0);
+  g.hdr_highlights = std::clamp(Query<double>("vulkan_hdr_highlights"), 0.25, 2.0);
+  g.hdr_shadows = std::clamp(Query<double>("vulkan_hdr_shadows"), 0.25, 2.0);
+  g.hdr_saturation = std::clamp(Query<double>("vulkan_hdr_saturation"), 0.25, 2.0);
+#ifdef BOTS_N1FFI
+  if (auto* host = static_cast<N1Host*>(n1_host_); host && host->r) {
+    N1Applied applied{};
+    if (n1_applied(host->r, &applied) == 0 && applied.valid) {
+      g.n1_reported = true;
+      g.n1_aa_mode = applied.aa_mode;
+      g.n1_sharpen = double(applied.sharpen);
+      g.n1_ao_active = applied.ao_active != 0;
+      g.n1_ao_failed = applied.ao_failed != 0;
+      g.n1_pause_blur = applied.pause_blur != 0;
+      if (applied.render_w && applied.render_h) g.internal_w = applied.render_w, g.internal_h = applied.render_h;
+    }
+  }
+#endif
+  const std::string line = bots::diag::FormatGraphicsSummary(g);
+  const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  if (!graphics_gate_.ShouldLog(line, now)) return;
+  REXLOG_INFO("{}", line);
+  if (hs)
+    if (auto sink = hs->graphics_summary.load(std::memory_order_acquire)) sink(line.c_str());
+}
 
 void Renderer::DestroySceneFill() {
   DestroyBurst();

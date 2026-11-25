@@ -1,4 +1,5 @@
 use super::{Garbage, Globals, HDR_FORMAT, Renderer, layout_barrier};
+use crate::log::{self, n1log};
 use crate::shaders;
 use anyhow::{Result, anyhow};
 use ash::vk;
@@ -40,7 +41,7 @@ impl AoGate {
             Ok(on) => on,
             Err(e) => {
                 if !self.failed {
-                    eprintln!("n1ffi: ambient occlusion disabled for this session: {e:#}");
+                    n1log!(log::WARN, "summary: n1: ambient occlusion disabled for this session: {e:#}");
                 }
                 self.failed = true;
                 false
