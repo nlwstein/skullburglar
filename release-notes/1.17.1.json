@@ -1,0 +1,4 @@
+[
+  "The pause menu no longer slows the game down on weaker graphics chips.",
+  "There is a new \"Pause background blur\" setting in Graphics > Performance: turn it off to keep the pause tint without the blur."
+]

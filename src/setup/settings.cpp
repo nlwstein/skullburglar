@@ -62,6 +62,7 @@ REXCVAR_DEFINE_DOUBLE(vulkan_hdr_shadows, 1.0, "bots/HDR", "Scene shadows");
 REXCVAR_DEFINE_DOUBLE(vulkan_hdr_saturation, 1.0, "bots/HDR", "Scene saturation");
 REXCVAR_DEFINE_BOOL(ambient_occlusion, false, "bots/Display", "Soft contact shading with the new renderer");
 REXCVAR_DEFINE_DOUBLE(ambient_occlusion_strength, 3.0, "bots/Display", "Ambient occlusion strength");
+REXCVAR_DEFINE_BOOL(pause_blur, true, "bots/Display", "Blur the game behind the pause menu (new renderer)");
 
 namespace bots::setup {
 namespace fs = std::filesystem;

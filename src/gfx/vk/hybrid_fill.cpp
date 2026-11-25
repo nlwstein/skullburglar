@@ -871,6 +871,8 @@ bool Renderer::DrawSceneN1(Image& target, const HybridCamera& cam, const VkRect2
   // BOTS_N1_FADE=0: no fade (the old behaviour).
   static const bool fade_on = std::atoi(EnvOr("BOTS_N1_FADE", "1")) != 0;
   if (fade_on) n1_set_fade(host->r, view_cam->fade_scale, view_cam->fade_overlay);
+  // #56: the "Pause background blur" setting (off: the pause menu's backdrop is tinted, not blurred).
+  n1_set_pause_blur(rex::cvar::Query<bool>("pause_blur") ? 1u : 0u);
   N1Camera camera{};
   std::memcpy(camera.view, view_cam->view, sizeof(camera.view));
   std::memcpy(camera.proj, view_cam->proj, sizeof(camera.proj));

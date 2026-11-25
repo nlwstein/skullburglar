@@ -58,8 +58,12 @@ const POST_MATS: usize = 3;
 // Sets: 0-7 the fixed passes above, from 8 the post materials, then (B-292) the damage pre-pass when it runs before
 // the bloom (it is one of the `POST_MATS` taken out of the material list, so it never needs a set of its own beyond
 // them), padding, and the last set is the god-rays pass (B-307).
-const POST_PASSES: usize = 9 + POST_MATS;
-const _: () = assert!(8 + POST_MATS < POST_PASSES, "the god-rays set must not overlap a material or the damage set");
+// #56: three more sets before the god-rays one make the pause backdrop's blur (the 4x4 downsample, then the horizontal and the
+// vertical blur), recorded on the first paused frame only.
+const PAUSE_PASSES: usize = 3;
+const POST_PASSES: usize = 9 + POST_MATS + PAUSE_PASSES;
+const PAUSE_SET0: usize = POST_PASSES - 1 - PAUSE_PASSES;
+const _: () = assert!(8 + POST_MATS <= PAUSE_SET0, "the pause blur's sets must not overlap a material or the damage set");
 /// The god-rays target's side: the port's ray pass and its mask are 128x128 (B-313).
 const GOD_GRID: u32 = 128;
 /// B-313: view distance (UE units) from which the god-rays mask counts a pixel as sky. The port's mask pass leaves
@@ -516,6 +520,9 @@ pub struct Renderer {
     slots: Vec<Slot>,
     hdr: Option<Rt>,
     bloom: Option<[Rt; 3]>,
+    /// #56: the pause backdrop's blur, at the bloom targets' size; it keeps its picture between frames (`pause`).
+    pause_rt: Option<Rt>,
+    pause: crate::pause::PauseCache,
     /// B-313: the god-rays texture, 128x128 like the port's (`GOD_GRID` in post.wgsl), whatever the render size.
     god: Option<Rt>,
     /// W4: the graded scene (full res), when the level's MaterialEffect grade isn't the identity.
@@ -873,6 +880,8 @@ impl Renderer {
                 ao_targets: None,
                 ao_gate: ao::AoGate::default(),
                 bloom: None,
+                pause_rt: None,
+                pause: Default::default(),
                 god: None,
                 graded: None,
                 destc: None,
@@ -936,6 +945,8 @@ impl Renderer {
                     r.post_pipe(k.fs(), HDR_FORMAT)?;
                     r.post_pipe(k.fs(), color_format)?;
                 }
+                r.post_pipe("fs_pause_down", HDR_FORMAT)?;
+                r.post_pipe("fs_pause_blur", HDR_FORMAT)?;
             }
             Ok(r)
         }
@@ -1680,6 +1691,10 @@ impl Renderer {
                 self.defer(Garbage::Image(r.image, r.view, r.alloc));
             }
         }
+        if let Some(r) = self.pause_rt.take() {
+            self.defer(Garbage::Image(r.image, r.view, r.alloc));
+        }
+        self.pause.reset();
         self.hdr = Some(self.rt(HDR_FORMAT, w, h, false, "n1 hdr")?);
         self.depth = Some(self.rt(DEPTH_FORMAT, w, h, true, "n1 depth")?);
         let (bw, bh) = ((w / 4).max(1), (h / 4).max(1));
@@ -1687,6 +1702,7 @@ impl Renderer {
         let b = self.rt(HDR_FORMAT, bw, bh, false, "n1 post q1")?;
         let c = self.rt(HDR_FORMAT, bw, bh, false, "n1 post q2")?;
         self.bloom = Some([a, b, c]);
+        self.pause_rt = Some(self.rt(HDR_FORMAT, bw, bh, false, "n1 pause blur")?);
         self.god = Some(self.rt(HDR_FORMAT, GOD_GRID, GOD_GRID, false, "n1 god rays")?);
         self.graded = Some(self.rt(HDR_FORMAT, w, h, false, "n1 graded")?);
         self.destc = Some(self.rt(HDR_FORMAT, w, h, false, "n1 dest color")?);
@@ -2514,6 +2530,18 @@ impl Renderer {
         } else {
             None
         };
+        // #56: the pause backdrop with the blur on (params[1]) is blurred once, on the first paused frame, into `pause_rt`; the
+        // frames after that only read it.
+        let pause_idx = mats.iter().position(|m| m.0 == "fs_pause" && m.1[1] > 0.5);
+        let pause_step = {
+            let key = crate::pause::PauseKey { size: (rw, rh), at: (target.rect.offset.x, target.rect.offset.y) };
+            let before = self.pause.counts();
+            let step = self.pause.step(pause_idx.is_some(), key);
+            if step == crate::pause::PauseStep::Fill && before.0 < 4 {
+                eprintln!("n1ffi: pause backdrop blurred at {}x{} into {}x{} (fill {} of this run)", rw, rh, (rw / 4).max(1), (rh / 4).max(1), before.0 + 1);
+            }
+            step
+        };
         let names: Vec<&'static str> = damage_pre.iter().chain(mats.iter()).map(|m| m.0).collect();
         if names != self.post_mats_last {
             eprintln!(
@@ -2599,6 +2627,20 @@ impl Renderer {
                 blocks[7][13] = fade;
             }
             blocks.push(o);
+        }
+        if pause_step == crate::pause::PauseStep::Fill {
+            // The blur's width is the fitted sigma (8 px at 720 lines), less what the 4x4 box already blurs (variance 15/12 px),
+            // in quarter-resolution texels. The vertical pass applies the tint's gain.
+            let sg = 8.0 * rh as f32 / 720.0;
+            let sg_q = (sg * sg - 15.0 / 12.0).max(1.0).sqrt() / 4.0;
+            let radius = (sg_q * 3.0).ceil().clamp(1.0, 24.0);
+            blocks[PAUSE_SET0] = blk(ft, [0.0, 0.0], &[], [0.0, 0.0]);
+            for (k, (dir, gain)) in [([1.0, 0.0], [1.0, 1.0, 1.0]), ([0.0, 1.0], [1.60, 1.58, 1.00])].into_iter().enumerate() {
+                let mut o = blk(qt, dir, &[], [0.0, 0.0]);
+                o[5] = [sg_q, radius, 0.0, 0.0];
+                o[6] = [gain[0], gain[1], gain[2], 0.0];
+                blocks[PAUSE_SET0 + 1 + k] = o;
+            }
         }
         // B-277(e): the passes that write the output (composite, copy, the linear composite or the last post material) add the outline from the
         // mask when this frame drew one: taps[5].w = 1 (2: show the mask).
@@ -2767,6 +2809,7 @@ impl Renderer {
             let [q0, q1, q2] = self.bloom.as_ref().map(|x| [x[0].view, x[1].view, x[2].view]).unwrap();
             let bloom_b = if bloom_blur_on { q2 } else { q0 };
             let gv = self.god.as_ref().unwrap().view;
+            let mut pause_src = None;
             let mut srcs = vec![
                 (hdr, q0, q0),   // grade
                 (scene, q0, q0), // down -> q0
@@ -2782,8 +2825,14 @@ impl Renderer {
                 let other = if damage_pre.is_some() { scene_orig } else { pre_dst };
                 srcs.push((scene, q0, bloom_b));
                 let mut cur = other;
-                for (_, _, ids, _) in &mats {
-                    srcs.push((cur, self.tex_view(ids[0], TEX_BLACK), self.tex_view(ids[1], TEX_BLACK)));
+                for (j, (_, _, ids, _)) in mats.iter().enumerate() {
+                    let mut t0 = self.tex_view(ids[0], TEX_BLACK);
+                    if Some(j) == pause_idx {
+                        // The backdrop pass reads the blur (bloom binding) and, on the frame that makes it, its source is `cur`.
+                        t0 = self.pause_rt.as_ref().unwrap().view;
+                        pause_src = Some(cur);
+                    }
+                    srcs.push((cur, t0, self.tex_view(ids[1], TEX_BLACK)));
                     cur = if cur == other { scene } else { other };
                 }
             }
@@ -2799,6 +2848,13 @@ impl Renderer {
             // Every other set's binding 8 is the god-rays texture.
             while srcs.len() < POST_PASSES - 1 {
                 srcs.push((q0, q0, q0));
+            }
+            if let (Some(from), true) = (pause_src, pause_step == crate::pause::PauseStep::Fill) {
+                // #56: the blur's three passes read the frame, then the quarter-resolution copy (q1), then the horizontal blur
+                // (q0); their other bindings repeat the source, which is in the read layout while each one writes another image.
+                srcs[PAUSE_SET0] = (from, from, from);
+                srcs[PAUSE_SET0 + 1] = (q1, q1, q1);
+                srcs[PAUSE_SET0 + 2] = (q0, q0, q0);
             }
             srcs.push((scene, q0, q0));
             let s = &self.slots[si];
@@ -2928,6 +2984,11 @@ impl Renderer {
         let p_pre = match &damage_pre {
             Some(m) => Some(self.post_pipe(m.0, HDR_FORMAT)?),
             None => None,
+        };
+        let p_pause = if pause_step == crate::pause::PauseStep::Fill {
+            Some((self.post_pipe("fs_pause_down", HDR_FORMAT)?, self.post_pipe("fs_pause_blur", HDR_FORMAT)?))
+        } else {
+            None
         };
         let mut p_mats = Vec::with_capacity(mats.len());
         if !mats.is_empty() {
@@ -3488,6 +3549,17 @@ impl Renderer {
                     }
                     let (mut cur, mut next) = (other_rt, scene_rt); // read, write
                     for j in 0..mats.len() {
+                        if let (Some((p_pdown, p_pblur)), Some(prt), true) = (p_pause, self.pause_rt.as_ref(), Some(j) == pause_idx) {
+                            // #56: the backdrop's blur, once: 4x4 box of the frame into q1, the horizontal blur into q0, the
+                            // vertical blur (with the tint's gain) into `pause_rt`, which then stays in the read layout.
+                            barrier(frag, cao, &[to_att(bloom[1].image)]);
+                            pass(bloom[1].view, catt_layout, bq, p_pdown, ps[PAUSE_SET0]);
+                            barrier(cao | frag, frag | cao, &[to_read(bloom[1].image), to_att(bloom[0].image)]);
+                            pass(bloom[0].view, catt_layout, bq, p_pblur, ps[PAUSE_SET0 + 1]);
+                            barrier(cao | frag, frag | cao, &[to_read(bloom[0].image), to_att(prt.image)]);
+                            pass(prt.view, catt_layout, bq, p_pblur, ps[PAUSE_SET0 + 2]);
+                            barrier(cao, frag, &[to_read(prt.image)]);
+                        }
                         let (pipe, set) = (p_mats[j + 1], ps[8 + j]);
                         if j + 1 == mats.len() {
                             pass(dst_view, dst_layout, dst_rect, pipe, set);
