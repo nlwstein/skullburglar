@@ -67,6 +67,10 @@ bool InstallUpdate(InstallKind kind, const Asset& asset, InstallProgress& progre
 bool InstallUpdateAt(InstallKind kind, const std::filesystem::path& target, const Asset& asset,
                      InstallProgress& progress, std::string& error, const std::string& running_version);
 
+// Starts this program again, for the caller to quit right after (B-408: portable mode is read at start). The same
+// command line; the AppImage or app bundle when it is one. False with `error` set when it couldn't.
+bool RestartThisProgram(std::string& error);
+
 // Removes what an earlier update left behind (downloads in the temp folder, a replaced copy that was in use).
 void CleanUpOldUpdates();
 

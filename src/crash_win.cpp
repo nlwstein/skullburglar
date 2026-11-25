@@ -25,6 +25,7 @@ namespace {
 std::filesystem::path g_crash_dir;
 std::filesystem::path g_crash_log;
 std::string g_crash_stamp;
+std::filesystem::path g_dump_folder;  // portable mode (B-408): minidumps go here (the data folder's logs/), not next to bots.exe
 std::filesystem::path g_exe_folder;  // where logs\ is: next to bots.exe, whatever the working directory is
 
 void PrintFrame(int i, DWORD64 pc) {
@@ -58,7 +59,9 @@ std::filesystem::path WriteMinidump(EXCEPTION_POINTERS* ep) {
     std::fprintf(stderr, "minidump: dbghelp.dll unavailable\n");
     return {};
   }
-  const std::filesystem::path path = bots::savebackup::DumpPath(g_exe_folder, GetCurrentProcessId());
+  const std::filesystem::path path =
+      g_dump_folder.empty() ? bots::savebackup::DumpPath(g_exe_folder, GetCurrentProcessId())
+                            : g_dump_folder / bots::PathFromUtf8("crash-" + std::to_string(GetCurrentProcessId()) + ".dmp");
   const std::string shown = bots::PathUtf8(path);
   std::error_code ec;
   std::filesystem::create_directories(path.parent_path(), ec);
@@ -133,6 +136,8 @@ void SetWindowsCrashArchive(const std::filesystem::path& dir, const std::string&
   g_crash_stamp = stamp;
   g_crash_dir = dir;
 }
+
+void SetWindowsCrashDumpFolder(const std::filesystem::path& dir) { g_dump_folder = dir; }
 
 void InstallWindowsCrashLogger() {
   // The executable's folder, read now: the crash handler shouldn't have to ask the system while the process is dying.
