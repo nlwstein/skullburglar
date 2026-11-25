@@ -63,6 +63,7 @@
 #include "renderer_choice.h"
 #include "script_input.h"
 #include "setup/portable.h"
+#include "setup/portable_io.h"
 #include "setup/game_location.h"
 #include "setup/occlusion_choice.h"
 #include "save_backup.h"
@@ -76,6 +77,7 @@
 
 #if defined(_WIN32)
 void InstallWindowsCrashLogger();  // src/crash_win.cpp
+void SetWindowsCrashDumpFolder(const std::filesystem::path& dir);  // src/crash_win.cpp (B-408: portable mode)
 void SetWindowsCrashArchive(const std::filesystem::path& dir, const std::string& stamp,
                             const std::filesystem::path& log);  // src/crash_win.cpp (B-065)
 #endif
@@ -101,6 +103,26 @@ void InstallOpenHooks();  // hybrid.cpp (B-199 level preload)
 namespace bots::levelstream {
 void Start(const std::filesystem::path& user_root);  // level_stream.cpp (B-226 level-start prefetch)
 }
+
+// Keeps HybridState's window size and fullscreen flag current for the graphics summary line (graphics_summary.h): the
+// renderer plugin only knows the size of the picture it draws, not the window it is shown in.
+class WindowSizeNote final : public rex::ui::WindowListener {
+ public:
+  explicit WindowSizeNote(rex::ui::Window* window) : window_(window) {}
+  void Publish() const {
+    bots::HybridState* hs = bots::FindHybridState();
+    if (!hs || !window_) return;
+    hs->window_w.store(window_->GetActualPhysicalWidth(), std::memory_order_relaxed);
+    hs->window_h.store(window_->GetActualPhysicalHeight(), std::memory_order_relaxed);
+    hs->window_fullscreen.store(window_->IsFullscreen(), std::memory_order_relaxed);
+  }
+  void OnOpened(rex::ui::UISetupEvent&) override { Publish(); }
+  void OnResize(rex::ui::UISetupEvent&) override { Publish(); }
+  void OnDpiChanged(rex::ui::UISetupEvent&) override { Publish(); }
+
+ private:
+  rex::ui::Window* window_;
+};
 
 class BotsApp : public rex::ReXApp {
  public:
@@ -279,12 +301,18 @@ class BotsApp : public rex::ReXApp {
       rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, message);
       std::exit(2);
     }
+    // B-408: scratch files (update downloads, disk image mounts) and driver shader caches go in the data folder too,
+    // so nothing but the player's own copy of existing game files is ever written outside it.
+    if (!su::ApplyPortableEnvironment(data.root)) std::fprintf(stderr, "portable: couldn't prepare tmp/ and cache/drivers/ in %s\n", bots::PathUtf8(data.root).c_str());
     if (!user_given) {
       paths.user_data_root = layout.user;
       paths.config_path = layout.user / "bots.toml";
     }
     if (!cache_given) paths.cache_root = layout.cache;
     if (!log_given) UseLogDir(layout.logs);
+#if defined(_WIN32)
+    if (su::PortableIsolationOn()) SetWindowsCrashDumpFolder(layout.logs);  // B-408: the minidump goes with the logs, not next to bots.exe
+#endif
   }
 
   // In the macOS app bundle, log to ~/Library/Logs/Skullburglar/bots-<time>.log (newest 10 kept) unless --log_file
@@ -616,6 +644,11 @@ class BotsApp : public rex::ReXApp {
       close(fd);
       bots::savebackup::CopyLog();
     }
+    // B-408: in portable mode the crash archive above is the report. Dying by the signal would also make the system
+    // write its own (macOS: ~/Library/Logs/DiagnosticReports, Linux: a core file or the distribution's crash
+    // reporter), outside the portable folder, so the program just ends with the signal's exit status.
+    if (bots::setup::ActiveDataRoot().source != bots::setup::DataSource::kDefault && bots::setup::PortableIsolationOn())
+      _exit(128 + sig);
     signal(sig, SIG_DFL);
     raise(sig);
   }
@@ -774,6 +807,8 @@ class BotsApp : public rex::ReXApp {
       }
     }
     SetCvarDefault("depth_float24_convert_in_pixel_shader", "REX_DEPTH_FLOAT24_CONVERT_IN_PIXEL_SHADER", "true");
+    // The graphics summary line reports HDR as asked for next to HDR as applied, so keep what the player chose.
+    if (bots::HybridState* hs = bots::FindHybridState()) hs->hdr_requested.store(rex::cvar::Query<bool>("vulkan_hdr"));
     if (!bots::UseN1()) rex::cvar::SetFlagByName("vulkan_hdr", "false");
     // MoltenVK: plain Metal binding instead of Metal3 argument buffers for descriptor sets —
     // gameplay 18.4 → 22.1 fps on M2 Pro (B-032, run 38). Read at VkInstance creation, which
@@ -936,6 +971,13 @@ class BotsApp : public rex::ReXApp {
   }
 
   void OnPostSetup() override {
+    if (bots::HybridState* hs = bots::FindHybridState())  // the renderer's "summary: graphics:" line, for the diagnostics file
+      hs->graphics_summary.store(+[](const char* line) { bots::diag::SetGraphicsSummary(line); });
+    if (rex::ui::Window* window = runtime() ? runtime()->display_window() : nullptr) {
+      auto* note = new WindowSizeNote(window);  // lives as long as the window
+      window->AddListener(note);
+      note->Publish();
+    }
     LogGameSummary();
     bots::StartThreadStats();
     SetLaunchCommandLine();

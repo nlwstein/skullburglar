@@ -125,6 +125,13 @@ struct MouseGate {
   static constexpr double kCoherenceClose = 0.3; // an open gate closes below this share
   double cx = 0, cy = 0, path = 0;
 
+  // Opening releases at most this many gates' worth of held-back counts on top of the frame's own (B-396, #21 second
+  // report). The held level can be several gates long (a sensor that jitters keeps it high while strict mode waits for
+  // a direction), and releasing all of it in one frame is a visible jump from a camera the player did not touch. The
+  // part over the cap is dropped, as the drift under the gate always was. A turn or flick loses at most the cap
+  // (0.5 degrees at the default gate) at its start. <= 0 releases everything, the 1.15.0 behaviour (BOTS_MOUSE_GATE_CAP=0).
+  double backlog_cap = 1.0;
+
   // One frame: `dt` seconds since the last one, (dx, dy) the counts that arrived meanwhile. Returns what passes.
   struct Out {
     double x = 0, y = 0;
@@ -154,6 +161,12 @@ struct MouseGate {
     }
     if (level < gate || !coherent_open) return {};
     open = true;
+    if (backlog_cap > 0) {
+      // This frame's counts pass whole; the backlog before them is limited to backlog_cap * gate in length.
+      const double bx = x - dx, by = y - dy, blen = std::hypot(bx, by), lim = backlog_cap * gate;
+      const double k = blen > lim ? lim / blen : 1.0;
+      return {dx + bx * k, dy + by * k};
+    }
     return {x, y};
   }
 };

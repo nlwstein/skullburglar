@@ -261,6 +261,19 @@ int main(int argc, char** argv) {
     CHECK(r.net_out >= 0.93 * r.net_in);
     CHECK(r.first_out_ms <= 700);
   }
+  // 9. Opening releases a capped backlog (#21 second report): jitter that finally opens the gate moves the camera by
+  //    about a gate, not by the whole held-back sum (1.15.0: up to 6-8 counts in one frame).
+  for (const char* spec : {"noise:0.3", "burst:0.15:2", "burst:0.3:3", "poisson:6:0.8"}) {
+    for (uint32_t seed : {3u, 7u, 11u}) {
+      const Result r = Run(spec, Algo::kStrict, 1.6, 120, seed);
+      CHECK(r.max_step <= 1.6 * MouseGate{}.backlog_cap + 3.01);  // the cap plus the biggest frame of counts (3)
+    }
+  }
+  {  // a flick still passes whole (its own frame's counts are never capped)
+    MouseGate g;
+    const auto o = g.Step(12, 0, kDt, 1.6);
+    CHECK(o.x == 12);
+  }
   {  // strict off must not even track the coherence state
     MouseGate g;
     for (int i = 0; i < 100; ++i) g.Step(1, 0, kDt, 1.6);

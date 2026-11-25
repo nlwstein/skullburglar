@@ -54,6 +54,10 @@ enum class LauncherAction {
   kOfferCopy,       // the copy offer: Copy the game files here
   kOfferDisc,       // the copy offer: Install from a disc image instead
   kOfferNotNow,     // the copy offer: Not now
+  // The portable-mode offer on removable storage (B-408)
+  kPortableYes,     // keep everything next to the game on this drive
+  kPortableNo,      // use the normal folders; never ask again
+  kPortableLater,   // Esc / B: close the offer for this run, ask again next start
 };
 
 // What the window knows that the menu shows. Filled every frame.
@@ -86,6 +90,9 @@ struct LauncherStatus {
   bool offer_open = false;              // the copy offer is up
   std::string offer_dest, offer_size_text, offer_free_text, offer_error;  // size and free space, or why they're unknown
   bool offer_enough = true;             // the free space holds the copy
+  bool portable_offer_open = false;     // the "keep everything on this drive?" offer is up (B-408)
+  std::string portable_offer_where;     // the folder the files would live in (bots-data next to the game)
+  std::string portable_offer_error;     // why Yes didn't work (a locked drive), shown in the offer
   bool offer_prior_use = false;         // this portable folder was used before: Not now keeps the shared folder
   char* iso_path = nullptr;  // the disc image path text box
   size_t iso_path_size = 0;
@@ -153,7 +160,7 @@ class LauncherMenu {
   LauncherAction Draw(std::vector<Setting>& settings, const LauncherStatus& status, const LauncherFonts& fonts);
 
   // A key binding is waiting for its key, or a confirmation is open: the window's own shortcuts stay off.
-  bool Busy() const { return capture_ >= 0 || confirm_reset_ || confirm_move_ || offer_open_; }
+  bool Busy() const { return capture_ >= 0 || confirm_reset_ || confirm_move_ || offer_open_ || portable_offer_open_; }
 
   // A slider is held by the mouse (auto-save waits for the release).
   bool Dragging() const { return dragging_row_ >= 0; }
@@ -236,6 +243,7 @@ class LauncherMenu {
   bool confirm_reset_ = false;
   bool confirm_move_ = false;   // the move-saves confirmation
   bool offer_open_ = false;     // the portable copy offer (three buttons), from the status
+  bool portable_offer_open_ = false;  // the portable-mode offer (two buttons), from the status
   int confirm_focus_ = 1;       // 0 reset, 1 cancel
   bool text_input_active_ = false;
   bool focus_text_input_ = false;

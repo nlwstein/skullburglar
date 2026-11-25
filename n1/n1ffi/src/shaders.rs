@@ -145,14 +145,14 @@ fn vs_skin(@location(0) pos: vec3<f32>, @location(3) bi: vec4<u32>, @location(4)
 }
 "#;
 
-pub fn scene_source(c: &Compiled, f: ShaderFlags) -> String {
+pub fn scene_source(c: &Compiled, f: ShaderFlags, sample_shading: bool) -> String {
     // Opt-in (B-293): no visible difference was measured on a desktop GPU, so the invented tangent stays the default.
     let skin_tan = if std::env::var("BOTS_N1_SKIN_TANGENT").is_ok_and(|v| v == "1") {
         "vec4<f32>(normalize(vec3<f32>(tu.x, tu.z, tu.y) + vec3<f32>(0.0, 1e-6, 0.0)), tn.w)"
     } else {
         "vec4<f32>(normalize(cross(a, n)), 1.0)"
     };
-    let mut s = assemble(c, f)
+    let mut s = assemble(c, f, sample_shading)
         .replace(matdef::shader::SHADOW_STUB, SHADOW_WGSL)
         .replace("@group(1)", "@group(9)")
         .replace("@group(2)", "@group(1)")
@@ -340,7 +340,7 @@ mod tests {
     fn fallback_and_textured_compile() {
         let grey = MatDef { diffuse_const: Some([0.6, 0.6, 0.6, 1.0]), ..Default::default() };
         let c = matdef::codegen::compile(&grey, &[]);
-        spirv(&scene_source(&c, ShaderFlags::new(false, false, false, 330))).unwrap();
+        spirv(&scene_source(&c, ShaderFlags::new(false, false, false, 330), false)).unwrap();
         let tex = MatDef {
             textures: vec![TexRef { path: "a".into(), normal: false }],
             nodes: vec![Node::Tex { tex: 0, uv: None }, Node::Mask { x: 0, m: [false, false, false, true] }],
@@ -349,10 +349,12 @@ mod tests {
             ..Default::default()
         };
         let c = matdef::codegen::compile(&tex, &[None]);
-        spirv(&scene_source(&c, ShaderFlags::new(true, false, false, 330))).unwrap();
+        let masked = ShaderFlags::new(true, false, false, 330);
+        spirv(&scene_source(&c, masked, false)).unwrap();
+        spirv_caps(&scene_source(&c, masked, true), naga::valid::Capabilities::MULTISAMPLED_SHADING).unwrap();
         spirv(&post_source()).unwrap();
         spirv_caps(SHADOW_DEPTH_WGSL, naga::valid::Capabilities::IMMEDIATES).unwrap();
-        assert!(scene_source(&c, ShaderFlags::new(true, false, false, 330)).contains("shadow_map"));
+        assert!(scene_source(&c, masked, false).contains("shadow_map"));
     }
 
     /// B-244: a material whose normal reads LightVector compiles with the per-light re-evaluation (texture samples in
@@ -367,11 +369,11 @@ mod tests {
             ..Default::default()
         };
         let c = matdef::codegen::compile(&m, &[None]);
-        let src = scene_source(&c, ShaderFlags::new(false, false, false, 330));
+        let src = scene_source(&c, ShaderFlags::new(false, false, false, 330), false);
         assert!(src.contains("if (true && true)"), "LightVector material should take the per-light path");
         spirv(&src).unwrap();
         let grey = MatDef { diffuse_const: Some([0.6, 0.6, 0.6, 1.0]), ..Default::default() };
-        let src = scene_source(&matdef::codegen::compile(&grey, &[]), ShaderFlags::new(false, false, false, 330));
+        let src = scene_source(&matdef::codegen::compile(&grey, &[]), ShaderFlags::new(false, false, false, 330), false);
         assert!(src.contains("if (false && true)"));
     }
 
@@ -391,7 +393,7 @@ mod tests {
         let plain = matdef::codegen::compile_ex(&tex, &[None, None], &[false, false]);
         assert_ne!(c.key, plain.key);
         let f = ShaderFlags { lm_pwl: true, ..ShaderFlags::new(false, false, false, 330) };
-        let src = scene_source(&c, f);
+        let src = scene_source(&c, f, false);
         assert!(src.contains("if (true) { return xe_pwl3(c); }"));
         spirv(&src).unwrap();
     }
@@ -414,7 +416,7 @@ mod tests {
         assert_ne!(c.key, plain.key);
         let none = matdef::codegen::compile_addr(&tex, &[None, None], &[false, false], &[false, false], &[0, 0]);
         assert_eq!(none.key, plain.key);
-        spirv(&scene_source(&c, ShaderFlags::new(false, false, false, 330))).unwrap();
+        spirv(&scene_source(&c, ShaderFlags::new(false, false, false, 330), false)).unwrap();
     }
 
     /// B-273: additive draws fade toward black in fog and modulate draws toward white; the rest toward the fog colour.
@@ -424,7 +426,7 @@ mod tests {
         let c = matdef::codegen::compile(&grey, &[]);
         for mode in 0u8..3 {
             let f = ShaderFlags { fog_mode: mode, ..ShaderFlags::new(false, false, true, 330) };
-            let src = scene_source(&c, f);
+            let src = scene_source(&c, f, false);
             assert!(src.contains(&format!("apply_fog(col, i.wpos, {mode}u)")), "mode {mode}");
             spirv(&src).unwrap();
         }
@@ -449,14 +451,14 @@ mod tests {
         let c = matdef::codegen::compile(&m, &[]);
         assert!(c.soft);
         let f = ShaderFlags::new(false, true, true, 330);
-        let src = scene_source(&c, f);
+        let src = scene_source(&c, f, false);
         assert!(src.contains("@group(0) @binding(10) var scene_depth: texture_depth_2d;"));
         assert!(src.contains("fi.scene_w - fi.view_w"));
         spirv(&src).unwrap();
         let grey = MatDef { diffuse_const: Some([0.6, 0.6, 0.6, 1.0]), ..Default::default() };
         let c = matdef::codegen::compile(&grey, &[]);
         assert!(!c.soft);
-        let src = scene_source(&c, f);
+        let src = scene_source(&c, f, false);
         assert!(!src.contains("scene_depth"));
         spirv(&src).unwrap();
     }

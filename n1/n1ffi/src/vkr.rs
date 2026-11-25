@@ -15,6 +15,7 @@
 //! are host-visible; textures and render targets are device-local (textures uploaded through staging buffers
 //! recorded at the start of the next `record`).
 
+use crate::log::{self, n1log};
 use crate::light::{Globals, Knobs, Lighting, POST_TAPS, POST_VECS};
 use crate::shaders;
 use crate::store::{NO_SHADER, SceneKey, Store};
@@ -37,6 +38,7 @@ use std::sync::Arc;
 mod aa;
 mod gprof;
 pub(crate) mod ao;
+mod msaa;
 mod outline;
 mod pgpu;
 mod shadow;
@@ -310,6 +312,7 @@ struct Key {
     two_sided: bool,
     mirrored: bool,
     skin: bool,
+    soft: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -336,11 +339,6 @@ pub(crate) fn blend_of(b: Blend) -> u8 {
 
 /// `BOTS_N1_SKIP_FILE` contents: material ids, blend mask, draw range, dump flag, soft edges on, planar PixelDepth.
 type SkipCfg = (Vec<u32>, u32, u32, u32, bool, bool, bool);
-
-/// B-327: `BOTS_N1_SOFTALPHA=0` draws soft-edged materials in the main pass with a hard edge (the old look).
-fn soft_alpha_pass() -> bool {
-    std::env::var("BOTS_N1_SOFTALPHA").map_or(true, |v| v != "0")
-}
 
 /// B-327: `BOTS_N1_PIXDEPTH=euclid` starts with PixelDepth as the distance to the eye (the old value).
 fn planar_depth_off() -> bool {
@@ -456,6 +454,8 @@ pub struct Renderer {
     pub aa_sharpen: f32,
     aa: Option<aa::Aa>,
     aa_logged: aa::Plan,
+    /// The player's settings as the last frame applied them (`n1_applied`, the host's startup summary).
+    pub applied: crate::N1Applied,
     pub knobs: Knobs,
     set0_layout: vk::DescriptorSetLayout,
     lm_layout: vk::DescriptorSetLayout,
@@ -519,6 +519,8 @@ pub struct Renderer {
     light_copy_serial: u64,
     slots: Vec<Slot>,
     hdr: Option<Rt>,
+    samples: vk::SampleCountFlags,
+    msaa: Option<[Rt; 2]>,
     bloom: Option<[Rt; 3]>,
     /// #56: the pause backdrop's blur, at the bloom targets' size; it keeps its picture between frames (`pause`).
     pause_rt: Option<Rt>,
@@ -553,6 +555,8 @@ pub struct Renderer {
     pub fade: [[f32; 3]; 2],
     /// `n1_set_debug_bits` (debug A/B switches; 0 normally).
     pub debug_bits: u32,
+    /// B-327: `BOTS_N1_SOFTALPHA=0` gives hard edges. These shaders still need the depth bound read-only.
+    soft_alpha: bool,
     /// B-327 run-time A/B (skip file `soft=` / `pixdepth=`): soft edges on, PixelDepth planar.
     dbg_soft: bool,
     dbg_planar: bool,
@@ -674,6 +678,17 @@ impl Renderer {
         color_format: vk::Format,
         cache_dir: Option<std::path::PathBuf>,
     ) -> Result<Self> {
+        unsafe { Self::new_with_msaa(ctx, color_format, cache_dir, 1, false) }
+    }
+
+    /// The host must enable Vulkan sampleRateShading before requesting SGSSAA.
+    pub unsafe fn new_with_msaa(
+        ctx: &VkContext,
+        color_format: vk::Format,
+        cache_dir: Option<std::path::PathBuf>,
+        requested_samples: u32,
+        sgssaa: bool,
+    ) -> Result<Self> {
         unsafe {
             let static_fn = ash::StaticFn {
                 get_instance_proc_addr: ctx.get_instance_proc_addr,
@@ -768,6 +783,12 @@ impl Renderer {
                 instance.get_physical_device_features(ctx.physical_device).sampler_anisotropy == vk::TRUE,
                 instance.get_physical_device_properties(ctx.physical_device).limits.max_sampler_anisotropy,
             );
+            n1log!(
+                log::INFO,
+                "summary: n1: texture filtering: {} (device maximum {}x)",
+                if aniso > 1.0 { format!("anisotropic {aniso}x") } else { "trilinear (no anisotropy)".to_string() },
+                instance.get_physical_device_properties(ctx.physical_device).limits.max_sampler_anisotropy
+            );
             let mk_sampler = |addr, aniso: f32| {
                 let mut info = vk::SamplerCreateInfo::default()
                     .mag_filter(vk::Filter::LINEAR)
@@ -800,13 +821,24 @@ impl Renderer {
                 && instance.get_physical_device_properties(ctx.physical_device).api_version >= vk::API_VERSION_1_3
                 && (instance.fp_v1_0().get_device_proc_addr)(ctx.device, c"vkCmdSetCullMode".as_ptr()).is_some()
                 && (instance.fp_v1_0().get_device_proc_addr)(ctx.device, c"vkCmdSetFrontFace".as_ptr()).is_some();
+            let samples = match requested_samples {
+                2 | 4 => msaa::samples(&instance, ctx.physical_device, requested_samples),
+                _ => vk::SampleCountFlags::TYPE_1,
+            };
+            let sgssaa = sgssaa && samples != vk::SampleCountFlags::TYPE_1;
+            if sgssaa {
+                eprintln!("[n1] Per-sample shading enabled");
+            }
             let store = Store::new(
                 device.clone(),
                 set0_layout,
                 lm_layout,
                 pg.pipe_layout,
-                cache_dir.map(|d| d.join("n1-gpu")),
+                // Keep the manifest with the interpolation mode its shaders were built for.
+                cache_dir.map(|d| d.join(if sgssaa { "n1-gpu-msaa-full" } else { "n1-gpu" })),
                 dyn_cull,
+                samples,
+                sgssaa,
             )?;
             let mut allocator = allocator;
             let shadows = shadow::Shadows::new(&device, &mut allocator, set0_layout, store.cache, &knobs)?;
@@ -830,6 +862,7 @@ impl Renderer {
                 aa_sharpen: 0.0,
                 aa: None,
                 aa_logged: aa::Plan::new(aa::Mode::Off, 0.0),
+                applied: crate::N1Applied::default(),
                 knobs,
                 set0_layout,
                 lm_layout,
@@ -877,6 +910,8 @@ impl Renderer {
                 light_copy_serial: 0,
                 slots: Vec::new(),
                 hdr: None,
+                samples,
+                msaa: None,
                 ao_targets: None,
                 ao_gate: ao::AoGate::default(),
                 bloom: None,
@@ -900,6 +935,7 @@ impl Renderer {
                 world_time: None,
                 fade: [[1.0; 3], [0.0; 3]],
                 debug_bits: 0,
+                soft_alpha: !std::env::var("BOTS_N1_SOFTALPHA").is_ok_and(|v| v == "0"),
                 dbg_soft: true,
                 dbg_planar: !planar_depth_off(),
                 dyn_logged: false,
@@ -1093,6 +1129,7 @@ impl Renderer {
         width: u32,
         height: u32,
         mips: u32,
+        samples: vk::SampleCountFlags,
         usage: vk::ImageUsageFlags,
         aspect: vk::ImageAspectFlags,
         name: &str,
@@ -1109,7 +1146,7 @@ impl Renderer {
                     })
                     .mip_levels(mips)
                     .array_layers(1)
-                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .samples(samples)
                     .tiling(vk::ImageTiling::OPTIMAL)
                     .usage(usage),
                 None,
@@ -1126,23 +1163,34 @@ impl Renderer {
                     linear: false,
                     allocation_scheme: AllocationScheme::GpuAllocatorManaged,
                 })
-                .map_err(|e| anyhow!("allocate {name}: {e}"))?;
-            self.device
-                .bind_image_memory(image, alloc.memory(), alloc.offset())?;
-            let view = self.device.create_image_view(
-                &vk::ImageViewCreateInfo::default()
-                    .image(image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(format)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: aspect,
-                        base_mip_level: 0,
-                        level_count: mips,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    }),
-                None,
-            )?;
+                .map_err(|e| {
+                    self.device.destroy_image(image, None);
+                    anyhow!("allocate {name}: {e}")
+                })?;
+            let view = self.device.bind_image_memory(image, alloc.memory(), alloc.offset()).and_then(|()| {
+                self.device.create_image_view(
+                    &vk::ImageViewCreateInfo::default()
+                        .image(image)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(format)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: aspect,
+                            base_mip_level: 0,
+                            level_count: mips,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        }),
+                    None,
+                )
+            });
+            let view = match view {
+                Ok(view) => view,
+                Err(e) => {
+                    self.device.destroy_image(image, None);
+                    let _ = self.allocator.as_mut().unwrap().free(alloc);
+                    return Err(e.into());
+                }
+            };
             Ok((image, view, alloc))
         }
     }
@@ -1218,6 +1266,7 @@ impl Renderer {
             width,
             height,
             mip_count,
+            vk::SampleCountFlags::TYPE_1,
             vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
             vk::ImageAspectFlags::COLOR,
             "n1 texture",
@@ -1280,7 +1329,7 @@ impl Renderer {
             };
             match self.try_add_texture(&desc) {
                 Ok(id) => self.damage_tex = Some(id),
-                Err(e) => eprintln!("n1ffi: damage texture {w}x{h}: {e:#}"),
+                Err(e) => n1log!(log::WARN, "n1ffi: damage texture {w}x{h}: {e:#}"),
             }
         }
         let old = std::mem::take(&mut self.damage_old);
@@ -1460,16 +1509,19 @@ impl Renderer {
         let skey = crate::plan::fnv(format!("{fl:?}|{}", c.key).as_bytes());
         // The shader is built by the startup step or a worker, never here: if it isn't ready the material is drawn
         // with the grey stand-in until it is.
+        let blend = blend_of(m.blend);
         let shader = match self.store.module_lookup(skey) {
             Some(id) => {
                 // B-199: materials arrive with the level preload, before anything draws them; have the static-mesh
                 // pipeline built now too (a worker, not urgent), so the first draw does not wait on the stand-in.
                 let cull = if self.dyn_cull { 0 } else { m.two_sided as u8 };
-                self.store.prewarm_scene_pipe(crate::store::SceneKey { shader: id, blend: blend_of(m.blend), skin: false, cull });
+                self.store.prewarm_scene_pipe(SceneKey {
+                    shader: id, blend, depth_read_only: c.soft && !blended(blend), skin: false, cull,
+                });
                 id
             }
             None => {
-                let after = vec![(blend_of(m.blend), false)];
+                let after = vec![(blend, false)];
                 self.store.want_scene_shader(skey, c.clone(), fl, after);
                 NO_SHADER
             }
@@ -1577,7 +1629,7 @@ impl Renderer {
         mi.skey = skey;
         mi.blend = m.blend;
         mi.two_sided = m.two_sided;
-        mi.soft = c.soft && soft_alpha_pass();
+        mi.soft = c.soft;
         Ok(id)
     }
 
@@ -1669,7 +1721,7 @@ impl Renderer {
                 vk::ImageAspectFlags::COLOR,
             )
         };
-        let (image, view, alloc) = self.image(format, w, h, 1, usage, aspect, name)?;
+        let (image, view, alloc) = self.image(format, w, h, 1, vk::SampleCountFlags::TYPE_1, usage, aspect, name)?;
         Ok(Rt {
             image,
             view,
@@ -1959,12 +2011,13 @@ impl Renderer {
         });
     }
 
-    fn scene_key(&self, k: &Key) -> SceneKey {
+    fn scene_key(k: &Key, dyn_cull: bool) -> SceneKey {
         SceneKey {
             shader: k.shader,
             blend: k.blend,
+            depth_read_only: k.soft && !blended(k.blend),
             skin: k.skin,
-            cull: if self.dyn_cull { 0 } else { k.two_sided as u8 | (k.mirrored as u8) << 1 },
+            cull: if dyn_cull { 0 } else { k.two_sided as u8 | (k.mirrored as u8) << 1 },
         }
     }
 
@@ -1973,7 +2026,7 @@ impl Renderer {
         if k.shader == NO_SHADER {
             return false;
         }
-        let sk = self.scene_key(k);
+        let sk = Self::scene_key(k, self.dyn_cull);
         if self.ready.contains_key(&sk) {
             return true;
         }
@@ -1999,7 +2052,7 @@ impl Renderer {
                 return true;
             }
             if !blended(d.key.blend) && grey_shader != NO_SHADER {
-                let k = Key { shader: grey_shader, blend: 0, ..d.key };
+                let k = Key { shader: grey_shader, blend: 0, soft: false, ..d.key };
                 if self.pipe_ready(&k) {
                     d.key = k;
                     d.mat = grey;
@@ -2129,6 +2182,7 @@ impl Renderer {
                         two_sided: mt.two_sided,
                         mirrored: det < 0.0,
                         skin: false,
+                        soft: mt.soft,
                     },
                     mat,
                     lm,
@@ -2176,6 +2230,7 @@ impl Renderer {
                     two_sided: mt.two_sided,
                     mirrored: false,
                     skin: true,
+                    soft: mt.soft,
                 },
                 mat: d.material,
                 lm: self.default_lm,
@@ -2224,7 +2279,7 @@ impl Renderer {
         let blend_bits = (bits >> 22) & 7;
         let file = self.skip_file();
         // Debug bit 25 (`hybrid n1debug`): hard edges; bit 26: PixelDepth as the distance to the eye.
-        self.dbg_soft = bits & (1 << 25) == 0 && file.as_ref().map_or(true, |f| f.5);
+        self.dbg_soft = self.soft_alpha && bits & (1 << 25) == 0 && file.as_ref().map_or(true, |f| f.5);
         self.dbg_planar = bits & (1 << 26) == 0 && file.as_ref().map_or(!planar_depth_off(), |f| f.6);
         if blend_bits == 0 && file.is_none() {
             return;
@@ -2458,10 +2513,13 @@ impl Renderer {
         self.laps.lap("slot");
 
         self.ensure_targets(rw, rh)?;
+        if self.samples != vk::SampleCountFlags::TYPE_1 {
+            self.ensure_msaa(rw, rh)?;
+        }
         // B-054: with anti-aliasing or sharpening on, the post chain writes `aa_ldr` and `aa_record` filters it into the target.
         let aa_plan = self.aa_plan();
         if aa_plan != self.aa_logged {
-            eprintln!("n1ffi: aa plan {:?} at {rw}x{rh}", aa_plan);
+            n1log!(log::INFO, "summary: n1: anti-aliasing plan {:?} at {rw}x{rh}", aa_plan);
             self.aa_logged = aa_plan;
         }
         self.aa_ensure(rw, rh, aa_plan)?;
@@ -2485,6 +2543,17 @@ impl Renderer {
         let ao_on = ao_ready && {
             let prepared = self.prepare_ao(si, ao_at, rw, rh, target.ambient_occlusion_strength, &globals);
             self.ao_gate.resolve(prepared)
+        };
+        self.applied = crate::N1Applied {
+            valid: 1,
+            aa_mode: aa_plan.mode as u32,
+            sharpen: aa_plan.sharpen,
+            ao_active: ao_on as u32,
+            // AO that was asked for and can't run: its setup failed this session, or its pipelines didn't build.
+            ao_failed: (!self.ao_gate.usable() || (target.ambient_occlusion_strength > 0.0 && self.store.ao().is_none())) as u32,
+            pause_blur: 0,
+            render_w: rw,
+            render_h: rh,
         };
         let post_on = self.knobs.post;
         let pp = &self.lighting.post;
@@ -2538,7 +2607,7 @@ impl Renderer {
             let before = self.pause.counts();
             let step = self.pause.step(pause_idx.is_some(), key);
             if step == crate::pause::PauseStep::Fill && before.0 < 4 {
-                eprintln!("n1ffi: pause backdrop blurred at {}x{} into {}x{} (fill {} of this run)", rw, rh, (rw / 4).max(1), (rh / 4).max(1), before.0 + 1);
+                n1log!(log::INFO, "summary: n1: pause backdrop blurred at {}x{} into {}x{} (fill {} of this run)", rw, rh, (rw / 4).max(1), (rh / 4).max(1), before.0 + 1);
             }
             step
         };
@@ -2955,10 +3024,7 @@ impl Renderer {
         let pf = std::mem::take(&mut self.pframe);
         let pg_sprites = pf.has_sprites();
         // B-327: draws of materials that read the scene depth (soft edges) need the read-only-depth pass too.
-        let soft_any = self.draws.iter().any(|dr| {
-            dr.key.shader != NO_SHADER && self.materials.get(dr.mat as usize).is_some_and(|m| m.soft)
-        });
-        let late_pass = pg_sprites || soft_any;
+        let late_pass = pg_sprites || self.draws.iter().any(|dr| dr.key.soft);
         let pg_meshes = pf.has_meshes();
         if pg_sprites || pg_meshes {
             self.pg_stage(si, &pf, view_proj, eye, rw, rh)?;
@@ -3067,20 +3133,26 @@ impl Renderer {
         };
         unsafe {
             // ---- scene -> HDR
-            barrier(frag, cao, &[to_att(hdr.image)]);
+            let msaa = self.msaa.is_some();
+            barrier(if msaa { frag | cao } else { frag }, cao, &[to_att(hdr.image)]);
             // Source includes the fragment stage: the last frame's sprite pass and post chain sample this depth
             // (write-after-read; the layout change from UNDEFINED discards and rewrites it).
+            let (depth_stages, resolve_write) = if msaa {
+                (tests | cao, vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            } else {
+                (tests, vk::AccessFlags::empty())
+            };
             barrier(
-                tests | frag,
-                tests,
+                depth_stages | frag,
+                depth_stages,
                 &[layout_barrier(
                     depth.image,
                     vk::ImageAspectFlags::DEPTH,
                     vk::ImageLayout::UNDEFINED,
                     vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
-                    vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE | resolve_write,
                     vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
-                        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE | resolve_write,
                 )],
             );
             // The post chain samples depth (the grade's sky clamp, DOF, the god-rays sky mask), so the scene pass stores
@@ -3118,13 +3190,31 @@ impl Renderer {
                         stencil: 0,
                     },
                 });
+            let (scene_color, scene_depth) = if let Some([color_ms, depth_ms]) = &self.msaa {
+                barrier(cao, cao, &[to_att(color_ms.image)]);
+                barrier(cao | tests, cao | tests, &[layout_barrier(
+                    depth_ms.image, vk::ImageAspectFlags::DEPTH, vk::ImageLayout::UNDEFINED,
+                    vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL, vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE | vk::AccessFlags::COLOR_ATTACHMENT_READ,
+                )]);
+                (
+                    catt[0].image_view(color_ms.view).store_op(vk::AttachmentStoreOp::DONT_CARE)
+                        .resolve_mode(vk::ResolveModeFlags::AVERAGE).resolve_image_view(hdr.view)
+                        .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+                    datt.image_view(depth_ms.view).store_op(vk::AttachmentStoreOp::DONT_CARE)
+                        .resolve_mode(vk::ResolveModeFlags::SAMPLE_ZERO).resolve_image_view(depth.view)
+                        .resolve_image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL),
+                )
+            } else {
+                (catt[0], datt)
+            };
             d.cmd_begin_rendering(
                 cmd,
                 &vk::RenderingInfo::default()
                     .render_area(full(rw, rh))
                     .layer_count(1)
-                    .color_attachments(&catt)
-                    .depth_attachment(&datt),
+                    .color_attachments(&[scene_color])
+                    .depth_attachment(&scene_depth),
             );
             viewport(0.0, 0.0, rw, rh);
             d.cmd_set_scissor(cmd, 0, &[full(rw, rh)]);
@@ -3136,15 +3226,10 @@ impl Renderer {
                 let mut cur_layout = vk::PipelineLayout::null();
                 let mut cur_pipe = vk::Pipeline::null();
                 for dr in draws {
-                    if (dr.key.shader != NO_SHADER && self.materials.get(dr.mat as usize).is_some_and(|m| m.soft)) != late {
+                    if dr.key.soft != late {
                         continue;
                     }
-                    let sk = SceneKey {
-                        shader: dr.key.shader,
-                        blend: dr.key.blend,
-                        skin: dr.key.skin,
-                        cull: if self.dyn_cull { 0 } else { dr.key.two_sided as u8 | (dr.key.mirrored as u8) << 1 },
-                    };
+                    let sk = Self::scene_key(&dr.key, self.dyn_cull);
                     let Some(&pipe) = self.ready.get(&sk) else { continue };
                     if cur_key != Some(dr.key) {
                         if pipe != cur_pipe {
@@ -3220,17 +3305,30 @@ impl Renderer {
                 }
             };
             // The draw list already puts opaque first.
-            // Splitting the slice adds no AO checks.
-            let opaque_end = if ao_on { self.draws.partition_point(|dr| !blended(dr.key.blend)) } else { self.draws.len() };
+            // Resolved before any pass that needs single-sample depth.
+            let split_scene = ao_on || msaa;
+            let opaque_end = if split_scene {
+                self.draws.partition_point(|dr| !blended(dr.key.blend))
+            } else { self.draws.len() };
             record_scene(&self.draws[..opaque_end], false, &mut st);
             if let Some(g) = &self.gprof {
                 g.mark(d, cmd, 2);
             }
             self.laps.lap("scene_draws");
-            if ao_on {
+            if split_scene {
                 d.cmd_end_rendering(cmd);
-                self.record_ao(cmd, si, rw, rh);
-                st.draws += 4;
+                if msaa {
+                    // VK writes both fixed resolves in COLOR_ATTACHMENT_OUTPUT, incl depth.
+                    d.cmd_pipeline_barrier(cmd, cao, cao | tests | frag, vk::DependencyFlags::empty(),
+                        &[vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+                                | vk::AccessFlags::SHADER_READ)], &[], &[]);
+                }
+                if ao_on {
+                    self.record_ao(cmd, si, rw, rh);
+                    st.draws += 4;
+                }
                 // Foliage has a separate fog shader. Keep it and all blended draws outside the AO composite.
                 let color_load = [catt[0].load_op(vk::AttachmentLoadOp::LOAD)];
                 let depth_load = datt.load_op(vk::AttachmentLoadOp::LOAD);
@@ -3242,7 +3340,7 @@ impl Renderer {
             if let Some(g) = &self.gprof { g.mark(d, cmd, 3); }
             self.laps.lap("ambient_occlusion");
             st.draws += self.tg_record(cmd, si, &tf);
-            if ao_on { record_scene(&self.draws[opaque_end..], false, &mut st); }
+            if split_scene { record_scene(&self.draws[opaque_end..], false, &mut st); }
             if pg_meshes {
                 st.draws += self.pg_record(cmd, si, &pf, true);
             }
@@ -3849,7 +3947,7 @@ impl Renderer {
         match self.try_add_mesh_at(m, true) {
             Ok(id) => Some(id),
             Err(e) => {
-                eprintln!("n1ffi: decal mesh upload failed: {e:#}");
+                n1log!(log::WARN, "n1ffi: decal mesh upload failed: {e:#}");
                 None
             }
         }
@@ -4010,7 +4108,7 @@ fn sc4(s: [[f32; 3]; 3]) -> [[f32; 4]; 3] {
 impl Backend for Renderer {
     fn add_texture(&mut self, t: &TextureDesc) -> u32 {
         self.try_add_texture(t).unwrap_or_else(|e| {
-            eprintln!("n1ffi: texture upload failed: {e:#}");
+            n1log!(log::WARN, "n1ffi: texture upload failed: {e:#}");
             TEX_GREY
         })
     }
@@ -4018,7 +4116,7 @@ impl Backend for Renderer {
         match self.try_add_material(m) {
             Ok(id) => id,
             Err(e) => {
-                eprintln!("n1ffi: material failed: {e:#}");
+                n1log!(log::WARN, "n1ffi: material failed: {e:#}");
                 NONE
             }
         }
@@ -4045,7 +4143,7 @@ impl Backend for Renderer {
         match self.try_add_mesh(m) {
             Ok(id) => id,
             Err(e) => {
-                eprintln!("n1ffi: mesh upload failed: {e:#}");
+                n1log!(log::WARN, "n1ffi: mesh upload failed: {e:#}");
                 let empty = MeshDesc {
                     positions: &[[0.0; 3]],
                     uvs: &[],
@@ -4107,7 +4205,7 @@ impl Backend for Renderer {
                         xf: [coord_scale[0], coord_scale[1], coord_bias[0], coord_bias[1]],
                     }),
                     Err(e) => {
-                        eprintln!("n1ffi: lightmap set failed: {e:#}");
+                        n1log!(log::WARN, "n1ffi: lightmap set failed: {e:#}");
                         NONE
                     }
                 }
@@ -4158,6 +4256,7 @@ impl Drop for Renderer {
                 rts.extend(b);
             }
             if let Some(r) = self.ao_targets.take() { rts.extend(r); }
+            rts.extend(self.msaa.take().into_iter().flatten());
             for r in rts {
                 self.free(Garbage::Image(r.image, r.view, r.alloc));
             }

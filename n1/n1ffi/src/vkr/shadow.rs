@@ -15,6 +15,7 @@
 //! nothing is compiled in play. `BOTS_N1_SHADOW=0` turns it all off (the shader then skips its loop).
 
 use super::*;
+use crate::log::{self, n1log};
 use gpu_allocator::vulkan::Allocator;
 
 /// UE3 per-object shadow sizing (BaseEngine.ini [Engine.Engine]): MinShadowResolution, ShadowFadeResolution,
@@ -450,7 +451,7 @@ impl Shadows {
             let pipe_static = mk(false)?;
             let pipe_skin = mk(true)?;
             if knobs.shadows {
-                eprintln!("[n1] shadows: up to {layers} a frame, {res}x{res} (BOTS_N1_SHADOW=0 turns them off)");
+                n1log!(log::INFO, "summary: n1: shadows: up to {layers} a frame, {res}x{res} (BOTS_N1_SHADOW=0 turns them off)");
             }
             Ok(Shadows {
                 image,

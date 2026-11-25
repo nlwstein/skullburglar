@@ -40,7 +40,7 @@ const std::map<std::string, std::string> kDefaults = {
     {"motion_blur", "true"}, {"screen_shake", "100.00"}, {"movie_volume", "100.00"}, {"framerate_limit", "60"},
     {"anti_aliasing", "smaa"}, {"sharpening", "0.00"}, {"ambient_occlusion", "false"}, {"ambient_occlusion_strength", "3.00"}, {"pre1_occlusion", "auto"}, {"aim_toggle", "false"},
     {"present_vsync", "true"}, {"fps_counter", "false"}, {"pause_blur", "true"}, {"check_updates", "true"}, {"diagnostic_logging", "false"},
-    {"pad_prompts", "auto"}, {"aim_assist", "true"}, {"right_stick_deadzone", "20.00"},
+    {"pad_prompts", "auto"}, {"aim_assist", "true"}, {"weapon_kick", "100.00"}, {"right_stick_deadzone", "20.00"},
     {"stick_acceleration", "true"}, {"stick_response", "original"}, {"stick_look_speed", "1.00"},
     {"vibration", "true"}, {"user_signin_live", "true"}, {"split_screen", "false"}, {"coop", "false"},
     {"coop_pads", "1,2"}, {"kbm", "true"}, {"kbm_sensitivity", "1.00"}, {"kbm_aim_sensitivity", "1.00"},
@@ -193,6 +193,12 @@ int main(int argc, char** argv) {
     if (state == "offer-nospace") st.offer_free_text = "3.0 GB", st.offer_enough = false;
     if (state == "offer-error") st.offer_error = "Can't read the shared game folder to size it.", st.offer_enough = false;
   }
+  if (state.rfind("portable-offer", 0) == 0) {  // B-408: the first-start offer on removable storage; -repeat keeps it up after each answer
+    st.portable_offer_open = true;
+    st.portable_offer_where = "/run/media/player/SD-card/Games/bots-data";
+    st.installed = false;
+    if (state == "portable-offer-error") st.portable_offer_error = "Can't create /run/media/player/SD-card/Games/portable.txt. Is the drive locked?";
+  }
   if (state == "copying") {
     st.installed = false, st.extracting = true, st.copying = true, st.extract_fraction = 0.42f;
     st.extract_progress = "2.9 / 6.8 GB";
@@ -247,6 +253,8 @@ int main(int argc, char** argv) {
     }
     if (a == LauncherAction::kDismissSaves && state != "misplaced-repeat") st.saves_warning.clear(), st.saves_can_move = false, st.saves_note.clear();
     // The offer's answers, as the window handles them (the preview keeps the offer up for the other devices in "offer-repeat").
+    if (state == "portable-offer" && (a == LauncherAction::kPortableYes || a == LauncherAction::kPortableNo || a == LauncherAction::kPortableLater))
+      st.portable_offer_open = false;
     if (state.rfind("offer", 0) == 0 && a != LauncherAction::kNone && state != "offer-repeat" && state != "offer-nospace") {
       if (a == LauncherAction::kOfferCopy) st.offer_open = false, st.installed = false, st.extracting = true, st.copying = true, st.extract_fraction = 0.1f;
       if (a == LauncherAction::kOfferDisc || a == LauncherAction::kOfferNotNow) st.offer_open = false;

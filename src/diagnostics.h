@@ -3,7 +3,8 @@
 //
 // Two things go to the log once at startup:
 //   env: NAME=value        every BOTS_* and REX_* environment variable that is set, values shortened and secrets hidden
-//   summary: key: value    a short block (OS, CPU, memory, how the game was started, folders, display, HDR, controllers);
+//   summary: key: value    a short block (OS, CPU, memory, how the game was started, folders, display, HDR, controllers, and
+//                          "summary: graphics:", every graphics setting as applied, graphics_summary.h);
 //                          the "summary: " prefix is stable, so `grep '^.*summary: '` pulls the block out of any log
 // and the launcher's About & logs page can save the block and the newest logs to one file (SaveBundle).
 //
@@ -372,7 +373,11 @@ struct GameInfo {
 };
 void AddGameSummary(const GameInfo& info, std::function<void(const std::string&)> log);
 
-// The summary lines gathered so far (each "summary: key: value"), waiting briefly for the startup thread.
+// The renderer's "summary: graphics: ..." line (graphics_summary.h) as it stands now; each call replaces the last, and
+// the bundle's summary block shows the newest. Any thread.
+void SetGraphicsSummary(const std::string& line);
+
+// The summary lines gathered so far (each "summary: key: value", the graphics line last), waiting briefly for the startup thread.
 std::vector<std::string> SummaryLines();
 
 // Writes <folder>/skullburglar-diagnostics.txt: the summary block, each log's summary, switch and GPU lines, and the

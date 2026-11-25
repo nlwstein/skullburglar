@@ -1,0 +1,34 @@
+# Input parity for the portable-mode offer on removable storage (B-408): run with --state portable-offer-repeat --sizes 1920x1080
+# (the offer stays up after each answer, so the keyboard, the controller and the mouse can each give every answer). Focus starts
+# on "Yes, keep it here" (the recommended answer).
+# Keyboard: Enter = Yes; Right, Enter = No; Esc = decide next time (nothing remembered)
+expect-page:main
+key:Enter
+expect-action:portable-yes
+key:Right
+key:Enter
+expect-action:portable-no
+key:Escape
+expect-action:portable-later
+key:Left
+key:Space
+expect-action:portable-yes
+# Controller (A selects, B = decide next time, d-pad moves)
+pad:Left
+pad:A
+expect-action:portable-yes
+pad:Right
+pad:A
+expect-action:portable-no
+pad:B
+expect-action:portable-later
+# Mouse: the two buttons
+click:0.370,0.675
+expect-action:portable-yes
+click:0.609,0.675
+expect-action:portable-no
+# Nothing behind the offer reacts: Down / Tab / a click on the menu don't change the page
+key:Down
+key:Tab
+click:0.1,0.4
+expect-page:main

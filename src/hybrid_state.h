@@ -277,6 +277,15 @@ struct HybridState {
   // Builds with no launcher (iOS, tvOS, Android): the game sets this to a function that saves the explicit pick of the
   // pre-1.0 renderer (renderer = "pre1" in bots.toml), and the renderer's start-failure box offers it as a button.
   std::atomic<void (*)()> pick_pre1{nullptr};
+  // The "summary: graphics:" line (graphics_summary.h): the renderer plugin hands each new one to the game, which keeps
+  // the newest for the diagnostics file (diagnostics.h SetGraphicsSummary).
+  std::atomic<void (*)(const char*)> graphics_summary{nullptr};
+  // The `vulkan_hdr` setting as the player left it: the game turns it off for the pre-1.0 renderer, and the line reports both.
+  std::atomic<bool> hdr_requested{false};
+  // The game window's drawable size and whether it is fullscreen (the game keeps them current; the graphics summary line reports
+  // them: the renderer itself only knows the size of the picture it makes, not the window it is shown in).
+  std::atomic<uint32_t> window_w{0}, window_h{0};
+  std::atomic<bool> window_fullscreen{false};
 };
 
 // The register the marker writes: unknown to the Xenos register table (no side effects in the SDK's command

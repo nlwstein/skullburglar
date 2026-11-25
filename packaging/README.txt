@@ -142,11 +142,22 @@ Portable mode (keep everything in one folder)
   BOTS_DATA_DIR to it, for example BOTS_DATA_DIR=/mnt/games/bots %command% in Steam. It beats portable.txt, and it
   holds the same layout (user, cache, logs). Command-line options like --user_data_root still win for what they name.
 
+  On an SD card or USB drive the launcher offers this itself: the first time it starts from removable storage on a
+  computer with no Skullburglar install, it asks "Keep everything on this drive?". Yes makes portable.txt for you and
+  restarts into portable mode (your saves are then on the drive too: keep a copy of bots-data\user); No keeps the
+  normal folders and doesn't ask again. In portable mode nothing is written outside the folder, except what the system
+  keeps for every program: the graphics driver's shader cache, the macOS Metal cache, Windows Firewall rules, and
+  Steam's own shader cache for a Steam shortcut. See docs/FILES.md.
+
   The folder must be writable. If it isn't, the game says so and doesn't start; it never saves somewhere else
   quietly. Existing saves don't move by themselves: to take them along, copy the contents of your current saves
   folder (listed under "Saves, settings") into bots-data\user before you first start in portable mode. On macOS, an app opened straight
   from the Downloads folder may run from a temporary read-only copy that can't see portable.txt: drag it somewhere
   first. The Windows setup, the launcher's updates and the Linux updater all leave portable.txt and bots-data alone.
+
+The full list of folders (shader cache, save backups, crash archives, registry and Start menu entries, phone and TV
+apps), how to move everything to another drive, how to back up your saves and how to uninstall completely is at
+https://github.com/nlwstein/skullburglar/blob/main/docs/FILES.md
 
 Updating: the launcher's "Update now" button does it for the Windows setup, the macOS app, the Linux AppImage and an
 unpacked Linux .tar.xz (the folder is swapped as a whole; the game folder, logs and any files you added stay). Otherwise,
@@ -163,7 +174,7 @@ Linux    Delete the AppImage or the unpacked folder.
 Steam Deck  In Steam: the game's gear icon > Manage > Remove non-Steam game from your library, then delete the
             .AppImage (in Desktop Mode).
 
-That leaves the game files and your saves. Delete the folders listed under "Where things are kept" to
+That leaves the game files and your saves (and, on Windows, the logs folder). Delete the folders listed under "Where things are kept" to
 remove them as well: on the Steam Deck and Linux, ~/.local/share/bots-recomp (the game files),
 ~/.local/state/bots-recomp (the AppImage's logs) and ~/.local/share/bots (saves, settings, shader cache). Back up the
 saves folder first if you might play again. (In Desktop Mode, Ctrl+H shows those hidden folders in Dolphin.)

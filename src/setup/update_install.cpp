@@ -1,6 +1,8 @@
 // See update_install.h.
 #include "update_install.h"
 
+#include "portable.h"
+#include "portable_io.h"
 #include "update_check.h"
 
 #include <algorithm>
@@ -40,6 +42,7 @@
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #include <dlfcn.h>
+#include <crt_externs.h>  // _NSGetArgv
 #include <mach-o/dyld.h>
 #include <stdio.h>  // renamex_np
 #if TARGET_OS_OSX
@@ -160,6 +163,20 @@ bool Writable(const fs::path& dir) {
   close(fd);
   unlink(tmpl.c_str());
   return true;
+#endif
+}
+
+// Whether files could be created in `dir`, judged from its permissions alone: nothing is created, so it is safe to ask
+// about a folder a portable install must not touch (Windows has no such folder to ask about and probes).
+[[maybe_unused]] bool WritableByPermission(const fs::path& dir) {
+  std::error_code ec;
+  if (!fs::is_directory(dir, ec)) return false;
+#if defined(_WIN32)
+  return Writable(dir);
+#else
+  struct statvfs sv {};
+  if (statvfs(dir.c_str(), &sv) == 0 && (sv.f_flag & ST_RDONLY)) return false;
+  return access(dir.c_str(), W_OK | X_OK) == 0;
 #endif
 }
 
@@ -993,8 +1010,12 @@ fs::path InstallTarget(InstallKind kind) {
   }
 }
 
-std::string SelfUpdateBlockerAt(InstallKind kind, const fs::path& target) {
+std::string SelfUpdateBlockerAt(InstallKind kind, const fs::path& target, [[maybe_unused]] bool probe_outside) {
   if (kind == InstallKind::kNone || target.empty()) return "this install can't update itself";
+  // B-408: portable mode never writes outside its folder, and the Windows setup program does.
+  if (std::string why = PortableUpdateBlocker(ActiveDataRoot().source != DataSource::kDefault, kind == InstallKind::kWindowsSetup);
+      !why.empty())
+    return why;
   std::error_code ec;
 #if defined(__linux__)
   if (kind == InstallKind::kLinuxTarball) {
@@ -1002,6 +1023,10 @@ std::string SelfUpdateBlockerAt(InstallKind kind, const fs::path& target) {
     // two trade places) must be writable, and the file system must be able to trade them.
     if (!target.has_parent_path() || target == target.root_path()) return "the install folder has no parent folder";
     if (!Writable(target)) return target.string() + " isn't writable";
+    // Portable mode asks (when it only has to know whether to offer the button) without creating anything in the parent:
+    // the folder swap itself is tried when the player presses Update now.
+    if (!probe_outside)
+      return WritableByPermission(target.parent_path()) ? std::string() : target.parent_path().string() + " isn't writable";
     if (!Writable(target.parent_path())) return target.parent_path().string() + " isn't writable";
     return CheckExchange(target.parent_path());
   }
@@ -1012,7 +1037,12 @@ std::string SelfUpdateBlockerAt(InstallKind kind, const fs::path& target) {
   return {};
 }
 
-std::string SelfUpdateBlocker(InstallKind kind) { return SelfUpdateBlockerAt(kind, InstallTarget(kind)); }
+std::string SelfUpdateBlocker(InstallKind kind) {
+  // B-408: a portable session writes nothing outside the folder it was started from, so asking whether an update could
+  // run must not create probe files in the folder above it (the Linux tarball's swap happens there).
+  const bool portable = ActiveDataRoot().source != DataSource::kDefault;
+  return SelfUpdateBlockerAt(kind, InstallTarget(kind), !PortableMayNotProbeOutside(portable));
+}
 
 bool InstallUpdate(InstallKind kind, const Asset& asset, InstallProgress& progress, std::string& error) {
   return InstallUpdateAt(kind, InstallTarget(kind), asset, progress, error, AppVersion());
@@ -1158,6 +1188,71 @@ void CleanUpOldUpdates() {
     if ((name.starts_with(kSwapPrefix) || name.starts_with(".skullburglar-old-")) && fs::last_write_time(e.path(), ec) < cutoff)
       fs::remove_all(e.path(), ec);
   }
+#endif
+}
+
+// Starts this program again (B-408: after the player chose portable mode, which is read at start). The new copy starts
+// right away on Windows and a second from now elsewhere; the caller quits at once.
+bool RestartThisProgram(std::string& error) {
+#if defined(_WIN32)
+  const fs::path exe = SelfExe();
+  std::wstring cmd = GetCommandLineW();
+  STARTUPINFOW si{sizeof(si)};
+  PROCESS_INFORMATION pi{};
+  if (exe.empty() ||
+      !CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                      nullptr, exe.parent_path().c_str(), &si, &pi)) {
+    error = "can't start the game again (error " + std::to_string(GetLastError()) + ")";
+    return false;
+  }
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+  return true;
+#elif defined(BOTS_UPDATE_NO_SPAWN)
+  error = "can't start the game again here";
+  return false;
+#else
+  // The arguments it was started with, after the program name.
+  std::vector<std::string> args;
+#if defined(__linux__)
+  std::ifstream in("/proc/self/cmdline", std::ios::binary);
+  if (in) {
+    std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    size_t i = 0;
+    bool first = true;
+    while (i < all.size()) {
+      const size_t z = all.find('\0', i);
+      const std::string a = all.substr(i, z == std::string::npos ? std::string::npos : z - i);
+      if (!first) args.push_back(a);
+      first = false;
+      if (z == std::string::npos) break;
+      i = z + 1;
+    }
+  }
+#elif defined(__APPLE__)
+  {
+    char*** argv = _NSGetArgv();
+    const int argc = *_NSGetArgc();
+    for (int i = 1; argv && i < argc; ++i) args.push_back((*argv)[i]);
+  }
+#endif
+  const InstallKind kind = CurrentInstallKind();
+  std::vector<std::string> cmd;
+  if (kind == InstallKind::kMacBundle) {
+    cmd = {Tool("open"), "-n", InstallTarget(kind).string()};
+    if (!args.empty()) cmd.push_back("--args");
+  } else if (kind == InstallKind::kLinuxAppImage) {
+    cmd = {InstallTarget(kind).string()};
+  } else {
+    cmd = {SelfExe().string()};
+  }
+  if (cmd.front().empty() || cmd.back().empty()) {
+    error = "can't tell which program to start again";
+    return false;
+  }
+  cmd.insert(cmd.end(), args.begin(), args.end());
+  RelaunchAfterExit(cmd);
+  return true;
 #endif
 }
 

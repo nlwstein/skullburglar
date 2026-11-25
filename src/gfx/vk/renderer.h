@@ -35,6 +35,7 @@
 
 #include <rex/ui/vulkan/mem_alloc.h>
 
+#include "../../graphics_summary.h"
 #include "../pm4.h"
 #include "shaders.h"
 #include "vk_api.h"
@@ -218,6 +219,9 @@ class Renderer : public Pm4Sink {
     bool held = false;
   };
   N1FrameNote TakeN1FrameNote() { return std::exchange(n1_note_, N1FrameNote{}); }
+  // The "summary: graphics:" line (graphics_summary.h): every graphics setting as applied, from the live cvars and what the
+  // renderers report; logged on the first call and whenever it changes (at most every 2 s). Called from Present.
+  void NoteGraphics(uint32_t internal_w, uint32_t internal_h);
   // Seconds since n1 last resumed drawing after a gap (level start, or after a loading screen); negative before the
   // first scene.
   double n1_seconds_since_resume() const;
@@ -536,6 +540,10 @@ class Renderer : public Pm4Sink {
   }
  private:
   std::string n1_cooked_dir_, n1_cache_dir_;
+  uint32_t graphics_checks_ = 0;
+  bots::diag::GraphicsLogGate graphics_gate_;
+  std::string msaa_started_;                    // the msaa setting n1 started with (applies at start only)
+  bool msaa_per_sample_unavailable_ = false;   // SGSSAA asked for without per-sample shading
   void PumpN1Warmup();
   void* n1_host_ = nullptr;
   // Dual render (BOTS_HYBRID_DUAL, parity harness): the port's scene stays, n1 draws the same frame offscreen and

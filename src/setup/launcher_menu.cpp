@@ -359,6 +359,8 @@ LauncherAction LauncherMenu::Draw(std::vector<Setting>& settings, const Launcher
   // The copy offer opens with focus on its first usable button.
   if (st.offer_open && !offer_open_) confirm_focus_ = st.offer_enough ? 0 : 1;
   offer_open_ = st.offer_open;
+  if (st.portable_offer_open && !portable_offer_open_) confirm_focus_ = 0;  // the recommended answer
+  portable_offer_open_ = st.portable_offer_open;
   // FocusSetting: open the setting's page; its row is selected while the page draws.
   if (!focus_cvar_.empty()) {
     if (std::none_of(settings.begin(), settings.end(), [&](const Setting& s) { return s.cvar == focus_cvar_; }))
@@ -464,7 +466,7 @@ LauncherAction LauncherMenu::Draw(std::vector<Setting>& settings, const Launcher
   }
   ImGui::End();
   if (capture_ >= 0) DrawCapture(settings, modal_in);
-  if (confirm_reset_ || confirm_move_ || offer_open_) DrawConfirm(st, modal_in);
+  if (confirm_reset_ || confirm_move_ || offer_open_ || portable_offer_open_) DrawConfirm(st, modal_in);
   ImGui::PopStyleColor(4);
   ImGui::PopStyleVar(6);
 
@@ -1646,8 +1648,9 @@ void LauncherMenu::DrawFooter(const LauncherStatus& st, Intent& in, float top) {
 
 void LauncherMenu::DrawConfirm(const LauncherStatus& st, Intent& in) {
   // Three kinds: Reset to defaults and Move the saves (two buttons), and the portable copy offer (three; B-400).
+  const bool portable_offer = portable_offer_open_ && !offer_open_;  // B-408
   const bool offer = offer_open_;
-  const bool move = !offer && confirm_move_;
+  const bool move = !offer && !portable_offer && confirm_move_;
   const ImVec2 size = ImGui::GetIO().DisplaySize;
   ImGui::SetNextWindowPos(ImVec2(0, 0));
   ImGui::SetNextWindowSize(size);
@@ -1664,7 +1667,20 @@ void LauncherMenu::DrawConfirm(const LauncherStatus& st, Intent& in) {
     bool small = false;
   };
   std::vector<Para> paras;
-  if (offer) {
+  if (portable_offer) {
+    paras.push_back({"Skullburglar is on a removable drive. Keep the game files, your saves and your settings on this "
+                     "drive too, next to the game? Then the whole game moves with the drive, and nothing is written to "
+                     "this computer. This is the recommended choice for an SD card or a USB drive.",
+                     color::kText});
+    paras.push_back({st.portable_offer_where, color::kTextDim, true});
+    paras.push_back({"Your saves live there too: if you take the drive to another computer, keep a copy of that folder "
+                     "somewhere safe.",
+                     color::kText});
+    paras.push_back({"If you choose No, the game uses this computer's normal folders, as it always has, and doesn't ask "
+                     "again. Esc or B decides next time instead.",
+                     color::kTextDim});
+    if (!st.portable_offer_error.empty()) paras.push_back({st.portable_offer_error, color::kBad});
+  } else if (offer) {
     paras.push_back({"Portable mode keeps everything in one folder, so it can hold its own copy of the game files. This "
                      "computer already has them, installed for the normal Skullburglar, in:",
                      color::kText});
@@ -1690,10 +1706,13 @@ void LauncherMenu::DrawConfirm(const LauncherStatus& st, Intent& in) {
                      "are not touched.",
                      color::kText});
   }
-  const char* title = offer ? "COPY THE GAME FILES HERE?" : move ? "MOVE YOUR SAVES AND SETTINGS?" : "RESET TO DEFAULTS?";
+  const char* title = portable_offer ? "KEEP EVERYTHING ON THIS DRIVE?" : offer ? "COPY THE GAME FILES HERE?" : move ? "MOVE YOUR SAVES AND SETTINGS?" : "RESET TO DEFAULTS?";
   std::vector<std::string> labels;
   std::vector<bool> enabled;
-  if (offer) {
+  if (portable_offer) {
+    labels = {"YES, KEEP IT HERE (RECOMMENDED)", "NO, USE THIS COMPUTER"};
+    enabled = {true, true};
+  } else if (offer) {
     labels = {"COPY THEM HERE", "USE A DISC IMAGE", "NOT NOW"};
     enabled = {st.offer_enough && st.offer_error.empty(), true, true};
   } else {
@@ -1735,7 +1754,7 @@ void LauncherMenu::DrawConfirm(const LauncherStatus& st, Intent& in) {
   if (in.up || in.down) in.up = in.down = false;
   if (confirm_focus_ >= nb) confirm_focus_ = nb - 1;
   int pressed = -1;
-  bool cancel = false;
+  bool cancel = false, later = false;
   for (int i = 0; i < nb; ++i) {
     const float x = a.x + S(24) + bx[i], yy = y + by[i];
     ImGui::SetCursorScreenPos(ImVec2(x, yy));
@@ -1753,11 +1772,18 @@ void LauncherMenu::DrawConfirm(const LauncherStatus& st, Intent& in) {
   }
   if (in.accept && enabled[confirm_focus_]) pressed = confirm_focus_, in.accept = false;
   if (in.back) {
-    if (offer) pressed = 2;  // Esc / B: Not now, the least committing answer
+    if (portable_offer) later = true;  // Esc / B: decide next time (nothing is remembered)
+    else if (offer) pressed = 2;  // Esc / B: Not now, the least committing answer
     else cancel = true;
     in.back = false;
   }
   ImGui::End();
+  if (portable_offer) {
+    if (pressed == 0) action_ = LauncherAction::kPortableYes;
+    else if (pressed == 1) action_ = LauncherAction::kPortableNo;
+    else if (later) action_ = LauncherAction::kPortableLater;
+    return;  // the window closes the offer
+  }
   if (offer) {
     if (pressed == 0) action_ = LauncherAction::kOfferCopy;
     else if (pressed == 1) action_ = LauncherAction::kOfferDisc;

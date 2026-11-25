@@ -112,6 +112,14 @@ class MouseKeyboardDriver final : public rex::input::InputDriver,
   // Screens that only take pad buttons (the music player) get mouse clicks this way.
   void TapButtons(uint16_t mask);
 
+  // Test only (game_hooks.cpp `mouse` console command): add raw mouse counts as if the sensor reported them. They take
+  // the same path as real motion from here on (sensitivity, noise gate, invert).
+  void InjectMouse(float dx, float dy) {
+    std::lock_guard lock(mutex_);
+    mouse_dx_ += dx;
+    mouse_dy_ += dy;
+  }
+
   // BOTS_KEY_TEST (game_hooks.cpp, test only): press / release a key as if typed (claims window focus).
   void TestKey(uint16_t vk, bool down) {
     has_focus_ = true;

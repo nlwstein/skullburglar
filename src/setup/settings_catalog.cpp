@@ -33,6 +33,11 @@ std::vector<Setting> SettingsCatalog() {
                "Intel graphics.",
                {{"auto", "Automatic"}, {"3", "4K  (2160p)"}, {"2", "1440p"}, {"1.5", "1080p"},
                 {"1.25", "900p"}, {"1", "720p  (original)"}, {"0.75", "75%"}, {"0.667", "67%"}, {"0.5", "50%"}}});
+  add(LauncherPage::kGraphics, "Image quality", {"msaa", "", "Multisampling (restart required)",
+               "MSAA smooths geometry edges. SGSSAA also shades cutouts, textures and lighting per sample. "
+               "Requires the new renderer.",
+               {{"off", "Off"}, {"2x", "2x MSAA"}, {"4x", "4x MSAA"},
+                {"2x-sgssaa", "2x SGSSAA"}, {"4x-sgssaa", "4x SGSSAA"}}});
   add(LauncherPage::kGraphics, "Image quality", {"anti_aliasing", "", "Anti-aliasing",
                "Smooths jagged edges on the 3D scene; the HUD and text are not touched. SMAA is the cleanest; FXAA is "
                "the cheapest and a little softer. Requires the new renderer.",
@@ -128,6 +133,12 @@ std::vector<Setting> SettingsCatalog() {
                "with keyboard and mouse (every key bound to Aim, such as right mouse button or Shift). Taking cover "
                "or running (A) also ends it; menus, pause and vehicles reset it.",
                {}});
+  add(LauncherPage::kControls, "Aiming", {"weapon_kick", "", "Weapon kick",
+               "How much each shot pushes your aim up, and how far it slides back afterwards, as a share of the game's "
+               "own. 100% is as shipped; 0% turns the kick and the slide-back off, which suits gyro and mouse aiming "
+               "where you control the muzzle yourself. Separate from Screen shake.",
+               {}});
+  s.back().slider_min = 0, s.back().slider_max = 100, s.back().slider_linear = true, s.back().slider_format = "%.0f%%";
   // Page Controls: Controller
   add(LauncherPage::kControls, "Controller", {"pad_prompts", "", "Controller button prompts",
                "Which buttons the game shows. Automatic matches the controller you used last.",

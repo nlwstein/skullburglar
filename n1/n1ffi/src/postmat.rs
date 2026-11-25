@@ -209,6 +209,11 @@ pub fn set_pause_blur(on: bool) {
     PAUSE_BLUR.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// The pause backdrop's blur as applied: the setting on and `BOTS_N1_PAUSE_FX` not 0 (n1_applied).
+pub fn pause_blur_applied() -> bool {
+    pause_fx_on() && pause_blur_on()
+}
+
 fn pause_blur_on() -> bool {
     PAUSE_BLUR.load(std::sync::atomic::Ordering::Relaxed)
 }
