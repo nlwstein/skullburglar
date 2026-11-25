@@ -43,6 +43,7 @@ struct State {
   std::mutex mu;
   std::condition_variable cv;
   std::vector<std::string> lines;  // "summary: key: value"
+  std::string graphics;            // the newest "summary: graphics: ..." line (SetGraphicsSummary)
   int pending = 0;                 // background probes still running
 };
 State& St() {
@@ -424,10 +425,17 @@ void AddGameSummary(const GameInfo& info, std::function<void(const std::string&)
   }).detach();
 }
 
+void SetGraphicsSummary(const std::string& line) {
+  std::lock_guard lock(St().mu);
+  St().graphics = line;
+}
+
 std::vector<std::string> SummaryLines() {
   std::unique_lock lock(St().mu);
   St().cv.wait_for(lock, std::chrono::seconds(2), [] { return St().pending == 0; });
-  return St().lines;
+  std::vector<std::string> lines = St().lines;
+  if (!St().graphics.empty()) lines.push_back(St().graphics);
+  return lines;
 }
 
 fs::path SaveBundle(const fs::path& log_folder, size_t tail_lines, std::string& error) {
@@ -457,7 +465,7 @@ fs::path SaveBundle(const fs::path& log_folder, size_t tail_lines, std::string& 
     out += "\n== " + path.filename().string() + (li == 0 ? " (newest)" : " (the one before)") + "\n";
     {  // what each run said about itself at the top: summary, env switches and the GPU
       std::vector<std::string> head = LinesContaining(
-          text, {"summary: ", "env: ", "Vulkan device '", "VulkanPresenter: Created", "driverName:", "driverInfo:"}, 60);
+          text, {"summary: ", "env: ", "Vulkan device '", "VulkanPresenter: Created", "driverName:", "driverInfo:"}, 120);
       if (!head.empty()) {
         out += "-- summary, switches and GPU lines from this log\n";
         for (const std::string& l : head) out += l + "\n";

@@ -55,6 +55,24 @@ void n1_set_hdr(N1Renderer* r, const N1Hdr* hdr);
  * sharpen 0 (off) to 1. May be called every frame; takes effect at the next n1_record. */
 void n1_set_aa(N1Renderer* r, uint32_t mode, float sharpen);
 
+/* The host's log sink for n1's state messages (what the player's diagnostics file reads): level 0 info, 1 warning,
+ * 2 error; the text has no newline and no prefix beyond its own. NULL (the default) sends them to stderr. May be called
+ * before n1_create and from any thread; the sink may be called from any thread. */
+typedef void (*N1LogSink)(uint32_t level, const char* message);
+void n1_set_log(N1LogSink sink);
+
+/* The settings as the last n1_record applied them (not as asked for): the host's "summary: graphics:" line. */
+typedef struct N1Applied {
+  uint32_t valid;       /* 1 once a frame was recorded; the rest is meaningful only then */
+  uint32_t aa_mode;     /* 0 off, 1 FXAA, 2 SMAA 1x */
+  float sharpen;        /* 0 off, up to 1 */
+  uint32_t ao_active;   /* ambient occlusion drawn in the last frame */
+  uint32_t ao_failed;   /* 1: AO was asked for and its setup failed for this session */
+  uint32_t pause_blur;  /* the pause backdrop blurs (setting on and BOTS_N1_PAUSE_FX not 0) */
+  uint32_t render_w, render_h; /* the last frame's view rectangle: the render resolution */
+} N1Applied;
+int32_t n1_applied(const N1Renderer* r, N1Applied* out); /* 0, or -1 for a NULL argument */
+
 typedef struct N1Camera {
   float view[16]; /* FSceneView ViewMatrix */
   float proj[16]; /* FSceneView ProjectionMatrix (x/y scales used) */

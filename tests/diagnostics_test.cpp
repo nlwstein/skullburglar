@@ -4,6 +4,7 @@
 #include <map>
 
 #include "diagnostics.h"
+#include "graphics_summary.h"
 // (Split literals: the repo's leak scan blocks real-looking home folders, even in tests.)
 
 using namespace bots::diag;
@@ -136,6 +137,27 @@ int main() {
     CHECK_EQ(ScrubText("nothing to hide: 1.5 GiB", lin), "nothing to hide: 1.5 GiB");
     CHECK_EQ(ScrubText("/ho" "me/alice", ScrubInfo{}), "~");
     CHECK_EQ(ScrubText("x", ScrubInfo{}), "x");
+  }
+
+  // The "summary: graphics:" lines in a bundle (graphics_summary.h): nothing in a normal line is a name, and a value that
+  // carries a path (a render scale read from a file-ish launch option, say) is scrubbed like any other path.
+  {
+    ScrubInfo win{"C:\\Users\\Pat Lee", "Pat Lee", "PATS-LAPTOP"};
+    GraphicsApplied g;
+    g.n1_reported = true, g.n1_aa_mode = 2, g.hdr_requested = true, g.internal_w = 853, g.internal_h = 480;
+    g.window_w = 1920, g.window_h = 1080, g.scale = 2.0f / 3.0f;
+    const std::string plain = "== newest\n" + FormatGraphicsSummary(g) + "\n";
+    CHECK_EQ(ScrubText(plain, win), plain);  // no home folder, account or computer name in an ordinary line
+    g.render_scale_env = "C:\\Users\\Pat Lee\\Documents\\scale.txt on PATS-LAPTOP";
+    g.pre1_occlusion = "/ho" "me/pat/occlusion";
+    const std::string leaky = FormatGraphicsSummary(g);
+    CHECK(leaky.find("Pat Lee") != std::string::npos);  // the unscrubbed line does carry the names
+    const std::string clean = ScrubText("-- summary lines\n" + leaky + "\n", win);
+    CHECK(clean.find("Pat Lee") == std::string::npos);
+    CHECK(clean.find("PATS-LAPTOP") == std::string::npos);
+    CHECK(clean.find("/ho" "me/pat") == std::string::npos);
+    CHECK(clean.find("~\\Documents\\scale.txt on <computer>") != std::string::npos);
+    CHECK(clean.find("summary: graphics: renderer=new (n1)") != std::string::npos);  // the rest of the line is kept
   }
 
   if (failures) return 1;

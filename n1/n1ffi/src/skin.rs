@@ -3,6 +3,7 @@
 //! (`scenefmt::skel::skin_palette`); bones the game left unset (NaN), or outside the primitive's current LOD (B-265), are
 //! rebuilt from the reference pose.
 
+use crate::log::{self, n1log};
 use crate::vkr::{Renderer, SkinDraw, SkinFrame, SkinInst};
 use assetdb::{AssetDb, SkelAsset};
 use scenekit::{NONE, Resolver};
@@ -241,7 +242,7 @@ impl Skins {
                         }
                     }
                     Err(e) => {
-                        eprintln!("n1ffi: skinned mesh upload failed: {e:#}");
+                        n1log!(log::WARN, "n1ffi: skinned mesh upload failed: {e:#}");
                         State::Missing
                     }
                 },

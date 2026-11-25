@@ -15,6 +15,7 @@
 //! are host-visible; textures and render targets are device-local (textures uploaded through staging buffers
 //! recorded at the start of the next `record`).
 
+use crate::log::{self, n1log};
 use crate::light::{Globals, Knobs, Lighting, POST_TAPS, POST_VECS};
 use crate::shaders;
 use crate::store::{NO_SHADER, SceneKey, Store};
@@ -453,6 +454,8 @@ pub struct Renderer {
     pub aa_sharpen: f32,
     aa: Option<aa::Aa>,
     aa_logged: aa::Plan,
+    /// The player's settings as the last frame applied them (`n1_applied`, the host's startup summary).
+    pub applied: crate::N1Applied,
     pub knobs: Knobs,
     set0_layout: vk::DescriptorSetLayout,
     lm_layout: vk::DescriptorSetLayout,
@@ -780,6 +783,12 @@ impl Renderer {
                 instance.get_physical_device_features(ctx.physical_device).sampler_anisotropy == vk::TRUE,
                 instance.get_physical_device_properties(ctx.physical_device).limits.max_sampler_anisotropy,
             );
+            n1log!(
+                log::INFO,
+                "summary: n1: texture filtering: {} (device maximum {}x)",
+                if aniso > 1.0 { format!("anisotropic {aniso}x") } else { "trilinear (no anisotropy)".to_string() },
+                instance.get_physical_device_properties(ctx.physical_device).limits.max_sampler_anisotropy
+            );
             let mk_sampler = |addr, aniso: f32| {
                 let mut info = vk::SamplerCreateInfo::default()
                     .mag_filter(vk::Filter::LINEAR)
@@ -853,6 +862,7 @@ impl Renderer {
                 aa_sharpen: 0.0,
                 aa: None,
                 aa_logged: aa::Plan::new(aa::Mode::Off, 0.0),
+                applied: crate::N1Applied::default(),
                 knobs,
                 set0_layout,
                 lm_layout,
@@ -1319,7 +1329,7 @@ impl Renderer {
             };
             match self.try_add_texture(&desc) {
                 Ok(id) => self.damage_tex = Some(id),
-                Err(e) => eprintln!("n1ffi: damage texture {w}x{h}: {e:#}"),
+                Err(e) => n1log!(log::WARN, "n1ffi: damage texture {w}x{h}: {e:#}"),
             }
         }
         let old = std::mem::take(&mut self.damage_old);
@@ -2509,7 +2519,7 @@ impl Renderer {
         // B-054: with anti-aliasing or sharpening on, the post chain writes `aa_ldr` and `aa_record` filters it into the target.
         let aa_plan = self.aa_plan();
         if aa_plan != self.aa_logged {
-            eprintln!("n1ffi: aa plan {:?} at {rw}x{rh}", aa_plan);
+            n1log!(log::INFO, "summary: n1: anti-aliasing plan {:?} at {rw}x{rh}", aa_plan);
             self.aa_logged = aa_plan;
         }
         self.aa_ensure(rw, rh, aa_plan)?;
@@ -2533,6 +2543,17 @@ impl Renderer {
         let ao_on = ao_ready && {
             let prepared = self.prepare_ao(si, ao_at, rw, rh, target.ambient_occlusion_strength, &globals);
             self.ao_gate.resolve(prepared)
+        };
+        self.applied = crate::N1Applied {
+            valid: 1,
+            aa_mode: aa_plan.mode as u32,
+            sharpen: aa_plan.sharpen,
+            ao_active: ao_on as u32,
+            // AO that was asked for and can't run: its setup failed this session, or its pipelines didn't build.
+            ao_failed: (!self.ao_gate.usable() || (target.ambient_occlusion_strength > 0.0 && self.store.ao().is_none())) as u32,
+            pause_blur: 0,
+            render_w: rw,
+            render_h: rh,
         };
         let post_on = self.knobs.post;
         let pp = &self.lighting.post;
@@ -2586,7 +2607,7 @@ impl Renderer {
             let before = self.pause.counts();
             let step = self.pause.step(pause_idx.is_some(), key);
             if step == crate::pause::PauseStep::Fill && before.0 < 4 {
-                eprintln!("n1ffi: pause backdrop blurred at {}x{} into {}x{} (fill {} of this run)", rw, rh, (rw / 4).max(1), (rh / 4).max(1), before.0 + 1);
+                n1log!(log::INFO, "summary: n1: pause backdrop blurred at {}x{} into {}x{} (fill {} of this run)", rw, rh, (rw / 4).max(1), (rh / 4).max(1), before.0 + 1);
             }
             step
         };
@@ -3926,7 +3947,7 @@ impl Renderer {
         match self.try_add_mesh_at(m, true) {
             Ok(id) => Some(id),
             Err(e) => {
-                eprintln!("n1ffi: decal mesh upload failed: {e:#}");
+                n1log!(log::WARN, "n1ffi: decal mesh upload failed: {e:#}");
                 None
             }
         }
@@ -4087,7 +4108,7 @@ fn sc4(s: [[f32; 3]; 3]) -> [[f32; 4]; 3] {
 impl Backend for Renderer {
     fn add_texture(&mut self, t: &TextureDesc) -> u32 {
         self.try_add_texture(t).unwrap_or_else(|e| {
-            eprintln!("n1ffi: texture upload failed: {e:#}");
+            n1log!(log::WARN, "n1ffi: texture upload failed: {e:#}");
             TEX_GREY
         })
     }
@@ -4095,7 +4116,7 @@ impl Backend for Renderer {
         match self.try_add_material(m) {
             Ok(id) => id,
             Err(e) => {
-                eprintln!("n1ffi: material failed: {e:#}");
+                n1log!(log::WARN, "n1ffi: material failed: {e:#}");
                 NONE
             }
         }
@@ -4122,7 +4143,7 @@ impl Backend for Renderer {
         match self.try_add_mesh(m) {
             Ok(id) => id,
             Err(e) => {
-                eprintln!("n1ffi: mesh upload failed: {e:#}");
+                n1log!(log::WARN, "n1ffi: mesh upload failed: {e:#}");
                 let empty = MeshDesc {
                     positions: &[[0.0; 3]],
                     uvs: &[],
@@ -4184,7 +4205,7 @@ impl Backend for Renderer {
                         xf: [coord_scale[0], coord_scale[1], coord_bias[0], coord_bias[1]],
                     }),
                     Err(e) => {
-                        eprintln!("n1ffi: lightmap set failed: {e:#}");
+                        n1log!(log::WARN, "n1ffi: lightmap set failed: {e:#}");
                         NONE
                     }
                 }
