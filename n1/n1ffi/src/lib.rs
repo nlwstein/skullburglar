@@ -63,6 +63,8 @@ pub struct N1Init {
     /// Background loader threads; 0 loads synchronously inside `n1_record` (offline tools only: it stalls).
     pub loader_threads: u32,
     pub hdr: u32,
+    pub msaa: u32,
+    pub sgssaa: u32,
 }
 
 #[repr(C)]
@@ -675,7 +677,9 @@ pub unsafe extern "C" fn n1_create(init: *const N1Init) -> *mut N1Renderer {
             physical_device: init.physical_device,
             device: init.device,
         };
-        let mut renderer = unsafe { Renderer::new(&ctx, init.color_format, Some(cache.to_path_buf()))? };
+        let mut renderer = unsafe {
+            Renderer::new_with_msaa(&ctx, init.color_format, Some(cache.to_path_buf()), init.msaa, init.sgssaa != 0)?
+        };
         renderer.hdr_output = init.hdr != 0;
         let db_ps = db.clone();
         let db_tr = db.clone();

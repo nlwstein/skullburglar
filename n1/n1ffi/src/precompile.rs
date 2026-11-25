@@ -282,6 +282,7 @@ impl Stream {
                         SceneKey {
                             shader,
                             blend,
+                            depth_read_only: e.plan.c.soft && blend < 2,
                             skin,
                             cull,
                         },
@@ -583,7 +584,7 @@ fn run(store: &Arc<Store>, jobs: Jobs, prog: &Arc<Progress>) -> u32 {
                         // Without dynamic cull state every combination is its own pipeline.
                         let culls: &[u8] = if dyn_cull { &[0] } else { &[0, 1, 2, 3] };
                         for &cull in culls {
-                            s.build_scene_pipe(SceneKey { shader, blend, skin, cull }, Origin::Startup);
+                            s.build_scene_pipe(SceneKey { shader, blend, depth_read_only: false, skin, cull }, Origin::Startup);
                         }
                     }
                     prog.done.fetch_add(1, Relaxed);

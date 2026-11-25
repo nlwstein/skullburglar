@@ -34,6 +34,8 @@ pub struct SceneKey {
     pub shader: u32,
     /// `vkr::blend_of`: 0 opaque, 1 masked, 2 alpha, 3 additive, 4 modulate.
     pub blend: u8,
+    /// Opaque and masked material whose shader samples the read-only depth attachment.
+    pub depth_read_only: bool,
     pub skin: bool,
     /// Static cull state when the device can't switch it per draw: bit 0 two-sided, bit 1 mirrored. Always 0 with
     /// dynamic cull state.
@@ -155,6 +157,8 @@ pub struct Store {
     pub log_misses: bool,
     /// Cull mode and front face are set per draw (Vulkan 1.3 dynamic state); else they are part of the pipeline key.
     pub dyn_cull: bool,
+    samples: vk::SampleCountFlags,
+    sgssaa: bool,
     /// For `precompile::maybe_save`.
     pub manifest_header: Mutex<String>,
     pub manifest_saved: AtomicU32,
@@ -209,13 +213,15 @@ fn fnv(b: &[u8]) -> u64 {
 impl Store {
     /// `dir`: the n1 cache directory (SPIR-V under `spv-*`, the pipeline cache as `pipeline_cache.bin`); `None` keeps
     /// everything in memory. `particle_layout` is the particle pipeline layout (made by the renderer).
-    pub fn new(
+    pub(crate) fn new(
         device: ash::Device,
         set0_layout: vk::DescriptorSetLayout,
         lm_layout: vk::DescriptorSetLayout,
         particle_layout: vk::PipelineLayout,
         dir: Option<PathBuf>,
         dyn_cull: bool,
+        samples: vk::SampleCountFlags,
+        sgssaa: bool,
     ) -> Result<Arc<Store>> {
         // Empty now; the persisted data is merged in by `load_persisted_cache` on the startup thread, because some
         // drivers (MoltenVK recompiles every cached shader library) take seconds to read it.
@@ -244,6 +250,8 @@ impl Store {
             ao: OnceLock::new(),
             log_misses: std::env::var("BOTS_N1_COMPILE_LOG").is_ok(),
             dyn_cull,
+            samples,
+            sgssaa,
             manifest_header: Mutex::new(String::new()),
             manifest_saved: AtomicU32::new(0),
             last_save: Mutex::new(std::time::Instant::now()),
@@ -494,7 +502,7 @@ impl Store {
     // ---- shader modules ----
 
     /// SPIR-V for WGSL source, from the disk cache when it has it.
-    pub fn spirv_cached(&self, src: &str) -> Result<(Arc<Vec<u32>>, u64)> {
+    fn spirv_cached(&self, src: &str, caps: naga::valid::Capabilities) -> Result<(Arc<Vec<u32>>, u64)> {
         let h = fnv(src.as_bytes());
         let file = self.dir.as_ref().map(|d| d.join(format!("spv-{SPV_REV}")).join(format!("{h:016x}.spv")));
         if let Some(f) = &file
@@ -509,7 +517,7 @@ impl Store {
             }
         }
         let t = std::time::Instant::now();
-        let words = shaders::spirv(src)?;
+        let words = shaders::spirv_caps(src, caps)?;
         self.ctr.naga_us.fetch_add(t.elapsed().as_micros() as u64, Relaxed);
         self.ctr.spv_misses.fetch_add(1, Relaxed);
         if let Some(f) = &file {
@@ -623,8 +631,11 @@ impl Store {
     fn build_scene_shader_claimed(&self, key: u64, c: &Compiled, flags: ShaderFlags, origin: Origin) -> Option<u32> {
         let t = std::time::Instant::now();
         let r = (|| {
-            let src = shaders::scene_source(c, flags);
-            let (words, h) = self.spirv_cached(&src)?;
+            let sample_shading = self.sgssaa && !flags.translucent && !c.soft;
+            let src = shaders::scene_source(c, flags, sample_shading);
+            let mut caps = naga::valid::Capabilities::empty();
+            caps.set(naga::valid::Capabilities::MULTISAMPLED_SHADING, sample_shading);
+            let (words, h) = self.spirv_cached(&src, caps)?;
             Ok(((self.make_module(&words)?, c.ntex, h), words))
         })();
         let (r, words) = match r {
@@ -707,7 +718,7 @@ impl Store {
             Box::new(move |s| {
                 if let Some(id) = s.build_scene_shader_claimed(key, &c, flags, Origin::Live) {
                     for (blend, skin) in after {
-                        s.build_scene_pipe(SceneKey { shader: id, blend, skin, cull: 0 }, Origin::Live);
+                        s.build_scene_pipe(SceneKey { shader: id, blend, depth_read_only: c.soft && blend < 2, skin, cull: 0 }, Origin::Live);
                     }
                 }
             }),
@@ -841,7 +852,7 @@ impl Store {
             let (vs_module, vs_own) = self.stage(key.shader, vs_entry)?;
             let (fs_module, fs_own) = self.stage(key.shader, c"fs")?;
             let blend = blend_state(key.blend);
-            let write = key.blend < 2;
+            let depth_write = key.blend < 2 && !key.depth_read_only;
             let stages = [
                 vk::PipelineShaderStageCreateInfo::default()
                     .stage(vk::ShaderStageFlags::VERTEX)
@@ -895,10 +906,14 @@ impl Store {
                 .cull_mode(if key.cull & 1 != 0 { vk::CullModeFlags::NONE } else { vk::CullModeFlags::BACK })
                 .front_face(if key.cull & 2 != 0 { vk::FrontFace::CLOCKWISE } else { vk::FrontFace::COUNTER_CLOCKWISE })
                 .line_width(1.0);
-            let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            let mut ms = vk::PipelineMultisampleStateCreateInfo::default()
+                .rasterization_samples(if depth_write { self.samples } else { vk::SampleCountFlags::TYPE_1 });
+            if depth_write && self.sgssaa {
+                ms = ms.sample_shading_enable(true).min_sample_shading(1.0);
+            }
             let ds = vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(true)
-                .depth_write_enable(write)
+                .depth_write_enable(depth_write)
                 .depth_compare_op(vk::CompareOp::GREATER); // reverse Z
             let att = [blend
                 .unwrap_or(vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA))];
@@ -1120,8 +1135,9 @@ impl Store {
                 continue;
             }
             match k {
-                AnyKey::Scene(k) => sn.scene_pipes.push((i.mods[k.shader as usize].key, k.blend, k.skin)),
+                AnyKey::Scene(k) if !k.depth_read_only => sn.scene_pipes.push((i.mods[k.shader as usize].key, k.blend, k.skin)),
                 AnyKey::Part(k) => sn.part_pipes.push((i.mods[k.module as usize].key, k.blend, k.two_sided, k.variant)),
+                AnyKey::Scene(_) => (),
             }
         }
         sn.scene_mods.sort();

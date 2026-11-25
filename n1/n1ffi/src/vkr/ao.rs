@@ -12,8 +12,9 @@ pub(super) struct Parameters {
     inverse_view_proj: [f32; 16],
     size: [f32; 4],
     params: [f32; 4],
+    depth_sample: [f32; 4],
 }
-const _: () = assert!(std::mem::size_of::<Parameters>() == 96);
+const _: () = assert!(std::mem::size_of::<Parameters>() == 112);
 
 /// Test hook `BOTS_N1_AO_FAIL`: `pipelines` makes the AO pipeline build fail, `frame` makes the per-frame setup fail.
 fn forced_failure(stage: &str) -> bool {
@@ -155,10 +156,12 @@ impl Renderer {
             };
             self.ao_targets = Some([first, second]);
         }
+        let [sample_x, sample_y] = self.depth_sample_offset();
         let parameters = Parameters {
             inverse_view_proj,
             size: [w as f32, h as f32, 1.0 / w as f32, 1.0 / h as f32],
             params: [self.near, AO_RADIUS, strength, (self.knobs.features & 8 != 0) as u32 as f32],
+            depth_sample: [sample_x, sample_y, 0.0, 0.0],
         };
         let bytes = bytemuck::bytes_of(&parameters);
         self.slots[si].buf.bytes()[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);

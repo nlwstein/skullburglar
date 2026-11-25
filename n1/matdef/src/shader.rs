@@ -35,7 +35,7 @@ impl ShaderFlags {
     }
 }
 
-pub fn assemble(c: &Compiled, f: ShaderFlags) -> String {
+pub fn assemble(c: &Compiled, f: ShaderFlags, sample_shading: bool) -> String {
     let mut textures = String::new();
     let mut body = String::new();
     for l in c.body.lines() {
@@ -59,6 +59,7 @@ pub fn assemble(c: &Compiled, f: ShaderFlags) -> String {
         ""
     };
     SCENE_WGSL
+        .replace("{{SCENE_INTERPOLATION}}", if sample_shading { "@interpolate(perspective, sample) " } else { "" })
         .replace("{{GLOBALS}}", GLOBALS_WGSL)
         .replace("{{FOG}}", FOG_WGSL)
         .replace("{{SCENE_DEPTH}}", scene_depth)

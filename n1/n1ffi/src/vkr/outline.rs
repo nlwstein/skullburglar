@@ -214,10 +214,11 @@ impl Renderer {
                 cmd,
                 &vk::RenderingInfo::default().render_area(full).layer_count(1).color_attachments(&catt).depth_attachment(&datt),
             );
+            let [x, y] = self.depth_sample_offset();
             d.cmd_set_viewport(
                 cmd,
                 0,
-                &[vk::Viewport { x: 0.0, y: 0.0, width: rw as f32, height: rh as f32, min_depth: 0.0, max_depth: 1.0 }],
+                &[vk::Viewport { x: -x, y: -y, width: rw as f32, height: rh as f32, min_depth: 0.0, max_depth: 1.0 }],
             );
             d.cmd_set_scissor(cmd, 0, &[full]);
             d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, ol.pipe);

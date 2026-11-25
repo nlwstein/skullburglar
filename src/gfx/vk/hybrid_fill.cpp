@@ -249,6 +249,12 @@ void* Renderer::EnsureN1(VkFormat format) {
   init.cache_dir = EnvOr("BOTS_N1_CACHE", n1_cache_dir_.empty() ? "cache/n1" : n1_cache_dir_.c_str());
   init.loader_threads = uint32_t(std::atoi(EnvOr("BOTS_N1_THREADS", "2")));
   init.hdr = hdr_ && format == VK_FORMAT_R16G16B16A16_SFLOAT;
+  const auto msaa = rex::cvar::GetFlagByName("msaa");
+  init.msaa = msaa == "4x" || msaa == "4x-sgssaa" ? 4 : msaa == "2x" || msaa == "2x-sgssaa" ? 2 : 1;
+  if (msaa == "2x-sgssaa" || msaa == "4x-sgssaa") {
+    init.sgssaa = device_->properties().sampleRateShading;
+    if (!init.sgssaa) REXLOG_INFO("hybrid n1: per-sample shading unavailable, using MSAA");
+  }
   const auto t0 = std::chrono::steady_clock::now();
   // The new renderer has no fallback: a start failure ends in the renderer start-failure box (native.cpp), whose text
   // points the player at the pre-1.0 renderer in the launcher. BOTS_TEST_N1_FAIL=1 forces it (tests).

@@ -33,6 +33,11 @@ std::vector<Setting> SettingsCatalog() {
                "Intel graphics.",
                {{"auto", "Automatic"}, {"3", "4K  (2160p)"}, {"2", "1440p"}, {"1.5", "1080p"},
                 {"1.25", "900p"}, {"1", "720p  (original)"}, {"0.75", "75%"}, {"0.667", "67%"}, {"0.5", "50%"}}});
+  add(LauncherPage::kGraphics, "Image quality", {"msaa", "", "Multisampling (restart required)",
+               "MSAA smooths geometry edges. SGSSAA also shades cutouts, textures and lighting per sample. "
+               "Requires the new renderer.",
+               {{"off", "Off"}, {"2x", "2x MSAA"}, {"4x", "4x MSAA"},
+                {"2x-sgssaa", "2x SGSSAA"}, {"4x-sgssaa", "4x SGSSAA"}}});
   add(LauncherPage::kGraphics, "Image quality", {"anti_aliasing", "", "Anti-aliasing",
                "Smooths jagged edges on the 3D scene; the HUD and text are not touched. SMAA is the cleanest; FXAA is "
                "the cheapest and a little softer. Requires the new renderer.",
