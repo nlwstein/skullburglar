@@ -6,6 +6,7 @@ struct AoParams {
     inverse_view_proj: mat4x4<f32>,
     size: vec4<f32>,   // full-resolution width, height, inverse width, inverse height
     params: vec4<f32>, // near plane, world radius, strength, fog enabled
+    depth_sample: vec4<f32>, // pixel offset of the resolved depth sample, from pixel center
 };
 @group(0) @binding(1) var<uniform> a: AoParams;
 @group(0) @binding(2) var scene_depth: texture_depth_2d;
@@ -80,7 +81,7 @@ fn ao_pack(visibility: f32, z: f32, texel: vec2<i32>, pixel: vec2<i32>) -> vec2<
 }
 
 fn ao_position(p: vec2<i32>, depth: f32) -> vec3<f32> {
-    let uv = (vec2<f32>(p) + 0.5) * a.size.zw;
+    let uv = (vec2<f32>(p) + 0.5 + a.depth_sample.xy) * a.size.zw;
     let h = a.inverse_view_proj * vec4<f32>(uv * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), depth, 1.0);
     return h.xyz / h.w;
 }

@@ -38,6 +38,8 @@ typedef struct N1Init {
   const char* cache_dir;   /* writable: asset index and extracted meshes/textures/light */
   uint32_t loader_threads; /* background loaders; 0 = load synchronously inside n1_record (stalls) */
   uint32_t hdr;            /* optional extended FP16 output */
+  uint32_t msaa;           /* samples requested for the opaque scene */
+  uint32_t sgssaa;         /* nonzero: shade each MSAA sample; requires enabled sampleRateShading */
 } N1Init;
 
 typedef struct N1Hdr {

@@ -38,14 +38,14 @@ struct MatParams { c: array<vec4<f32>, {{MP_N}}> };
 
 struct VOut {
     @builtin(position) pos: vec4<f32>,
-    @location(0) wpos: vec3<f32>,
-    @location(1) nrm: vec3<f32>,
-    @location(2) tan: vec4<f32>,
-    @location(3) uv: vec4<f32>,
-    @location(4) vcol: vec4<f32>,
-    @location(5) l0: vec3<f32>,
-    @location(6) l1: vec3<f32>,
-    @location(7) l2: vec3<f32>,
+    @location(0) {{SCENE_INTERPOLATION}}wpos: vec3<f32>,
+    @location(1) {{SCENE_INTERPOLATION}}nrm: vec3<f32>,
+    @location(2) {{SCENE_INTERPOLATION}}tan: vec4<f32>,
+    @location(3) {{SCENE_INTERPOLATION}}uv: vec4<f32>,
+    @location(4) {{SCENE_INTERPOLATION}}vcol: vec4<f32>,
+    @location(5) {{SCENE_INTERPOLATION}}l0: vec3<f32>,
+    @location(6) {{SCENE_INTERPOLATION}}l1: vec3<f32>,
+    @location(7) {{SCENE_INTERPOLATION}}l2: vec3<f32>,
     @location(8) @interpolate(flat) inst: u32,
 };
 
