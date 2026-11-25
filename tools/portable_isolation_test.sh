@@ -148,7 +148,9 @@ elif ls "$OUT"/strace-*.txt >/dev/null 2>&1; then
   # opens for writing, and the calls that create, move or delete something, outside the portable folder and our output
   cat "$OUT"/strace-*.txt | grep -E ' (open|openat|creat|mkdir|mkdirat|rename|renameat|renameat2|unlink|unlinkat|rmdir|symlink|symlinkat|link|linkat|truncate|chmod|fchmodat)\(' |
     grep -v ' = -1 ' | grep -E ' (creat|mkdir|mkdirat|rename|renameat|renameat2|unlink|unlinkat|rmdir|symlink|symlinkat|link|linkat|truncate|chmod|fchmodat)\(|O_WRONLY|O_RDWR|O_CREAT' |
-    grep -oE '"/[^"]*"' | tr -d '"' | grep -v "^/dev/\|^/proc/\|^/sys/\|^$APP/\|^$OUT/" |
+    grep -oE '"/[^"]*"' | tr -d '"' |
+    while IFS= read -r q; do case $q in *..*) realpath -m "$q" ;; *) printf '%s\n' "$q" ;; esac; done |  # "app/../x" is not inside app
+    grep -v "^/dev/\|^/proc/\|^/sys/\|^$APP/\|^$OUT/" |
     sort -u | sed 's|^|TRACE |' >> "$OUT/leaks.txt"
 fi
 while IFS= read -r d; do
