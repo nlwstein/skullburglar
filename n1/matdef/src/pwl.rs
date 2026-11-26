@@ -18,8 +18,18 @@ pub fn sdk_pwl(gamma: f32) -> f32 {
 }
 
 /// What `scene.wgsl`'s `xe_pwl3` computes for one channel (kept in step with the WGSL by `wgsl_matches_mirror`): the
-/// stored value in 0..255 picks the slope k = 1, 2, 4 or 8 and the offset, then the SDK's extra `trunc` term.
+/// largest of four lines, plus the SDK's extra trunc term.
 pub fn wgsl_pwl(c: f32) -> f32 {
+    let s = c.clamp(0.0, 1.0);
+    let l = (s * 255.0).max(s * 510.0 - 64.0).max((s * 1020.0 - 256.0).max(s * 2040.0 - 1024.0));
+    let t = (l * if l >= 512.0 { 1.0 / 128.0 } else { 1.0 / 256.0 }).floor();
+    (l + t) * (1.0 / 1023.0)
+}
+
+/// The select-per-segment form `xe_pwl3` had in 1.15.0 to 1.18.0 (slower on a laptop GPU, same values): the reference the
+/// branch-free `wgsl_pwl` must keep equal.
+#[cfg(test)]
+pub fn segments_pwl(c: f32) -> f32 {
     let g = c.clamp(0.0, 1.0) * 255.0;
     let (k, o) = if g >= 192.0 {
         (8.0, -1024.0)
@@ -84,6 +94,27 @@ mod tests {
         }
     }
 
+    /// The branch-free form equals the per-segment form: every 8-bit value and its half steps, and a dense sweep (the two
+    /// differ only by float rounding, far below one step of 1/1023).
+    #[test]
+    fn branch_free_equals_the_segments() {
+        let mut worst = 0.0f32;
+        for k in 0..=(1 << 20) {
+            let c = k as f32 / (1 << 20) as f32;
+            worst = worst.max((wgsl_pwl(c) - segments_pwl(c)).abs());
+        }
+        for g in 0..=255 {
+            for h in [0.0, 0.5] {
+                let c = (g as f32 + h) / 255.0;
+                worst = worst.max((wgsl_pwl(c) - segments_pwl(c)).abs());
+            }
+        }
+        assert!(worst < 1.0 / 1023.0 / 64.0, "worst difference {worst}");
+        // Out-of-range input is clamped the same way.
+        assert_eq!(wgsl_pwl(-0.5), 0.0);
+        assert!((wgsl_pwl(1.5) - 1.0).abs() < 1e-6);
+    }
+
     #[test]
     fn old_curve_was_low_at_the_top() {
         // The B-235 max-of-lines form: exact over the darks it matters in, up to 0.8% under the SDK's at the top (white 0.992).
@@ -112,9 +143,10 @@ mod tests {
     #[test]
     fn wgsl_matches_mirror() {
         let f = SCENE.split("fn xe_pwl3").nth(1).and_then(|s| s.split("\n}\n").next()).expect("xe_pwl3 in scene.wgsl");
-        for tok in ["255.0", "192.0", "96.0", "64.0", "-1024.0", "-256.0", "-64.0", "trunc", "1023.0", "1024.0"] {
+        for tok in ["255.0", "510.0", "1020.0", "2040.0", "512.0", "1024.0", "256.0", "64.0", "floor", "1023.0", "saturate"] {
             assert!(f.contains(tok), "xe_pwl3 lacks {tok}:\n{f}");
         }
-        assert!(!f.contains("0.2490234375"), "the old max-of-lines form is still there");
+        assert!(!f.contains("0.2490234375"), "the pre-B-392 max-of-lines form is still there");
+        assert!(!f.contains("trunc"), "the select-per-segment form is back");
     }
 }
