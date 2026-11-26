@@ -47,8 +47,9 @@ summary: n1: abtime pwl 08.395/8.382 18.014/8.070 ...        (<order><A ms>/<B m
 Why it is quieter than comparing builds: both variants see the same frame state, the same clocks and the same thermal state, and
 the order alternates every frame, so a drifting boost clock or a "second pass is warm" effect cancels. On a frozen scene (a paused
 game) a pair ratio varies by about 1 % per frame, and a few hundred pairs resolve a 0.2 % cost difference. The cost of an A/B
-frame is three renders, so use it on a paused or idle scene, not for fps. Read it with `ops/bench/gate2/abtime.py` in the
-private ops repo, or by hand: ratio = sum(B) / sum(A). `BOTS_N1_AB_EVERY` still sets the interval (default 1 in this mode).
+frame is three renders, so use it on a paused or idle scene, not for fps. Reading the log: cut the pairs into blocks of 20 frames,
+ratio = sum(B) / sum(A) per block, and take the mean and a t-interval over the blocks (an A against A run reads 1.0000 within 0.02%).
+`BOTS_N1_AB_EVERY` still sets the interval (default 1 in this mode).
 
 Limits: both variants live in one shader (a push-constant branch), so the timing says what the alternative costs *inside that
 shader*, not what a separately compiled shader would cost; confirm with a live-play A/B of two builds. The first run with a new
