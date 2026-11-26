@@ -18,16 +18,16 @@ pub fn sdk_pwl(gamma: f32) -> f32 {
 }
 
 /// What `scene.wgsl`'s `xe_pwl3` computes for one channel (kept in step with the WGSL by `wgsl_matches_mirror`): the
-/// largest of four lines, plus the SDK's extra trunc term.
+/// largest of four lines on the rounded g = 255 c, plus the SDK's extra round-down term. Bit-identical to `segments_pwl`.
 pub fn wgsl_pwl(c: f32) -> f32 {
-    let s = c.clamp(0.0, 1.0);
-    let l = (s * 255.0).max(s * 510.0 - 64.0).max((s * 1020.0 - 256.0).max(s * 2040.0 - 1024.0));
+    let g = c.clamp(0.0, 1.0) * 255.0;
+    let l = g.max(g * 2.0 - 64.0).max((g * 4.0 - 256.0).max(g * 8.0 - 1024.0));
     let t = (l * if l >= 512.0 { 1.0 / 128.0 } else { 1.0 / 256.0 }).floor();
     (l + t) * (1.0 / 1023.0)
 }
 
-/// The select-per-segment form `xe_pwl3` had in 1.15.0 to 1.18.0 (slower on a laptop GPU, same values): the reference the
-/// branch-free `wgsl_pwl` must keep equal.
+/// The select-per-segment form `xe_pwl3` had in 1.15.0 to 1.18.0 (slower on a laptop GPU): the reference the branch-free
+/// `wgsl_pwl` must equal bit for bit.
 #[cfg(test)]
 pub fn segments_pwl(c: f32) -> f32 {
     let g = c.clamp(0.0, 1.0) * 255.0;
@@ -94,25 +94,40 @@ mod tests {
         }
     }
 
-    /// The branch-free form equals the per-segment form: every 8-bit value and its half steps, and a dense sweep (the two
-    /// differ only by float rounding, far below one step of 1/1023).
+    /// The branch-free form equals the per-segment form bit for bit: every 8-bit value and its neighbours (the joins at
+    /// 64, 96, 192 and the integer steps of l), half steps, and a dense stride over every f32 in 0..=1 (the whole range is
+    /// `branch_free_is_exact_everywhere`, ignored by default).
     #[test]
     fn branch_free_equals_the_segments() {
-        let mut worst = 0.0f32;
-        for k in 0..=(1 << 20) {
-            let c = k as f32 / (1 << 20) as f32;
-            worst = worst.max((wgsl_pwl(c) - segments_pwl(c)).abs());
-        }
-        for g in 0..=255 {
-            for h in [0.0, 0.5] {
+        let same = |c: f32| assert_eq!(wgsl_pwl(c).to_bits(), segments_pwl(c).to_bits(), "c = {c:e} ({:#x})", c.to_bits());
+        for g in 0..=255u32 {
+            for h in [0.0f32, 0.5] {
                 let c = (g as f32 + h) / 255.0;
-                worst = worst.max((wgsl_pwl(c) - segments_pwl(c)).abs());
+                same(c);
+                for d in -3i32..=3 {
+                    same(f32::from_bits((c.to_bits() as i32 + d) as u32));
+                }
             }
         }
-        assert!(worst < 1.0 / 1023.0 / 64.0, "worst difference {worst}");
+        let one = 1.0f32.to_bits();
+        for b in (0..=one).step_by(997) {
+            same(f32::from_bits(b));
+        }
         // Out-of-range input is clamped the same way.
+        same(-0.5);
+        same(1.5);
         assert_eq!(wgsl_pwl(-0.5), 0.0);
         assert!((wgsl_pwl(1.5) - 1.0).abs() < 1e-6);
+    }
+
+    /// Every f32 from 0 to 1 (1.06 billion): `cargo test -p matdef --release -- --ignored branch_free_is_exact`.
+    #[test]
+    #[ignore]
+    fn branch_free_is_exact_everywhere() {
+        for b in 0..=1.0f32.to_bits() {
+            let c = f32::from_bits(b);
+            assert_eq!(wgsl_pwl(c).to_bits(), segments_pwl(c).to_bits(), "c = {c:e}");
+        }
     }
 
     #[test]
@@ -143,7 +158,7 @@ mod tests {
     #[test]
     fn wgsl_matches_mirror() {
         let f = SCENE.split("fn xe_pwl3").nth(1).and_then(|s| s.split("\n}\n").next()).expect("xe_pwl3 in scene.wgsl");
-        for tok in ["255.0", "510.0", "1020.0", "2040.0", "512.0", "1024.0", "256.0", "64.0", "floor", "1023.0", "saturate"] {
+        for tok in ["255.0", "2.0 - 64.0", "4.0 - 256.0", "8.0 - 1024.0", "512.0", "256.0", "128.0", "floor", "1023.0", "saturate"] {
             assert!(f.contains(tok), "xe_pwl3 lacks {tok}:\n{f}");
         }
         assert!(!f.contains("0.2490234375"), "the pre-B-392 max-of-lines form is still there");

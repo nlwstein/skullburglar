@@ -56,12 +56,15 @@ struct VOut {
 {{AB_DECLS}}
 fn xe_pwl3(c: vec3<f32>) -> vec3<f32> {
     {{AB_PWL}}
-    // The same curve as the SDK's, without the per-channel branches (perf: the select form cost the T480's opaque pass
-    // 1.5 to 3 ms at 720p). The four segments (stored value g = 255 c; slopes 1, 2, 4, 8, joined at 64, 96, 192) are a
-    // convex curve, so the SDK's linear value is the largest of four lines; its round-down term (l * k / 1024 with the slope k
-    // folded in) is l / 256 below l = 512 (slopes 1, 2, 4) and l / 128 from 512 up (slope 8).
-    let s = saturate(c);
-    let l = max(max(s * 255.0, s * 510.0 - 64.0), max(s * 1020.0 - 256.0, s * 2040.0 - 1024.0));
+    // Bit-identical to the select-per-segment form of 1.15 to 1.18 (which cost the T480's opaque pass 1.5 to 3 ms at 720p),
+    // without its per-channel branches. g = 255 c is rounded to a float first, exactly as before (do not fold the slopes into
+    // the 255: s * 510.0 - 64.0 is fused into one rounding on the GPU, which moved l across an integer for about 4 pixels
+    // per frame). The segments (slopes 1, 2, 4, 8, joined at 64, 96, 192) are a convex curve, so the old form's l = g k + o is
+    // the largest of four lines; g * k is exact (k is a power of two), so each line equals the old one bit for bit, and the
+    // max equals the old pick because rounding is monotone. The old round-down term l * k / 1024 is l / 256 for the three
+    // low slopes (the 1 and 2 segments stay under 256, where both are 0) and l / 128 from l = 512 (g >= 192) up.
+    let g = saturate(c) * 255.0;
+    let l = max(max(g, g * 2.0 - 64.0), max(g * 4.0 - 256.0, g * 8.0 - 1024.0));
     let t = floor(l * select(vec3<f32>(1.0 / 256.0), vec3<f32>(1.0 / 128.0), l >= vec3<f32>(512.0)));
     return (l + t) * (1.0 / 1023.0);
 }
