@@ -61,9 +61,10 @@ impl AbState {
         let cfg = ab::config()?;
         n1log!(
             log::INFO,
-            "summary: n1: same-frame A/B on: {} (A flags {}, every {} frames, on request: debug bit 24, dir {})",
+            "summary: n1: same-frame A/B on: {} (A flags {}, B flags {}, every {} frames, on request: debug bit 24, dir {})",
             cfg.names,
             cfg.flags_a,
+            cfg.flags_b,
             cfg.every,
             cfg.dir.as_ref().map_or("none".to_string(), |d| d.display().to_string())
         );
@@ -188,7 +189,7 @@ impl Renderer {
         Some(AbFrame {
             images: [t[0].image, t[1].image],
             views: [t[0].view, t[1].view],
-            flags: [ab.cfg.flags_a, 0],
+            flags: [ab.cfg.flags_a, ab.cfg.flags_b],
             rect,
         })
     }

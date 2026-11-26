@@ -35,12 +35,24 @@ pub const FEATURES: &[(&str, u32)] = &[
     ("lsb", 2),
     // Self-test: A's decode is the old form plus 4/1023, so the hook is proven to reach the scene's pixels.
     ("pwlprobe", 4),
+    // Self-test: A runs a verbatim copy of the shipping decode (`xe_pwl3_copy`), in its own arm of the hook. Must be 0: if it
+    // isn't, a difference between A and B can come from the hook's arms and not from the code under test.
+    ("pwlcopy", 8),
+    // Diagnostic: A shows where, in the real shader, the 1.18.0 decode and the shipping one differ at all: such a texel comes out
+    // magenta (its G channel 0, R and B far above 1). B is the normal picture.
+    ("pwlmark", 16),
+    // Self-test: a verbatim copy of the 1.18.0 decode in its own arm; with BOTS_N1_AB=pwl BOTS_N1_AB_B=pwllegacy2 it is the old
+    // decode against itself through two arms (any difference is the compiler treating the arms differently, not the decode).
+    ("pwllegacy2", 32),
 ];
 
 pub struct Config {
     pub names: String,
     /// Flags of variant A (the alternatives); B is always 0.
     pub flags_a: u32,
+    /// Flags of variant B (default 0, the shipping path): `BOTS_N1_AB_B=<feature>[,..]` puts a feature's bit on B too, to
+    /// compare two alternatives with each other (`pwl` against `pwllegacy2` is the old decode against a verbatim copy of it).
+    pub flags_b: u32,
     pub every: u64,
     pub dir: Option<PathBuf>,
     pub save_all: bool,
@@ -75,9 +87,13 @@ fn parse(spec: Option<&str>, env: impl Fn(&str) -> Option<String>) -> Option<Con
             }
         }
     }
+    let flags_b = env("BOTS_N1_AB_B").map_or(0, |v| {
+        v.split(',').map(str::trim).filter_map(|n| FEATURES.iter().find(|f| f.0 == n)).fold(0, |a, f| a | f.1)
+    });
     Some(Config {
         names: spec.to_string(),
         flags_a: flags,
+        flags_b,
         every: env("BOTS_N1_AB_EVERY").and_then(|v| v.trim().parse().ok()).unwrap_or(0),
         dir: env("BOTS_N1_AB_DIR").filter(|d| !d.is_empty()).map(PathBuf::from),
         save_all: env("BOTS_N1_AB_SAVE").is_some_and(|v| v == "all"),
@@ -108,9 +124,15 @@ pub fn scene_text_with(src: &str, on: bool) -> String {
     if !on {
         return src.replace("{{AB_DECLS}}", "").replace("{{AB_PWL}}", "");
     }
-    src.replace("{{AB_DECLS}}", &format!("{PC_DECL}{PWL_LEGACY}")).replace(
+    let copy = src
+        .split("fn xe_pwl3(")
+        .nth(1)
+        .and_then(|s| s.split("\n}\n").next())
+        .map(|f| format!("fn xe_pwl3_copy({f}\n}}\n").replace("{{AB_PWL}}", ""))
+        .unwrap_or_default();
+    src.replace("{{AB_DECLS}}", &format!("{PC_DECL}{PWL_LEGACY}{}{copy}", PWL_LEGACY.replace("xe_pwl3_legacy", "xe_pwl3_legacy2"))).replace(
         "{{AB_PWL}}",
-        "if ((ab_pc.flags & 1u) != 0u) { return xe_pwl3_legacy(c); }\n    if ((ab_pc.flags & 4u) != 0u) { return xe_pwl3_legacy(c) + vec3<f32>(4.0 / 1023.0); }",
+        "if ((ab_pc.flags & 1u) != 0u) { return xe_pwl3_legacy(c); }\n    if ((ab_pc.flags & 4u) != 0u) { return xe_pwl3_legacy(c) + vec3<f32>(4.0 / 1023.0); }\n    if ((ab_pc.flags & 8u) != 0u) { return xe_pwl3_copy(c); }\n    if ((ab_pc.flags & 16u) != 0u) { let l = xe_pwl3_legacy(c); if (any(bitcast<vec3<u32>>(l) != bitcast<vec3<u32>>(xe_pwl3_copy(c)))) { return vec3<f32>(100.0, 0.0, 100.0); } return l; }\n    if ((ab_pc.flags & 32u) != 0u) { return xe_pwl3_legacy2(c); }",
     )
 }
 
@@ -365,5 +387,13 @@ mod tests {
         assert!(scene.contains("{{AB_DECLS}}") && scene.contains("{{AB_PWL}}"));
         assert!(include_str!("post.wgsl").contains("{{AB_POST_OUT}}"));
         assert!(PWL_LEGACY.contains("trunc"));
+        // The copy is the shipping body, verbatim, and the whole thing is valid WGSL (the copy needs the real scene text).
+        let on = scene_text_with(scene, true);
+        assert!(on.contains("fn xe_pwl3_copy(") && on.contains("xe_pwl3_copy(c)"));
+        let body = |name: &str| on.split(name).nth(1).and_then(|s| s.split("\n}\n").next()).unwrap().replace("{{AB_PWL}}", "");
+        let shipping = body("fn xe_pwl3(");
+        let copy = body("fn xe_pwl3_copy(");
+        assert!(shipping.contains("floor") && copy.contains("floor"));
+        assert_eq!(copy.rsplit("let g").next(), shipping.rsplit("let g").next());
     }
 }

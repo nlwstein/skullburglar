@@ -10,6 +10,10 @@ use std::ffi::CStr;
 
 const SCENE: &str = include_str!("../../matdef/src/scene.wgsl");
 const ONE_BITS: u32 = 0x3F80_0000;
+/// The last input bits swept: 1.0 by default, every f32 (negatives, above 1, infinities, NaNs) with PWL_ALL=1.
+fn last_bits() -> u32 {
+    if std::env::var("PWL_ALL").is_ok_and(|v| v == "1") { u32::MAX } else { ONE_BITS }
+}
 const CHUNK: u32 = 1 << 23;
 const RECORDS: usize = 64;
 
@@ -122,7 +126,7 @@ fn init() -> Option<Gpu> {
 fn shader_source(cand: &str) -> String {
     format!(
         "{legacy}\n{cand}\n
-struct Params {{ base: u32, last: u32 }}
+struct Params {{ base: u32, last: u32, m: f32, k: f32 }}
 @group(0) @binding(0) var<storage, read_write> out: array<atomic<u32>>;
 @group(0) @binding(1) var<storage, read> prm: Params;
 
@@ -140,12 +144,17 @@ fn rec(bits: u32, ch: u32, a: f32, b: f32) {{
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
     let bits = prm.base + id.x;
     if (bits > prm.last) {{ return; }}
-    let c = vec3<f32>(bitcast<f32>(bits), bitcast<f32>(min(bits + 1u, {ONE_BITS}u)), bitcast<f32>(bits & 0xfffffffeu));
+    let c = vec3<f32>(bitcast<f32>(bits), bitcast<f32>(bits + 1u), bitcast<f32>(bits & 0xfffffffeu));
     let a = xe_pwl3_legacy(c);
     let b = cand(c);
     if (bitcast<u32>(a.x) != bitcast<u32>(b.x)) {{ rec(bits, 0u, a.x, b.x); }}
     if (bitcast<u32>(a.y) != bitcast<u32>(b.y)) {{ rec(bits, 1u, a.y, b.y); }}
     if (bitcast<u32>(a.z) != bitcast<u32>(b.z)) {{ rec(bits, 2u, a.z, b.z); }}
+    // The decode feeding a multiply-add with values the compiler can't see (the way the scene shader uses it): the GPU may
+    // fuse the decode's last multiply into it, which would expose a difference in the value before that multiply.
+    let fa = a * prm.m + vec3<f32>(prm.k);
+    let fb = b * prm.m + vec3<f32>(prm.k);
+    if (any(bitcast<vec3<u32>>(fa) != bitcast<vec3<u32>>(fb))) {{ atomicAdd(&out[1], 1u); }}
 }}
 ",
         legacy = n1ffi::ab::PWL_LEGACY
@@ -160,6 +169,7 @@ fn shipping() -> String {
 
 struct Run {
     mismatches: u32,
+    fused: u32, // pixels (3 channels) whose decode * 0.8123 + 0.0171 differs
     first: Vec<(f32, u32, f32, f32)>, // input, channel, legacy, candidate
 }
 
@@ -193,6 +203,8 @@ unsafe fn run_gpu(gpu: &Gpu, cand: &str) -> Run {
     let out_words = 2 + RECORDS * 4;
     let (out_buf, out_ptr) = buffer((out_words * 4) as u64);
     let (prm_buf, prm_ptr) = buffer(16);
+    *(prm_ptr.add(2) as *mut f32) = 0.8123;
+    *(prm_ptr.add(3) as *mut f32) = 0.0171;
     std::ptr::write_bytes(out_ptr, 0, out_words);
 
     let pool = d
@@ -216,7 +228,7 @@ unsafe fn run_gpu(gpu: &Gpu, cand: &str) -> Run {
 
     let mut base = 0u32;
     loop {
-        let last = (base as u64 + CHUNK as u64 - 1).min(ONE_BITS as u64) as u32;
+        let last = (base as u64 + CHUNK as u64 - 1).min(last_bits() as u64) as u32;
         *prm_ptr = base;
         *prm_ptr.add(1) = last;
         d.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default()).unwrap();
@@ -228,7 +240,7 @@ unsafe fn run_gpu(gpu: &Gpu, cand: &str) -> Run {
         d.queue_submit(gpu.queue, &[vk::SubmitInfo::default().command_buffers(&cmds)], fence).unwrap();
         d.wait_for_fences(&[fence], true, u64::MAX).unwrap();
         d.reset_fences(&[fence]).unwrap();
-        if last == ONE_BITS {
+        if last == last_bits() {
             break;
         }
         base = last + 1;
@@ -248,7 +260,7 @@ unsafe fn run_gpu(gpu: &Gpu, cand: &str) -> Run {
     d.destroy_shader_module(module, None);
     d.destroy_buffer(out_buf, None);
     d.destroy_buffer(prm_buf, None);
-    Run { mismatches: n, first }
+    Run { mismatches: n, fused: *out_ptr.add(1), first }
 }
 
 #[test]
@@ -259,20 +271,20 @@ fn shipping_decode_is_bit_exact_on_the_gpu() {
     };
     let mut all: Vec<(String, String)> = CANDIDATES.iter().map(|(n, s)| (n.to_string(), s.to_string())).collect();
     all.push(("shipping".to_string(), shipping()));
-    let mut shipped = u32::MAX;
+    let mut shipped = (u32::MAX, u32::MAX);
     for (name, src) in &all {
         let r = unsafe { run_gpu(&gpu, src) };
-        eprintln!("pwl_gpu [{}] {name}: {} mismatching channels of 3.2 billion", gpu.name, r.mismatches);
+        eprintln!("pwl_gpu [{}] {name}: {} mismatching channels of 3.2 billion, {} values differ after a multiply-add", gpu.name, r.mismatches, r.fused);
         for (c, ch, a, b) in r.first.iter().take(6) {
             eprintln!("    c = {c:e} ({:#010x}) ch {ch}: legacy {a:e} ({:#010x}), this {b:e} ({:#010x})", c.to_bits(), a.to_bits(), b.to_bits());
         }
         if name == "shipping" {
-            shipped = r.mismatches;
+            shipped = (r.mismatches, r.fused);
         }
     }
     unsafe {
         gpu.device.destroy_device(None);
         gpu.instance.destroy_instance(None);
     }
-    assert_eq!(shipped, 0, "the shipping decode differs from 1.18.0's on {}", gpu.name);
+    assert_eq!(shipped, (0, 0), "the shipping decode differs from 1.18.0's on {}", gpu.name);
 }
