@@ -35,6 +35,7 @@ use scenekit::{
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+mod ab;
 mod aa;
 mod gprof;
 pub(crate) mod ao;
@@ -577,6 +578,8 @@ pub struct Renderer {
     /// G6: per-pass GPU timestamps, BOTS_N1_GPU_PROF=1 (`vkr/gprof.rs`).
     gprof: Option<gprof::GpuProf>,
     tg: tgpu::TGpu,
+    /// Same-frame A/B (`BOTS_N1_AB`, `crate::ab`); `None` normally.
+    ab: Option<ab::AbState>,
     /// The next `record`'s particles (set by the host wrapper, used once).
     pub pframe: crate::particles::PFrame,
     /// The next `record`'s trees (set by the host wrapper, used once).
@@ -768,11 +771,15 @@ impl Renderer {
                 None,
             )?;
             let pl = [post_layout];
+            // Same-frame A/B (`ab.rs`): the hooks read a push constant, so the layout carries the range. Off, it doesn't.
+            let ab_range = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::FRAGMENT, offset: 0, size: 4 }];
             let post_pipe_layout = device.create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::default().set_layouts(&pl),
+                &vk::PipelineLayoutCreateInfo::default()
+                    .set_layouts(&pl)
+                    .push_constant_ranges(if crate::ab::enabled() { &ab_range } else { &[] }),
                 None,
             )?;
-            let words = shaders::spirv(&shaders::post_source())?;
+            let words = shaders::spirv_caps(&shaders::post_source(), shaders::ab_caps())?;
             let post_module = device
                 .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)?;
             // The material sampler filters anisotropically like the Pre-1.0 renderer, which takes the level from the
@@ -949,6 +956,7 @@ impl Renderer {
                 pg,
                 shadows,
                 gprof,
+                ab: ab::AbState::from_env(),
                 tg,
                 tframe: Default::default(),
                 pframe: Default::default(),
@@ -993,6 +1001,10 @@ impl Renderer {
     }
 
     fn buffer(&mut self, size: u64, usage: vk::BufferUsageFlags, name: &str) -> Result<Buf> {
+        self.buffer_in(size, usage, name, MemoryLocation::CpuToGpu)
+    }
+
+    fn buffer_in(&mut self, size: u64, usage: vk::BufferUsageFlags, name: &str, location: MemoryLocation) -> Result<Buf> {
         unsafe {
             let size = size.max(16);
             let buffer = self.device.create_buffer(
@@ -1007,7 +1019,7 @@ impl Renderer {
                 .allocate(&AllocationCreateDesc {
                     name,
                     requirements,
-                    location: MemoryLocation::CpuToGpu,
+                    location,
                     linear: true,
                     allocation_scheme: AllocationScheme::GpuAllocatorManaged,
                 })
@@ -2420,6 +2432,7 @@ impl Renderer {
             bail!("serial {serial} before {}", self.last_serial);
         }
         self.retire(completed);
+        self.ab_poll(completed);
         self.laps.lap("retire");
         // The serial must move before anything recorded into `cmd` is deferred: `defer` frees at `last_serial + 1`, and
         // with the old value the upload staging buffers were freed once the *previous* n1 submission's successor
@@ -3077,6 +3090,12 @@ impl Renderer {
             g.mark(&self.device, cmd, 1);
         }
 
+        // Same-frame A/B (`crate::ab`): on a chosen frame the scene and post run three times from this one frame state
+        // (A and B into offscreen targets, then the shipping path into the host's target). Otherwise one pass, as ever.
+        let ab_frame = self.ab_begin(target, serial);
+        let ab_push = crate::ab::enabled();
+        let ab_passes = if ab_frame.is_some() { 3 } else { 1 };
+        let st_before = st;
         let d = &self.device;
         let hdr = self.hdr.as_ref().unwrap();
         let depth = self.depth.as_ref().unwrap();
@@ -3131,7 +3150,24 @@ impl Renderer {
                 height: h,
             },
         };
+        for ab_pass in 0..ab_passes {
+        // Which variant this pass renders (None: the host's target), and what the shaders' push constant says.
+        let which = ab_frame.as_ref().and_then(|_| (ab_pass < 2).then_some(ab_pass));
+        let ab_flags = match (&ab_frame, which) {
+            (Some(f), Some(i)) => Some(f.flags[i]),
+            _ => ab_push.then_some(0u32),
+        };
+        let tgt = match (&ab_frame, which) {
+            (Some(f), Some(i)) => Target { view: f.views[i], layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, ..*target },
+            _ => *target,
+        };
+        if ab_pass > 0 {
+            st = st_before;
+        }
         unsafe {
+            if let (Some(f), Some(i)) = (&ab_frame, which) {
+                barrier(frag | cao | vk::PipelineStageFlags::TRANSFER, cao, &[to_att(f.images[i])]);
+            }
             // ---- scene -> HDR
             let msaa = self.msaa.is_some();
             barrier(if msaa { frag | cao } else { frag }, cao, &[to_att(hdr.image)]);
@@ -3260,6 +3296,9 @@ impl Renderer {
                                 &[],
                             );
                             cur_layout = layout;
+                            if let Some(f) = ab_flags {
+                                d.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::FRAGMENT, 0, &f.to_ne_bytes());
+                            }
                             cur_lm = vk::DescriptorSet::null();
                             cur_mat = u32::MAX;
                         }
@@ -3535,6 +3574,9 @@ impl Renderer {
                     &[set],
                     &[],
                 );
+                if let Some(f) = ab_flags {
+                    d.cmd_push_constants(cmd, self.post_pipe_layout, vk::ShaderStageFlags::FRAGMENT, 0, &f.to_ne_bytes());
+                }
                 d.cmd_draw(cmd, 3, 1, 0, 0);
                 d.cmd_end_rendering(cmd);
             };
@@ -3543,7 +3585,7 @@ impl Renderer {
             // The post chain's last pass: the host's target, or the intermediate the filters read (B-054).
             let (dst_view, dst_layout, dst_rect) = match aa_ldr {
                 Some((_, v)) => (v, catt_layout, full(rw, rh)),
-                None => (target.view, target.layout, target.rect),
+                None => (tgt.view, tgt.layout, tgt.rect),
             };
             if let Some((img, _)) = aa_ldr {
                 barrier(frag, cao, &[to_att(img)]);
@@ -3680,11 +3722,15 @@ impl Renderer {
             }
             if let Some((img, _)) = aa_ldr {
                 barrier(cao, frag, &[to_read(img)]);
-                self.aa_record(cmd, target, aa_plan);
+                self.aa_record(cmd, &tgt, aa_plan);
             }
             if let Some(g) = &self.gprof {
                 g.mark(d, cmd, 8);
             }
+            if let (Some(f), Some(i)) = (&ab_frame, which) {
+                self.ab_copy_out(cmd, f, i);
+            }
+        }
         }
         self.laps.lap("post_pass");
         st.record_ms = t0.elapsed().as_secs_f32() * 1000.0;
@@ -4228,6 +4274,7 @@ impl Drop for Renderer {
             if let Some(g) = self.gprof.take() {
                 g.destroy(&self.device);
             }
+            self.ab_free();
             for s in std::mem::take(&mut self.slots) {
                 self.free(Garbage::Buffer(s.buf));
                 self.free(Garbage::Buffer(s.pbuf));

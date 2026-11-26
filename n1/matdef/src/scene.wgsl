@@ -53,7 +53,9 @@ struct VOut {
 // the gamma sign. B-392: the SDK's PWLGammaToLinear exactly (mirrored in `pwl.rs`, with its tests): the stored 0..255
 // value picks a slope k = 1, 2, 4 or 8 (joins at 64, 96, 192) and an offset, then the SDK adds trunc(lin * k / 1024) and
 // divides by 1023, so white is 1.0 (the first version here divided by 1024 and left the top segment up to 0.8% low).
+{{AB_DECLS}}
 fn xe_pwl3(c: vec3<f32>) -> vec3<f32> {
+    {{AB_PWL}}
     // The same curve as the SDK's, without the per-channel branches (perf: the select form cost the T480's opaque pass
     // 1.5 to 3 ms at 720p). The four segments (stored value g = 255 c; slopes 1, 2, 4, 8, joined at 64, 96, 192) are a
     // convex curve, so the SDK's linear value is the largest of four lines; its round-down term (l * k / 1024 with the slope k

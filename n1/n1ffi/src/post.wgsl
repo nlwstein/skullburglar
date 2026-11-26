@@ -44,6 +44,7 @@ struct P {
 @group(0) @binding(8) var gods: texture_2d<f32>;    // B-307: god-rays texture (128x128), read when taps[4].w > 0
 @group(0) @binding(9) var<uniform> gamma_ramp: array<vec4<u32>, 64>;
 
+{{AB_POST_DECLS}}
 struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
 @vertex
@@ -230,6 +231,7 @@ fn gamma_out(c0: vec3<f32>, frag: vec4<f32>) -> vec4<f32> {
     }
     var g = pow(clamp(c * p.taps[4].xyz, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(p.comp.y));
     g = min(g + p.taps[5].xyz, vec3<f32>(1.0));
+    {{AB_POST_OUT}}
     if (p.c.z < 0.5) {
         // sRGB targets encode on write, so convert g back to linear.
         g = select(pow((g + 0.055) / 1.055, vec3<f32>(2.4)), g / 12.92, g <= vec3<f32>(0.04045));

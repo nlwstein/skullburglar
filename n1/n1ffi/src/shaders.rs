@@ -146,13 +146,18 @@ fn vs_skin(@location(0) pos: vec3<f32>, @location(3) bi: vec4<u32>, @location(4)
 "#;
 
 pub fn scene_source(c: &Compiled, f: ShaderFlags, sample_shading: bool) -> String {
+    scene_source_ab(c, f, sample_shading, crate::ab::enabled())
+}
+
+/// `scene_source` with the same-frame A/B hooks (`ab.rs`) in or out. Off, the text has no extra code at all.
+pub fn scene_source_ab(c: &Compiled, f: ShaderFlags, sample_shading: bool, ab: bool) -> String {
     // Opt-in (B-293): no visible difference was measured on a desktop GPU, so the invented tangent stays the default.
     let skin_tan = if std::env::var("BOTS_N1_SKIN_TANGENT").is_ok_and(|v| v == "1") {
         "vec4<f32>(normalize(vec3<f32>(tu.x, tu.z, tu.y) + vec3<f32>(0.0, 1e-6, 0.0)), tn.w)"
     } else {
         "vec4<f32>(normalize(cross(a, n)), 1.0)"
     };
-    let mut s = assemble(c, f, sample_shading)
+    let mut s = crate::ab::scene_text_with(&assemble(c, f, sample_shading), ab)
         .replace(matdef::shader::SHADOW_STUB, SHADOW_WGSL)
         .replace("@group(1)", "@group(9)")
         .replace("@group(2)", "@group(1)")
@@ -163,7 +168,12 @@ pub fn scene_source(c: &Compiled, f: ShaderFlags, sample_shading: bool) -> Strin
 
 /// W4: the game's post chain (grade, DOF + bloom, gamma 2.2) and the gamma-only copy for the low-end path.
 pub fn post_source() -> String {
-    include_str!("post.wgsl").to_string()
+    crate::ab::post_text(include_str!("post.wgsl"))
+}
+
+/// Validator capabilities for the post and scene shaders: with the A/B hooks in, they read a push constant.
+pub fn ab_caps() -> naga::valid::Capabilities {
+    if crate::ab::enabled() { naga::valid::Capabilities::IMMEDIATES } else { naga::valid::Capabilities::empty() }
 }
 
 pub fn ao_source() -> String {
@@ -334,6 +344,25 @@ mod tests {
                 spirv(&src).unwrap();
             }
         }
+    }
+
+    /// Same-frame A/B (`ab.rs`): with the hooks in, the scene and post shaders must still compile (a push constant read in
+    /// the fragment stage), and with them out the text carries no trace of them.
+    #[test]
+    fn ab_hooks_compile_in_and_leave_no_trace_out() {
+        let grey = MatDef { diffuse_const: Some([0.6, 0.6, 0.6, 1.0]), ..Default::default() };
+        let c = matdef::codegen::compile(&grey, &[]);
+        let f = ShaderFlags::new(false, false, false, 330);
+        let on = scene_source_ab(&c, f, false, true);
+        assert!(on.contains("xe_pwl3_legacy") && on.contains("ab_pc.flags"));
+        spirv_caps(&on, naga::valid::Capabilities::IMMEDIATES).unwrap();
+        let off = scene_source_ab(&c, f, false, false);
+        assert!(!off.contains("ab_pc") && !off.contains("legacy") && !off.contains("{{AB"));
+        let post_on = crate::ab::post_text_with(include_str!("post.wgsl"), true);
+        spirv_caps(&post_on, naga::valid::Capabilities::IMMEDIATES).unwrap();
+        let post_off = crate::ab::post_text_with(include_str!("post.wgsl"), false);
+        assert!(!post_off.contains("ab_pc") && !post_off.contains("{{AB"));
+        spirv(&post_off).unwrap();
     }
 
     #[test]
