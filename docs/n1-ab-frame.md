@@ -41,7 +41,7 @@ A feature is a bit in a push constant the shaders read. A renders with the bit s
 
 | Feature | A (bit set) | B (bit clear) |
 |---|---|---|
-| `pwl` | the per-segment select PWL gamma decode that 1.15 to 1.18 used | the branch-free decode (`xe_pwl3` in `n1/matdef/src/scene.wgsl`) |
+| `pwl` | the per-segment select PWL gamma decode that 1.15 to 1.18 used | the branch-free decode (`xe_pwl3` in `n1/matdef/src/scene.wgsl`), bit-identical to A: max 0 over every frame on GTX 1070, T480 and Deck. The same check over every f32 from 0 to 1 is `n1/n1ffi/tests/pwl_gpu.rs` (it skips without a Vulkan device) |
 | `lsb` | self-test: adds one 8-bit step to the red output | nothing |
 | `pwlprobe` | self-test: the old decode plus 4/1023, to show the hook reaches the scene's pixels | nothing |
 

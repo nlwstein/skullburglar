@@ -89,7 +89,7 @@ fn parse(spec: Option<&str>, env: impl Fn(&str) -> Option<String>) -> Option<Con
 const PC_DECL: &str = "struct AbPc { flags: u32 }\nvar<immediate> ab_pc: AbPc;\n";
 
 /// The per-segment select decode !189 replaced (kept here, not in the shader, so a normal build doesn't carry it).
-const PWL_LEGACY: &str = "fn xe_pwl3_legacy(c: vec3<f32>) -> vec3<f32> {
+pub const PWL_LEGACY: &str = "fn xe_pwl3_legacy(c: vec3<f32>) -> vec3<f32> {
     let g = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0;
     let hi = g >= vec3<f32>(96.0);
     let k = select(select(vec3<f32>(1.0), vec3<f32>(2.0), g >= vec3<f32>(64.0)), select(vec3<f32>(4.0), vec3<f32>(8.0), g >= vec3<f32>(192.0)), hi);

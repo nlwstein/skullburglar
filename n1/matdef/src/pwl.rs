@@ -20,7 +20,7 @@ pub fn sdk_pwl(gamma: f32) -> f32 {
 /// What `scene.wgsl`'s `xe_pwl3` computes for one channel (kept in step with the WGSL by `wgsl_matches_mirror`): the
 /// largest of four lines on the rounded g = 255 c, plus the SDK's extra round-down term. Bit-identical to `segments_pwl`.
 pub fn wgsl_pwl(c: f32) -> f32 {
-    let g = c.clamp(0.0, 1.0) * 255.0;
+    let g = (c.clamp(0.0, 1.0) * 255.0).min(255.0);
     let l = g.max(g * 2.0 - 64.0).max((g * 4.0 - 256.0).max(g * 8.0 - 1024.0));
     let t = (l * if l >= 512.0 { 1.0 / 128.0 } else { 1.0 / 256.0 }).floor();
     (l + t) * (1.0 / 1023.0)
@@ -105,7 +105,10 @@ mod tests {
                 let c = (g as f32 + h) / 255.0;
                 same(c);
                 for d in -3i32..=3 {
-                    same(f32::from_bits((c.to_bits() as i32 + d) as u32));
+                    let n = f32::from_bits((c.to_bits() as i32 + d) as u32);
+                    if !n.is_nan() {
+                        same(n); // (a NaN never comes out of a texture sample)
+                    }
                 }
             }
         }
@@ -158,7 +161,7 @@ mod tests {
     #[test]
     fn wgsl_matches_mirror() {
         let f = SCENE.split("fn xe_pwl3").nth(1).and_then(|s| s.split("\n}\n").next()).expect("xe_pwl3 in scene.wgsl");
-        for tok in ["255.0", "2.0 - 64.0", "4.0 - 256.0", "8.0 - 1024.0", "512.0", "256.0", "128.0", "floor", "1023.0", "saturate"] {
+        for tok in ["255.0", "g * 2.0 - 64.0", "g * 4.0 - 256.0", "g * 8.0 - 1024.0", "512.0", "256.0", "128.0", "floor", "1023.0", "saturate", "min("] {
             assert!(f.contains(tok), "xe_pwl3 lacks {tok}:\n{f}");
         }
         assert!(!f.contains("0.2490234375"), "the pre-B-392 max-of-lines form is still there");

@@ -57,13 +57,15 @@ struct VOut {
 fn xe_pwl3(c: vec3<f32>) -> vec3<f32> {
     {{AB_PWL}}
     // Bit-identical to the select-per-segment form of 1.15 to 1.18 (which cost the T480's opaque pass 1.5 to 3 ms at 720p),
-    // without its per-channel branches. g = 255 c is rounded to a float first, exactly as before (do not fold the slopes into
-    // the 255: s * 510.0 - 64.0 is fused into one rounding on the GPU, which moved l across an integer for about 4 pixels
-    // per frame). The segments (slopes 1, 2, 4, 8, joined at 64, 96, 192) are a convex curve, so the old form's l = g k + o is
-    // the largest of four lines; g * k is exact (k is a power of two), so each line equals the old one bit for bit, and the
-    // max equals the old pick because rounding is monotone. The old round-down term l * k / 1024 is l / 256 for the three
-    // low slopes (the 1 and 2 segments stay under 256, where both are 0) and l / 128 from l = 512 (g >= 192) up.
-    let g = saturate(c) * 255.0;
+    // without its per-channel branches. g = 255 c is rounded to a float first, exactly as before. The segments (slopes 1, 2,
+    // 4, 8, joined at 64, 96, 192) are a convex curve, so the old form's l = g k + o is the largest of four lines; g * k is exact
+    // (k is a power of two), so each line equals the old one bit for bit, and the max equals the old pick because rounding is
+    // monotone. The old round-down term l * k / 1024 is l / 256 for the three low slopes (the 1 and 2 segments stay under
+    // 256, where both are 0) and l / 128 from l = 512 (g >= 192) up.
+    // The min is a no-op (g <= 255) and must stay: without it the GPU compilers (seen on a GTX 1070) fold the slope into the
+    // 255 and fuse s * 510 - 64 into one rounding, which moved l by an ulp in 0.8% of channels (a 1-step flip in about 4 pixels
+    // per frame, up to 18 steps next to it with SMAA). `n1ffi/tests/pwl_gpu.rs` checks every f32 against the old form.
+    let g = min(saturate(c) * 255.0, vec3<f32>(255.0));
     let l = max(max(g, g * 2.0 - 64.0), max(g * 4.0 - 256.0, g * 8.0 - 1024.0));
     let t = floor(l * select(vec3<f32>(1.0 / 256.0), vec3<f32>(1.0 / 128.0), l >= vec3<f32>(512.0)));
     return (l + t) * (1.0 / 1023.0);
