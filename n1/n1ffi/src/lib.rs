@@ -497,7 +497,10 @@ impl Inner {
         out.upload_bytes = rc.upload_bytes;
         out.textures_added = rc.textures_added;
         out.meshes_added = rc.meshes_added;
-        out.preload_pending = self.preload_pending();
+        // Shader work happens up front: the level-start hold also waits for the pipelines the level's materials asked
+        // for (they were queued as the materials arrived), so play does not begin on stand-ins. The hold has its own
+        // time limit. BOTS_N1_HOLD_COMPILES=0: the hold waits for loads only, as before.
+        out.preload_pending = self.preload_pending() + hold_compiles(&self.renderer.store);
         out.copies_pending = copies;
         out.staging_bytes = staging;
         out.preload_scanning = self.preload.scanning.load(Relaxed);
@@ -1925,5 +1928,15 @@ mod grade_file_tests {
         std::fs::write(&file, "g0\nPkg.Mat\nnone\n").unwrap();
         assert_eq!(read_grade_file(&file, "Pkg.Mat"), None, "another version is not used");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Compile tasks the level-start hold should wait for: the store's queue, unless `BOTS_N1_HOLD_COMPILES=0`.
+fn hold_compiles(store: &store::Store) -> u32 {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var("BOTS_N1_HOLD_COMPILES").map_or(true, |v| v != "0")) {
+        store.backlog() as u32
+    } else {
+        0
     }
 }
