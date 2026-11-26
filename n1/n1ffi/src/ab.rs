@@ -67,6 +67,9 @@ pub struct Config {
     /// `BOTS_N1_AB_TIME=1`: time A and B on the GPU every frame (timestamps around each variant's scene+post), no readback and
     /// no compare, and log the pairs (read by `ops/bench/gate2/abtime.py`). `every` then defaults to 1.
     pub time: bool,
+    /// `BOTS_N1_AB_SHIP=<feature>[,..]`: flags of the ordinary (shipping) passes, the ones the player sees and the GPU profile times.
+    /// With `alu` (and `BOTS_N1_AB_ALU`) every frame carries a known extra cost, the gate's +3 % self-test; 0 (default) is the shipping path.
+    pub flags_ship: u32,
 }
 
 static CONFIG: OnceLock<Option<Config>> = OnceLock::new();
@@ -108,6 +111,9 @@ fn parse(spec: Option<&str>, env: impl Fn(&str) -> Option<String>) -> Option<Con
         names: spec.to_string(),
         flags_a: with_alu(flags),
         flags_b: with_alu(flags_b),
+        flags_ship: with_alu(env("BOTS_N1_AB_SHIP").map_or(0, |v| {
+            v.split(',').map(str::trim).filter_map(|n| FEATURES.iter().find(|f| f.0 == n)).fold(0, |a, f| a | f.1)
+        })),
         time,
         every: env("BOTS_N1_AB_EVERY").and_then(|v| v.trim().parse().ok()).unwrap_or(u64::from(time)),
         dir: env("BOTS_N1_AB_DIR").filter(|d| !d.is_empty()).map(PathBuf::from),
@@ -376,6 +382,13 @@ mod tests {
         assert_eq!(c.every, 1, "timing runs every frame unless told otherwise");
         assert_eq!(c.flags_a, 128 | (40 << ALU_SHIFT));
         assert_eq!(c.flags_b, 0);
+        assert_eq!(c.flags_ship, 0);
+        let ship = |k: &str| match k {
+            "BOTS_N1_AB_SHIP" => Some("alu".to_string()),
+            "BOTS_N1_AB_ALU" => Some("7".to_string()),
+            _ => None,
+        };
+        assert_eq!(parse(Some("alu"), ship).unwrap().flags_ship, 128 | (7 << ALU_SHIFT));
         let c = parse(Some("pwl189"), env).unwrap();
         assert_eq!(c.flags_a, 64, "the loop count only rides with the alu feature");
         assert!(!parse(Some("pwl"), none).unwrap().time);

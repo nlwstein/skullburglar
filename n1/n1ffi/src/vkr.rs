@@ -3156,7 +3156,7 @@ impl Renderer {
         let which = ab_frame.as_ref().and_then(|f| (ab_pass < 2).then_some(ab_pass ^ usize::from(f.swap)));
         let ab_flags = match (&ab_frame, which) {
             (Some(f), Some(i)) => Some(f.flags[i]),
-            _ => ab_push.then_some(0u32),
+            _ => ab_push.then(|| crate::ab::config().map_or(0, |c| c.flags_ship)),
         };
         let tgt = match (&ab_frame, which) {
             (Some(f), Some(i)) => Target { view: f.views[i], layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, ..*target },

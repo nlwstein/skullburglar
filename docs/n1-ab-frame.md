@@ -35,6 +35,25 @@ channel differs at all, `mean B` is B's mean channel value (a blank frame would 
 A compared frame costs three renders (A, B and the normal one the player sees); the other frames cost nothing extra. Don't
 combine it with `BOTS_N1_GPU_PROF`: it then stays off. The target format must be 8-bit (RGBA or BGRA) or RGBA16F.
 
+## Timing two paths in one process (`BOTS_N1_AB_TIME`)
+
+`BOTS_N1_AB_TIME=1` turns the same mechanism into a GPU stopwatch: every frame, A and B are each recorded between two GPU
+timestamps (scene plus post), nothing is copied or compared, and the pairs are logged 20 to a line:
+
+```
+summary: n1: abtime pwl 08.395/8.382 18.014/8.070 ...        (<order><A ms>/<B ms>; order 1 = B ran first)
+```
+
+Why it is quieter than comparing builds: both variants see the same frame state, the same clocks and the same thermal state, and
+the order alternates every frame, so a drifting boost clock or a "second pass is warm" effect cancels. On a frozen scene (a paused
+game) a pair ratio varies by about 1 % per frame, and a few hundred pairs resolve a 0.2 % cost difference. The cost of an A/B
+frame is three renders, so use it on a paused or idle scene, not for fps. Read it with `ops/bench/gate2/abtime.py` in the
+private ops repo, or by hand: ratio = sum(B) / sum(A). `BOTS_N1_AB_EVERY` still sets the interval (default 1 in this mode).
+
+Limits: both variants live in one shader (a push-constant branch), so the timing says what the alternative costs *inside that
+shader*, not what a separately compiled shader would cost; confirm with a live-play A/B of two builds. The first run with a new
+shader text still pays the pipeline compile (minutes on a low-end GPU).
+
 ## Features
 
 A feature is a bit in a push constant the shaders read. A renders with the bit set, B with it clear.
@@ -43,6 +62,8 @@ A feature is a bit in a push constant the shaders read. A renders with the bit s
 |---|---|---|
 | `pwl` | the per-segment select PWL gamma decode that 1.15 to 1.18 used | the branch-free decode (`xe_pwl3` in `n1/matdef/src/scene.wgsl`), bit-identical to A: max 0 over every frame on GTX 1070, T480 and Deck. The same check over every f32 from 0 to 1 is `n1/n1ffi/tests/pwl_gpu.rs` (it skips without a Vulkan device) |
 | `lsb` | self-test: adds one 8-bit step to the red output | nothing |
+| `pwl189` | !189's branch-free decode (before the bit-exact change), to time it against the shipping one: `BOTS_N1_AB=pwl189` is !189 against shipping, `BOTS_N1_AB=pwl BOTS_N1_AB_B=pwl189` is 1.18.0's decode against !189's |
+| `alu` | timing self-test: A adds a dependent ALU loop of `BOTS_N1_AB_ALU` iterations to every decode call (the picture is unchanged); a known cost the timing must find |
 | `pwlprobe` | self-test: the old decode plus 4/1023, to show the hook reaches the scene's pixels | nothing |
 
 **Self-tests:** `BOTS_N1_AB=none` must report exactly 0 differing pixels, and `lsb` must report `max 1` with a differing
