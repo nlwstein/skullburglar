@@ -67,7 +67,7 @@ fn header(db: &AssetDb, o: &Opts) -> String {
         ^ fnv(include_str!("../../scenefmt/src/particles/shader.rs").as_bytes()).rotate_left(8);
     // B-235: the PWL switches change which shaders the materials ask for.
     format!(
-        "v1 index={:016x} features={} bc5={} pwl={}{}{}{}{} code={code:016x}",
+        "v2 index={:016x} features={} bc5={} pwl={}{}{}{}{} code={code:016x}",
         db.index_stamp(),
         o.features,
         o.bc5_ok as u8,
@@ -88,8 +88,8 @@ fn manifest_text(h: &str, sn: &Snapshot) -> String {
     for (k, spv, ntex) in &sn.scene_mods {
         s += &format!("S {k:016x} {spv:016x} {ntex}\n");
     }
-    for (k, b, skin) in &sn.scene_pipes {
-        s += &format!("s {k:016x} {b} {}\n", *skin as u8);
+    for (k, b, skin, ro) in &sn.scene_pipes {
+        s += &format!("s {k:016x} {b} {} {}\n", *skin as u8, *ro as u8);
     }
     for k in &sn.part_mods {
         s += &format!("M {k:016x}\n");
@@ -111,7 +111,7 @@ fn parse_manifest(text: &str, h: &str) -> Option<Snapshot> {
         let f: Vec<&str> = l.split(' ').collect();
         match f.as_slice() {
             ["S", k, spv, ntex] => sn.scene_mods.push((hx(k)?, hx(spv)?, ntex.parse().ok()?)),
-            ["s", k, b, skin] => sn.scene_pipes.push((hx(k)?, b.parse().ok()?, *skin == "1")),
+            ["s", k, b, skin, ro] => sn.scene_pipes.push((hx(k)?, b.parse().ok()?, *skin == "1", *ro == "1")),
             ["M", k] => sn.part_mods.push(hx(k)?),
             ["q", k, b, two, v] => sn.part_pipes.push((hx(k)?, b.parse().ok()?, *two == "1", v.parse().ok()?)),
             _ => return None,
@@ -145,7 +145,8 @@ struct Jobs {
 struct SceneJob {
     spv: u64,
     ntex: usize,
-    pipes: BTreeSet<(u8, bool)>,
+    /// (blend, skin, depth_read_only)
+    pipes: BTreeSet<(u8, bool, bool)>,
 }
 
 struct PartJob {
@@ -170,9 +171,9 @@ impl Jobs {
                 },
             );
         }
-        for &(k, b, skin) in &sn.scene_pipes {
+        for &(k, b, skin, ro) in &sn.scene_pipes {
             if let Some(s) = j.scene.get_mut(&k) {
-                s.pipes.insert((b, skin));
+                s.pipes.insert((b, skin, ro));
             }
         }
         for &k in &sn.part_mods {
@@ -283,7 +284,7 @@ impl Stream {
                         SceneKey {
                             shader,
                             blend,
-                            depth_read_only: e.plan.c.soft && blend < 2,
+                            depth_read_only: crate::store::scene_depth_read_only(e.plan.c.soft, blend),
                             skin,
                             cull,
                         },
@@ -362,6 +363,51 @@ mod tests {
         assert_ne!(base, templates_hash("struct Globals { x: f32 }", "fn apply_fog() {}"), "globals.wgsl edit");
         assert_ne!(base, templates_hash("struct Globals {}", "fn apply_fog() { return; }"), "fog.wgsl edit");
         assert_ne!(base, 0);
+    }
+
+    fn sample() -> Snapshot {
+        Snapshot {
+            scene_mods: vec![(1, 0xaa, 3), (2, 0xbb, 0)],
+            // Shader 2 is a soft-edge material: play asks for its read-only-depth pipelines.
+            scene_pipes: vec![(1, 0, false, false), (2, 0, false, true), (2, 1, true, true), (2, 2, false, false)],
+            part_mods: vec![9],
+            part_pipes: vec![(9, 3, true, 1)],
+        }
+    }
+
+    #[test]
+    fn the_manifest_keeps_the_read_only_depth_pipelines() {
+        // PR #57 review note: `Store::snapshot` skipped them and the replay built `depth_read_only: false`, so a warm
+        // start never had the pipelines soft-edge materials draw with and they were built in play.
+        let sn = sample();
+        let back = parse_manifest(&manifest_text("h", &sn), "h").expect("parses");
+        assert_eq!(back, sn);
+    }
+
+    #[test]
+    fn a_manifest_of_another_header_or_the_old_format_is_not_replayed() {
+        let text = manifest_text("v2 x", &sample());
+        assert!(parse_manifest(&text, "v2 y").is_none(), "other header");
+        // Before the read-only flag a pipeline line had four fields; it must not be read as "not read-only".
+        assert!(parse_manifest("H h\nS 0000000000000001 00000000000000aa 3\ns 0000000000000001 0 0\n", "h").is_none());
+    }
+
+    #[test]
+    fn replay_jobs_carry_the_read_only_flag_into_the_pipeline_key() {
+        let j = Jobs::from_snapshot(&sample());
+        assert_eq!(j.scene[&1].pipes.iter().copied().collect::<Vec<_>>(), vec![(0, false, false)]);
+        let soft: Vec<_> = j.scene[&2].pipes.iter().copied().collect();
+        assert_eq!(soft, vec![(0, false, true), (1, true, true), (2, false, false)]);
+        // 2 shaders + 4 scene pipes + 1 module + 1 particle pipe.
+        assert_eq!(j.units(), 2 + 4 + 1 + 1);
+    }
+
+    #[test]
+    fn every_spelling_of_the_read_only_rule_agrees() {
+        use crate::store::scene_depth_read_only as ro;
+        // Opaque (0) and masked (1) soft-edge materials sample the depth; blended ones (2..) never do.
+        assert!([(true, 0), (true, 1)].iter().all(|&(s, b)| ro(s, b)));
+        assert!([(false, 0), (false, 1), (true, 2), (true, 3), (true, 4), (false, 2)].iter().all(|&(s, b)| !ro(s, b)));
     }
 
     #[test]
@@ -580,12 +626,12 @@ fn run(store: &Arc<Store>, jobs: Jobs, prog: &Arc<Progress>) -> u32 {
             Box::new(move |s| {
                 let id = s.build_scene_shader_cached(skey, job.spv, job.ntex, Origin::Startup);
                 prog.done.fetch_add(1, Relaxed);
-                for (blend, skin) in job.pipes {
+                for (blend, skin, ro) in job.pipes {
                     if let Some(shader) = id {
                         // Without dynamic cull state every combination is its own pipeline.
                         let culls: &[u8] = if dyn_cull { &[0] } else { &[0, 1, 2, 3] };
                         for &cull in culls {
-                            s.build_scene_pipe(SceneKey { shader, blend, depth_read_only: false, skin, cull }, Origin::Startup);
+                            s.build_scene_pipe(SceneKey { shader, blend, depth_read_only: ro, skin, cull }, Origin::Startup);
                         }
                     }
                     prog.done.fetch_add(1, Relaxed);
@@ -726,6 +772,7 @@ pub fn start(store: Arc<Store>, db: Arc<AssetDb>, mut o: Opts) -> Arc<Progress> 
                 return;
             }
             store.startup_done.store(true, Relaxed);
+            crate::compile_log::startup_done();
             store.set_max_active(o.play_threads.max(1));
             save_manifest(&store, &h);
             store.save_cache();

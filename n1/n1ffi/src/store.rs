@@ -28,6 +28,12 @@ pub use crate::vkr::{DEPTH_FORMAT, HDR_FORMAT};
 const SPV_REV: &str = "naga30-r1";
 pub const NO_SHADER: u32 = u32::MAX;
 
+/// The one rule for `SceneKey::depth_read_only`, shared by the render thread, the live workers, the level preload and
+/// the startup step (they each used to spell it out: a copy that drifted would be a pipeline built in play).
+pub fn scene_depth_read_only(soft: bool, blend: u8) -> bool {
+    soft && blend < 2
+}
+
 /// A scene pipeline: cull mode and front face are dynamic where the device allows, so two-sided and mirrored draws
 /// share it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -432,6 +438,7 @@ impl Store {
 
     /// Destroys every object the store made. The workers must be stopped and the GPU idle.
     pub unsafe fn destroy(&self) {
+        crate::compile_log::log_summary();
         self.save_cache();
         // B-223: wait out a merge or save on the startup thread, then mark `cache` gone before destroying it.
         let mut g = self.gate.lock().unwrap_or_else(|p| p.into_inner());
@@ -602,6 +609,7 @@ impl Store {
                     Origin::Startup => self.ctr.shaders_startup.fetch_add(1, Relaxed),
                     Origin::Live => self.ctr.shaders_live.fetch_add(1, Relaxed),
                 };
+                crate::compile_log::record(if particle { "part_module" } else { "scene_shader" }, &format!("{key:016x}"), (ms * 1e3) as u64, false);
                 if self.log_misses && origin == Origin::Live {
                     eprintln!("n1ffi: live shader {key:016x} built in {ms:.1} ms (startup done: {})", self.startup_done.load(Relaxed));
                 }
@@ -719,7 +727,7 @@ impl Store {
             Box::new(move |s| {
                 if let Some(id) = s.build_scene_shader_claimed(key, &c, flags, Origin::Live) {
                     for (blend, skin) in after {
-                        s.build_scene_pipe(SceneKey { shader: id, blend, depth_read_only: c.soft && blend < 2, skin, cull: 0 }, Origin::Live);
+                        s.build_scene_pipe(SceneKey { shader: id, blend, depth_read_only: scene_depth_read_only(c.soft, blend), skin, cull: 0 }, Origin::Live);
                     }
                 }
             }),
@@ -759,6 +767,7 @@ impl Store {
                     Origin::Startup => self.ctr.pipes_startup.fetch_add(1, Relaxed),
                     Origin::Live => self.ctr.pipes_live.fetch_add(1, Relaxed),
                 };
+                crate::compile_log::record(if matches!(k, AnyKey::Part(_)) { "part_pipe" } else { "scene_pipe" }, &format!("{k:?}"), us, false);
                 if self.log_misses && origin == Origin::Live {
                     eprintln!("n1ffi: live pipeline {k:?} built in {:.1} ms (startup done: {})", us as f64 / 1e3, self.startup_done.load(Relaxed));
                 }
@@ -1113,8 +1122,8 @@ impl Store {
 pub struct Snapshot {
     /// (skey, spv name, ntex)
     pub scene_mods: Vec<(u64, u64, usize)>,
-    /// (skey, blend, skin)
-    pub scene_pipes: Vec<(u64, u8, bool)>,
+    /// (skey, blend, skin, depth_read_only)
+    pub scene_pipes: Vec<(u64, u8, bool, bool)>,
     pub part_mods: Vec<u64>,
     /// (module key, blend, two_sided, variant)
     pub part_pipes: Vec<(u64, u8, bool, u8)>,
@@ -1136,9 +1145,10 @@ impl Store {
                 continue;
             }
             match k {
-                AnyKey::Scene(k) if !k.depth_read_only => sn.scene_pipes.push((i.mods[k.shader as usize].key, k.blend, k.skin)),
+                // Read-only-depth (soft-edge) pipelines too: they are the ones play asks for, and a manifest without
+                // them replayed the wrong variant and left these to be built in play (PR #57 review note, B-198).
+                AnyKey::Scene(k) => sn.scene_pipes.push((i.mods[k.shader as usize].key, k.blend, k.skin, k.depth_read_only)),
                 AnyKey::Part(k) => sn.part_pipes.push((i.mods[k.module as usize].key, k.blend, k.two_sided, k.variant)),
-                AnyKey::Scene(_) => (),
             }
         }
         sn.scene_mods.sort();

@@ -13,6 +13,7 @@
 //! should cache handles per component).
 
 pub mod bcdec;
+pub mod compile_log;
 pub mod decals;
 pub mod godref;
 pub mod light;
@@ -1658,6 +1659,7 @@ pub unsafe extern "C" fn n1_record(
         set_error("null target or camera");
         return -1;
     };
+    compile_log::scene_frame();
     let inst: &[Instance] = if count == 0 || instances.is_null() {
         &[]
     } else {

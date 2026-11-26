@@ -158,6 +158,73 @@ impl Renderer {
         Plan::new(Mode::from_setting(self.aa_mode), self.aa_sharpen)
     }
 
+    /// Makes (once) the layouts and the shader module the filters share.
+    fn aa_init(&mut self) -> Result<()> {
+        if self.aa.is_some() {
+            return Ok(());
+        }
+        let d = &self.device;
+        let b = |i: u32, ty| {
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(i)
+                .descriptor_type(ty)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+        };
+        let bindings = [
+            b(0, vk::DescriptorType::SAMPLER),
+            b(1, vk::DescriptorType::SAMPLED_IMAGE),
+            b(2, vk::DescriptorType::SAMPLED_IMAGE),
+            b(3, vk::DescriptorType::SAMPLED_IMAGE),
+            b(4, vk::DescriptorType::SAMPLED_IMAGE),
+        ];
+        let (set_layout, pipe_layout, module, words) = unsafe {
+            let set_layout =
+                d.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?;
+            let sets = [set_layout];
+            let pcr = [vk::PushConstantRange {
+                stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                offset: 0,
+                size: std::mem::size_of::<Pc>() as u32,
+            }];
+            let pipe_layout = d.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default().set_layouts(&sets).push_constant_ranges(&pcr),
+                None,
+            )?;
+            let words = shaders::spirv_caps(AA_WGSL, naga::valid::Capabilities::IMMEDIATES)?;
+            let module = d.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)?;
+            (set_layout, pipe_layout, module, words)
+        };
+        self.aa = Some(Aa {
+            set_layout,
+            pipe_layout,
+            module,
+            words: if shaders::split_entries() { words } else { Vec::new() },
+            split: HashMap::new(),
+            pipes: HashMap::new(),
+            lut: None,
+            t: None,
+        });
+        Ok(())
+    }
+
+    /// B-198: builds every filter pipeline (FXAA, SMAA's three, the sharpener) at startup, so neither the first scene
+    /// frame nor a later switch of the anti-aliasing setting compiles anything.
+    pub(super) fn aa_prewarm(&mut self) -> Result<()> {
+        self.aa_init()?;
+        let cf = self.color_format;
+        for (entry, f) in [
+            ("fs_fxaa", cf),
+            ("fs_smaa_edge", vk::Format::R8G8_UNORM),
+            ("fs_smaa_weights", vk::Format::R8G8B8A8_UNORM),
+            ("fs_smaa_blend", cf),
+            ("fs_cas", cf),
+        ] {
+            self.aa_pipe(entry, f)?;
+        }
+        Ok(())
+    }
+
     /// Makes (once) the device objects, and (per size and plan) the targets and descriptor sets. Frees the targets when
     /// the plan is off. Call before the frame borrows the renderer; `aa_record` then needs no `&mut`.
     pub(super) fn aa_ensure(&mut self, w: u32, h: u32, plan: Plan) -> Result<()> {
@@ -166,50 +233,7 @@ impl Renderer {
             self.aa_drop_targets();
             return Ok(());
         }
-        if self.aa.is_none() {
-            let d = &self.device;
-            let b = |i: u32, ty| {
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(i)
-                    .descriptor_type(ty)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::FRAGMENT)
-            };
-            let bindings = [
-                b(0, vk::DescriptorType::SAMPLER),
-                b(1, vk::DescriptorType::SAMPLED_IMAGE),
-                b(2, vk::DescriptorType::SAMPLED_IMAGE),
-                b(3, vk::DescriptorType::SAMPLED_IMAGE),
-                b(4, vk::DescriptorType::SAMPLED_IMAGE),
-            ];
-            let (set_layout, pipe_layout, module, words) = unsafe {
-                let set_layout =
-                    d.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?;
-                let sets = [set_layout];
-                let pcr = [vk::PushConstantRange {
-                    stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                    offset: 0,
-                    size: std::mem::size_of::<Pc>() as u32,
-                }];
-                let pipe_layout = d.create_pipeline_layout(
-                    &vk::PipelineLayoutCreateInfo::default().set_layouts(&sets).push_constant_ranges(&pcr),
-                    None,
-                )?;
-                let words = shaders::spirv_caps(AA_WGSL, naga::valid::Capabilities::IMMEDIATES)?;
-                let module = d.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)?;
-                (set_layout, pipe_layout, module, words)
-            };
-            self.aa = Some(Aa {
-                set_layout,
-                pipe_layout,
-                module,
-                words: if shaders::split_entries() { words } else { Vec::new() },
-                split: HashMap::new(),
-                pipes: HashMap::new(),
-                lut: None,
-                t: None,
-            });
-        }
+        self.aa_init()?;
         let smaa = plan.mode == Mode::Smaa;
         if smaa && self.aa.as_ref().unwrap().lut.is_none() {
             let area = self.upload_texture(vk::Format::R8G8_UNORM, 160, 560, &[AREA_LUT])?;
@@ -312,6 +336,7 @@ impl Renderer {
         if self.aa.as_ref().unwrap().pipes.contains_key(&k) {
             return Ok(());
         }
+        let t0 = std::time::Instant::now();
         let layout = self.aa.as_ref().unwrap().pipe_layout;
         let mut stage = |name: &'static str| -> Result<vk::ShaderModule> {
             let a = self.aa.as_mut().unwrap();
@@ -364,6 +389,7 @@ impl Renderer {
                 .map_err(|(_, e)| anyhow!("aa pipeline {entry}: {e}"))?[0]
         };
         self.aa.as_mut().unwrap().pipes.insert(k, p);
+        crate::compile_log::record("aa_pipe", &format!("{entry}/{}", out.as_raw()), t0.elapsed().as_micros() as u64, true);
         Ok(())
     }
 
