@@ -465,7 +465,10 @@ fn enumerate_particles(db: &AssetDb, st: &Stream) {
             if *sprite {
                 st.want_part(sk, &sh.sprite_spv, Some((b, true, 0)));
             }
-            if *velocity {
+            // Additive sprites also get the velocity-aligned pipeline: cold runs on a 1070 and a Deck each built three of
+            // them in play (all additive) for materials whose emitters, as read from the asset, were not velocity-aligned
+            // (the live emitter's alignment differs from the asset's default). ~30 extra pipelines.
+            if *velocity || (*sprite && b == 3) {
                 st.want_part(sk, &sh.sprite_spv, Some((b, true, 1)));
             }
             st.want_part(mk, &sh.mesh_spv, None);
