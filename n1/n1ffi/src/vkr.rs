@@ -855,6 +855,7 @@ impl Renderer {
                 None
             };
             let gprof = gprof::GpuProf::from_env(&instance, &device, ctx.physical_device);
+            let ab_state = ab::AbState::from_env(&instance, &device, ctx.physical_device);
             let mut r = Self {
                 laps: Laps::new(),
                 ctr: Ctr::default(),
@@ -956,7 +957,7 @@ impl Renderer {
                 pg,
                 shadows,
                 gprof,
-                ab: ab::AbState::from_env(),
+                ab: ab_state,
                 tg,
                 tframe: Default::default(),
                 pframe: Default::default(),
@@ -3152,7 +3153,7 @@ impl Renderer {
         };
         for ab_pass in 0..ab_passes {
         // Which variant this pass renders (None: the host's target), and what the shaders' push constant says.
-        let which = ab_frame.as_ref().and_then(|_| (ab_pass < 2).then_some(ab_pass));
+        let which = ab_frame.as_ref().and_then(|f| (ab_pass < 2).then_some(ab_pass ^ usize::from(f.swap)));
         let ab_flags = match (&ab_frame, which) {
             (Some(f), Some(i)) => Some(f.flags[i]),
             _ => ab_push.then_some(0u32),
@@ -3163,6 +3164,9 @@ impl Renderer {
         };
         if ab_pass > 0 {
             st = st_before;
+        }
+        if let (Some(f), Some(i)) = (&ab_frame, which) {
+            self.ab_stamp(cmd, f, i, 0, ab_pass == 0);
         }
         unsafe {
             if let (Some(f), Some(i)) = (&ab_frame, which) {
@@ -3728,7 +3732,11 @@ impl Renderer {
                 g.mark(d, cmd, 8);
             }
             if let (Some(f), Some(i)) = (&ab_frame, which) {
-                self.ab_copy_out(cmd, f, i);
+                if f.time.is_some() {
+                    self.ab_stamp(cmd, f, i, 1, false);
+                } else {
+                    self.ab_copy_out(cmd, f, i);
+                }
             }
         }
         }

@@ -44,7 +44,15 @@ pub const FEATURES: &[(&str, u32)] = &[
     // Self-test: a verbatim copy of the 1.18.0 decode in its own arm; with BOTS_N1_AB=pwl BOTS_N1_AB_B=pwllegacy2 it is the old
     // decode against itself through two arms (any difference is the compiler treating the arms differently, not the decode).
     ("pwllegacy2", 32),
+    // gate2: the decode of !189 (before the bit-exact change), to time it against the shipping one in one process.
+    ("pwl189", 64),
+    // gate2 timing self-test: A adds a known ALU loop (`BOTS_N1_AB_ALU` iterations per decode call) to the decode, output
+    // unchanged. The loop count rides in the flag word's upper 16 bits (`ALU_SHIFT`).
+    ("alu", 128),
 ];
+
+/// The ALU loop count of feature `alu` sits in the flag word above this bit.
+pub const ALU_SHIFT: u32 = 16;
 
 pub struct Config {
     pub names: String,
@@ -56,6 +64,9 @@ pub struct Config {
     pub every: u64,
     pub dir: Option<PathBuf>,
     pub save_all: bool,
+    /// `BOTS_N1_AB_TIME=1`: time A and B on the GPU every frame (timestamps around each variant's scene+post), no readback and
+    /// no compare, and log the pairs (read by `ops/bench/gate2/abtime.py`). `every` then defaults to 1.
+    pub time: bool,
 }
 
 static CONFIG: OnceLock<Option<Config>> = OnceLock::new();
@@ -90,11 +101,15 @@ fn parse(spec: Option<&str>, env: impl Fn(&str) -> Option<String>) -> Option<Con
     let flags_b = env("BOTS_N1_AB_B").map_or(0, |v| {
         v.split(',').map(str::trim).filter_map(|n| FEATURES.iter().find(|f| f.0 == n)).fold(0, |a, f| a | f.1)
     });
+    let time = env("BOTS_N1_AB_TIME").is_some_and(|v| !v.is_empty() && v != "0");
+    let alu: u32 = env("BOTS_N1_AB_ALU").and_then(|v| v.trim().parse().ok()).unwrap_or(0).min(0xFFFF);
+    let with_alu = |f: u32| if f & 128 != 0 { f | (alu << ALU_SHIFT) } else { f };
     Some(Config {
         names: spec.to_string(),
-        flags_a: flags,
-        flags_b,
-        every: env("BOTS_N1_AB_EVERY").and_then(|v| v.trim().parse().ok()).unwrap_or(0),
+        flags_a: with_alu(flags),
+        flags_b: with_alu(flags_b),
+        time,
+        every: env("BOTS_N1_AB_EVERY").and_then(|v| v.trim().parse().ok()).unwrap_or(u64::from(time)),
         dir: env("BOTS_N1_AB_DIR").filter(|d| !d.is_empty()).map(PathBuf::from),
         save_all: env("BOTS_N1_AB_SAVE").is_some_and(|v| v == "all"),
     })
@@ -115,6 +130,26 @@ pub const PWL_LEGACY: &str = "fn xe_pwl3_legacy(c: vec3<f32>) -> vec3<f32> {
 }
 ";
 
+/// !189's decode (branch-free, before the bit-exact change), for timing against the shipping one.
+pub const PWL_189: &str = "fn xe_pwl3_189(c: vec3<f32>) -> vec3<f32> {
+    let s = saturate(c);
+    let l = max(max(s * 255.0, s * 510.0 - 64.0), max(s * 1020.0 - 256.0, s * 2040.0 - 1024.0));
+    let t = floor(l * select(vec3<f32>(1.0 / 256.0), vec3<f32>(1.0 / 128.0), l >= vec3<f32>(512.0)));
+    return (l + t) * (1.0 / 1023.0);
+}
+";
+
+/// The shipping decode plus a dependent ALU loop of `flags >> 16` iterations; the branch on its result never fires, so the
+/// loop can't be removed and the picture doesn't change.
+pub const PWL_ALU: &str = "fn xe_pwl3_alu(c: vec3<f32>) -> vec3<f32> {
+    var x = c.x + 0.5;
+    let n = ab_pc.flags >> 16u;
+    for (var i = 0u; i < n; i = i + 1u) { x = fma(x, 0.999, 0.0013); x = x * 1.0007 + 0.0001; }
+    if (x == 123456.0) { return vec3<f32>(1.0); }
+    return xe_pwl3_copy(c);
+}
+";
+
 /// scene.wgsl's tokens, filled in: empty when A/B is off.
 pub fn scene_text(src: &str) -> String {
     scene_text_with(src, enabled())
@@ -130,9 +165,9 @@ pub fn scene_text_with(src: &str, on: bool) -> String {
         .and_then(|s| s.split("\n}\n").next())
         .map(|f| format!("fn xe_pwl3_copy({f}\n}}\n").replace("{{AB_PWL}}", ""))
         .unwrap_or_default();
-    src.replace("{{AB_DECLS}}", &format!("{PC_DECL}{PWL_LEGACY}{}{copy}", PWL_LEGACY.replace("xe_pwl3_legacy", "xe_pwl3_legacy2"))).replace(
+    src.replace("{{AB_DECLS}}", &format!("{PC_DECL}{PWL_LEGACY}{}{copy}{PWL_189}{PWL_ALU}", PWL_LEGACY.replace("xe_pwl3_legacy", "xe_pwl3_legacy2"))).replace(
         "{{AB_PWL}}",
-        "if ((ab_pc.flags & 1u) != 0u) { return xe_pwl3_legacy(c); }\n    if ((ab_pc.flags & 4u) != 0u) { return xe_pwl3_legacy(c) + vec3<f32>(4.0 / 1023.0); }\n    if ((ab_pc.flags & 8u) != 0u) { return xe_pwl3_copy(c); }\n    if ((ab_pc.flags & 16u) != 0u) { let l = xe_pwl3_legacy(c); if (any(bitcast<vec3<u32>>(l) != bitcast<vec3<u32>>(xe_pwl3_copy(c)))) { return vec3<f32>(100.0, 0.0, 100.0); } return l; }\n    if ((ab_pc.flags & 32u) != 0u) { return xe_pwl3_legacy2(c); }",
+        "if ((ab_pc.flags & 1u) != 0u) { return xe_pwl3_legacy(c); }\n    if ((ab_pc.flags & 4u) != 0u) { return xe_pwl3_legacy(c) + vec3<f32>(4.0 / 1023.0); }\n    if ((ab_pc.flags & 8u) != 0u) { return xe_pwl3_copy(c); }\n    if ((ab_pc.flags & 16u) != 0u) { let l = xe_pwl3_legacy(c); if (any(bitcast<vec3<u32>>(l) != bitcast<vec3<u32>>(xe_pwl3_copy(c)))) { return vec3<f32>(100.0, 0.0, 100.0); } return l; }\n    if ((ab_pc.flags & 32u) != 0u) { return xe_pwl3_legacy2(c); }\n    if ((ab_pc.flags & 64u) != 0u) { return xe_pwl3_189(c); }\n    if ((ab_pc.flags & 128u) != 0u) { return xe_pwl3_alu(c); }",
     )
 }
 
@@ -327,6 +362,24 @@ mod tests {
         assert_eq!(parse(Some("pwl, lsb"), none).unwrap().flags_a, 3);
         let c = parse(Some("pwl"), |k| (k == "BOTS_N1_AB_EVERY").then(|| "90".to_string())).unwrap();
         assert_eq!(c.every, 90);
+    }
+
+    #[test]
+    fn timing_and_alu_switches() {
+        let env = |k: &str| match k {
+            "BOTS_N1_AB_TIME" => Some("1".to_string()),
+            "BOTS_N1_AB_ALU" => Some("40".to_string()),
+            _ => None,
+        };
+        let c = parse(Some("alu"), env).unwrap();
+        assert!(c.time);
+        assert_eq!(c.every, 1, "timing runs every frame unless told otherwise");
+        assert_eq!(c.flags_a, 128 | (40 << ALU_SHIFT));
+        assert_eq!(c.flags_b, 0);
+        let c = parse(Some("pwl189"), env).unwrap();
+        assert_eq!(c.flags_a, 64, "the loop count only rides with the alu feature");
+        assert!(!parse(Some("pwl"), none).unwrap().time);
+        assert_eq!(parse(Some("pwl"), none).unwrap().every, 0);
     }
 
     #[test]

@@ -26,6 +26,29 @@ pub(super) struct AbState {
     worst: f32,
     differ_total: u64,
     layout: Option<(Layout, bool)>,
+    /// `BOTS_N1_AB_TIME`: GPU timestamps around each variant (`TimePool`).
+    tpool: Option<TimePool>,
+}
+
+/// Timestamps for `BOTS_N1_AB_TIME=1`: per frame four marks (begin and end of variant 0 = A and variant 1 = B), a ring of
+/// `TRING` frames read back without waiting. The variants' order alternates every frame (`swap`) so a position effect
+/// (the second pass finding warm caches, or a boost state) cancels in the pair statistics. Logged 20 pairs to a line,
+/// `summary: n1: abtime <order><A ms>/<B ms> ...` (order 0 = A first, 1 = B first).
+struct TimePool {
+    pool: vk::QueryPool,
+    period_ms: f64,
+    mask: u64,
+    frame: u64,
+    ring: [Option<bool>; TRING as usize],
+    out: Vec<String>,
+}
+const TRING: u32 = 8;
+
+/// Where `record` writes the stamps of this frame (`AbFrame::time`).
+#[derive(Clone, Copy)]
+pub(super) struct TimeSlot {
+    pool: vk::QueryPool,
+    base: u32,
 }
 
 struct Pending {
@@ -44,6 +67,10 @@ pub(super) struct AbFrame {
     pub views: [vk::ImageView; 2],
     pub flags: [u32; 2],
     pub rect: vk::Rect2D,
+    /// Timing mode: stamps go here and nothing is copied or compared.
+    pub time: Option<TimeSlot>,
+    /// The variants run B first on this frame (timing mode alternates).
+    pub swap: bool,
 }
 
 /// Byte layout of a target format for the compare, and whether the red channel is the third byte.
@@ -57,8 +84,12 @@ fn layout_of(f: vk::Format) -> Option<(Layout, bool)> {
 }
 
 impl AbState {
-    pub(super) fn from_env() -> Option<AbState> {
+    pub(super) fn from_env(instance: &ash::Instance, device: &ash::Device, phys: vk::PhysicalDevice) -> Option<AbState> {
         let cfg = ab::config()?;
+        let tpool = if cfg.time { TimePool::new(instance, device, phys) } else { None };
+        if cfg.time && tpool.is_none() {
+            n1log!(log::WARN, "summary: n1: ab: no GPU timestamps on this queue; BOTS_N1_AB_TIME off");
+        }
         n1log!(
             log::INFO,
             "summary: n1: same-frame A/B on: {} (A flags {}, B flags {}, every {} frames, on request: debug bit 24, dir {})",
@@ -81,6 +112,33 @@ impl AbState {
             worst: 0.0,
             differ_total: 0,
             layout: None,
+            tpool,
+        })
+    }
+}
+
+impl TimePool {
+    fn new(instance: &ash::Instance, device: &ash::Device, phys: vk::PhysicalDevice) -> Option<Self> {
+        let props = unsafe { instance.get_physical_device_properties(phys) };
+        let fams = unsafe { instance.get_physical_device_queue_family_properties(phys) };
+        let bits = fams.iter().find(|f| f.queue_flags.contains(vk::QueueFlags::GRAPHICS)).map_or(0, |f| f.timestamp_valid_bits);
+        if bits == 0 || props.limits.timestamp_period <= 0.0 {
+            return None;
+        }
+        let pool = unsafe {
+            device.create_query_pool(
+                &vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(4 * TRING),
+                None,
+            )
+        }
+        .ok()?;
+        Some(Self {
+            pool,
+            period_ms: f64::from(props.limits.timestamp_period) * 1e-6,
+            mask: if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 },
+            frame: 0,
+            ring: [None; TRING as usize],
+            out: Vec::new(),
         })
     }
 }
@@ -131,6 +189,9 @@ impl Renderer {
     pub(super) fn ab_begin(&mut self, target: &Target, serial: u64) -> Option<AbFrame> {
         if self.draws.is_empty() || self.gprof.is_some() {
             return None;
+        }
+        if self.ab.as_ref().is_some_and(|a| a.cfg.time) {
+            return self.ab_begin_time(target);
         }
         let rect = target.rect;
         let bits = self.debug_bits & ab::TRIGGER_BIT != 0;
@@ -191,7 +252,79 @@ impl Renderer {
             views: [t[0].view, t[1].view],
             flags: [ab.cfg.flags_a, ab.cfg.flags_b],
             rect,
+            time: None,
+            swap: false,
         })
+    }
+
+    /// Timing mode: reads back the stamps of an earlier frame, then (every `every` frames) makes the offscreen targets and
+    /// returns the frame's plan. No readback buffers, no compare.
+    fn ab_begin_time(&mut self, target: &Target) -> Option<AbFrame> {
+        let fmt = self.color_format;
+        let d = self.device.clone();
+        let ab = self.ab.as_mut()?;
+        ab.frames += 1;
+        let every = ab.cfg.every.max(1);
+        let (fa, fb) = (ab.cfg.flags_a, ab.cfg.flags_b);
+        let tp = ab.tpool.as_mut()?;
+        if ab.frames % every != 0 {
+            return None;
+        }
+        let e = (tp.frame % u64::from(TRING)) as usize;
+        if let Some(swap) = tp.ring[e].take() {
+            let mut ts = [[0u64; 2]; 4];
+            let ok = unsafe {
+                d.get_query_pool_results(tp.pool, e as u32 * 4, &mut ts, vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WITH_AVAILABILITY)
+            };
+            if ok.is_ok() && ts.iter().all(|t| t[1] != 0) {
+                let ms = |i: usize| ts[2 * i + 1][0].wrapping_sub(ts[2 * i][0]) & tp.mask;
+                tp.out.push(format!("{}{:.3}/{:.3}", u8::from(swap), ms(0) as f64 * tp.period_ms, ms(1) as f64 * tp.period_ms));
+                if tp.out.len() >= 20 {
+                    n1log!(log::INFO, "summary: n1: abtime {} {}", ab.cfg.names, tp.out.join(" "));
+                    tp.out.clear();
+                }
+            }
+        }
+        let swap = tp.frame % 2 == 1;
+        let (pool, base) = (tp.pool, e as u32 * 4);
+        tp.ring[e] = Some(swap);
+        tp.frame += 1;
+        let rect = target.rect;
+        let need = !ab.targets.as_ref().is_some_and(|t| t[0].width == target.width && t[0].height == target.height);
+        if need {
+            let old = ab.targets.take();
+            for r in old.into_iter().flatten() {
+                self.defer(Garbage::Image(r.image, r.view, r.alloc));
+            }
+            let a = self.rt(fmt, target.width, target.height, false, "n1 ab A").ok();
+            let b = self.rt(fmt, target.width, target.height, false, "n1 ab B").ok();
+            let (Some(a), Some(b)) = (a, b) else {
+                n1log!(log::WARN, "summary: n1: ab: could not allocate the targets; timing off");
+                self.ab = None;
+                return None;
+            };
+            self.ab.as_mut()?.targets = Some([a, b]);
+        }
+        let t = self.ab.as_ref()?.targets.as_ref()?;
+        Some(AbFrame {
+            images: [t[0].image, t[1].image],
+            views: [t[0].view, t[1].view],
+            flags: [fa, fb],
+            rect,
+            time: Some(TimeSlot { pool, base }),
+            swap,
+        })
+    }
+
+    /// Timing mode: stamp `k` (0 = begin, 1 = end) of variant `which`; the first stamp of a frame resets its four slots.
+    pub(super) fn ab_stamp(&self, cmd: vk::CommandBuffer, f: &AbFrame, which: usize, k: u32, first: bool) {
+        let Some(t) = f.time else { return };
+        unsafe {
+            if first {
+                self.device.cmd_reset_query_pool(cmd, t.pool, t.base, 4);
+            }
+            self.device.cmd_write_timestamp(cmd, vk::PipelineStageFlags::BOTTOM_OF_PIPE, t.pool, t.base + 2 * which as u32 + k);
+        }
     }
 
     /// Records the copy of offscreen target `which` (A = 0, B = 1) into its readback buffer, after its last pass.
@@ -256,6 +389,12 @@ impl Renderer {
                 ab.worst,
                 ab.differ_total
             );
+        }
+        if let Some(tp) = ab.tpool.take() {
+            if !tp.out.is_empty() {
+                n1log!(log::INFO, "summary: n1: abtime {} {}", ab.cfg.names, tp.out.join(" "));
+            }
+            unsafe { self.device.destroy_query_pool(tp.pool, None) };
         }
         for r in ab.targets.take().into_iter().flatten() {
             self.free(Garbage::Image(r.image, r.view, r.alloc));
