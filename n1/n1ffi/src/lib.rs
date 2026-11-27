@@ -12,6 +12,7 @@
 //! All entry points may be called from any thread; they serialise on one mutex (handle lookups are cheap; the host
 //! should cache handles per component).
 
+pub mod ab;
 pub mod bcdec;
 pub mod decals;
 pub mod godref;
@@ -723,6 +724,8 @@ pub unsafe extern "C" fn n1_create(init: *const N1Init) -> *mut N1Renderer {
             physical_device: init.physical_device,
             device: init.device,
         };
+        // The post module is compiled for the output kind (HDR code in the shaders only for native HDR).
+        crate::shaders::set_post_hdr(init.hdr != 0);
         let mut renderer = unsafe {
             Renderer::new_with_msaa(&ctx, init.color_format, Some(cache.to_path_buf()), init.msaa, init.sgssaa != 0)?
         };

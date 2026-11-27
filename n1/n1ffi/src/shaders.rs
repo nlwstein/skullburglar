@@ -146,13 +146,18 @@ fn vs_skin(@location(0) pos: vec3<f32>, @location(3) bi: vec4<u32>, @location(4)
 "#;
 
 pub fn scene_source(c: &Compiled, f: ShaderFlags, sample_shading: bool) -> String {
+    scene_source_ab(c, f, sample_shading, crate::ab::enabled())
+}
+
+/// `scene_source` with the same-frame A/B hooks (`ab.rs`) in or out. Off, the text has no extra code at all.
+pub fn scene_source_ab(c: &Compiled, f: ShaderFlags, sample_shading: bool, ab: bool) -> String {
     // Opt-in (B-293): no visible difference was measured on a desktop GPU, so the invented tangent stays the default.
     let skin_tan = if std::env::var("BOTS_N1_SKIN_TANGENT").is_ok_and(|v| v == "1") {
         "vec4<f32>(normalize(vec3<f32>(tu.x, tu.z, tu.y) + vec3<f32>(0.0, 1e-6, 0.0)), tn.w)"
     } else {
         "vec4<f32>(normalize(cross(a, n)), 1.0)"
     };
-    let mut s = assemble(c, f, sample_shading)
+    let mut s = crate::ab::scene_text_with(&assemble(c, f, sample_shading), ab)
         .replace(matdef::shader::SHADOW_STUB, SHADOW_WGSL)
         .replace("@group(1)", "@group(9)")
         .replace("@group(2)", "@group(1)")
@@ -163,7 +168,51 @@ pub fn scene_source(c: &Compiled, f: ShaderFlags, sample_shading: bool) -> Strin
 
 /// W4: the game's post chain (grade, DOF + bloom, gamma 2.2) and the gamma-only copy for the low-end path.
 pub fn post_source() -> String {
-    include_str!("post.wgsl").to_string()
+    post_source_hdr(post_hdr())
+}
+
+/// post.wgsl for an SDR (`false`) or native-HDR output renderer. The HDR-only code (scene controls, the roll-off, the gamma-ramp
+/// re-encode and its uniform) is cut from the SDR text before compiling, so an SDR player's post shaders carry none of it
+/// (B-414: +0.5 ms of post at 720p on a UHD 620 when they did, behind a uniform branch).
+pub fn post_source_hdr(hdr: bool) -> String {
+    crate::ab::post_text(&split_hdr(include_str!("post.wgsl"), hdr))
+}
+
+/// The post.wgsl before the HDR split (`post_legacy.wgsl`), the A arm of the A/B feature `post`.
+pub fn post_legacy_source() -> String {
+    crate::ab::post_text(include_str!("post_legacy.wgsl"))
+}
+
+static POST_HDR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The renderer's output is native HDR (set once, before the post module is compiled).
+pub fn set_post_hdr(on: bool) {
+    POST_HDR.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn post_hdr() -> bool {
+    POST_HDR.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `{{HDR_BEGIN}}` .. `{{HDR_END}}` regions (each marker on its own line) stay for HDR output and go for SDR; `{{HDR_NOCLAMP}}`
+/// is the test for "HDR keeps values above white" (`false` for SDR).
+pub fn split_hdr(src: &str, hdr: bool) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut skip = false;
+    for line in src.split_inclusive('\n') {
+        match line.trim() {
+            "{{HDR_BEGIN}}" => skip = !hdr,
+            "{{HDR_END}}" => skip = false,
+            _ if !skip => out.push_str(line),
+            _ => {}
+        }
+    }
+    out.replace("{{HDR_NOCLAMP}}", if hdr { "p.hdr.x > 0.0" } else { "false" })
+}
+
+/// Validator capabilities for the post and scene shaders: with the A/B hooks in, they read a push constant.
+pub fn ab_caps() -> naga::valid::Capabilities {
+    if crate::ab::enabled() { naga::valid::Capabilities::IMMEDIATES } else { naga::valid::Capabilities::empty() }
 }
 
 pub fn ao_source() -> String {
@@ -334,6 +383,48 @@ mod tests {
                 spirv(&src).unwrap();
             }
         }
+    }
+
+    /// Same-frame A/B (`ab.rs`): with the hooks in, the scene and post shaders must still compile (a push constant read in
+    /// the fragment stage), and with them out the text carries no trace of them.
+    #[test]
+    fn ab_hooks_compile_in_and_leave_no_trace_out() {
+        let grey = MatDef { diffuse_const: Some([0.6, 0.6, 0.6, 1.0]), ..Default::default() };
+        let c = matdef::codegen::compile(&grey, &[]);
+        let f = ShaderFlags::new(false, false, false, 330);
+        let on = scene_source_ab(&c, f, false, true);
+        assert!(on.contains("xe_pwl3_legacy") && on.contains("ab_pc.flags"));
+        spirv_caps(&on, naga::valid::Capabilities::IMMEDIATES).unwrap();
+        let off = scene_source_ab(&c, f, false, false);
+        assert!(!off.contains("ab_pc") && !off.contains("legacy") && !off.contains("{{AB"));
+        let post_on = crate::ab::post_text_with(&split_hdr(include_str!("post.wgsl"), false), true);
+        spirv_caps(&post_on, naga::valid::Capabilities::IMMEDIATES).unwrap();
+        let post_off = crate::ab::post_text_with(&split_hdr(include_str!("post.wgsl"), false), false);
+        assert!(!post_off.contains("ab_pc") && !post_off.contains("{{AB"));
+        spirv(&post_off).unwrap();
+    }
+
+    /// B-414: an SDR output's post shaders hold none of the HDR-only code, an HDR output's hold all of it, both compile (with
+    /// the A/B hooks too), and the previous post.wgsl (the A arm of feature `post`) still compiles.
+    #[test]
+    fn post_hdr_split_cuts_the_hdr_code_for_sdr() {
+        let src = include_str!("post.wgsl");
+        let (sdr, hdr) = (split_hdr(src, false), split_hdr(src, true));
+        for hdr_only in ["gamma_ramp", "ramp_inverse", "ramp_extended", "p.hdr", "p.grade", "p.gray", "headroom", "{{HDR"] {
+            assert!(!sdr.contains(hdr_only), "{hdr_only} left in the SDR text");
+        }
+        for hdr_only in ["gamma_ramp", "ramp_inverse", "headroom", "p.hdr.x > 0.0"] {
+            assert!(hdr.contains(hdr_only), "{hdr_only} missing from the HDR text");
+        }
+        assert!(!hdr.contains("{{HDR"));
+        for t in [&sdr, &hdr] {
+            spirv(&crate::ab::post_text_with(t, false)).unwrap();
+            spirv_caps(&crate::ab::post_text_with(t, true), naga::valid::Capabilities::IMMEDIATES).unwrap();
+        }
+        // The SDR text is the HDR text minus the cut regions: every other line is the same, in order.
+        let keep: Vec<&str> = hdr.lines().filter(|l| sdr.lines().any(|s| s == *l)).collect();
+        assert!(keep.len() > 500);
+        spirv(&crate::ab::post_text_with(include_str!("post_legacy.wgsl"), false)).unwrap();
     }
 
     #[test]

@@ -24,6 +24,12 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use crate::vkr::ao::AmbientOcclusion;
 pub use crate::vkr::{DEPTH_FORMAT, HDR_FORMAT};
+/// The SPIR-V cache folder. A same-frame A/B run (`ab.rs`) compiles different WGSL under the same material keys, so its
+/// cache is a folder of its own and never mixes with a normal run's.
+fn spv_dir() -> String {
+    if crate::ab::enabled() { format!("spv-{SPV_REV}-ab") } else { format!("spv-{SPV_REV}") }
+}
+
 /// Bump when anything that changes SPIR-V without changing the WGSL text (naga upgrade, writer options) changes.
 const SPV_REV: &str = "naga30-r1";
 pub const NO_SHADER: u32 = u32::MAX;
@@ -228,7 +234,7 @@ impl Store {
         // drivers (MoltenVK recompiles every cached shader library) take seconds to read it.
         let cache = unsafe { device.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)? };
         if let Some(d) = &dir {
-            let _ = std::fs::create_dir_all(d.join(format!("spv-{SPV_REV}")));
+            let _ = std::fs::create_dir_all(d.join(spv_dir()));
         }
         Ok(Arc::new(Store {
             device,
@@ -492,9 +498,14 @@ impl Store {
                 .device
                 .create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?;
             let layouts = [self.set0_layout, self.lm_layout, sl];
-            let pl = self
-                .device
-                .create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts), None)?;
+            // Same-frame A/B (`ab.rs`): the scene shaders read a push constant. Off, the layout has no range.
+            let ab_range = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::FRAGMENT, offset: 0, size: 4 }];
+            let pl = self.device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default()
+                    .set_layouts(&layouts)
+                    .push_constant_ranges(if crate::ab::enabled() { &ab_range } else { &[] }),
+                None,
+            )?;
             i.layouts.insert(ntex, (sl, pl));
             Ok((sl, pl))
         }
@@ -505,7 +516,7 @@ impl Store {
     /// SPIR-V for WGSL source, from the disk cache when it has it.
     fn spirv_cached(&self, src: &str, caps: naga::valid::Capabilities) -> Result<(Arc<Vec<u32>>, u64)> {
         let h = fnv(src.as_bytes());
-        let file = self.dir.as_ref().map(|d| d.join(format!("spv-{SPV_REV}")).join(format!("{h:016x}.spv")));
+        let file = self.dir.as_ref().map(|d| d.join(spv_dir()).join(format!("{h:016x}.spv")));
         if let Some(f) = &file
             && let Ok(b) = std::fs::read(f)
             && b.len() % 4 == 0
@@ -532,7 +543,7 @@ impl Store {
     }
 
     fn spv_path(&self, name: &str) -> Option<PathBuf> {
-        self.dir.as_ref().map(|d| d.join(format!("spv-{SPV_REV}")).join(format!("{name}.spv")))
+        self.dir.as_ref().map(|d| d.join(spv_dir()).join(format!("{name}.spv")))
     }
 
     /// SPIR-V by its name in the disk cache (`{hash:016x}` for scene shaders, `p{hash:016x}` for particles).
@@ -634,7 +645,7 @@ impl Store {
         let r = (|| {
             let sample_shading = self.sgssaa && !flags.translucent && !c.soft;
             let src = shaders::scene_source(c, flags, sample_shading);
-            let mut caps = naga::valid::Capabilities::empty();
+            let mut caps = shaders::ab_caps();
             caps.set(naga::valid::Capabilities::MULTISAMPLED_SHADING, sample_shading);
             let (words, h) = self.spirv_cached(&src, caps)?;
             Ok(((self.make_module(&words)?, c.ntex, h), words))

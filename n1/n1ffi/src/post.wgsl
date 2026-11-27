@@ -42,8 +42,11 @@ struct P {
 @group(0) @binding(6) var wrap: sampler;   // repeat addressing, for post-material textures
 @group(0) @binding(7) var omask: texture_2d<f32>;   // B-277(e): enemy outline mask (R8), read when taps[5].w > 0
 @group(0) @binding(8) var gods: texture_2d<f32>;    // B-307: god-rays texture (128x128), read when taps[4].w > 0
+{{HDR_BEGIN}}
 @group(0) @binding(9) var<uniform> gamma_ramp: array<vec4<u32>, 64>;
+{{HDR_END}}
 
+{{AB_POST_DECLS}}
 struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
 @vertex
@@ -162,6 +165,7 @@ fn with_outline(c: vec3<f32>, frag: vec4<f32>) -> vec3<f32> {
     return mix(c, OUTLINE_COLOR, t);
 }
 
+{{HDR_BEGIN}}
 fn ramp_entry(i: u32, shift: u32) -> f32 {
     return f32((gamma_ramp[i >> 2u][i & 3u] >> shift) & 1023u) / 1023.0;
 }
@@ -190,9 +194,11 @@ fn ramp_inverse(v: f32, shift: u32) -> f32 {
     let b = ramp_entry(hi, shift);
     return (f32(lo) + (v - a) / (b - a)) / 255.0;
 }
+{{HDR_END}}
 
 fn gamma_out(c0: vec3<f32>, frag: vec4<f32>) -> vec4<f32> {
     let c = with_outline(c0, frag);
+    {{HDR_BEGIN}}
     if (p.comp.w > 1.5) {
         // Apply the scene controls before HUD.
         // 2.2 output kept for HUD blending.
@@ -228,8 +234,10 @@ fn gamma_out(c0: vec3<f32>, frag: vec4<f32>) -> vec4<f32> {
         // Keeping neg values needed for black level compensation.
         return vec4<f32>(g, 1.0);
     }
+    {{HDR_END}}
     var g = pow(clamp(c * p.taps[4].xyz, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(p.comp.y));
     g = min(g + p.taps[5].xyz, vec3<f32>(1.0));
+    {{AB_POST_OUT}}
     if (p.c.z < 0.5) {
         // sRGB targets encode on write, so convert g back to linear.
         g = select(pow((g + 0.055) / 1.055, vec3<f32>(2.4)), g / 12.92, g <= vec3<f32>(0.04045));
@@ -277,15 +285,28 @@ fn god_texel(t: vec2<i32>) -> f32 {
     return select(0.0, 1.0, god_sky(px));
 }
 
+// B-414: the mask is made once per frame (fs_god_mask, one depth fetch per texel) into a 128x128 target that the ray pass reads
+// through `gods` (binding 8: the ray pass doesn't read the rays texture). Before, each of the 80 steps of every ray pixel
+// fetched four depths at full resolution and ran the sky test (a division) on each. The values are the same 0 or 1.
+fn god_texel_m(t: vec2<i32>) -> f32 {
+    return textureLoad(gods, clamp(t, vec2<i32>(0), vec2<i32>(GOD_GRID - 1)), 0).r;
+}
+
 // The mask as the port's bilinear fetch sees it (clamp to edge).
 fn god_mask(uv: vec2<f32>) -> f32 {
     let f = uv * f32(GOD_GRID) - 0.5;
     let i = floor(f);
     let fr = f - i;
     let t = vec2<i32>(i);
-    let a = mix(god_texel(t), god_texel(t + vec2<i32>(1, 0)), fr.x);
-    let b = mix(god_texel(t + vec2<i32>(0, 1)), god_texel(t + vec2<i32>(1, 1)), fr.x);
+    let a = mix(god_texel_m(t), god_texel_m(t + vec2<i32>(1, 0)), fr.x);
+    let b = mix(god_texel_m(t + vec2<i32>(0, 1)), god_texel_m(t + vec2<i32>(1, 1)), fr.x);
     return mix(a, b, fr.y);
+}
+
+// The sky mask, one texel per pixel of the 128x128 target (r: 1 on sky, 0 on geometry).
+@fragment
+fn fs_god_mask(i: VOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(god_texel(vec2<i32>(i.pos.xy)), 0.0, 0.0, 1.0);
 }
 
 @fragment
@@ -548,7 +569,7 @@ fn fs_scope(i: VOut) -> @location(0) vec4<f32> {
     let lines = clamp(1.0 + 4.0 * (ret.r - 0.5), clamp(r2, 0.0, 1.0), 1.0);
     let lit = vec3<f32>(ret.g);
     let scoped = max(lens * lines, lit);
-    return mat_out(select(min(scoped, vec3<f32>(1.0)), scoped, p.hdr.x > 0.0), i.pos);
+    return mat_out(select(min(scoped, vec3<f32>(1.0)), scoped, {{HDR_NOCLAMP}}), i.pos);
 }
 
 @fragment
@@ -583,7 +604,7 @@ fn fs_death(i: VOut) -> @location(0) vec4<f32> {
     let d = desat(s, clamp(k, 0.0, 0.8), vec3<f32>(0.3, 0.59, 0.11));
     let out_max = 1.0 - 2.0 * clamp(k - 0.5, 0.0, 1.0);
     let dead = max(d, vec3<f32>(0.0));
-    return mat_out(select(min(dead, vec3<f32>(1.0)), dead, p.hdr.x > 0.0) * out_max, i.pos);
+    return mat_out(select(min(dead, vec3<f32>(1.0)), dead, {{HDR_NOCLAMP}}) * out_max, i.pos);
 }
 
 // ---- B-345 (#32): the stylized counter-kill ("Merk You Space"), FX_MerkYouSpaceRescource. Decoded node by node from

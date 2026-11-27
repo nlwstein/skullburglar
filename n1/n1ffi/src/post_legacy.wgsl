@@ -1,0 +1,648 @@
+// The game's own post chain, decoded from the port's draws.
+// Plain WGSL (naga -> SPIR-V). Colour here is display-linear: the port's scene texture value, which its composite
+// turns into SDR with pow(saturate(c), 1/2.2). HDR keeps above white and applies scene controls here.
+//
+// Passes:
+//   fs_grade  scene + depth -> graded scene (GenericOutdoor_MAT01's foreground / background grade; skipped when
+//             the level's grade is the identity)
+//   fs_down   graded scene + depth -> quarter res: rgb = sum((u + BloomScale * bright) * c) / 16, a = sum(u) / 16,
+//             u the per-pixel blur amount (DOF), bright = any channel over BloomThreshold
+//   fs_blur   quarter res gaussian, bilinear pairs, taps from the uniform (BlurKernelSize, then BloomKernelSize)
+//   fs_comp   DOF lerp, the 15% mix of the bloom-kernel blur, saturate, gamma 2.2
+//   fs_copy   low-end path: gamma only
+//   fs_pause_down, fs_pause_blur   the pause backdrop's blur, made once per pause (#56), see fs_pause
+//   fs_comp_lin  fs_comp without the gamma, into a full-res target, when post materials follow (B-266)
+//   fs_gangsta, fs_death, fs_damage, fs_scope, fs_fireheat, fs_pause   post materials (B-266, n1ffi/src/postmat.rs): read the linear scene, write linear or (the last one)
+//             gamma_out into the target. Their block: g0 the material's parameters, g1.x time (the game's world
+//             time, the clock the materials' parameters use), g1.w real time (seconds, any origin), g1.y/z 1 = tex0/tex1
+//             take Xenos's gamma curve (raw upload), comp.w 1 = last pass. tex0/tex1 sit in the bloom bindings.
+
+struct P {
+    a: vec4<f32>,       // x bloom scale, y bloom threshold, z/w texel size of the pass's source
+    dof: vec4<f32>,     // x focus distance, y 1 / focus inner radius, z falloff exponent, w target x offset
+    dof2: vec4<f32>,    // x max near blur, y max far blur, z near plane (reverse-Z infinite depth), w target y offset
+    c: vec4<f32>,       // x/y blur direction, z 1 = UNORM target (write gamma), 0 = sRGB target, w tap count
+    comp: vec4<f32>,    // x bloom kernel mix, y 1 / gamma, z DOFAndBloom on, w last material pass (1 SDR, 2 HDR)
+    g0: vec4<f32>,      // x fg desaturate, y fg contrast, z bk brightness, w bk desaturate
+    g1: vec4<f32>,      // x bk contrast, y fg-bg blend, z fg-bg blend offset, w sky clamp distance
+    fg_tint: vec4<f32>,
+    bk_tint: vec4<f32>,
+    inv_hi: vec4<f32>,  // composite multiplier before saturate (1 / Scene_HighLights in UE3)
+    taps: array<vec4<f32>, 32>, // x offset (texels along c.xy), y weight; composite/copy: [4] fade scale, [5] overlay (B-240)
+    hdr: vec4<f32>,     // game white, peak, UI white (nits), exposure multiplier
+    grade: vec4<f32>,   // contrast, highlights, shadows, saturation. 1 = unchanged
+    gray: vec4<f32>,    // x output for 18% gray
+};
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var smp: sampler;
+@group(0) @binding(2) var src: texture_2d<f32>;
+@group(0) @binding(3) var bloom: texture_2d<f32>;
+@group(0) @binding(4) var bloom2: texture_2d<f32>;
+@group(0) @binding(5) var depth: texture_depth_2d;
+@group(0) @binding(6) var wrap: sampler;   // repeat addressing, for post-material textures
+@group(0) @binding(7) var omask: texture_2d<f32>;   // B-277(e): enemy outline mask (R8), read when taps[5].w > 0
+@group(0) @binding(8) var gods: texture_2d<f32>;    // B-307: god-rays texture (128x128), read when taps[4].w > 0
+@group(0) @binding(9) var<uniform> gamma_ramp: array<vec4<u32>, 64>;
+
+{{AB_POST_DECLS}}
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> VOut {
+    var o: VOut;
+    let x = f32((vi << 1u) & 2u);
+    let y = f32(vi & 2u);
+    o.pos = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+    o.uv = vec2<f32>(x, y);
+    return o;
+}
+
+// View distance (UE units) at a full-res pixel; sky (depth 0) is far.
+fn view_z(px: vec2<i32>) -> f32 {
+    let d = textureLoad(depth, px, 0);
+    return select(1.0e7, p.dof2.z / d, d > 0.0);
+}
+
+// The uber effect's blur amount at distance z.
+fn blur_amount(z: f32) -> f32 {
+    let dz = z - p.dof.x;
+    let m = select(p.dof2.y, p.dof2.x, dz < 0.0);
+    let f = pow(max(clamp(abs(dz) * p.dof.y, 0.0, 1.0), 1e-4), p.dof.z);
+    return min(m, f);
+}
+
+fn desat(c: vec3<f32>, pct: f32, w: vec3<f32>) -> vec3<f32> {
+    return mix(c, vec3<f32>(dot(c, w)), pct);
+}
+
+@fragment
+fn fs_grade(i: VOut) -> @location(0) vec4<f32> {
+    let px = vec2<i32>(i.pos.xy);
+    let s = textureLoad(src, px, 0).rgb;
+    let z = view_z(px);
+    // foreground: desaturate, contrast toward grey, screen with the tint
+    let fc = mix(desat(s, p.g0.x, vec3<f32>(0.3, 0.59, 0.11)), vec3<f32>(0.5), p.g0.y);
+    let fg = 1.0 - (1.0 - fc) * (1.0 - p.fg_tint.rgb);
+    // background: brightness, desaturate (weights 1,1,1 as the material has them), contrast, tint; only up to the
+    // sky clamp distance
+    let bd = desat(s * p.g0.z, p.g0.w, vec3<f32>(1.0));
+    let bk = p.bk_tint.rgb * mix(bd, vec3<f32>(0.5), p.g1.x);
+    let zb = z * p.g1.y;
+    let bg = select(bk, s, zb > p.g1.w);
+    return vec4<f32>(mix(fg, bg, clamp(zb + p.g1.z, 0.0, 1.0)), 1.0);
+}
+
+@fragment
+fn fs_down(i: VOut) -> @location(0) vec4<f32> {
+    let base = vec2<i32>(i.pos.xy) * 4;
+    let lim = vec2<i32>(textureDimensions(src)) - 1;
+    var acc = vec4<f32>(0.0);
+    for (var y = 0; y < 4; y++) {
+        for (var x = 0; x < 4; x++) {
+            let q = min(base + vec2<i32>(x, y), lim);
+            let c = textureLoad(src, q, 0).rgb;
+            let u = blur_amount(view_z(q));
+            let b = select(0.0, 1.0, any(c > vec3<f32>(p.a.y)));
+            acc += vec4<f32>((u + p.a.x * b) * c, u);
+        }
+    }
+    return acc / 16.0;
+}
+
+@fragment
+fn fs_blur(i: VOut) -> @location(0) vec4<f32> {
+    let d = p.c.xy * p.a.zw;
+    var acc = vec4<f32>(0.0);
+    let n = i32(p.c.w);
+    for (var k = 0; k < n; k++) {
+        let t = p.taps[k];
+        acc += textureSample(src, smp, i.uv + d * t.x) * t.y;
+    }
+    return acc;
+}
+
+// B-277(e): the port draws a red outline around enemies the game highlights (bSpecialHighlight). It marks the pawn in
+// the scene's alpha and edge-detects it; measured against the port with and without the flag (dual render) the line is
+// crisp and hugs the silhouette, a couple of pixels wide at 720p. Here: the edge is where the unblurred, binary mask
+// changes inside its 3x3 neighbourhood (max - min), so it is one pixel inside plus one pixel outside the silhouette.
+// The colour lerps toward a red: out = c + gain * edge * (colour - c), in the linear light before the gamma.
+// `outline_edge` mirrors `edge_strength` in vkr/outline.rs; gain and colour are OUTLINE_GAIN / OUTLINE_COLOR here and
+// there. The neighbourhood scales with the render height (720 = 1), so a larger render keeps the same look.
+const OUTLINE_GAIN = 0.3;
+const OUTLINE_COLOR = vec3<f32>(1.1, 0.05, 0.04);
+
+fn omask_at(frag: vec2<f32>, d: vec2<f32>, sc: f32) -> f32 {
+    let dims = vec2<f32>(textureDimensions(omask));
+    return textureSampleLevel(omask, smp, (frag + d * sc) / dims, 0.0).r;
+}
+
+fn outline_edge(frag: vec2<f32>) -> f32 {
+    let sc = max(1.0, round(f32(textureDimensions(omask).y) / 720.0));
+    var lo = 1.0;
+    var hi = 0.0;
+    for (var j = -1; j <= 1; j++) {
+        for (var i = -1; i <= 1; i++) {
+            let m = omask_at(frag, vec2<f32>(f32(i), f32(j)), sc);
+            lo = min(lo, m);
+            hi = max(hi, m);
+        }
+    }
+    return hi - lo;
+}
+
+fn with_outline(c: vec3<f32>, frag: vec4<f32>) -> vec3<f32> {
+    let mode = p.taps[5].w;
+    if (mode < 0.5) {
+        return c;
+    }
+    let f = frag.xy - vec2<f32>(p.dof.w, p.dof2.w);
+    if (mode > 1.5) {
+        return vec3<f32>(omask_at(f, vec2<f32>(0.0), 1.0), 0.0, 0.0) + c * 0.25;
+    }
+    let t = clamp(OUTLINE_GAIN * outline_edge(f), 0.0, 1.0);
+    return mix(c, OUTLINE_COLOR, t);
+}
+
+fn ramp_entry(i: u32, shift: u32) -> f32 {
+    return f32((gamma_ramp[i >> 2u][i & 3u] >> shift) & 1023u) / 1023.0;
+}
+
+fn ramp_extended(v: f32, shift: u32) -> f32 {
+    let x = clamp(v, 0.0, 1.0) * 255.0;
+    let i = u32(x);
+    return mix(ramp_entry(i, shift), ramp_entry(min(i + 1u, 255u), shift), fract(x))
+        + min(v, 0.0) + max(v - 1.0, 0.0);
+}
+
+// Endpoint checks leave a < v <= b.
+// Eight bisections reaching adjacent entries including across flat sections.
+fn ramp_inverse(v: f32, shift: u32) -> f32 {
+    let first = ramp_entry(0u, shift);
+    let last = ramp_entry(255u, shift);
+    if (v <= first) { return v - first; }
+    if (v >= last) { return 1.0 + v - last; }
+    var lo = 0u;
+    var hi = 255u;
+    for (var k = 0u; k < 8u; k++) {
+        let mid = (lo + hi) >> 1u;
+        if (ramp_entry(mid, shift) < v) { lo = mid; } else { hi = mid; }
+    }
+    let a = ramp_entry(lo, shift);
+    let b = ramp_entry(hi, shift);
+    return (f32(lo) + (v - a) / (b - a)) / 255.0;
+}
+
+fn gamma_out(c0: vec3<f32>, frag: vec4<f32>) -> vec4<f32> {
+    let c = with_outline(c0, frag);
+    if (p.comp.w > 1.5) {
+        // Apply the scene controls before HUD.
+        // 2.2 output kept for HUD blending.
+        var h = max(c * p.taps[4].xyz, vec3<f32>(0.0)) * p.hdr.w;
+        let y = dot(h, vec3<f32>(0.2126, 0.7152, 0.0722));
+        if (y > 0.0 && (any(p.grade != vec4<f32>(1.0)) || p.gray.x != 0.18)) {
+            var g = 0.18 * pow(y / 0.18, p.grade.x);
+            if (g < 1.0 && p.gray.x != 0.18) {
+                g = pow(g, log(p.gray.x) / log(0.18));
+            }
+            if (g > 0.18) {
+                g = 0.18 * pow(g / 0.18, p.grade.y);
+            } else {
+                g = 0.18 * pow(g / 0.18, 1.0 / p.grade.z);
+            }
+            h *= g / y;
+            h = max(mix(vec3<f32>(g), h, p.grade.w), vec3<f32>(0.0));
+        }
+        // Roll off the highlights beyond ref white toward the peak.
+        let m = max(max(h.r, h.g), h.b);
+        let headroom = max(p.hdr.y / p.hdr.x - 1.0, 0.001);
+        if (m > 1.0) {
+            h *= (1.0 + headroom * (1.0 - exp(-(m - 1.0) / headroom))) / m;
+        }
+        var g = max(pow(h, vec3<f32>(p.comp.y)) + p.taps[5].xyz, vec3<f32>(0.0));
+        if (p.hdr.x != p.hdr.z) {
+            // Scene white is scaled after the gamma ramp then encoded through its inverse for the HUD.
+            // Present then applies the ramp again since scaling before makes the UI slider changes the scene too.
+            let r = vec3<f32>(ramp_extended(g.r, 20u), ramp_extended(g.g, 10u), ramp_extended(g.b, 0u))
+                * pow(p.hdr.x / p.hdr.z, 1.0 / 2.2);
+            g = vec3<f32>(ramp_inverse(r.r, 20u), ramp_inverse(r.g, 10u), ramp_inverse(r.b, 0u));
+        }
+        // Keeping neg values needed for black level compensation.
+        return vec4<f32>(g, 1.0);
+    }
+    var g = pow(clamp(c * p.taps[4].xyz, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(p.comp.y));
+    g = min(g + p.taps[5].xyz, vec3<f32>(1.0));
+    {{AB_POST_OUT}}
+    if (p.c.z < 0.5) {
+        // sRGB targets encode on write, so convert g back to linear.
+        g = select(pow((g + 0.055) / 1.055, vec3<f32>(2.4)), g / 12.92, g <= vec3<f32>(0.04045));
+    }
+    return vec4<f32>(g, 1.0);
+}
+
+// B-307: the port's god-rays composite adds the mean of 8 jittered taps of the ray texture (stored /4) to the scene,
+// after the DOF/bloom mix and before the multiplier and gamma (draw 174's c252-c255).
+const GOD_TAPS = array<vec2<f32>, 8>(
+    vec2<f32>(0.02255, -0.00457), vec2<f32>(0.01217, 0.01798),
+    vec2<f32>(-0.00765, -0.00951), vec2<f32>(-0.00477, 0.01455),
+    vec2<f32>(-0.01969, -0.00172), vec2<f32>(-0.01631, 0.01071),
+    vec2<f32>(0.00435, -0.02093), vec2<f32>(0.01110, -0.01125));
+
+// B-307/B-313: the port's ray pass, decoded from its pixel shader (PS 1F26E2C0, capture of chapter 73575) and followed
+// instruction by instruction; `godref.rs` is the same function on the CPU and the tests compare the two.
+//   - It renders into a 128x128 target (here too: the god-rays texture is its own 128x128 image), so uv is the centre
+//     of a texel of that grid.
+//   - L = the light point clamped to [0,1]^2 (g0.xy). dir = (uv - L) / max(|uv.x - L.x|, |uv.y - L.y|); step = dir / 128.
+//   - 80 iterations (loop constant 0x50) from the pixel toward L (uv -= step). The mask fetch is predicated on the
+//     remaining x distance, rx = |uv.x - L.x| - k * |step.x|, being >= 0, so the march stops at L (k <= 128 * max axis).
+//   - The mask is a 128x128 target sampled with the bilinear filter; the shader only keeps whether the value is > 0.
+//     It is alpha: 1 on sky, 0 on geometry (a weight under 1/512 counts as 0, see GOD_MASK_EPS). n1 has no mask target: a texel is sky when the depth at its centre says so.
+//   - acc += step_mask * w; then w = sat(w - decay) (g0.w). Out = sat(acc * magnitude * (1 - |uv - L|^2) * colour)
+//     * exposure. magnitude is g0.z, colour^2.2 and exposure g1.
+// B-313: the port draws its mask without the sky dome, so its sky is everything past the level geometry. n1's depth
+// has the dome in it (a level's sky is a mesh, not the cleared background), so sky is a view distance of at least
+// comp.x (UE units), or nothing drawn.
+fn god_sky(px: vec2<i32>) -> bool {
+    let d = textureLoad(depth, px, 0);
+    return d <= 0.0 || p.dof2.z / d >= p.comp.x;
+}
+
+const GOD_GRID = 128;
+// The mask test is "the bilinear value is not 0". The hardware filters with an 8-bit fraction, so a texel weighing less than
+// half a step contributes nothing; the same threshold keeps the GPU and godref.rs from disagreeing on rounding noise.
+const GOD_MASK_EPS = 0.001953125;
+
+// One texel of the 128x128 sky mask: the depth at the texel's centre.
+fn god_texel(t: vec2<i32>) -> f32 {
+    let dims = vec2<i32>(textureDimensions(depth));
+    let c = clamp(t, vec2<i32>(0), vec2<i32>(GOD_GRID - 1));
+    let px = clamp(vec2<i32>((vec2<f32>(c) + 0.5) * vec2<f32>(dims) / f32(GOD_GRID)), vec2<i32>(0), dims - vec2<i32>(1));
+    return select(0.0, 1.0, god_sky(px));
+}
+
+// The mask as the port's bilinear fetch sees it (clamp to edge).
+fn god_mask(uv: vec2<f32>) -> f32 {
+    let f = uv * f32(GOD_GRID) - 0.5;
+    let i = floor(f);
+    let fr = f - i;
+    let t = vec2<i32>(i);
+    let a = mix(god_texel(t), god_texel(t + vec2<i32>(1, 0)), fr.x);
+    let b = mix(god_texel(t + vec2<i32>(0, 1)), god_texel(t + vec2<i32>(1, 1)), fr.x);
+    return mix(a, b, fr.y);
+}
+
+@fragment
+fn fs_god(i: VOut) -> @location(0) vec4<f32> {
+    // B-313 diagnostics (debug bits 18-19, in comp.w): 2 = the sky mask texel at this pixel.
+    if (p.comp.w > 1.5) {
+        return vec4<f32>(vec3<f32>(god_texel(vec2<i32>(floor(i.uv * f32(GOD_GRID)))) * 0.25), 1.0);
+    }
+    let l = clamp(p.g0.xy, vec2<f32>(0.0), vec2<f32>(1.0));
+    let d = i.uv - l;
+    let m = max(max(abs(d.x), abs(d.y)), 1e-8);
+    let stp = d / (m * f32(GOD_GRID));
+    var uv = i.uv;
+    var rx = abs(d.x);
+    var w = 1.0;
+    var acc = 0.0;
+    for (var k = 0; k < 80; k++) {
+        if (rx >= 0.0 && god_mask(uv) > GOD_MASK_EPS) {
+            acc += w;
+        }
+        w = clamp(w - p.g0.w, 0.0, 1.0);
+        if (w <= 0.0) {
+            break;
+        }
+        uv -= stp;
+        rx -= abs(stp.x);
+    }
+    let fall = 1.0 - dot(d, d);
+    let v = clamp(vec3<f32>(acc * p.g0.z * fall) * p.g1.rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * p.g1.w;
+    return vec4<f32>(v, 1.0);
+}
+
+// B-320: the rays fade in with the distance of what they land on (taps[3]: x near, y 1 / (far - near); y = 0 is off).
+// godref.rs `depth_fade` is this function.
+fn god_depth_fade(z: f32) -> f32 {
+    if (p.taps[3].y <= 0.0) {
+        return 1.0;
+    }
+    let t = clamp((z - p.taps[3].x) * p.taps[3].y, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+fn composite(px: vec2<i32>, uv: vec2<f32>) -> vec3<f32> {
+    var c = textureLoad(src, px, 0).rgb;
+    if (p.comp.z > 0.5) {
+        let u = blur_amount(view_z(px));
+        let a = textureSample(bloom, smp, uv);
+        c = (c * (1.0 - u) + a.rgb) / max(a.a + (1.0 - u), 1e-4);
+        if (p.comp.x != 0.0) {
+            c = mix(c, textureSample(bloom2, smp, uv).rgb, p.comp.x);
+        }
+    }
+    if (p.taps[4].w > 0.5) {
+        var g = vec3<f32>(0.0);
+        for (var k = 0; k < 8; k++) {
+            g += textureSample(gods, smp, uv + GOD_TAPS[k]).rgb;
+        }
+        // B-313: the mean of the 8 taps. The port stores its rays / 4 in an 8888 target and the composite's x4 undoes
+        // that; fs_god writes them unscaled into a float target, so a x4 here made them 4 times too strong (a sweep
+        // against the port at the 73575 sun views: x1, x1/2, x1/3, x1/4 gave mean abs. difference 9.9, 7.6, 6.7, 6.2).
+        c += g * 0.125 * god_depth_fade(view_z(px));
+        if (p.taps[4].w > 1.5) {
+            // B-313 diagnostics: the god-rays texture alone (x4, to see it).
+            c = textureLoad(gods, min(vec2<i32>(floor(uv * 128.0)), vec2<i32>(127)), 0).rgb * 4.0;
+        }
+    }
+    return c * p.inv_hi.rgb;
+}
+
+@fragment
+fn fs_comp(i: VOut) -> @location(0) vec4<f32> {
+    return gamma_out(composite(vec2<i32>(i.pos.xy - vec2<f32>(p.dof.w, p.dof2.w)), i.uv), i.pos);
+}
+
+@fragment
+fn fs_comp_lin(i: VOut) -> @location(0) vec4<f32> {
+    // B-336: the outline joins the scene here, before the post materials (taps[5].w is set on this block only then).
+    return vec4<f32>(with_outline(composite(vec2<i32>(i.pos.xy), i.uv), i.pos), 1.0);
+}
+
+// ---- post materials (B-266 / B-267)
+
+// Xenos's piecewise-linear gamma for a texture uploaded raw (as scenefmt's particle `xe_pwl_raw`).
+fn xe_pwl_raw(c: vec4<f32>) -> vec4<f32> {
+    let g = c.rgb;
+    let s = max(max(g * 0.2490234375, g * 0.498046875 - 0.0625), max(g * 0.99609375 - 0.25, g * 1.9921875 - 1.0));
+    return vec4<f32>(s, c.a);
+}
+
+fn mat_tex0(uv: vec2<f32>) -> vec4<f32> {
+    let c = textureSample(bloom, wrap, uv);
+    return select(c, xe_pwl_raw(c), p.g1.y > 0.5);
+}
+
+// The same texture with clamped addressing (the scope reads it past its edges and expects the edge texel there).
+fn mat_tex0_clamp(uv: vec2<f32>) -> vec4<f32> {
+    let c = textureSample(bloom, smp, uv);
+    return select(c, xe_pwl_raw(c), p.g1.y > 0.5);
+}
+
+fn mat_tex1(uv: vec2<f32>) -> vec4<f32> {
+    let c = textureSample(bloom2, wrap, uv);
+    return select(c, xe_pwl_raw(c), p.g1.z > 0.5);
+}
+
+fn mat_out(c: vec3<f32>, frag: vec4<f32>) -> vec4<f32> {
+    if (p.comp.w > 0.5) {
+        return gamma_out(c, frag);
+    }
+    return vec4<f32>(c, 1.0);
+}
+
+// UE3 Rotator about (0.5, 0.5).
+fn rotate_uv(uv: vec2<f32>, a: f32) -> vec2<f32> {
+    let d = uv - vec2<f32>(0.5);
+    let cs = cos(a);
+    let sn = sin(a);
+    return vec2<f32>(0.5) + vec2<f32>(d.x * cs - d.y * sn, d.x * sn + d.y * cs);
+}
+
+// FX_GangsterFire.GangsterFire_MAT02 (C1HUD.SlowmoEffect_MatInst), g0.x = PARAMAmount. tex0 streak, tex1 EyeMask.
+@fragment
+fn fs_gangsta(i: VOut) -> @location(0) vec4<f32> {
+    let a = p.g0.x;
+    let t = p.g1.x;
+    let uv = i.uv;
+    let d = uv - vec2<f32>(0.5);
+    let r = length(d);
+    // barrel warp toward the centre
+    let w = textureSample(src, smp, mix(uv, vec2<f32>(0.5) + d * (1.0 - 0.5 * r * r), a)).rgb;
+    // burn: darks and mids pushed up by 3x their colour
+    let inner = w + (1.0 - clamp(dot(w, vec3<f32>(0.3, 0.59, 0.11)), 0.0, 1.0)) * (3.0 * w) * a;
+    // outside the eye mask: the scene sampled along each ray at a fixed radius (a radial smear)
+    let n = select(vec2<f32>(0.0), d / max(r, 1e-6), r > 1e-6);
+    let smear = textureSample(src, smp, vec2<f32>(0.5) + 0.32 * n).rgb;
+    let euv = d * mix(0.5, 0.9, a) + vec2<f32>(0.5);
+    let m = clamp(mat_tex1(rotate_uv(euv, t * 0.25)).r + mat_tex1(rotate_uv(euv, t * -0.25)).r, 0.0, 1.0);
+    let col = mix(smear, inner, m);
+    // fire streaks panned outward, strongest in the corners
+    let h = n.y * 0.5 + 0.5;
+    let sx = select(h, 2.0 - h, n.x > 0.0) * 0.5;
+    let suv = vec2<f32>(4.0, 0.6) * vec2<f32>(sx, r) + t * vec2<f32>(0.0, -1.0);
+    let streak = mat_tex0(suv).rgb * 10.0 * pow(1.5 * r, 8.0);
+    return mat_out(mix(vec3<f32>(1.0), vec3<f32>(1.0) + streak, a) * col, i.pos);
+}
+
+// FX_EnvironmentLibrary.Fire.PostProcessIntensity_MIC (an instance of PostProcessIntensity_MAT, additive, B-384), g0.x =
+// Fade. tex0 FX_Blood.Wobble_DIF, tex1 FX_Smoke.SmokeLayer2NormalMap. Decoded node by node from the material graph: the scene
+// is read through a horizontal shimmer min(SmokeLayer2NormalMap.r(u * 0.5, v * 0.1 + 0.2 t), 0.0025) (ScreenPosition
+// plus (shimmer, 0)); that sample times 1.5 times (2, 1, 0.5) times (Wobble_DIF(uv * 0.05 + t * (-0.35, 0.7)) + 0.4)
+// times Fade is added to the scene (BLEND_Additive).
+@fragment
+fn fs_fireheat(i: VOut) -> @location(0) vec4<f32> {
+    let t = p.g1.x;
+    let uv = i.uv;
+    let base = textureSample(src, smp, uv).rgb;
+    let sh = min(mat_tex1(vec2<f32>(uv.x * 0.5, uv.y * 0.1 + 0.2 * t)).r, 0.0025);
+    var s = textureSample(src, smp, uv + vec2<f32>(sh, 0.0)).rgb;
+    // B-330: the port's material reads the composite from an 8-bit target (saturated); n1's linear target keeps values above 1
+    // (a lit window strip), which this multiplies into a blown-out veil. g0.y = 1 clamps the sampled scene to 1 like the port.
+    if (p.g0.y > 0.5) {
+        s = min(s, vec3<f32>(1.0));
+    }
+    let wob = mat_tex0(uv * 0.05 + t * vec2<f32>(-0.35, 0.7)).rgb;
+    return mat_out(base + s * 1.5 * vec3<f32>(2.0, 1.0, 0.5) * (wob + vec3<f32>(0.4)) * p.g0.x, i.pos);
+}
+
+// UI_IngameMenus.PausePPEffect (B-393, #53): the pause menu's backdrop. The game's chain is a DOFAndBloomEffect (everything fully
+// blurred: BlurKernelSize 16, FocusDistance 100000; ModulateBlurColor (0.90, 0.86, 0.72)) then PauseMAT (SceneTexture x
+// (0.6, 0.6, 0.4) x 1.3). Fitted to the Pre-1.0 renderer's paused frames (10 poses, linear light, saturated pixels left out): a Gaussian
+// of sigma 8 px at 720 lines, times (1.60, 1.58, 1.00). The tint's ratio is the material's, the overall level is not derived.
+//
+// #56: the paused picture doesn't change, so the blur is made once, when the pause starts (and again after a resize or a render scale
+// change), at a quarter of the resolution (the result is blurry anyway): fs_pause_down (4x4 box into the quarter-resolution target),
+// then fs_pause_blur twice (horizontal, then vertical with the gain), into a target that stays between frames. Every paused frame
+// is then fs_pause: one tap of that target (bloom binding, g0.y = 1). g0.y = 0 (the "Pause background blur" setting off): the
+// sharp scene with the same gain, no blur.
+@fragment
+fn fs_pause_down(i: VOut) -> @location(0) vec4<f32> {
+    let base = vec2<i32>(i.pos.xy) * 4;
+    let lim = vec2<i32>(textureDimensions(src)) - 1;
+    var acc = vec3<f32>(0.0);
+    for (var y = 0; y < 4; y++) {
+        for (var x = 0; x < 4; x++) {
+            acc += textureLoad(src, min(base + vec2<i32>(x, y), lim), 0).rgb;
+        }
+    }
+    return vec4<f32>(acc / 16.0, 1.0);
+}
+
+// One direction of the Gaussian at quarter resolution: c.xy the direction, g0.x sigma and g0.y the radius in texels, g1.xyz a
+// multiplier (1 on the horizontal pass, the tint's gain on the vertical one).
+@fragment
+fn fs_pause_blur(i: VOut) -> @location(0) vec4<f32> {
+    let sg = max(p.g0.x, 0.01);
+    let r = i32(p.g0.y);
+    let d = p.c.xy * p.a.zw;
+    var acc = vec3<f32>(0.0);
+    var wsum = 0.0;
+    for (var k = -r; k <= r; k++) {
+        let w = exp(-f32(k * k) / (2.0 * sg * sg));
+        acc += textureSampleLevel(src, smp, i.uv + d * f32(k), 0.0).rgb * w;
+        wsum += w;
+    }
+    return vec4<f32>(acc / wsum * p.g1.xyz, 1.0);
+}
+
+@fragment
+fn fs_pause(i: VOut) -> @location(0) vec4<f32> {
+    if (p.g0.y > 0.5) {
+        return mat_out(textureSampleLevel(bloom, smp, i.uv, 0.0).rgb, i.pos);
+    }
+    return mat_out(textureSampleLevel(src, smp, i.uv, 0.0).rgb * vec3<f32>(1.60, 1.58, 1.00), i.pos);
+}
+
+const DAMAGE_GAMMA: f32 = 1.12;
+
+// FX_Damage.DamageEffectMaterial (DamageEffectMaterial_MIC, B-292), g0.x = CriticalHealthFadeParameter. The scene fades
+// toward a 75% desaturated copy. The material's hit-arrow render target is not drawn (it is black without a hit).
+@fragment
+fn fs_damage(i: VOut) -> @location(0) vec4<f32> {
+    let w = vec3<f32>(0.3, 0.59, 0.11);
+    // The port reads the scene pinched toward the centre by 1 - g0.y * (hit picture's blue) (5% at full strength),
+    // the picture itself at the plain uv (decoded from draw 425, B-292).
+    let b = mat_tex1(i.uv).b;
+    let s = textureSample(src, smp, (i.uv - vec2<f32>(0.5)) * (1.0 - p.g0.y * b) + vec2<f32>(0.5)).rgb;
+    let s5 = mix(s, desat(s, 0.75, w), clamp(p.g0.x, 0.0, 1.0));
+    // tex1 = the host's picture of DamageEffectTexture (hit marks; black = none), its blue channel indexes the ramp
+    // (tex0, DamageRamp): alpha brightens the scene, colour overlays it (decoded from the material graph, B-292).
+    let ramp = mat_tex0_clamp(vec2<f32>(b, 0.5));   // clamped: b = 0 must not blend in the ramp's far end
+    // The blend runs on the scene in a gamma-encoded space (exponent 1.12, fitted on the port's own marker shots at
+    // 30/60/90 damage: n1/port green ratio 0.99/1.00/0.99; linear blending left 0.98/0.88/0.83, B-292).
+    let s5e = pow(max(s5, vec3<f32>(0.0)), vec3<f32>(1.0 / DAMAGE_GAMMA));
+    let m = s5e * (1.0 + 3.0 * ramp.a);
+    let o = mix(vec3<f32>(0.5), ramp.rgb, b);
+    let hi = o * m * 2.0;
+    let lo = vec3<f32>(1.0) - 2.0 * (vec3<f32>(1.0) - o) * (vec3<f32>(1.0) - m);
+    let r = select(lo, hi, dot(m, w) > 0.5);
+    return mat_out(pow(max(r, vec3<f32>(0.0)), vec3<f32>(DAMAGE_GAMMA)), i.pos);
+}
+
+// C1HUD.SniperScope_V02_MAT (SniperScope_MIC, B-295), g0.x = its scalar parameter (0 = the 16:9 mapping). tex0
+// SniperScope_v02_EFCT (R: reticle lines on mid grey, G: lit marks, B: lens falloff). Decoded node by node from the
+// material graph: lens = scene * EFCT.b(r2, r2) with r2 the squared distance from the mapped centre; top edge
+// darkened by (1 - 1.0..2.5 * (1 - v)^4); reticle = clamp(lens * clamp(1 + 4 (R - 0.5), sat(r2), 1), EFCT.g, 1).
+@fragment
+fn fs_scope(i: VOut) -> @location(0) vec4<f32> {
+    let uv = i.uv;
+    let s = textureSample(src, smp, uv).rgb;
+    let wide = uv * vec2<f32>(4.25, 2.25) - vec2<f32>(2.1165, 1.1205);
+    let narrow = uv * vec2<f32>(2.75, 2.25) - vec2<f32>(1.3695, 1.1205);
+    let q = abs(mix(wide, narrow, clamp(p.g0.x, 0.0, 1.0)));
+    let r2 = dot(q, q);
+    var lens = s * mat_tex0_clamp(vec2<f32>(r2, r2)).b;
+    let t = 1.0 - uv.y;
+    let t4 = t * t * t * t;
+    lens = lens * clamp(vec3<f32>(1.0) - t4 * vec3<f32>(2.5, 1.0, 0.5), vec3<f32>(0.0), vec3<f32>(1.0));
+    let rc = vec2<f32>(1.0 - abs(uv.x * 4.0 - 1.5 - 0.5) * 2.0, uv.y * 4.0 - 1.5);
+    let ret = mat_tex0_clamp(rc);
+    let lines = clamp(1.0 + 4.0 * (ret.r - 0.5), clamp(r2, 0.0, 1.0), 1.0);
+    let lit = vec3<f32>(ret.g);
+    let scoped = max(lens * lines, lit);
+    return mat_out(select(min(scoped, vec3<f32>(1.0)), scoped, p.hdr.x > 0.0), i.pos);
+}
+
+@fragment
+fn fs_copy(i: VOut) -> @location(0) vec4<f32> {
+    return gamma_out(textureLoad(src, vec2<i32>(i.pos.xy - vec2<f32>(p.dof.w, p.dof2.w)), 0).rgb, i.pos);
+}
+
+// UI_DeathEffect.FaderDeath_MAT (FaderDeath_MIC): g0.x StartTime, g0.y EffectLength. tex0 DeathScreenBackground_Alphas,
+// tex1 HeatVisionClouds_Alpha. n = (Time - StartTime) / EffectLength on the world clock (StartTime is world time); the
+// clouds and flicker run on real time: the death screen pauses the game and the port's clouds keep moving.
+@fragment
+fn fs_death(i: VOut) -> @location(0) vec4<f32> {
+    let n = (p.g1.x - p.g0.x) / max(p.g0.y, 1e-3);
+    let t = p.g1.w;
+    let uv = i.uv;
+    if (n > 0.5) {
+        // dark red clouds, panned, framed by the background's blue channel, flickering between 0.7 and 1
+        let r1 = mat_tex0(uv + t * vec2<f32>(0.035, -0.05)).r;
+        let off = 0.2 * mat_tex1(uv).rg;
+        let r2 = mat_tex0(uv * 1.2 + t * vec2<f32>(0.1, -0.03) + off).r;
+        let tau = 6.283185307;
+        let cloud = clamp((vec3<f32>(r1, 0.0, 0.0) + vec3<f32>(2.0 * r2, 0.1 * r2, 0.0)) * mat_tex0(uv).b,
+                          vec3<f32>(0.0), vec3<f32>(1.0));
+        let flicker = clamp(ceil(sin(t * tau / 0.3) * floor(cos(t * tau / 0.4))), 0.7, 1.0);
+        return mat_out(mix(vec3<f32>(0.0), cloud * flicker, clamp((n - 0.5) * 2.0, 0.0, 1.0)), i.pos);
+    }
+    // first half: a closing vignette that also pulls the scene inward, desaturation up to 80%, then fade to black
+    let k = 2.0 * clamp(n, 0.0, 0.5);
+    let q = clamp(pow(length(uv - vec2<f32>(0.5)) * mix(0.01, 2.0, k), 4.0), 0.0, 1.0);
+    let coord = (1.0 - 0.2 * clamp(1.2 * q, 0.0, 1.0)) * (uv - vec2<f32>(0.5)) + vec2<f32>(0.5);
+    let s = textureSample(src, smp, coord).rgb * (1.0 - q);
+    let d = desat(s, clamp(k, 0.0, 0.8), vec3<f32>(0.3, 0.59, 0.11));
+    let out_max = 1.0 - 2.0 * clamp(k - 0.5, 0.0, 1.0);
+    let dead = max(d, vec3<f32>(0.0));
+    return mat_out(select(min(dead, vec3<f32>(1.0)), dead, p.hdr.x > 0.0) * out_max, i.pos);
+}
+
+// ---- B-345 (#32): the stylized counter-kill ("Merk You Space"), FX_MerkYouSpaceRescource. Decoded node by node from
+// the package's material graphs (postmat.rs has the summary). UE3's Sine is sin(2 pi x / Period), Period 1 here;
+// TextureCoordinate and ScreenPosition (ScreenAlign) are both the screen uv in a post material. Time is g1.x.
+
+// The kill's pulse after a hit time: 1 - n while 0 <= n <= 1, else 0 (the graph's two If nodes).
+fn merk_pulse(n: f32) -> f32 {
+    return select(0.0, 1.0 - n, n >= 0.0 && n <= 1.0);
+}
+
+// BKGAndGhost_MAT (BKGAndGhost_MIC): g0.x HitTime, g0.y EffectLength, g0.z LV. tex0 = Wall (the parchment).
+@fragment
+fn fs_merk_bkg(i: VOut) -> @location(0) vec4<f32> {
+    let t = p.g1.x;
+    let uv = i.uv;
+    let n = (t - p.g0.x) / max(p.g0.y, 1e-4);
+    let n2 = (t - p.g0.x) / max(2.0 * p.g0.y, 1e-4);
+    let pulse = merk_pulse(n);
+    let pulse2 = merk_pulse(n2);
+    let tau = 6.283185307;
+    // the wall: zoomed in by the long pulse, swaying sideways with it
+    let wz = (uv - vec2<f32>(0.5)) * mix(vec2<f32>(0.663, 0.75), vec2<f32>(0.884, 1.0), pulse2) + vec2<f32>(0.5);
+    let wuv = vec2<f32>(wz.x + sin(t * 3.0 * tau) * mix(0.0, 0.2, pulse2), wz.y);
+    let s = textureSample(src, smp, uv).rgb;
+    let d0 = desat(s, 0.8, vec3<f32>(0.3, 0.49, 0.21));
+    let k = clamp(3.0 * mix(d0, vec3<f32>(0.5), -0.1), vec3<f32>(0.0), vec3<f32>(2.0));
+    let base = mat_tex0(wuv).rgb * k;
+    // two grey ghosts of the scene, zoomed toward (0.2, 0.2) as the hit pulse runs, darkening by (grey - 1) / 2 each
+    let lw = vec3<f32>(0.3, 0.59, 0.11);
+    let g1 = dot(textureSample(src, smp, vec2<f32>(0.2) + (uv - vec2<f32>(0.2)) * mix(1.0, 0.5, n)).rgb, lw);
+    let g2 = dot(textureSample(src, smp, vec2<f32>(0.2) + (uv - vec2<f32>(0.2)) * mix(1.0, 0.75, n)).rgb, lw);
+    let ghost = vec3<f32>(0.5 * ((g2 - 1.0) * pulse + (g1 - 1.0) * pulse));
+    let red = vec3<f32>(1.75 * pulse, 0.0, 0.0) * p.g0.z;
+    // vignette: 1 - |uv - 0.5| x 0.5..0.75, pulsing 10 times a second
+    let vig = 1.0 - length((uv - vec2<f32>(0.5)) * mix(0.75, 0.5, sin(t * 10.0 * tau) * 0.5 + 0.5));
+    return mat_out((red + base + ghost) * vig, i.pos);
+}
+
+// FadeIn_MAT (FadeIn_MAT_MIC): g0.x StartTime, g0.y EffectLength. tex0 = GLogo_02 (its red channel). FadeColour is
+// white in the instance. The logo, centred at 1.77:1, grows from the screen's size to infinity as c goes 0 -> 1, over a
+// fill that fades from white to the scene.
+@fragment
+fn fs_merk_fadein(i: VOut) -> @location(0) vec4<f32> {
+    let c = clamp((p.g1.x - p.g0.x) / max(p.g0.y, 1e-4), 0.0, 1.0);
+    let luv = (i.uv - vec2<f32>(0.5)) * vec2<f32>(1.77, 1.0) * (1.0 - c) + vec2<f32>(0.5);
+    let logo = mat_tex0_clamp(luv).r;
+    let s = textureSample(src, smp, i.uv).rgb;
+    return mat_out(logo * mix(vec3<f32>(1.0), s, c), i.pos);
+}
+
+// BurnOut_MAT (BurnOut_MIC): g0.x StartTime, g0.y EffectLength. SfCore's Levels expression with only InputMax wired
+// (taken as clamp(x / InputMax, 0, 1)): InputMax 0.1 -> 1 and desaturation 40% -> 0 as c = clamp(1.5 (t - start) / len).
+@fragment
+fn fs_merk_burnout(i: VOut) -> @location(0) vec4<f32> {
+    let c = clamp(1.5 * (p.g1.x - p.g0.x) / max(p.g0.y, 1e-4), 0.0, 1.0);
+    let s = textureSample(src, smp, i.uv).rgb;
+    let lv = clamp(s / mix(0.1, 1.0, c), vec3<f32>(0.0), vec3<f32>(1.0));
+    return mat_out(desat(lv, mix(0.4, 0.0, c), vec3<f32>(0.3, 0.59, 0.11)), i.pos);
+}
