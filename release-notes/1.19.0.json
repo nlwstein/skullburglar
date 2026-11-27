@@ -1,0 +1,6 @@
+[
+  "The new renderer is faster on lower-end graphics, such as Intel laptops, with no change to the picture.",
+  "Shaders are now prepared during loading, so levels no longer hitch while you play.",
+  "Street decals (scorch marks and trash) no longer flicker or vanish on some graphics cards.",
+  "New \"Gyro rest deadband\" setting in Controls, and mouse sensitivity can now go down to 0.05 for finer gyro aiming."
+]
