@@ -10,6 +10,8 @@
 //                          0.5): random jitter, with a bias a sensor that leans one way
 //   burst:<p>:<max>[:<bias>] on each frame with probability <p> a random 1..<max> counts (a sensor with a wider jitter
 //                          than noise:, e.g. an Edge-class gyro), positive with probability <bias> (default 0.5)
+//   file:<path>            replay a recording: one line per frame, "dx dy" counts (or just "dx"), looped (a gyro
+//                          recording turned into whole counts; no ':' or '+' in the path)
 //   poisson:<cps>[:<bias>] counts arrive at random (a Poisson process) at <cps> per second, positive with probability
 //                          <bias> (default 1): drift that is not evenly spaced
 #pragma once
@@ -18,7 +20,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace bots::input {
@@ -73,6 +78,13 @@ class MousePattern {
         case Kind::kBurst:
           if (Uniform() < p.rate) n = (1 + std::floor(Uniform() * p.max)) * (Uniform() < p.bias ? 1.0 : -1.0);
           break;
+        case Kind::kFile: {
+          // One recorded line per frame (the recording is at the game's frame rate, whatever dt is).
+          if (p.frames.empty()) break;
+          const auto& f = p.frames[p.next++ % p.frames.size()];
+          c.x += f.first, c.y += f.second;
+          continue;
+        }
         case Kind::kPoisson: {
           // Knuth's method; fine for the small means a frame has.
           const double limit = std::exp(-p.rate * dt);
@@ -90,11 +102,13 @@ class MousePattern {
 
  private:
   static constexpr double kEps = 1e-9;  // frames add up to a round time only to within rounding
-  enum class Kind { kSteady, kAlt, kNoise, kPoisson, kBurst };
+  enum class Kind { kSteady, kAlt, kNoise, kPoisson, kBurst, kFile };
   struct Part {
     Kind kind = Kind::kSteady;
     double rate = 0, bias = 0.5, max = 1;
     bool y = false;
+    std::vector<std::pair<double, double>> frames;  // kFile
+    size_t next = 0;
   };
 
   bool ParsePart(const std::string& s) {
@@ -107,6 +121,18 @@ class MousePattern {
     }
     if (f.size() < 2 || f[1].empty()) return false;
     Part p;
+    if (f[0] == "file") {
+      std::ifstream in(f[1]);
+      for (std::string line; std::getline(in, line);) {
+        std::istringstream ls(line);
+        double x = 0, y = 0;
+        if (ls >> x) ls >> y, p.frames.emplace_back(x, y);
+      }
+      if (p.frames.empty()) return false;
+      p.kind = Kind::kFile;
+      parts_.push_back(std::move(p));
+      return true;
+    }
     p.rate = std::atof(f[1].c_str());
     if (f[0] == "steady") {
       p.kind = Kind::kSteady;

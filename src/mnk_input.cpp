@@ -28,6 +28,11 @@ REXCVAR_DEFINE_BOOL(kbm_noise_gate_strict, false, "bots/Input",
                     "Stricter noise gate for a gyro with wide random jitter (a DualSense Edge): on top of kbm_noise_gate, "
                     "motion must also keep one direction (about 0.8 s) before it counts as deliberate. Turns and steady "
                     "drift are treated as before. Does nothing while kbm_noise_gate is 0. BOTS_MOUSE_GATE_STRICT=1 overrides.");
+REXCVAR_DEFINE_DOUBLE(kbm_rest_deadband, 0.0, "bots/Input",
+                      "Rest deadband in degrees (0 = off): for a gyro that ticks while it lies still. The view stays put "
+                      "until motion adds up to this angle in one direction, whatever the mouse sensitivity (the noise "
+                      "gate counts pixels instead). Uses the stricter gate. BOTS_REST_DEADBAND=<deg> overrides.")
+    .range(0.0, 2.0);
 REXCVAR_DEFINE_BOOL(aim_toggle, false, "bots/Input",
                     "Toggle aim: press Aim once to start aiming and again to stop, instead of holding it. Works with a "
                     "controller and with keyboard and mouse (aim_toggle.h). Taking cover or running (A) also ends it; menus, "
@@ -396,8 +401,13 @@ void MouseKeyboardDriver::TakeMouseDelta(float& dx, float& dy) {
     return v && *v ? std::atof(v) : bots::input::MouseGate{}.backlog_cap;
   }();
   gate_.backlog_cap = env_cap;
-  const bool strict = env_strict >= 0 ? env_strict != 0 : REXCVAR_GET(kbm_noise_gate_strict);
-  const double gate = env_gate >= 0 ? env_gate : REXCVAR_GET(kbm_noise_gate);
+  static const double env_rest = [] {
+    const char* v = std::getenv("BOTS_REST_DEADBAND");
+    return v && *v ? std::atof(v) : -1.0;
+  }();
+  const double rest_counts = bots::input::RestGateCounts(env_rest >= 0 ? env_rest : REXCVAR_GET(kbm_rest_deadband), s, aiming);
+  const bool strict = rest_counts > 0 || (env_strict >= 0 ? env_strict != 0 : REXCVAR_GET(kbm_noise_gate_strict));
+  const double gate = std::max(rest_counts, env_gate >= 0 ? env_gate : REXCVAR_GET(kbm_noise_gate));
   // Seconds of wall time since the last frame: motion arrives in wall time, whatever the game's clock does.
   const auto now_tp = std::chrono::steady_clock::now();
   const double dt = gate_last_ == std::chrono::steady_clock::time_point{}
