@@ -52,7 +52,13 @@ pub const FEATURES: &[(&str, u32)] = &[
     // t720e: A draws the post chain with the previous post.wgsl (`post_legacy.wgsl`: native HDR code in the SDR shaders, the
     // god-ray pass before its rewrite) through its own pipelines; B is the shipping post.wgsl. Pipeline-level, not a hook.
     ("post", 256),
+    // Self-test for the pipeline-level features: A adds one 8-bit step to red in the PREVIOUS post.wgsl only (`BOTS_N1_AB=post,postprobe`),
+    // so it shows exactly when A really draws with the previous post.wgsl's pipelines (the shipping text has no such hook).
+    ("postprobe", 1024),
 ];
+
+/// Flag bit of feature `postprobe`, read only by the previous post.wgsl (`post_legacy_text`).
+pub const POST_PROBE: u32 = 1024;
 
 /// Flag bit of feature `post`: the variant uses the previous post.wgsl's pipelines.
 pub const POST_LEGACY: u32 = 256;
@@ -181,6 +187,16 @@ pub fn scene_text_with(src: &str, on: bool) -> String {
         "{{AB_PWL}}",
         "if ((ab_pc.flags & 1u) != 0u) { return xe_pwl3_legacy(c); }\n    if ((ab_pc.flags & 4u) != 0u) { return xe_pwl3_legacy(c) + vec3<f32>(4.0 / 1023.0); }\n    if ((ab_pc.flags & 8u) != 0u) { return xe_pwl3_copy(c); }\n    if ((ab_pc.flags & 16u) != 0u) { let l = xe_pwl3_legacy(c); if (any(bitcast<vec3<u32>>(l) != bitcast<vec3<u32>>(xe_pwl3_copy(c)))) { return vec3<f32>(100.0, 0.0, 100.0); } return l; }\n    if ((ab_pc.flags & 32u) != 0u) { return xe_pwl3_legacy2(c); }\n    if ((ab_pc.flags & 64u) != 0u) { return xe_pwl3_189(c); }\n    if ((ab_pc.flags & 128u) != 0u) { return xe_pwl3_alu(c); }",
     )
+}
+
+/// The previous post.wgsl (the A arm of feature `post`): the same hooks, plus the `postprobe` self-test hook that only it has.
+pub fn post_legacy_text(src: &str) -> String {
+    let t = post_text_with(src, enabled());
+    if enabled() {
+        t.replacen("    if (p.c.z < 0.5) {\n        // sRGB targets encode on write", "    if ((ab_pc.flags & 1024u) != 0u) { g = min(g + vec3<f32>(1.0 / 255.0, 0.0, 0.0), vec3<f32>(1.0)); }\n    if (p.c.z < 0.5) {\n        // sRGB targets encode on write", 1)
+    } else {
+        t
+    }
 }
 
 /// post.wgsl's tokens, filled in: empty when A/B is off.

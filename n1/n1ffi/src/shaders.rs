@@ -180,7 +180,7 @@ pub fn post_source_hdr(hdr: bool) -> String {
 
 /// The post.wgsl before the HDR split (`post_legacy.wgsl`), the A arm of the A/B feature `post`.
 pub fn post_legacy_source() -> String {
-    crate::ab::post_text(include_str!("post_legacy.wgsl"))
+    crate::ab::post_legacy_text(include_str!("post_legacy.wgsl"))
 }
 
 static POST_HDR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -425,6 +425,15 @@ mod tests {
         let keep: Vec<&str> = hdr.lines().filter(|l| sdr.lines().any(|s| s == *l)).collect();
         assert!(keep.len() > 500);
         spirv(&crate::ab::post_text_with(include_str!("post_legacy.wgsl"), false)).unwrap();
+    }
+
+    /// The `postprobe` hook is in the previous post.wgsl (A/B on) and not in the shipping one, and both compile with it.
+    #[test]
+    fn postprobe_hook_is_only_in_the_previous_post() {
+        let leg = include_str!("post_legacy.wgsl");
+        let probed = leg.replacen("    if (p.c.z < 0.5) {\n        // sRGB targets encode on write", "    if ((ab_pc.flags & 1024u) != 0u) { g = g; }\n    if (p.c.z < 0.5) {\n        // sRGB targets encode on write", 1);
+        assert_ne!(probed, leg, "the anchor line moved in post_legacy.wgsl");
+        assert!(!include_str!("post.wgsl").contains("1024u"));
     }
 
     #[test]
