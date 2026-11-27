@@ -369,7 +369,8 @@ impl Renderer {
 
     /// Records the filters from `ldr` into `target`. `aa_ensure` ran with the same plan and size; the post chain left
     /// `ldr` in the sampled layout.
-    pub(super) fn aa_record(&self, cmd: vk::CommandBuffer, target: &Target, plan: Plan) {
+    pub(super) fn aa_record(&self, cmd: vk::CommandBuffer, target: &Target, plan: Plan) -> bool {
+        let mut subs = false;
         let a = self.aa.as_ref().expect("aa_ensure first");
         let t = a.t.as_ref().expect("aa_ensure first");
         let d = &self.device;
@@ -465,8 +466,15 @@ impl Renderer {
                 let (e, wt) = (t.edges.as_ref().unwrap(), t.weights.as_ref().unwrap());
                 barrier(frag, cao, &[to_att(e.image)]);
                 draw(e.view, att, full, "fs_smaa_edge", vk::Format::R8G8_UNORM, t.sets.edge, true, [0.0, 0.0]);
+                if let Some(g) = &self.gprof {
+                    g.mark(d, cmd, 9);
+                }
                 barrier(cao, frag, &[to_read(e.image), to_att(wt.image)]);
                 draw(wt.view, att, full, "fs_smaa_weights", vk::Format::R8G8B8A8_UNORM, t.sets.weights, true, [0.0, 0.0]);
+                if let Some(g) = &self.gprof {
+                    g.mark(d, cmd, 10);
+                    subs = true;
+                }
                 barrier(cao, frag, &[to_read(wt.image)]);
                 if let Some(r) = t.ldr2.as_ref().filter(|_| plan.needs_second()) {
                     barrier(frag, cao, &[to_att(r.image)]);
@@ -482,6 +490,7 @@ impl Renderer {
         if plan.sharpen > 0.0 {
             draw(target.view, target.layout, target.rect, "fs_cas", cf, cas_set, false, tgt_off);
         }
+        subs
     }
 }
 

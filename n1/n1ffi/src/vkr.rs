@@ -2749,6 +2749,9 @@ impl Renderer {
         // Debug bit 17 (131072) turns the pass off for an A/B in one session (B-313).
         let god = if post_on && self.debug_bits & 131072 == 0 { pp.god_fields() } else { None };
         let god_on = god.is_some();
+        if let Some(ab) = self.ab.as_mut() {
+            ab.god_now = god_on;
+        }
         if std::env::var("BOTS_N1_POST_LOG").is_ok_and(|v| v != "0") {
             thread_local!(static LAST: std::cell::Cell<Option<([f32; 4], [f32; 4])>> = const { std::cell::Cell::new(None) });
             if LAST.with(|l| l.replace(god)) != god {
@@ -3787,7 +3790,14 @@ impl Renderer {
             }
             if let Some((img, _)) = aa_ldr {
                 barrier(cao, frag, &[to_read(img)]);
-                self.aa_record(cmd, &tgt, aa_plan);
+                let subs = self.aa_record(cmd, &tgt, aa_plan);
+                if let (Some(g), false) = (&self.gprof, subs) {
+                    g.mark(d, cmd, 9);
+                    g.mark(d, cmd, 10);
+                }
+            } else if let Some(g) = &self.gprof {
+                g.mark(d, cmd, 9);
+                g.mark(d, cmd, 10);
             }
             if let Some(g) = &self.gprof {
                 g.mark(d, cmd, 8);

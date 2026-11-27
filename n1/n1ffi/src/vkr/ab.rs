@@ -21,6 +21,8 @@ pub(super) struct AbState {
     pending: Option<Pending>,
     seq: u32,
     csv_started: bool,
+    /// Set by `record` each frame: the god-rays pass runs in it.
+    pub(super) god_now: bool,
     /// All compared frames: how many, the worst difference, the pixels that differed.
     done: u64,
     worst: f32,
@@ -58,6 +60,8 @@ struct Pending {
     w: u32,
     h: u32,
     draws: usize,
+    /// The god-rays pass ran in this frame (a column of ab.csv, so a run can say how many compared frames had rays).
+    god: bool,
 }
 
 /// What `record` needs for the frame it runs A/B on: the two targets and the push-constant flags of each variant.
@@ -108,6 +112,7 @@ impl AbState {
             pending: None,
             seq: 0,
             csv_started: false,
+            god_now: false,
             done: 0,
             worst: 0.0,
             differ_total: 0,
@@ -245,7 +250,7 @@ impl Renderer {
         let ab = self.ab.as_mut()?;
         ab.layout = Some(layout);
         ab.seq += 1;
-        ab.pending = Some(Pending { serial, seq: ab.seq, frame: ab.frames, w, h, draws });
+        ab.pending = Some(Pending { serial, seq: ab.seq, frame: ab.frames, w, h, draws, god: ab.god_now });
         let t = ab.targets.as_ref()?;
         Some(AbFrame {
             images: [t[0].image, t[1].image],
@@ -414,10 +419,10 @@ fn ab_write(ab: &mut AbState, dir: &std::path::Path, p: &Pending, st: &Stats, la
     let csv = dir.join("ab.csv");
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&csv) {
         if !ab.csv_started {
-            let _ = writeln!(f, "seq,frame,width,height,draws,max,mean,differ,pixels,mean_b");
+            let _ = writeln!(f, "seq,frame,width,height,draws,max,mean,differ,pixels,mean_b,god");
             ab.csv_started = true;
         }
-        let _ = writeln!(f, "{},{},{},{},{},{:.4},{:.8},{},{},{:.3}", p.seq, p.frame, p.w, p.h, p.draws, st.max, st.mean, st.differ, st.pixels, st.mean_b);
+        let _ = writeln!(f, "{},{},{},{},{},{:.4},{:.8},{},{},{:.3},{}", p.seq, p.frame, p.w, p.h, p.draws, st.max, st.mean, st.differ, st.pixels, st.mean_b, u8::from(p.god));
     }
     if st.differ > 0 || ab.cfg.save_all {
         let px = (p.w as usize) * (p.h as usize);
