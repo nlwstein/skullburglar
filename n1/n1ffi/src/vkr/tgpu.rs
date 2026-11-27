@@ -204,10 +204,11 @@ impl Renderer {
         Ok(self.tg.assets.len() as u32 - 1)
     }
 
-    fn tg_make_pipelines(&mut self) -> Result<()> {
+    pub(super) fn tg_make_pipelines(&mut self) -> Result<()> {
         if self.tg.pipes[0] != vk::Pipeline::null() {
             return Ok(());
         }
+        let t0 = std::time::Instant::now();
         unsafe {
             if self.tg.module == vk::ShaderModule::null() {
                 let spv = crate::shaders::spirv(include_str!("tree.wgsl"))?;
@@ -280,9 +281,11 @@ impl Renderer {
                     .dynamic_state(&dy)
                     .layout(self.tg.pipe_layout)
                     .push_next(&mut rendering);
+                // The persisted cache (it used to be null: every boot compiled these two again, in play).
+                let _use = self.store.cache_use.read().unwrap_or_else(|p| p.into_inner());
                 let p = self
                     .device
-                    .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
+                    .create_graphics_pipelines(self.store.cache, &[info], None)
                     .map_err(|(_, e)| anyhow!("tree pipeline {k}: {e}"));
                 for m in vs_own.into_iter().chain(fs_own) {
                     self.device.destroy_shader_module(m, None);
@@ -290,6 +293,7 @@ impl Renderer {
                 self.tg.pipes[k] = p?[0];
             }
         }
+        crate::compile_log::record("tree_pipe", "opaque+masked", t0.elapsed().as_micros() as u64, true);
         Ok(())
     }
 

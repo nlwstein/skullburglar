@@ -1028,6 +1028,17 @@ impl Renderer {
                 r.post_pipe("fs_pause_down", HDR_FORMAT)?;
                 r.post_pipe("fs_pause_blur", HDR_FORMAT)?;
             }
+            // Shader work happens up front: the tree and anti-aliasing pipelines used to be made on the first frame
+            // that drew trees / ran the filters (the tree ones with no pipeline cache at all). BOTS_N1_PREWARM_PIPES=0
+            // leaves them to that frame again.
+            if std::env::var("BOTS_N1_PREWARM_PIPES").map_or(true, |v| v != "0") {
+                if let Err(e) = r.tg_make_pipelines() {
+                    n1log!(log::WARN, "n1ffi: tree pipelines not prewarmed: {e:#}");
+                }
+                if let Err(e) = r.aa_prewarm() {
+                    n1log!(log::WARN, "n1ffi: anti-aliasing pipelines not prewarmed: {e:#}");
+                }
+            }
             Ok(r)
         }
     }
@@ -1564,7 +1575,7 @@ impl Renderer {
                 // pipeline built now too (a worker, not urgent), so the first draw does not wait on the stand-in.
                 let cull = if self.dyn_cull { 0 } else { m.two_sided as u8 };
                 self.store.prewarm_scene_pipe(SceneKey {
-                    shader: id, blend, depth_read_only: c.soft && !blended(blend), skin: false, cull,
+                    shader: id, blend, depth_read_only: crate::store::scene_depth_read_only(c.soft, blend), skin: false, cull,
                 });
                 id
             }
@@ -1732,6 +1743,7 @@ impl Renderer {
         if let Some(&p) = self.post_pipes.get(&k) {
             return Ok(p);
         }
+        let t0 = std::time::Instant::now();
         unsafe {
             let name = std::ffi::CString::new(fs).unwrap();
             let (vs_module, fs_module) = (self.post_stage("vs", leg)?, self.post_stage(fs, leg)?);
@@ -1784,6 +1796,7 @@ impl Renderer {
                 .create_graphics_pipelines(self.store.cache, &[info], None)
                 .map_err(|(_, e)| anyhow!("post pipeline {fs}: {e}"))?[0];
             self.post_pipes.insert(k, p);
+            crate::compile_log::record("post_pipe", &format!("{fs}/{}", out.as_raw()), t0.elapsed().as_micros() as u64, true);
             Ok(p)
         }
     }
@@ -2098,7 +2111,7 @@ impl Renderer {
         SceneKey {
             shader: k.shader,
             blend: k.blend,
-            depth_read_only: k.soft && !blended(k.blend),
+            depth_read_only: crate::store::scene_depth_read_only(k.soft, k.blend),
             skin: k.skin,
             cull: if dyn_cull { 0 } else { k.two_sided as u8 | (k.mirrored as u8) << 1 },
         }
