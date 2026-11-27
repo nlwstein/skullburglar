@@ -15,8 +15,11 @@ int main() {
   CHECK(HostDepthBias(0.0f, 0.25f, 1.0f, 1.0f).slope == 0.25f);
   // A decal piece (guest constant 335.5, no slope): the constant scales, the slope becomes the decal slope.
   CHECK(HostDepthBias(335.5f, 0.0f, 1.0f, 1.0f).constant == 335.5f);
-  CHECK(HostDepthBias(335.5f, 0.0f, kDecalBiasScale, kDecalSlope).constant == 335.5f * 16.0f);
   CHECK(HostDepthBias(335.5f, 0.0f, 16.0f, 1.0f).constant == 335.5f * 16.0f);
+  CHECK(HostDepthBias(335.5f, 0.0f, kDecalBiasScale, kDecalSlope).constant == 335.5f * 32.0f);
+  CHECK(HostDepthBias(335.5f, 0.0f, kDecalBiasScale, kDecalSlope).slope == 4.0f);
+  // The 1.17 / 1.18 defaults stay reachable through the two environment values.
+  CHECK(HostDepthBias(335.5f, 0.0f, 16.0f, 1.0f).slope == 1.0f);
   CHECK(HostDepthBias(335.5f, 0.0f, 1.0f, 1.0f).slope == 1.0f);
   // A game slope above the decal slope wins; below it, the decal slope.
   CHECK(HostDepthBias(335.5f, 3.0f, 1.0f, 1.0f).slope == 3.0f);
@@ -30,8 +33,8 @@ int main() {
   // Constant scale 0 switches the constant off.
   CHECK(HostDepthBias(335.5f, 0.0f, 0.0f, 1.0f).constant == 0.0f);
   // The defaults are what draw.cpp ships (kept here so a change is deliberate).
-  static_assert(kDecalSlope == 1.0f);
-  static_assert(kDecalBiasScale == 16.0f);
+  static_assert(kDecalSlope == 4.0f);
+  static_assert(kDecalBiasScale == 32.0f);
 
   if (failures) return 1;
   std::printf("depth_bias_test: ok\n");
