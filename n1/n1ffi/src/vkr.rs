@@ -77,6 +77,7 @@ const GOD_SKY_DIST: f32 = 5.0e4;
 #[derive(Clone)]
 struct PostSet {
     god: vk::Pipeline,
+    god_mask: vk::Pipeline,
     grade: vk::Pipeline,
     down: vk::Pipeline,
     blur: vk::Pipeline,
@@ -555,6 +556,8 @@ pub struct Renderer {
     pause: crate::pause::PauseCache,
     /// B-313: the god-rays texture, 128x128 like the port's (`GOD_GRID` in post.wgsl), whatever the render size.
     god: Option<Rt>,
+    /// B-414: the sky mask the ray pass reads (128x128, made by `fs_god_mask` each frame the rays run).
+    god_mask: Option<Rt>,
     /// W4: the graded scene (full res), when the level's MaterialEffect grade isn't the identity.
     graded: Option<Rt>,
     /// B-273: a copy of the HDR target taken before the sprite pass, for DestColor particle materials (the QTE ring).
@@ -956,6 +959,7 @@ impl Renderer {
                 pause_rt: None,
                 pause: Default::default(),
                 god: None,
+                god_mask: None,
                 graded: None,
                 destc: None,
                 near: 5.0,
@@ -1010,6 +1014,7 @@ impl Renderer {
             r.post_pipe("fs_comp", color_format)?;
             r.post_pipe("fs_copy", color_format)?;
             r.post_pipe("fs_god", HDR_FORMAT)?;
+            r.post_pipe("fs_god_mask", HDR_FORMAT)?;
             // The post materials' passes too (the damage effect's at the first hit, the gangsta-fire and death ones at
             // their first use): built on the frame that first needs them, they can stall it (a Metal compile under
             // MoltenVK). Each runs as a middle pass (HDR) or the last one (the target's format).
@@ -1700,6 +1705,8 @@ impl Renderer {
     /// Every post pipeline a frame can use, from the shipping post module or (`leg`) the previous one.
     fn post_set(&mut self, leg: bool, pre: Option<&'static str>, pause: bool, mats: &[&'static str]) -> Result<PostSet> {
         let cf = self.color_format;
+        // The mask pass is only in the shipping post.wgsl; the previous one (A/B feature `post`) runs it too, its rays ignore the result.
+        let god_mask = self.post_pipe_v("fs_god_mask", HDR_FORMAT, false)?;
         let mut p = |fs: &'static str, f: vk::Format| self.post_pipe_v(fs, f, leg);
         let god = p("fs_god", HDR_FORMAT)?;
         let (grade, down, blur) = (p("fs_grade", HDR_FORMAT)?, p("fs_down", HDR_FORMAT)?, p("fs_blur", HDR_FORMAT)?);
@@ -1716,7 +1723,7 @@ impl Renderer {
                 out.push(p(fs, if j + 1 == mats.len() { cf } else { HDR_FORMAT })?);
             }
         }
-        Ok(PostSet { god, grade, down, blur, comp, copy, pre, pause, mats: out })
+        Ok(PostSet { god, god_mask, grade, down, blur, comp, copy, pre, pause, mats: out })
     }
 
     /// `leg`: the pipeline of the previous post.wgsl, for the A/B feature `post` (only built when the A/B tool is on).
@@ -1810,7 +1817,7 @@ impl Renderer {
         if self.hdr.as_ref().is_some_and(|r| r.width == w && r.height == h) {
             return Ok(());
         }
-        for r in [self.hdr.take(), self.depth.take(), self.graded.take(), self.destc.take(), self.god.take()].into_iter().flatten() {
+        for r in [self.hdr.take(), self.depth.take(), self.graded.take(), self.destc.take(), self.god.take(), self.god_mask.take()].into_iter().flatten() {
             self.defer(Garbage::Image(r.image, r.view, r.alloc));
         }
         if let Some(b) = self.bloom.take() {
@@ -1831,6 +1838,7 @@ impl Renderer {
         self.bloom = Some([a, b, c]);
         self.pause_rt = Some(self.rt(HDR_FORMAT, bw, bh, false, "n1 pause blur")?);
         self.god = Some(self.rt(HDR_FORMAT, GOD_GRID, GOD_GRID, false, "n1 god rays")?);
+        self.god_mask = Some(self.rt(HDR_FORMAT, GOD_GRID, GOD_GRID, false, "n1 god mask")?);
         self.graded = Some(self.rt(HDR_FORMAT, w, h, false, "n1 graded")?);
         self.destc = Some(self.rt(HDR_FORMAT, w, h, false, "n1 dest color")?);
         if let Some(m) = self.outline_mask.take() {
@@ -2954,6 +2962,7 @@ impl Renderer {
             let [q0, q1, q2] = self.bloom.as_ref().map(|x| [x[0].view, x[1].view, x[2].view]).unwrap();
             let bloom_b = if bloom_blur_on { q2 } else { q0 };
             let gv = self.god.as_ref().unwrap().view;
+            let gmv = self.god_mask.as_ref().unwrap().view;
             let mut pause_src = None;
             let mut srcs = vec![
                 (hdr, q0, q0),   // grade
@@ -3039,7 +3048,7 @@ impl Renderer {
                 }];
                 let set = s.post_sets[k];
                 let i5 = img(self.outline_mask.as_ref().map_or(*src, |m| m.view));
-                let i6 = img(if k == POST_PASSES - 1 { q0 } else { gv });
+                let i6 = img(if k == POST_PASSES - 1 { gmv } else { gv });
                 let writes = [
                     vk::WriteDescriptorSet::default()
                         .dst_set(set)
@@ -3203,7 +3212,7 @@ impl Renderer {
         };
         // Feature `post`: this variant draws with the previous post.wgsl's pipelines.
         let leg_arm = ab_flags.is_some_and(|f| f & crate::ab::POST_LEGACY != 0) && set_leg.is_some();
-        let PostSet { god: p_god, grade: p_grade, down: p_down, blur: p_blur, comp: p_comp, copy: p_copy, pre: p_pre, pause: p_pause, mats: p_mats } =
+        let PostSet { god: p_god, god_mask: p_god_mask, grade: p_grade, down: p_down, blur: p_blur, comp: p_comp, copy: p_copy, pre: p_pre, pause: p_pause, mats: p_mats } =
             if leg_arm { set_leg.clone().unwrap() } else { set_n.clone() };
         let tgt = match (&ab_frame, which) {
             (Some(f), Some(i)) => Target { view: f.views[i], layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, ..*target },
@@ -3709,6 +3718,11 @@ impl Renderer {
                     // layout even when the pass didn't run, as the bloom targets above).
                     let god_rt = self.god.as_ref().unwrap();
                     if god_on {
+                        // B-414: the sky mask first (one depth fetch per texel), then the rays read it.
+                        let gm = self.god_mask.as_ref().unwrap();
+                        barrier(frag, cao, &[to_att(gm.image)]);
+                        pass(gm.view, catt_layout, full(GOD_GRID, GOD_GRID), p_god_mask, ps[POST_PASSES - 1]);
+                        barrier(cao, frag, &[to_read(gm.image)]);
                         barrier(frag, cao, &[to_att(god_rt.image)]);
                         pass(god_rt.view, catt_layout, full(GOD_GRID, GOD_GRID), p_god, ps[POST_PASSES - 1]);
                         barrier(cao, frag, &[to_read(god_rt.image)]);
@@ -4353,7 +4367,7 @@ impl Drop for Renderer {
                     self.free(Garbage::Image(t.image, t.view, a));
                 }
             }
-            let mut rts: Vec<Rt> = [self.hdr.take(), self.depth.take(), self.graded.take(), self.destc.take(), self.outline_mask.take(), self.god.take()].into_iter().flatten().collect();
+            let mut rts: Vec<Rt> = [self.hdr.take(), self.depth.take(), self.graded.take(), self.destc.take(), self.outline_mask.take(), self.god.take(), self.god_mask.take()].into_iter().flatten().collect();
             if let Some(b) = self.bloom.take() {
                 rts.extend(b);
             }

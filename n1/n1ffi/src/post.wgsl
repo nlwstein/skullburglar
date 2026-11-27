@@ -285,15 +285,28 @@ fn god_texel(t: vec2<i32>) -> f32 {
     return select(0.0, 1.0, god_sky(px));
 }
 
+// B-414: the mask is made once per frame (fs_god_mask, one depth fetch per texel) into a 128x128 target that the ray pass reads
+// through `gods` (binding 8: the ray pass doesn't read the rays texture). Before, each of the 80 steps of every ray pixel
+// fetched four depths at full resolution and ran the sky test (a division) on each. The values are the same 0 or 1.
+fn god_texel_m(t: vec2<i32>) -> f32 {
+    return textureLoad(gods, clamp(t, vec2<i32>(0), vec2<i32>(GOD_GRID - 1)), 0).r;
+}
+
 // The mask as the port's bilinear fetch sees it (clamp to edge).
 fn god_mask(uv: vec2<f32>) -> f32 {
     let f = uv * f32(GOD_GRID) - 0.5;
     let i = floor(f);
     let fr = f - i;
     let t = vec2<i32>(i);
-    let a = mix(god_texel(t), god_texel(t + vec2<i32>(1, 0)), fr.x);
-    let b = mix(god_texel(t + vec2<i32>(0, 1)), god_texel(t + vec2<i32>(1, 1)), fr.x);
+    let a = mix(god_texel_m(t), god_texel_m(t + vec2<i32>(1, 0)), fr.x);
+    let b = mix(god_texel_m(t + vec2<i32>(0, 1)), god_texel_m(t + vec2<i32>(1, 1)), fr.x);
     return mix(a, b, fr.y);
+}
+
+// The sky mask, one texel per pixel of the 128x128 target (r: 1 on sky, 0 on geometry).
+@fragment
+fn fs_god_mask(i: VOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(god_texel(vec2<i32>(i.pos.xy)), 0.0, 0.0, 1.0);
 }
 
 @fragment
