@@ -65,6 +65,7 @@ A feature is a bit in a push constant the shaders read. A renders with the bit s
 | `lsb` | self-test: adds one 8-bit step to the red output | nothing |
 | `pwl189` | !189's branch-free decode (before the bit-exact change), to time it against the shipping one: `BOTS_N1_AB=pwl189` is !189 against shipping, `BOTS_N1_AB=pwl BOTS_N1_AB_B=pwl189` is 1.18.0's decode against !189's |
 | `alu` | timing self-test: A adds a dependent ALU loop of `BOTS_N1_AB_ALU` iterations to every decode call (the picture is unchanged); a known cost the timing must find |
+| `post` | pipeline-level: A draws the post chain with the previous `post.wgsl` (`n1/n1ffi/src/post_legacy.wgsl`, a frozen copy: native-HDR code in the SDR shaders, the old god-ray and composite code) through its own pipelines, B with the shipping one. Proves a post.wgsl rewrite identical on the same frame; the legacy copy is refreshed (or the feature retired) when the rewrite is merged. A/B timing (`BOTS_N1_AB_TIME`) still can't see register pressure: both arms are separately compiled here, so for this feature it can |
 | `pwlprobe` | self-test: the old decode plus 4/1023, to show the hook reaches the scene's pixels | nothing |
 
 **Self-tests:** `BOTS_N1_AB=none` must report exactly 0 differing pixels, and `lsb` must report `max 1` with a differing

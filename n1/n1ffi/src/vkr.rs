@@ -73,6 +73,30 @@ const GOD_GRID: u32 = 128;
 /// out the sky dome; n1's depth has it, so the dome (and nothing nearer) must fall past this.
 const GOD_SKY_DIST: f32 = 5.0e4;
 
+/// The post pipelines one frame draws with (`Renderer::post_set`).
+#[derive(Clone)]
+struct PostSet {
+    god: vk::Pipeline,
+    grade: vk::Pipeline,
+    down: vk::Pipeline,
+    blur: vk::Pipeline,
+    comp: vk::Pipeline,
+    copy: vk::Pipeline,
+    pre: Option<vk::Pipeline>,
+    pause: Option<(vk::Pipeline, vk::Pipeline)>,
+    mats: Vec<vk::Pipeline>,
+}
+
+/// The previous post.wgsl as a module, only with the A/B tool on (feature `post`).
+fn post_leg_module(device: &ash::Device) -> Result<Option<(vk::ShaderModule, Vec<u32>)>> {
+    if !crate::ab::enabled() {
+        return Ok(None);
+    }
+    let words = shaders::spirv_caps(&shaders::post_legacy_source(), shaders::ab_caps())?;
+    let m = unsafe { device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)? };
+    Ok(Some((m, if shaders::split_entries() { words } else { Vec::new() })))
+}
+
 /// B-320: the composites' ray fade as shader constants [near, 1 / (far - near), 0, 0] (see `godref::depth_fade`).
 /// `BOTS_N1_GODFADE=near,far` (UE units) sets it, `BOTS_N1_GODFADE=0` turns it off (the game's own composite).
 fn god_fade() -> [f32; 4] {
@@ -489,7 +513,10 @@ pub struct Renderer {
     /// B-332: on `split_entries` GPUs, the post module's words and a module per entry point.
     post_words: Vec<u32>,
     post_split: HashMap<&'static str, vk::ShaderModule>,
-    post_pipes: HashMap<(&'static str, i32), vk::Pipeline>,
+    /// Same-frame A/B feature `post`: the previous post.wgsl (`post_legacy.wgsl`) as its own module, its pipelines and entry modules.
+    post_leg: Option<(vk::ShaderModule, Vec<u32>)>,
+    post_split_leg: HashMap<&'static str, vk::ShaderModule>,
+    post_pipes: HashMap<(&'static str, i32, bool), vk::Pipeline>,
     /// B-266: post-material textures by path: (texture id, takes Xenos's gamma curve in the shader).
     post_tex: HashMap<String, (u32, bool)>,
     /// B-292: the damage render target's picture (the host reads the game's `DamageEffectTexture` back): texture id,
@@ -855,6 +882,7 @@ impl Renderer {
                 None
             };
             let gprof = gprof::GpuProf::from_env(&instance, &device, ctx.physical_device);
+            let post_leg = post_leg_module(&device)?;
             let ab_state = ab::AbState::from_env(&instance, &device, ctx.physical_device);
             let mut r = Self {
                 laps: Laps::new(),
@@ -893,6 +921,8 @@ impl Renderer {
                 post_module,
                 post_words: if shaders::split_entries() { words } else { Vec::new() },
                 post_split: HashMap::new(),
+                post_leg,
+                post_split_leg: HashMap::new(),
                 post_pipes: HashMap::new(),
                 post_tex: HashMap::new(),
                 damage_tex: None,
@@ -1647,25 +1677,57 @@ impl Renderer {
     }
 
     /// The post module for one entry point (B-332: its own copy on `split_entries` GPUs).
-    fn post_stage(&mut self, entry: &'static str) -> Result<vk::ShaderModule> {
-        if let Some(&m) = self.post_split.get(entry) {
+    fn post_stage(&mut self, entry: &'static str, leg: bool) -> Result<vk::ShaderModule> {
+        let split = if leg { &self.post_split_leg } else { &self.post_split };
+        if let Some(&m) = split.get(entry) {
             return Ok(m);
         }
-        let (m, own) = unsafe { shaders::stage_module(&self.device, self.post_module, &self.post_words, entry)? };
+        let (module, words) = match (&self.post_leg, leg) {
+            (Some((m, w)), true) => (*m, w.as_slice()),
+            _ => (self.post_module, self.post_words.as_slice()),
+        };
+        let (m, own) = unsafe { shaders::stage_module(&self.device, module, words, entry)? };
         if let Some(own) = own {
-            self.post_split.insert(entry, own);
+            if leg { self.post_split_leg.insert(entry, own) } else { self.post_split.insert(entry, own) };
         }
         Ok(m)
     }
 
     fn post_pipe(&mut self, fs: &'static str, out: vk::Format) -> Result<vk::Pipeline> {
-        let k = (fs, out.as_raw());
+        self.post_pipe_v(fs, out, false)
+    }
+
+    /// Every post pipeline a frame can use, from the shipping post module or (`leg`) the previous one.
+    fn post_set(&mut self, leg: bool, pre: Option<&'static str>, pause: bool, mats: &[&'static str]) -> Result<PostSet> {
+        let cf = self.color_format;
+        let mut p = |fs: &'static str, f: vk::Format| self.post_pipe_v(fs, f, leg);
+        let god = p("fs_god", HDR_FORMAT)?;
+        let (grade, down, blur) = (p("fs_grade", HDR_FORMAT)?, p("fs_down", HDR_FORMAT)?, p("fs_blur", HDR_FORMAT)?);
+        let (comp, copy) = (p("fs_comp", cf)?, p("fs_copy", cf)?);
+        let pre = match pre {
+            Some(m) => Some(p(m, HDR_FORMAT)?),
+            None => None,
+        };
+        let pause = if pause { Some((p("fs_pause_down", HDR_FORMAT)?, p("fs_pause_blur", HDR_FORMAT)?)) } else { None };
+        let mut out = Vec::with_capacity(mats.len() + 1);
+        if !mats.is_empty() {
+            out.push(p("fs_comp_lin", HDR_FORMAT)?);
+            for (j, fs) in mats.iter().enumerate() {
+                out.push(p(fs, if j + 1 == mats.len() { cf } else { HDR_FORMAT })?);
+            }
+        }
+        Ok(PostSet { god, grade, down, blur, comp, copy, pre, pause, mats: out })
+    }
+
+    /// `leg`: the pipeline of the previous post.wgsl, for the A/B feature `post` (only built when the A/B tool is on).
+    fn post_pipe_v(&mut self, fs: &'static str, out: vk::Format, leg: bool) -> Result<vk::Pipeline> {
+        let k = (fs, out.as_raw(), leg);
         if let Some(&p) = self.post_pipes.get(&k) {
             return Ok(p);
         }
         unsafe {
             let name = std::ffi::CString::new(fs).unwrap();
-            let (vs_module, fs_module) = (self.post_stage("vs")?, self.post_stage(fs)?);
+            let (vs_module, fs_module) = (self.post_stage("vs", leg)?, self.post_stage(fs, leg)?);
             let stages = [
                 vk::PipelineShaderStageCreateInfo::default()
                     .stage(vk::ShaderStageFlags::VERTEX)
@@ -3053,31 +3115,12 @@ impl Renderer {
         self.pg_resolve(&pf);
         self.tg_pipelines(&tf);
         self.laps.lap("pg_tg_pipes");
-        let p_god = self.post_pipe("fs_god", HDR_FORMAT)?;
-        let (p_grade, p_down, p_blur, p_comp, p_copy) = (
-            self.post_pipe("fs_grade", HDR_FORMAT)?,
-            self.post_pipe("fs_down", HDR_FORMAT)?,
-            self.post_pipe("fs_blur", HDR_FORMAT)?,
-            self.post_pipe("fs_comp", self.color_format)?,
-            self.post_pipe("fs_copy", self.color_format)?,
-        );
-        let p_pre = match &damage_pre {
-            Some(m) => Some(self.post_pipe(m.0, HDR_FORMAT)?),
-            None => None,
-        };
-        let p_pause = if pause_step == crate::pause::PauseStep::Fill {
-            Some((self.post_pipe("fs_pause_down", HDR_FORMAT)?, self.post_pipe("fs_pause_blur", HDR_FORMAT)?))
-        } else {
-            None
-        };
-        let mut p_mats = Vec::with_capacity(mats.len());
-        if !mats.is_empty() {
-            p_mats.push(self.post_pipe("fs_comp_lin", HDR_FORMAT)?);
-            for (j, (fs, ..)) in mats.iter().enumerate() {
-                let fmt = if j + 1 == mats.len() { self.color_format } else { HDR_FORMAT };
-                p_mats.push(self.post_pipe(fs, fmt)?);
-            }
-        }
+        let pre_fs = damage_pre.as_ref().map(|m| m.0);
+        let mat_fs: Vec<&'static str> = mats.iter().map(|m| m.0).collect();
+        let pause_fill = pause_step == crate::pause::PauseStep::Fill;
+        let set_n = self.post_set(false, pre_fs, pause_fill, &mat_fs)?;
+        // The A/B feature `post` runs variant A with the previous post.wgsl's pipelines.
+        let set_leg = if self.post_leg.is_some() { Some(self.post_set(true, pre_fs, pause_fill, &mat_fs)?) } else { None };
         self.laps.lap("post_pipe");
 
         // B-189: shadow depth passes (before the scene pass samples them).
@@ -3158,6 +3201,10 @@ impl Renderer {
             (Some(f), Some(i)) => Some(f.flags[i]),
             _ => ab_push.then(|| crate::ab::config().map_or(0, |c| c.flags_ship)),
         };
+        // Feature `post`: this variant draws with the previous post.wgsl's pipelines.
+        let leg_arm = ab_flags.is_some_and(|f| f & crate::ab::POST_LEGACY != 0) && set_leg.is_some();
+        let PostSet { god: p_god, grade: p_grade, down: p_down, blur: p_blur, comp: p_comp, copy: p_copy, pre: p_pre, pause: p_pause, mats: p_mats } =
+            if leg_arm { set_leg.clone().unwrap() } else { set_n.clone() };
         let tgt = match (&ab_frame, which) {
             (Some(f), Some(i)) => Target { view: f.views[i], layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, ..*target },
             _ => *target,
@@ -4342,7 +4389,10 @@ impl Drop for Renderer {
                 self.device.destroy_descriptor_set_layout(l, None);
             }
             self.device.destroy_shader_module(self.post_module, None);
-            for (_, m) in self.post_split.drain() {
+            if let Some((m, _)) = self.post_leg.take() {
+                self.device.destroy_shader_module(m, None);
+            }
+            for (_, m) in self.post_split.drain().chain(self.post_split_leg.drain()) {
                 self.device.destroy_shader_module(m, None);
             }
             self.shadows.destroy(&self.device, self.allocator.as_mut().unwrap());

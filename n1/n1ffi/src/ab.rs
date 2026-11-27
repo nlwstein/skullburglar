@@ -49,7 +49,13 @@ pub const FEATURES: &[(&str, u32)] = &[
     // gate2 timing self-test: A adds a known ALU loop (`BOTS_N1_AB_ALU` iterations per decode call) to the decode, output
     // unchanged. The loop count rides in the flag word's upper 16 bits (`ALU_SHIFT`).
     ("alu", 128),
+    // t720e: A draws the post chain with the previous post.wgsl (`post_legacy.wgsl`: native HDR code in the SDR shaders, the
+    // god-ray pass before its rewrite) through its own pipelines; B is the shipping post.wgsl. Pipeline-level, not a hook.
+    ("post", 256),
 ];
+
+/// Flag bit of feature `post`: the variant uses the previous post.wgsl's pipelines.
+pub const POST_LEGACY: u32 = 256;
 
 /// The ALU loop count of feature `alu` sits in the flag word above this bit.
 pub const ALU_SHIFT: u32 = 16;

@@ -42,7 +42,9 @@ struct P {
 @group(0) @binding(6) var wrap: sampler;   // repeat addressing, for post-material textures
 @group(0) @binding(7) var omask: texture_2d<f32>;   // B-277(e): enemy outline mask (R8), read when taps[5].w > 0
 @group(0) @binding(8) var gods: texture_2d<f32>;    // B-307: god-rays texture (128x128), read when taps[4].w > 0
+{{HDR_BEGIN}}
 @group(0) @binding(9) var<uniform> gamma_ramp: array<vec4<u32>, 64>;
+{{HDR_END}}
 
 {{AB_POST_DECLS}}
 struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
@@ -163,6 +165,7 @@ fn with_outline(c: vec3<f32>, frag: vec4<f32>) -> vec3<f32> {
     return mix(c, OUTLINE_COLOR, t);
 }
 
+{{HDR_BEGIN}}
 fn ramp_entry(i: u32, shift: u32) -> f32 {
     return f32((gamma_ramp[i >> 2u][i & 3u] >> shift) & 1023u) / 1023.0;
 }
@@ -191,9 +194,11 @@ fn ramp_inverse(v: f32, shift: u32) -> f32 {
     let b = ramp_entry(hi, shift);
     return (f32(lo) + (v - a) / (b - a)) / 255.0;
 }
+{{HDR_END}}
 
 fn gamma_out(c0: vec3<f32>, frag: vec4<f32>) -> vec4<f32> {
     let c = with_outline(c0, frag);
+    {{HDR_BEGIN}}
     if (p.comp.w > 1.5) {
         // Apply the scene controls before HUD.
         // 2.2 output kept for HUD blending.
@@ -229,6 +234,7 @@ fn gamma_out(c0: vec3<f32>, frag: vec4<f32>) -> vec4<f32> {
         // Keeping neg values needed for black level compensation.
         return vec4<f32>(g, 1.0);
     }
+    {{HDR_END}}
     var g = pow(clamp(c * p.taps[4].xyz, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(p.comp.y));
     g = min(g + p.taps[5].xyz, vec3<f32>(1.0));
     {{AB_POST_OUT}}
@@ -550,7 +556,7 @@ fn fs_scope(i: VOut) -> @location(0) vec4<f32> {
     let lines = clamp(1.0 + 4.0 * (ret.r - 0.5), clamp(r2, 0.0, 1.0), 1.0);
     let lit = vec3<f32>(ret.g);
     let scoped = max(lens * lines, lit);
-    return mat_out(select(min(scoped, vec3<f32>(1.0)), scoped, p.hdr.x > 0.0), i.pos);
+    return mat_out(select(min(scoped, vec3<f32>(1.0)), scoped, {{HDR_NOCLAMP}}), i.pos);
 }
 
 @fragment
@@ -585,7 +591,7 @@ fn fs_death(i: VOut) -> @location(0) vec4<f32> {
     let d = desat(s, clamp(k, 0.0, 0.8), vec3<f32>(0.3, 0.59, 0.11));
     let out_max = 1.0 - 2.0 * clamp(k - 0.5, 0.0, 1.0);
     let dead = max(d, vec3<f32>(0.0));
-    return mat_out(select(min(dead, vec3<f32>(1.0)), dead, p.hdr.x > 0.0) * out_max, i.pos);
+    return mat_out(select(min(dead, vec3<f32>(1.0)), dead, {{HDR_NOCLAMP}}) * out_max, i.pos);
 }
 
 // ---- B-345 (#32): the stylized counter-kill ("Merk You Space"), FX_MerkYouSpaceRescource. Decoded node by node from
