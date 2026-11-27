@@ -3790,7 +3790,14 @@ impl Renderer {
             }
             if let Some((img, _)) = aa_ldr {
                 barrier(cao, frag, &[to_read(img)]);
-                self.aa_record(cmd, &tgt, aa_plan);
+                let subs = self.aa_record(cmd, &tgt, aa_plan);
+                if let (Some(g), false) = (&self.gprof, subs) {
+                    g.mark(d, cmd, 9);
+                    g.mark(d, cmd, 10);
+                }
+            } else if let Some(g) = &self.gprof {
+                g.mark(d, cmd, 9);
+                g.mark(d, cmd, 10);
             }
             if let Some(g) = &self.gprof {
                 g.mark(d, cmd, 8);
