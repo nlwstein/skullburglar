@@ -916,7 +916,6 @@ void LauncherMenu::ProgressRow(float fraction, const std::string& overlay, float
 // One setting: its name on the left, its control on the right.
 void LauncherMenu::SettingRow(Setting& s, const std::vector<Setting>& all, Intent& in, float width, bool disabled,
                               const char* disabled_note) {
-  (void)all;
   const bool editable = !s.locked && !disabled;
   const float ctrl_w = std::clamp(width * 0.44f, S(180), S(380));
   const float label_w = width - ctrl_w - S(48);
@@ -1008,7 +1007,16 @@ void LauncherMenu::SettingRow(Setting& s, const std::vector<Setting>& all, Inten
     };
     arrow(cmin.x + aw * 0.5f, -1, can_left);
     arrow(cmax.x - aw * 0.5f, 1, can_right);
-    const std::string shown = ValueLabel(s, s.value);
+    std::string shown = ValueLabel(s, s.value);
+    if (s.cvar == "render_scale" && at >= 0) {
+      const auto aspect = std::find_if(all.begin(), all.end(), [](const Setting& v) { return v.cvar == "aspect_ratio"; });
+      const size_t split = shown.find(" / ");
+      if (aspect != all.end() && split != std::string::npos) {
+        if (aspect->value == "16:10") shown.erase(0, split + 3);
+        else if (aspect->value == "16:9") shown.erase(split);
+        else if (aspect->value != "auto") shown = s.value + "x";
+      }
+    }
     const float text_w = (cmax.x - cmin.x) - 2 * aw;
     FontRole role = FontRole::kBody;
     if (Measure(role, shown).x > text_w) role = FontRole::kSmall;

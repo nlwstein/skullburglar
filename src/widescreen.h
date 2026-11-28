@@ -4,6 +4,7 @@
 // field of view and sees more at the sides (Hor+), and constrained-aspect cameras use the full frame. Most UI is laid out
 // in fractions of the screen and stretches; the Music Player, laid out in 720-line pixels, is drawn scaled down to fit
 // (game_hooks.cpp easel_fit). Pre-rendered movies (the story cutscenes) stay 16:9, pillarboxed. Native renderer only.
+// At 16:10 the back buffer is 1280x800 and the player camera keeps its vertical field of view.
 #pragma once
 
 #include <cstdint>
@@ -21,7 +22,7 @@ namespace bots {
 // The window whose shape --aspect_ratio=auto follows. Set once the window exists (OnPostSetup).
 void SetWidescreenWindow(rex::ui::Window* window);
 
-// The back buffer's height in guest pixels: 720, or less with a wider aspect ratio. Fixed by the time the game
+// The back buffer's height in guest pixels: 720, 800 at 16:10, or less with a wider aspect ratio. Fixed by the time the game
 // creates its device (the first call decides it); reading it earlier decides it from the window as it is then.
 uint32_t GuestHeight();
 

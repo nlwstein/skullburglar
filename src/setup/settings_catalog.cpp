@@ -19,8 +19,9 @@ std::vector<Setting> SettingsCatalog() {
   add(LauncherPage::kGraphics, "Display", {"fullscreen", "", "Fullscreen", "F11 toggles it in game.", {}});
   add(LauncherPage::kGraphics, "Display", {"aspect_ratio", "", "Aspect ratio",
                "Wider than 16:9 fills an ultrawide screen and shows more at the sides; the HUD and menus stretch. "
-               "Automatic matches the screen in fullscreen, or the window.",
-               {{"16:9", "16:9 (original)"}, {"auto", "Automatic"}, {"21:9", "21:9"}, {"32:9", "32:9"}}});
+               "16:10 fills a 16:10 display. Automatic matches the screen in fullscreen, or the window.",
+               {{"16:9", "16:9 (original)"}, {"auto", "Automatic"}, {"16:10", "16:10"},
+                {"21:9", "21:9"}, {"32:9", "32:9"}}});
   add(LauncherPage::kGraphics, "Display", {"fov_offset", "", "Field of view",
                "Degrees added to the game's horizontal view. 0 is as shipped; more shows more of the scene and makes "
                "things look smaller. The aiming zoom and scopes widen in the same proportion; cutscenes and vehicle "
@@ -29,10 +30,11 @@ std::vector<Setting> SettingsCatalog() {
   s.back().slider_min = 0, s.back().slider_max = 40, s.back().slider_linear = true, s.back().slider_format = "+%.0f degrees";
   // Page Graphics: Image quality
   add(LauncherPage::kGraphics, "Image quality", {"render_scale", "", "Render resolution",
-               "Higher is sharper and costs GPU time; lower is faster on weak GPUs. Automatic is 720p, or 67% on "
-               "Intel graphics.",
-               {{"auto", "Automatic"}, {"3", "4K  (2160p)"}, {"2", "1440p"}, {"1.5", "1080p"},
-                {"1.25", "900p"}, {"1", "720p  (original)"}, {"0.75", "75%"}, {"0.667", "67%"}, {"0.5", "50%"}}});
+               "Higher is sharper and costs GPU time; lower is faster on weak GPUs. Automatic is 100%, or 67% on "
+               "Intel graphics. With Automatic aspect ratio, resolutions are shown as 16:9 / 16:10.",
+               {{"auto", "Automatic"}, {"3", "4K  (2160p) / 3840x2400"}, {"2.25", "1620p / 2880x1800"},
+                {"2", "1440p / 2560x1600"}, {"1.5", "1080p / 1920x1200"}, {"1.25", "900p / 1600x1000"},
+                {"1", "720p  (original) / 1280x800"}, {"0.75", "75%"}, {"0.667", "67%"}, {"0.5", "50%"}}});
   add(LauncherPage::kGraphics, "Image quality", {"msaa", "", "Multisampling (restart required)",
                "MSAA smooths geometry edges. SGSSAA also shades cutouts, textures and lighting per sample. "
                "Requires the new renderer.",
