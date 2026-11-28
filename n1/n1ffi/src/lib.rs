@@ -12,7 +12,9 @@
 //! All entry points may be called from any thread; they serialise on one mutex (handle lookups are cheap; the host
 //! should cache handles per component).
 
+pub mod ab;
 pub mod bcdec;
+pub mod compile_log;
 pub mod decals;
 pub mod godref;
 pub mod light;
@@ -496,7 +498,10 @@ impl Inner {
         out.upload_bytes = rc.upload_bytes;
         out.textures_added = rc.textures_added;
         out.meshes_added = rc.meshes_added;
-        out.preload_pending = self.preload_pending();
+        // Shader work happens up front: the level-start hold also waits for the pipelines the level's materials asked
+        // for (they were queued as the materials arrived), so play does not begin on stand-ins. The hold has its own
+        // time limit. BOTS_N1_HOLD_COMPILES=0: the hold waits for loads only, as before.
+        out.preload_pending = self.preload_pending() + hold_compiles(&self.renderer.store);
         out.copies_pending = copies;
         out.staging_bytes = staging;
         out.preload_scanning = self.preload.scanning.load(Relaxed);
@@ -723,6 +728,8 @@ pub unsafe extern "C" fn n1_create(init: *const N1Init) -> *mut N1Renderer {
             physical_device: init.physical_device,
             device: init.device,
         };
+        // The post module is compiled for the output kind (HDR code in the shaders only for native HDR).
+        crate::shaders::set_post_hdr(init.hdr != 0);
         let mut renderer = unsafe {
             Renderer::new_with_msaa(&ctx, init.color_format, Some(cache.to_path_buf()), init.msaa, init.sgssaa != 0)?
         };
@@ -1658,6 +1665,7 @@ pub unsafe extern "C" fn n1_record(
         set_error("null target or camera");
         return -1;
     };
+    compile_log::scene_frame();
     let inst: &[Instance] = if count == 0 || instances.is_null() {
         &[]
     } else {
@@ -1923,5 +1931,15 @@ mod grade_file_tests {
         std::fs::write(&file, "g0\nPkg.Mat\nnone\n").unwrap();
         assert_eq!(read_grade_file(&file, "Pkg.Mat"), None, "another version is not used");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Compile tasks the level-start hold should wait for: the store's queue, unless `BOTS_N1_HOLD_COMPILES=0`.
+fn hold_compiles(store: &store::Store) -> u32 {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var("BOTS_N1_HOLD_COMPILES").map_or(true, |v| v != "0")) {
+        store.backlog() as u32
+    } else {
+        0
     }
 }

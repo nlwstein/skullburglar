@@ -211,9 +211,11 @@ fn run_gpu(gpu: &Gpu, cases: &[(&Mask, &Params)], scale: u32) -> Vec<Vec<[f32; 3
         let dsls = [dsl];
         let layout = d.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&dsls), None).unwrap();
         let out_fmt = vk::Format::R32G32B32A32_SFLOAT;
+        let mask_fmt = vk::Format::R16G16B16A16_SFLOAT;
+        let mk_pipe = |entry: &CStr, fmt: vk::Format| {
         let stages = [
             vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(module).name(c"vs"),
-            vk::PipelineShaderStageCreateInfo::default().stage(fr).module(module).name(c"fs_god"),
+            vk::PipelineShaderStageCreateInfo::default().stage(fr).module(module).name(entry),
         ];
         let vi = vk::PipelineVertexInputStateCreateInfo::default();
         let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
@@ -228,7 +230,7 @@ fn run_gpu(gpu: &Gpu, cases: &[(&Mask, &Params)], scale: u32) -> Vec<Vec<[f32; 3
         let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&att);
         let dyns = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dy = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyns);
-        let fmts = [out_fmt];
+        let fmts = [fmt];
         let mut rendering = vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&fmts);
         let pinfo = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
@@ -242,7 +244,10 @@ fn run_gpu(gpu: &Gpu, cases: &[(&Mask, &Params)], scale: u32) -> Vec<Vec<[f32; 3
             .dynamic_state(&dy)
             .layout(layout)
             .push_next(&mut rendering);
-        let pipe = d.create_graphics_pipelines(vk::PipelineCache::null(), &[pinfo], None).map_err(|e| e.1).unwrap()[0];
+        d.create_graphics_pipelines(vk::PipelineCache::null(), &[pinfo], None).map_err(|e| e.1).unwrap()[0]
+        };
+        let pipe = mk_pipe(c"fs_god", out_fmt);
+        let mask_pipe = mk_pipe(c"fs_god_mask", mask_fmt);
 
         let smp = d
             .create_sampler(
@@ -270,6 +275,14 @@ fn run_gpu(gpu: &Gpu, cases: &[(&Mask, &Params)], scale: u32) -> Vec<Vec<[f32; 3
             vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
             vk::ImageAspectFlags::COLOR,
         );
+        // B-414: the sky mask the ray pass reads at binding 8, made by fs_god_mask from the depth texture.
+        let maskimg = gpu.image(
+            mask_fmt,
+            GRID as u32,
+            GRID as u32,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            vk::ImageAspectFlags::COLOR,
+        );
         let target = gpu.image(
             out_fmt,
             GRID as u32,
@@ -295,7 +308,7 @@ fn run_gpu(gpu: &Gpu, cases: &[(&Mask, &Params)], scale: u32) -> Vec<Vec<[f32; 3
         let ub = [vk::DescriptorBufferInfo { buffer: ubo.buf, offset: 0, range: POST_BYTES }];
         let sm = [vk::DescriptorImageInfo { sampler: smp, image_view: vk::ImageView::null(), image_layout: vk::ImageLayout::UNDEFINED }];
         let img = |v| [vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: v, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
-        let (di, du) = (img(dummy.view), [vk::DescriptorImageInfo {
+        let (di, mi, du) = (img(dummy.view), img(maskimg.view), [vk::DescriptorImageInfo {
             sampler: vk::Sampler::null(),
             image_view: depth.view,
             image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
@@ -312,7 +325,7 @@ fn run_gpu(gpu: &Gpu, cases: &[(&Mask, &Params)], scale: u32) -> Vec<Vec<[f32; 3
             wimg(set, 4, &di),
             wimg(set, 5, &du),
             wimg(set, 7, &di),
-            wimg(set, 8, &di),
+            wimg(set, 8, &mi),
         ];
         d.update_descriptor_sets(&writes, &[]);
 
@@ -355,6 +368,7 @@ fn run_gpu(gpu: &Gpu, cases: &[(&Mask, &Params)], scale: u32) -> Vec<Vec<[f32; 3
             let mut pre = vec![
                 barrier(depth.img, dep, if first { l } else { vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL }, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE, vk::AccessFlags::TRANSFER_WRITE),
                 barrier(target.img, col, l, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::AccessFlags::empty(), vk::AccessFlags::COLOR_ATTACHMENT_WRITE),
+                barrier(maskimg.img, col, l, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::AccessFlags::empty(), vk::AccessFlags::COLOR_ATTACHMENT_WRITE),
             ];
             if first {
                 pre.push(barrier(dummy.img, col, l, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::AccessFlags::empty(), vk::AccessFlags::SHADER_READ));
@@ -374,6 +388,23 @@ fn run_gpu(gpu: &Gpu, cases: &[(&Mask, &Params)], scale: u32) -> Vec<Vec<[f32; 3
                 &[barrier(depth.img, dep, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL, vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::SHADER_READ)],
             );
             let rect = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width: GRID as u32, height: GRID as u32 } };
+            // The sky mask pass, then the mask to the sampled layout for the ray pass.
+            let matt = [vk::RenderingAttachmentInfo::default()
+                .image_view(maskimg.view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .store_op(vk::AttachmentStoreOp::STORE)];
+            d.cmd_begin_rendering(cmd, &vk::RenderingInfo::default().render_area(rect).layer_count(1).color_attachments(&matt));
+            d.cmd_set_viewport(cmd, 0, &[vk::Viewport { x: 0.0, y: 0.0, width: GRID as f32, height: GRID as f32, min_depth: 0.0, max_depth: 1.0 }]);
+            d.cmd_set_scissor(cmd, 0, &[rect]);
+            d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, mask_pipe);
+            d.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, layout, 0, &[set], &[]);
+            d.cmd_draw(cmd, 3, 1, 0, 0);
+            d.cmd_end_rendering(cmd);
+            d.cmd_pipeline_barrier(
+                cmd, all, all, vk::DependencyFlags::empty(), &[], &[],
+                &[barrier(maskimg.img, col, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::AccessFlags::COLOR_ATTACHMENT_WRITE, vk::AccessFlags::SHADER_READ)],
+            );
             let catt = [vk::RenderingAttachmentInfo::default()
                 .image_view(target.view)
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)

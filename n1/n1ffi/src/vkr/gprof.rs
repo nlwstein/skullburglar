@@ -6,10 +6,13 @@
 //! `n1 gpu prof: N frames: shadows, opaque, ambient occlusion, trees+mesh particles, sprites, post, post mats, aa+sharpen, total ms`.
 use ash::vk;
 
-pub const MARKS: u32 = 9;
+/// Marks 0..=8 end the nine passes' segments; 9 and 10 sit inside the anti-aliasing segment, after SMAA's edge and weights passes
+/// (written together with 8 when SMAA doesn't run). They only split `aa+sharpen`, printed after the total as `aa edge`, `aa weights`.
+pub const MARKS: u32 = 11;
+const SEGS: usize = 8;
 const RING: u32 = 4;
 const REPORT: u32 = 300;
-const NAMES: [&str; MARKS as usize - 1] = [
+const NAMES: [&str; SEGS] = [
     "shadows",
     "opaque",
     "ambient occlusion",
@@ -26,7 +29,7 @@ pub struct GpuProf {
     valid_mask: u64,
     frame: u64,
     written: [bool; RING as usize],
-    acc: [f64; MARKS as usize - 1],
+    acc: [f64; SEGS + 2],
     n: u32,
     cur: u32,
 }
@@ -78,7 +81,7 @@ impl GpuProf {
             },
             frame: 0,
             written: [false; RING as usize],
-            acc: [0.0; MARKS as usize - 1],
+            acc: [0.0; SEGS + 2],
             n: 0,
             cur: 0,
         })
@@ -101,25 +104,29 @@ impl GpuProf {
                 )
             };
             if ok.is_ok() && ts.iter().all(|t| t[1] != 0) {
-                for k in 0..NAMES.len() {
-                    let d = ts[k + 1][0].wrapping_sub(ts[k][0]) & self.valid_mask;
-                    self.acc[k] += d as f64 * self.period_ns * 1e-6;
+                let ms = |a: usize, b: usize| (ts[b][0].wrapping_sub(ts[a][0]) & self.valid_mask) as f64 * self.period_ns * 1e-6;
+                for k in 0..SEGS {
+                    self.acc[k] += ms(k, k + 1);
                 }
+                self.acc[SEGS] += ms(7, 9);
+                self.acc[SEGS + 1] += ms(9, 10);
                 self.n += 1;
                 if self.n == REPORT {
-                    let total: f64 = self.acc.iter().sum();
+                    let total: f64 = self.acc[..SEGS].iter().sum();
                     let parts: Vec<String> = NAMES
                         .iter()
                         .zip(self.acc.iter())
                         .map(|(name, a)| format!("{name} {:.3}", a / f64::from(self.n)))
                         .collect();
-                    eprintln!(
-                        "n1 gpu prof: {} frames: {}, total {:.3} ms",
-                        self.n,
-                        parts.join(", "),
-                        total / f64::from(self.n)
-                    );
-                    self.acc = [0.0; MARKS as usize - 1];
+                    // SMAA's edge and weights passes (part of `aa+sharpen`, not added to the total again), when it ran in these frames.
+                    let n = f64::from(self.n);
+                    let sub = if self.acc[SEGS + 1] > 0.0 {
+                        format!(", aa edge {:.3}, aa weights {:.3}", self.acc[SEGS] / n, self.acc[SEGS + 1] / n)
+                    } else {
+                        String::new()
+                    };
+                    eprintln!("n1 gpu prof: {} frames: {}, total {:.3} ms{}", self.n, parts.join(", "), total / n, sub);
+                    self.acc = [0.0; SEGS + 2];
                     self.n = 0;
                 }
             }

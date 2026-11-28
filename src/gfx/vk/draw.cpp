@@ -802,6 +802,45 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
     ++stats_.draws;
     return;
   }
+  // BOTS_GFX_LOG_CLASSES=1: every 600 presents, the draws since the last report grouped by state class
+  // "o<offset> f<depth func> w<depth write> b<blend> a<alpha test func>" with draw count and average indices (what a scene's
+  // trash, decals and glass are, by state). BOTS_GFX_SKIP_CLASS=<class label>[,...] leaves those draws out (bisecting: what
+  // disappears when one class is hidden). Debugging; no effect when unset.
+  static const bool log_classes = [] {
+    const char* v = std::getenv("BOTS_GFX_LOG_CLASSES");
+    return v && *v && *v != '0';
+  }();
+  static const std::string skip_classes = [] {
+    const char* v = std::getenv("BOTS_GFX_SKIP_CLASS");
+    return v ? std::string(",") + v + "," : std::string();
+  }();
+  if (log_classes || skip_classes.size() > 2) {
+    const auto dc = du::GetNormalizedDepthControl(regs);
+    float cs, cc;
+    du::GetPreferredFacePolygonOffset(regs, polygonal, cs, cc);
+    const auto cctl = regs.Get<reg::RB_COLORCONTROL>();
+    const bool blend_on = (regs.values[reg::RB_BLENDCONTROL::rt_register_indices[0]] & 0x1FFF1FFF) != 0x00010001;
+    char label[64];
+    std::snprintf(label, sizeof(label), "o%d_f%u_w%d_b%d_a%u", cc != 0.0f || cs != 0.0f, dc.z_enable ? unsigned(dc.zfunc) : 7u,
+                  int(dc.z_enable && dc.z_write_enable), int(blend_on), cctl.alpha_test_enable ? unsigned(cctl.alpha_func) : 7u);
+    if (skip_classes.size() > 2 && skip_classes.find(std::string(",") + label + ",") != std::string::npos) {
+      ++stats_.draws;
+      return;
+    }
+    if (log_classes) {
+      static std::map<std::string, std::pair<uint64_t, uint64_t>> classes;
+      static uint64_t last_report = 0;
+      auto& e = classes[label];
+      ++e.first, e.second += draw.initiator.num_indices;
+      if (stats_.presents >= last_report + 600) {
+        last_report = stats_.presents;
+        for (auto& [k, v] : classes) {
+          REXLOG_INFO("gfx native: draw class (present {}) {}: {} draws, {} indices avg", stats_.presents, k, v.first, v.first ? v.second / v.first : 0);
+        }
+        classes.clear();
+      }
+    }
+  }
   // BOTS_DUMP_DRAW=<n> or <first>:<last> prints the microcode and the non-zero vertex and pixel shader constants of
   // those draws (numbered as in the draw trace) - debugging.
   static const std::pair<long long, long long> dump_draw = [] {
@@ -1644,6 +1683,19 @@ void Renderer::IssueDraw(const rg::RegisterFile& regs, const ShaderLoad& vs, con
         std::fclose(f);
       }
     }
+  }
+  // BOTS_GFX_BIAS_ALT="<scale>:<slope>,<scale>:<slope>": alternate the two settings on every present (test rigs: consecutive frames of one
+  // drive shot with the old and the new bias, a series with real camera motion where the two arms share the scene). Overrides the file.
+  static const std::array<float, 4> bias_alt = [] {
+    std::array<float, 4> r{0, 0, 0, 0};
+    if (const char* v = std::getenv("BOTS_GFX_BIAS_ALT")) {
+      if (std::sscanf(v, "%f:%f,%f:%f", &r[0], &r[1], &r[2], &r[3]) != 4) r = {0, 0, 0, 0};
+    }
+    return r;
+  }();
+  if (bias_alt[0] != 0.0f || bias_alt[2] != 0.0f) {
+    const bool odd = stats_.presents & 1;
+    bias_scale = bias_alt[odd ? 2 : 0], decal_slope = bias_alt[odd ? 3 : 1];
   }
   static const bool bias_logged = [] {
     REXLOG_INFO("gfx native: decal depth bias: constant x{}, slope {} (BOTS_GFX_DEPTH_BIAS_SCALE, BOTS_GFX_DECAL_SLOPE)", bias_scale, decal_slope);

@@ -171,4 +171,23 @@ struct MouseGate {
   }
 };
 
+// Rest deadband (#21, B-396). A mouse count turns the view kDegPerCountAtOne x sensitivity degrees (measured, B-311:
+// 65536 units a turn / 60), 0.33 degrees at the default 1.0, and kAimScale of that while aiming. A gyro lying still sends
+// the odd +-1 count; the noise gate above is set in counts, so what it holds back in degrees changes with the
+// sensitivity. The rest deadband is the same gate (always with strict mode) with the threshold given in degrees: the
+// view stays where it is until the motion adds up to this angle in one direction.
+inline constexpr double kDegPerCountAtOne = 360.0 * 60.0 / 65536.0;
+inline constexpr double kAimScale = 0.625;
+inline constexpr double kMaxRestGateCounts = 32.0;
+inline double DegPerCount(double sensitivity, bool aiming) {
+  return kDegPerCountAtOne * sensitivity * (aiming ? kAimScale : 1.0);
+}
+// The gate threshold, in counts, for a deadband of `degrees`: 0 = off. At least one count (a deadband under one count
+// would hold nothing back), at most kMaxRestGateCounts (a very fine step must not need a huge move to open).
+inline double RestGateCounts(double degrees, double sensitivity, bool aiming) {
+  const double per = DegPerCount(sensitivity, aiming);
+  if (!(degrees > 0) || !(per > 0) || !std::isfinite(degrees)) return 0;
+  return std::clamp(degrees / per, 1.0, kMaxRestGateCounts);
+}
+
 }  // namespace bots::input

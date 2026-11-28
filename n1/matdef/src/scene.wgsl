@@ -53,13 +53,22 @@ struct VOut {
 // the gamma sign. B-392: the SDK's PWLGammaToLinear exactly (mirrored in `pwl.rs`, with its tests): the stored 0..255
 // value picks a slope k = 1, 2, 4 or 8 (joins at 64, 96, 192) and an offset, then the SDK adds trunc(lin * k / 1024) and
 // divides by 1023, so white is 1.0 (the first version here divided by 1024 and left the top segment up to 0.8% low).
+{{AB_DECLS}}
 fn xe_pwl3(c: vec3<f32>) -> vec3<f32> {
-    let g = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0;
-    let hi = g >= vec3<f32>(96.0);
-    let k = select(select(vec3<f32>(1.0), vec3<f32>(2.0), g >= vec3<f32>(64.0)), select(vec3<f32>(4.0), vec3<f32>(8.0), g >= vec3<f32>(192.0)), hi);
-    let o = select(select(vec3<f32>(0.0), vec3<f32>(-64.0), g >= vec3<f32>(64.0)), select(vec3<f32>(-256.0), vec3<f32>(-1024.0), g >= vec3<f32>(192.0)), hi);
-    let l = g * k + o;
-    return (l + trunc(l * k * (1.0 / 1024.0))) * (1.0 / 1023.0);
+    {{AB_PWL}}
+    // Bit-identical to the select-per-segment form of 1.15 to 1.18 (which cost the T480's opaque pass 1.5 to 3 ms at 720p),
+    // without its per-channel branches. g = 255 c is rounded to a float first, exactly as before. The segments (slopes 1, 2,
+    // 4, 8, joined at 64, 96, 192) are a convex curve, so the old form's l = g k + o is the largest of four lines; g * k is exact
+    // (k is a power of two), so each line equals the old one bit for bit, and the max equals the old pick because rounding is
+    // monotone. The old round-down term l * k / 1024 is l / 256 for the three low slopes (the 1 and 2 segments stay under
+    // 256, where both are 0) and l / 128 from l = 512 (g >= 192) up.
+    // The min is a no-op (g <= 255) and must stay: without it the GPU compilers (seen on a GTX 1070) fold the slope into the
+    // 255 and fuse s * 510 - 64 into one rounding, which moved l by an ulp in 0.8% of channels (a 1-step flip in about 4 pixels
+    // per frame, up to 18 steps next to it with SMAA). `n1ffi/tests/pwl_gpu.rs` checks every f32 against the old form.
+    let g = min(saturate(c) * 255.0, vec3<f32>(255.0));
+    let l = max(max(g, g * 2.0 - 64.0), max(g * 4.0 - 256.0, g * 8.0 - 1024.0));
+    let t = floor(l * select(vec3<f32>(1.0 / 256.0), vec3<f32>(1.0 / 128.0), l >= vec3<f32>(512.0)));
+    return (l + t) * (1.0 / 1023.0);
 }
 
 fn xe_pwl(c: vec4<f32>) -> vec4<f32> {
