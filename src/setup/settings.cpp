@@ -39,7 +39,7 @@ REXCVAR_DEFINE_STRING(pre1_occlusion, "auto", "bots",
                       "off). auto is on, except on Intel graphics. Off draws everything in view (a BOTS_GFX_OCCLUSION "
                       "in the environment wins)");
 REXCVAR_DEFINE_STRING(render_scale, "auto", "bots",
-                      "Render resolution as a multiple of 720p (auto, 3, 2, 1.5, 1.25, 1, 0.75, "
+                      "Render resolution as a multiple of the back buffer (auto, 3, 2.25, 2, 1.5, 1.25, 1, 0.75, "
                       "0.667, 0.5); auto is 2/3 on Intel GPUs, else 1");
 REXCVAR_DEFINE_STRING(msaa, "off", "bots/Display", "New renderer multisampling: off, 2x, 4x, 2x-sgssaa or 4x-sgssaa");
 REXCVAR_DEFINE_STRING(anti_aliasing, "smaa", "bots",

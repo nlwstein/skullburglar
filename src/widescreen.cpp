@@ -18,7 +18,7 @@
 #include <rex/ui/window.h>
 
 REXCVAR_DEFINE_STRING(aspect_ratio, "16:9", "bots/Display",
-                      "Shape of the picture: 16:9 (the original), auto (match the window or screen), or a wider "
+                      "Shape of the picture: 16:9 (the original), 16:10, auto (match the window or screen), or a wider "
                       "ratio such as 21:9 or 32:9. Wider than 16:9 shows more at the sides; the HUD and menus "
                       "stretch. Applies when the game starts. Native renderer only");
 
@@ -32,6 +32,7 @@ namespace bots {
 namespace {
 
 constexpr float kWidth = 1280.0f;
+constexpr float k16x10 = 16.0f / 10.0f;
 constexpr float k16x9 = 16.0f / 9.0f;
 constexpr float kWidest = 32.0f / 9.0f;
 
@@ -64,13 +65,16 @@ void Decide() {
     return;
   }
   const float want = Requested();
-  // Only wider than 16:9 (a 16:10 or 4:3 screen keeps the original picture, pillarboxed as before), at most 32:9,
-  // and not for a sliver: under 2% wider is 16:9.
-  if (!(want > k16x9 * 1.02f)) {
+  // Allow a little room for window sizing in Automatic.
+  float aspect;
+  if (std::fabs(want / k16x10 - 1.0f) < 0.02f) {
+    aspect = k16x10;
+  } else if (want > k16x9 * 1.02f) {
+    aspect = std::min(want, kWidest);
+  } else {
     REXLOG_INFO("widescreen: 16:9 (aspect_ratio {})", REXCVAR_GET(aspect_ratio));
     return;
   }
-  const float aspect = std::min(want, kWidest);
   g_height = std::max(2u, uint32_t(std::lround(kWidth / aspect / 2.0f)) * 2);  // even, like every 360 target
   REXLOG_INFO("widescreen: {:.3f}:1 (aspect_ratio {}), back buffer 1280x{}", kWidth / float(g_height.load()),
               REXCVAR_GET(aspect_ratio), g_height.load());
@@ -78,7 +82,7 @@ void Decide() {
 
 bool Wide() { return GuestHeight() != 720; }
 
-// Horizontal widening of the field of view: tan(new/2) = tan(old/2) * k.
+// Horizontal field of view at the same vertical field of view.
 float FovScale() { return (kWidth / float(GuestHeight())) / k16x9; }
 
 }  // namespace
@@ -117,12 +121,12 @@ void BotsWideAspect(PPCRegister& f0) {
 }
 
 // 0x825CDAF8 (beq to 0x825CDBAC): a camera that constrains its aspect ratio (cutscene cameras; +0x218 bit, ratio
-// at +0x220) builds its own 16:9 projection, which would stretch across a wider frame. Wide: take the normal
+// at +0x220) builds its own 16:9 projection, which would stretch across the frame. Take the normal
 // projection like any other camera.
 bool BotsWideSkipConstrainedCamera() { return bots::Wide(); }
 
 // 0x82F62E5C: the end of the player's FOV function (sub_82F62DA0, degrees in f1; it already adapts the FOV to a
-// split-screen viewport). Keep the vertical FOV of 16:9 and widen the horizontal one (Hor+), then apply the player's
+// split-screen viewport). Keep the vertical FOV of 16:9 and adjust the horizontal one, then apply the player's
 // fov_offset (fov_math.h) the same way: a factor on tan(half angle), so the aiming zoom keeps its proportion.
 // BOTS_FOV_TRACE=1 logs every distinct value the game asks for and what it became.
 void BotsWideFov(PPCRegister& f1) {
